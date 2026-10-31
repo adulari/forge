@@ -138,6 +138,29 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// How many `/duel` candidate sessions (children titled `duel:<model>`) each of `ids` has.
+    /// Sessions without any are absent from the map.
+    pub fn duel_candidate_counts(
+        &self,
+        ids: &[String],
+    ) -> Result<std::collections::HashMap<String, u32>> {
+        if ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.lock()?;
+        let marks = vec!["?"; ids.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT parent_session_id, COUNT(*) FROM session \
+             WHERE parent_session_id IN ({marks}) AND title LIKE 'duel:%' \
+             GROUP BY parent_session_id"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, u32>(1)?))
+        })?;
+        rows.collect::<rusqlite::Result<_>>()
+            .map_err(StoreError::from)
+    }
+
     /// `forge tree` shows conversations, not worker fan-out.
     pub fn fork_nodes(&self) -> Result<Vec<ForkNode>> {
         let conn = self.lock()?;
@@ -163,6 +186,23 @@ impl Store {
 mod compacted_fork_tests {
     use super::*;
     use forge_types::Role;
+
+    #[test]
+    fn duel_candidates_are_counted_per_parent() {
+        let store = Store::open_in_memory().unwrap();
+        let parent = store.create_session("/tmp", "Default").unwrap();
+        let other = store.create_session("/tmp", "Default").unwrap();
+        for name in ["duel:a", "duel:b", "reviewer"] {
+            let child = store.create_child_session(".", "Default", &parent).unwrap();
+            store.set_session_title(&child, name).unwrap();
+        }
+        let counts = store
+            .duel_candidate_counts(&[parent.clone(), other.clone()])
+            .unwrap();
+        assert_eq!(counts.get(&parent), Some(&2));
+        assert_eq!(counts.get(&other), None);
+        assert!(store.duel_candidate_counts(&[]).unwrap().is_empty());
+    }
 
     fn compacted_session(store: &Store) -> String {
         let id = store.create_session("/tmp", "Default").unwrap();

@@ -254,6 +254,11 @@ impl TerminalHandle {
     }
 }
 
+mod guard;
+mod scrollback;
+
+use guard::TerminalClientGuard;
+
 #[derive(Default)]
 pub(crate) struct TerminalRegistry {
     terminals: Mutex<HashMap<TerminalKey, Arc<TerminalHandle>>>,
@@ -577,6 +582,7 @@ pub(crate) async fn terminal_list(
 
 pub(crate) async fn terminal_ws(
     State(state): State<Arc<DaemonState>>,
+    axum::Extension(auth): axum::Extension<crate::serve_clients::ClientAuth>,
     Query(params): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -635,24 +641,9 @@ pub(crate) async fn terminal_ws(
     };
     let registry = state.terminals.clone();
     let going_away = state.registry.signals.going_away_rx();
-    ws.on_upgrade(move |socket| attach_terminal(socket, terminal, registry, key, going_away))
-}
-
-struct TerminalClientGuard(Arc<TerminalHandle>);
-
-impl TerminalClientGuard {
-    fn new(handle: Arc<TerminalHandle>) -> Self {
-        handle.clients.fetch_add(1, Ordering::AcqRel);
-        handle.touch();
-        Self(handle)
-    }
-}
-
-impl Drop for TerminalClientGuard {
-    fn drop(&mut self) {
-        self.0.clients.fetch_sub(1, Ordering::AcqRel);
-        self.0.touch();
-    }
+    crate::serve_access::upgrade_until_revoked(ws, auth, move |socket| {
+        attach_terminal(socket, terminal, registry, key, going_away)
+    })
 }
 
 async fn send_server_frame(socket: &mut WebSocket, frame: TerminalServerFrame) -> bool {

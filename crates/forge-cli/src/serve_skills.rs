@@ -72,7 +72,16 @@ fn reply<T: Serialize>(result: Result<T, Fail>) -> Response {
 
 async fn project_root(state: &DaemonState, session: Option<&str>) -> Result<PathBuf, Fail> {
     match session.filter(|s| !s.is_empty()) {
-        Some(session) => session_repo_root(state, session).await,
+        Some(session) => {
+            let root = session_repo_root(state, session).await?;
+            match crate::serve_skills_confine::escaping_path(&root) {
+                Some(rel) => Err(fail(
+                    StatusCode::FORBIDDEN,
+                    format!("{rel} in this project is a symlink that leaves the repository"),
+                )),
+                None => Ok(root),
+            }
+        }
         None => Err(fail(
             StatusCode::BAD_REQUEST,
             "project scope needs a session to find the project",

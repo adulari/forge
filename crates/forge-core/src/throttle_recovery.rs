@@ -84,41 +84,60 @@ pub(crate) fn overload_delay(
     }
 }
 
-/// "provider busy (503 gateway_overloaded), retrying in 5s" for a pinned turn waiting out an
-/// overloaded provider. Shown on the first retry and every fifth after it; the status line
-/// carries the rest. The provider's whole answer goes to the log.
-pub(crate) fn announce_overload(
+/// `2m10s` / `45s` / `10m`: whole seconds, for a status line.
+pub(crate) fn short_duration(d: std::time::Duration) -> String {
+    let secs = d.as_secs();
+    match (secs / 60, secs % 60) {
+        (0, s) => format!("{s}s"),
+        (m, 0) => format!("{m}m"),
+        (m, s) => format!("{m}m{s}s"),
+    }
+}
+
+/// What a pinned turn tells the user before sleeping on a provider outage:
+/// "m: provider busy (503 no provider route), retrying in 20s (attempt 3, 2m10s of 10m budget
+/// used)". A wait of a few seconds or more is always announced, so an unattended run's
+/// stream-json shows why it is quiet; shorter ones are shown on the first retry and every fifth,
+/// so a `Retry-After: 1` gateway does not flood the chat. The provider's whole answer goes to the
+/// log.
+pub(crate) fn announce_outage_wait(
     session: &mut Session,
     active_model: &str,
     err: &forge_provider::ProviderError,
-    delay: std::time::Duration,
-    attempt: u32,
+    wait: OutageWait,
 ) {
-    let forge_provider::ProviderError::Overloaded { status, reason, .. } = err else {
-        return;
-    };
-    tracing::warn!(model = %active_model, attempt, error = %err, "pinned model provider busy");
-    if attempt != 1 && !attempt.is_multiple_of(5) {
+    tracing::warn!(model = %active_model, attempt = wait.attempt, error = %err, "pinned model provider unavailable");
+    let long = wait.delay >= std::time::Duration::from_secs(3);
+    if !long && wait.attempt != 1 && !wait.attempt.is_multiple_of(5) {
         return;
     }
+    let what = match err {
+        forge_provider::ProviderError::Overloaded { status, reason, .. } => {
+            format!("provider busy ({status} {reason})")
+        }
+        forge_provider::ProviderError::Unavailable(message) => {
+            let message: String = message.chars().take(90).collect();
+            format!("provider unreachable ({})", message.trim())
+        }
+        other => other.to_string(),
+    };
     session.presenter.emit(PresenterEvent::Warning(format!(
-        "{active_model}: provider busy ({status} {reason}), retrying in {}s (attempt {attempt})",
-        delay.as_secs().max(1)
+        "{active_model}: {what}, retrying in {}s (attempt {}, {} of {} budget used)",
+        wait.delay.as_secs().max(1),
+        wait.attempt,
+        short_duration(wait.waited),
+        short_duration(wait.budget),
     )));
 }
 
-/// The one-shot halfway warning for a pinned turn still waiting out an unreachable provider.
-pub(crate) fn announce_unreachable(
-    session: &mut Session,
-    active_model: &str,
-    remaining: std::time::Duration,
-) {
-    session.presenter.emit(PresenterEvent::Warning(format!(
-        "{active_model}: provider unreachable — retrying pinned model for up to {}s more (a pin \
-         never switches models; `/model` to unpin, or set `mesh.pin_failover = true` to allow \
-         mesh fallback)",
-        remaining.as_secs().max(1)
-    )));
+/// One backoff step of a pinned outage wait: how long this sleep is, which attempt it is, and how
+/// much of the budget the sleeps so far (including this one) have spent.
+#[derive(Clone, Copy)]
+pub(crate) struct OutageWait {
+    pub(crate) delay: std::time::Duration,
+    pub(crate) attempt: u32,
+    pub(crate) waited: std::time::Duration,
+    pub(crate) budget: std::time::Duration,
 }
 
 #[cfg(test)]
@@ -136,6 +155,15 @@ mod overload_tests {
         assert!(
             d(None) >= Duration::from_secs(3),
             "blind schedule when none"
+        );
+    }
+
+    #[test]
+    fn durations_read_as_minutes_and_seconds() {
+        let d = |s| short_duration(Duration::from_secs(s));
+        assert_eq!(
+            (d(45).as_str(), d(130).as_str(), d(600).as_str()),
+            ("45s", "2m10s", "10m")
         );
     }
 

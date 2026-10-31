@@ -56,19 +56,14 @@ impl DriverState {
                     }
                 }
             }
-            remote::RemoteInput::Allow { yes, seq } => {
+            remote::RemoteInput::Allow { yes, seq, note } => {
                 if !remote::prompt_seq_current(self.prompt_seq, seq) {
                     push_remote_note(
                         &mut self.notes,
                         "⚠ stale answer ignored — the prompt changed; review the current one",
                     );
                 } else if let Some((tool, reply)) = self.pending.take() {
-                    let outcome = if yes {
-                        ConfirmOutcome::Allow
-                    } else {
-                        ConfirmOutcome::Deny
-                    };
-                    let _ = reply.send(outcome.into());
+                    let _ = reply.send(remote::allow_reply(yes, note.as_deref()));
                     self.app.prompt = None;
                     if yes {
                         self.app.note(&format!("✓ remote allowed {tool}"));
@@ -404,7 +399,12 @@ impl DriverState {
                 // Expand `@path` mentions exactly like the TUI submit path.
                 attach_at_images(&prompt, Some(&hook_workspace), &self.session, &mut self.app)
                     .await;
-                let (file_blocks, included, skipped) = expand_at_files_in(&prompt, &hook_workspace);
+                let (mut file_blocks, included, skipped) =
+                    expand_at_files_in(&prompt, &hook_workspace);
+                file_blocks.extend(
+                    crate::mentions::apply(&prompt, &hook_workspace, &self.session, &mut self.app)
+                        .await,
+                );
                 if !included.is_empty() {
                     self.app
                         .note(&format!("📎 included {}", included.join(", ")));

@@ -120,6 +120,12 @@ export function ImportStep({ c, snapshot, step, position }: StepProps) {
           <Text style={[type.body, { color: tokens.ink }]}>Use Claude Code key bindings</Text>
         </View>
       ) : null}
+      {imports.claude_dir || imports.codex_dir ? (
+        <View style={styles.field}>
+          <Hint>Past Claude Code and Codex conversations can come over too, so you can pick them up here.</Hint>
+          <Button label="Choose conversations to import" variant="secondary" onPress={() => router.push("/import")} testID="onboarding-import-conversations" />
+        </View>
+      ) : null}
       {imports.mcp_servers > 0 ? (
         <Hint>
           {imports.mcp_servers} MCP server{imports.mcp_servers === 1 ? "" : "s"} found. Run `forge mcp import` in a terminal to choose which ones to bring.

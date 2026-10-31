@@ -107,6 +107,21 @@ Router construction (`build_provider_and_router`) loads `Store::duel_boosts(repo
 canonicalized cwd's display string — and threads it in via `with_repo_boosts`; callers without a
 store (e.g. a fresh `mcp_serve` path with none open yet) pass an empty map, a pure no-op.
 
+## 4b. Judge, N candidates, open PR
+
+`/duel [--judge[=MODEL]] [--n N] [--models a,b,c] <task>` (parsed by `duel_judge::DuelSpec`).
+`--n` races 2-5 models (default 3); `--models` names them and may repeat one model. `--judge`
+adds one model call after the race: the judge sees each candidate as a letter (rotated by the
+task, never its model name) with diffstat, test badge and a capped diff, and returns a ranking
+with a score and critique per candidate plus a rationale. Without a model it uses the session pin,
+else the first key-bearing cheap-tier model. A judge failure leaves the duel unjudged and says so
+in the picker heading. The picker lists candidates best first, crowns the pick with a star, and
+carries the verdict on the heading (` · judge MODEL: rationale`) and a trailing
+`judge #N S/10: critique` field on each row. Enter merges the highlighted candidate; `p` (TUI) or an
+id with the `pr:` prefix (phone, desktop) pushes its branch and opens a pull request through the
+`open_pr` checks, and a refusal puts the picker back. The session list row carries
+`duel_candidates` so the sidebar shows an "N candidates" tag on the parent.
+
 ## 5. Limitations
 - Needs a git repo (`worktree::is_git_repo`) and at least 2 usable distinct-provider models — either
   missing is a hard error, not a silent single-model fallback.

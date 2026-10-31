@@ -110,7 +110,9 @@ pub(crate) enum DispatchOutcome {
     },
     /// `/duel <task>` — race 2-3 mesh models on the same task, each in its own worktree
     /// (docs/features/duel.md), in a background task like a turn.
-    RunDuel { task: String },
+    RunDuel {
+        spec: forge_core::duel_judge::DuelSpec,
+    },
     /// `/mesh` — overlay opened immediately; receiver delivers the computed `MeshOverlay` (None =
     /// no catalog).
     PendingMesh(tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>),
@@ -388,6 +390,10 @@ pub(crate) async fn dispatch_command(
         // `btw.rs` for the same split).
         CommandAction::Subagents(explicit) => {
             super::subagents::set_subagent_pin_release(session, app, explicit).await;
+        }
+        CommandAction::Crew(choice) => super::subagents::run_crew(session, app, choice).await,
+        CommandAction::Delegation(explicit) => {
+            super::subagents::set_delegation(session, app, explicit).await;
         }
         CommandAction::Theme(name) => super::theme_cmd::run_theme(app, name),
         CommandAction::Agents => super::agents_cmd::list_agents(session, app).await,
@@ -717,12 +723,13 @@ and keep going."
         // `/duel <task>` — model arena: race 2-3 mesh models on the same task, each in its own
         // isolated worktree, then pick a winner from a comparable picker.
         CommandAction::Duel(text) => {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                app.note("usage: /duel <task> — races 2-3 mesh models on the same task");
-                return Ok(DispatchOutcome::Handled);
-            }
-            return Ok(DispatchOutcome::RunDuel { task: text });
+            return Ok(match forge_core::duel_judge::DuelSpec::parse(&text) {
+                Ok(spec) => DispatchOutcome::RunDuel { spec },
+                Err(e) => {
+                    app.note(&e);
+                    DispatchOutcome::Handled
+                }
+            });
         }
         // `/voice` (also Ctrl+V) — open the recording overlay. If the configured whisper model
         // isn't on disk yet, kick off the download in the background (progress feeds the overlay)
@@ -976,7 +983,10 @@ and keep going."
         CommandAction::Run => {
             app.note("/run needs the interactive TUI; define actions under [[actions]] in .forge/config.toml");
         }
+        CommandAction::Control => super::control_menu::open(app, None),
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
+        CommandAction::Import if tui.is_some() => app.import_menu.open(super::import_menu::fallback_dir()),
+        CommandAction::Import => app.note("/import opens in a terminal chat; run `forge import scan` and `forge import sessions` instead"),
         CommandAction::Anywhere => {
             match crate::anywhere::tui_status_summary() {
                 Ok(summary) => app.note(&summary),
@@ -1019,6 +1029,8 @@ and keep going."
             let cwd = session.lock().await.workspace_root().to_path_buf();
             app.note(&crate::cli::commands::dispatch::chat_dispatch_note(&prompt, &cwd).await);
         }
+        // `/host` — machines added with `forge host add`.
+        CommandAction::Host(arg) => super::host_menu::show(app, &arg),
         // `/memories` — list this project's memories.
         CommandAction::Memories => {
             let scope = session.lock().await.workspace_scope();

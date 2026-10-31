@@ -22,15 +22,21 @@ import {
   removePane,
   resizeBoundary,
   serializeLayout,
+  setSlot,
   swapSecondary,
   swapWithPrimary,
   toggleMaximize,
   visiblePaneCount,
+  withSecondary,
+  indexOfSlotId,
+  nextPaneSize,
+  openFromPane,
+  secondaryRenderOrder,
   type PaneLayoutState,
 } from "./layoutModel";
 
 function layoutWith(secondary: (string | null)[], focus = 0): PaneLayoutState {
-  return { ...initialLayout(), secondary, focus };
+  return { ...withSecondary(initialLayout(), secondary), focus };
 }
 
 describe("pane add / remove / swap", () => {
@@ -245,5 +251,129 @@ describe("persistence", () => {
     expect(migrateLegacySplit("{broken")).toBeNull();
     expect(migrateLegacySplit(JSON.stringify({ secondary: "x" }))).toBeNull();
     expect(migrateLegacySplit(null)).toBeNull();
+  });
+});
+
+describe("stable slot ids", () => {
+  const ids = (state: PaneLayoutState) => state.slotIds;
+
+  it("keeps ids parallel to the secondary list through add, remove, swap and set", () => {
+    let state = addPane(addPane(addPane(initialLayout(), "a"), "b"), "c");
+    expect(ids(state)).toEqual([1, 2, 3]);
+    state = removePane(state, 1);
+    expect(state.secondary).toEqual(["b", "c"]);
+    expect(ids(state)).toEqual([2, 3]);
+    state = setSlot(state, 1, "x");
+    expect(ids(state)).toEqual([2, 3]);
+    state = swapSecondary(state, 1, 2);
+    expect(state.secondary).toEqual(["c", "x"]);
+    expect(ids(state)).toEqual([3, 2]);
+    expect(state.slotIds).toHaveLength(state.secondary.length);
+  });
+
+  it("never reuses an id after a pane closes", () => {
+    let state = addPane(addPane(initialLayout(), "a"), "b");
+    state = removePane(state, 2);
+    state = addPane(state, "c");
+    expect(ids(state)).toEqual([1, 3]);
+  });
+
+  it("drops the first id when pane 0 is closed", () => {
+    const state = addPane(addPane(initialLayout(), "a"), "b");
+    const { state: next, promote } = promoteFirstSecondary(state);
+    expect(promote).toBe("a");
+    expect(ids(next)).toEqual([2]);
+  });
+
+  it("assigns 1..n on parse and leaves the stored shape unchanged", () => {
+    const stored = { secondary: ["b", null, "d"], weights: { cols2: [0.5, 0.5], cols3: [0.2, 0.3, 0.5], grid: [0.4, 0.6] }, dock: { right: 500, bottom: null } };
+    const parsed = parseLayout(JSON.parse(JSON.stringify(stored)));
+    expect(parsed.slotIds).toEqual([1, 2, 3]);
+    expect(JSON.parse(JSON.stringify(serializeLayout(parsed)))).toEqual(stored);
+    expect(Object.keys(serializeLayout(parsed)).sort()).toEqual(["dock", "secondary", "weights"]);
+  });
+
+  it("a preset keeps the id of a pane that stays", () => {
+    const state = addPane(addPane(initialLayout(), "a"), "b");
+    const next = withSecondary(state, ["b", "z"]);
+    expect(next.slotIds[0]).toBe(2);
+    expect(next.slotIds[1]).toBe(state.nextSlotId);
+  });
+
+  it("resolves a slot id to its current index", () => {
+    let state = addPane(addPane(addPane(initialLayout(), "a"), "b"), "c");
+    state = removePane(state, 1);
+    expect(indexOfSlotId(state, 0)).toBe(0);
+    expect(indexOfSlotId(state, 2)).toBe(1);
+    expect(indexOfSlotId(state, 3)).toBe(2);
+    expect(indexOfSlotId(state, 1)).toBe(-1);
+  });
+
+  it("remount proof: closing the first of three panes leaves the survivors' React keys, and their relative order, untouched", () => {
+    const before = addPane(addPane(addPane(initialLayout(), "a"), "b"), "c");
+    const keysBefore = secondaryRenderOrder(before).map((p) => p.slotId);
+    const after = removePane(before, 1);
+    const rendered = secondaryRenderOrder(after);
+    const keysAfter = rendered.map((p) => p.slotId);
+    expect(keysAfter).toEqual(keysBefore.slice(1));
+    expect(rendered.map((p) => p.slot)).toEqual(["b", "c"]);
+    // The pane that was index 2 is now index 1, but it is still the same keyed element.
+    expect(rendered[0]).toMatchObject({ slot: "b", slotId: 2, index: 1 });
+  });
+
+  it("renders in slot-id order even after a swap, so a swap never moves a live node", () => {
+    const before = addPane(addPane(initialLayout(), "a"), "b");
+    const after = swapSecondary(before, 1, 2);
+    expect(secondaryRenderOrder(after).map((p) => p.slot)).toEqual(["a", "b"]);
+    expect(secondaryRenderOrder(after).map((p) => p.index)).toEqual([2, 1]);
+  });
+});
+
+describe("zero-size guard", () => {
+  it("keeps the last real size when the container collapses to zero", () => {
+    const real = { width: 1400, height: 800 };
+    expect(nextPaneSize(real, 0, 800)).toBe(real);
+    expect(nextPaneSize(real, 1400, 0)).toBe(real);
+    expect(nextPaneSize(null, 0, 0)).toBeNull();
+  });
+
+  it("a collapsed layout would otherwise hide every secondary pane and push focus to pane 0", () => {
+    expect(visiblePaneCount(3, 0)).toBe(1);
+    expect(visiblePaneCount(3, 1400)).toBe(3);
+  });
+
+  it("takes a real new size and reuses the object for an identical one", () => {
+    const real = { width: 1400, height: 800 };
+    expect(nextPaneSize(real, 1400, 800)).toBe(real);
+    expect(nextPaneSize(real, 1000, 800)).toEqual({ width: 1000, height: 800 });
+    expect(nextPaneSize(null, 1000, 800)).toEqual({ width: 1000, height: 800 });
+  });
+});
+
+describe("openFromPane (a tap inside a secondary pane)", () => {
+  it("focuses pane 0 when the session is the primary, leaving every pane as it was", () => {
+    const state = { ...layoutWith(["parent", "other"]), focus: 1 };
+    const next = openFromPane(state, "child", 1, "child");
+    expect(next.secondary).toEqual(["parent", "other"]);
+    expect(next.focus).toBe(0);
+  });
+
+  it("focuses the pane that already shows the session instead of moving it", () => {
+    const state = { ...layoutWith(["parent", "child"]), focus: 1 };
+    const next = openFromPane(state, "main", 1, "child");
+    expect(next.secondary).toEqual(["parent", "child"]);
+    expect(next.focus).toBe(2);
+  });
+
+  it("replaces only this pane's session when the session is not open anywhere", () => {
+    const state = layoutWith(["parent", "other"]);
+    const next = openFromPane(state, "main", 1, "fresh");
+    expect(next.secondary).toEqual(["fresh", "other"]);
+    expect(next.focus).toBe(1);
+    expect(next.slotIds).toEqual(state.slotIds);
+  });
+
+  it("drop semantics are unchanged: openInPane still moves an open session", () => {
+    expect(openInPane(layoutWith(["parent", "child"]), "main", 1, "child").state.secondary).toEqual(["child", null]);
   });
 });

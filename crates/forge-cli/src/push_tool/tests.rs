@@ -28,7 +28,8 @@ fn channels(store: Arc<Store>) -> Channels {
 fn web_notifier(store: Arc<Store>) -> Arc<crate::push::PushNotifier> {
     Arc::new(
         crate::push::PushNotifier::with_key(store, crate::push::VapidKey::from_scalar(&[9u8; 32]))
-            .unwrap(),
+            .unwrap()
+            .permit_any_endpoint(),
     )
 }
 

@@ -452,9 +452,17 @@ pub(crate) struct PushNotifier {
     vapid: VapidKey,
     store: Arc<forge_store::Store>,
     client: reqwest::Client,
+    /// Off only in tests that post to a loopback stand-in for a push service.
+    strict_endpoints: bool,
 }
 
 impl PushNotifier {
+    #[cfg(test)]
+    pub(crate) fn permit_any_endpoint(mut self) -> Self {
+        self.strict_endpoints = false;
+        self
+    }
+
     pub(crate) fn new(store: Arc<forge_store::Store>) -> anyhow::Result<Self> {
         Self::with_key(store, VapidKey::load_or_create()?)
     }
@@ -464,10 +472,12 @@ impl PushNotifier {
         vapid: VapidKey,
     ) -> anyhow::Result<Self> {
         Ok(Self {
+            strict_endpoints: true,
             vapid,
             store,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .context("building reqwest client for push notifier")?,
         })
@@ -518,6 +528,13 @@ impl PushNotifier {
         payload: &[u8],
         ttl: u32,
     ) -> anyhow::Result<u16> {
+        if self.strict_endpoints
+            && !crate::serve_push_routes::is_push_service_endpoint(&sub.endpoint)
+        {
+            // A row stored before registration was restricted: never post to it, and drop it.
+            let _ = self.store.delete_push_subscription(&sub.endpoint);
+            anyhow::bail!("subscription endpoint is not a known https push service");
+        }
         let ua_public = b64url_decode(&sub.p256dh)
             .ok_or_else(|| anyhow::anyhow!("subscription p256dh is not base64url"))?;
         let auth = b64url_decode(&sub.auth)
@@ -551,6 +568,20 @@ mod tests {
     use super::*;
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::VerifyingKey;
+
+    #[tokio::test]
+    async fn rows_stored_before_the_allowlist_are_dropped_not_posted() {
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        store
+            .upsert_push_subscription("http://169.254.169.254/latest", "p", "a")
+            .unwrap();
+        let notifier =
+            PushNotifier::with_key(store.clone(), VapidKey::from_scalar(&[9u8; 32])).unwrap();
+        let sub = store.list_push_subscriptions().unwrap().remove(0);
+        let error = notifier.send_one(&sub, b"x", 60).await.unwrap_err();
+        assert!(error.to_string().contains("not a known https push service"));
+        assert!(store.list_push_subscriptions().unwrap().is_empty());
+    }
 
     fn b64d(s: &str) -> Vec<u8> {
         b64url_decode(s).expect("valid base64url")

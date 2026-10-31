@@ -81,6 +81,13 @@ pub(crate) enum McpCmd {
         #[arg(long)]
         cwd: Option<std::path::PathBuf>,
     },
+    /// Expose the control toolset (start sessions, read terminals, schedules, MCP, usage,
+    /// notify) as an MCP server on stdio, or manage which tools stay on. With no subcommand it
+    /// serves. Add to `.mcp.json`: `{"forge-control": {"type":"stdio","command":"forge","args":["mcp","control"]}}`.
+    Control {
+        #[command(subcommand)]
+        action: Option<ControlCmd>,
+    },
     /// Copy Forge's enabled MCP servers into Claude Code's (`~/.claude.json`) and Codex's
     /// (`~/.codex/config.toml`) configs. Other entries are kept and secret values are never
     /// written: tokens are referenced by environment variable name.
@@ -142,4 +149,20 @@ pub(crate) enum McpTransportArg {
 pub(crate) enum ServeTransportArg {
     Stdio,
     Http,
+}
+
+/// `forge mcp control <action>`: the per-tool switches and the audit trail of the control toolset.
+#[derive(Debug, Subcommand)]
+pub(crate) enum ControlCmd {
+    /// List every control tool and whether it is on.
+    List,
+    /// Turn a tool back on.
+    Enable { tool: String },
+    /// Turn a tool off: it is no longer advertised and calls are refused.
+    Disable { tool: String },
+    /// Show the newest control tool calls from the audit trail.
+    Log {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }

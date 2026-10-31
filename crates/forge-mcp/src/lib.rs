@@ -38,6 +38,7 @@ use serde_json::Value;
 
 mod connect_log;
 mod content;
+pub mod elicit;
 mod handler;
 pub mod oauth;
 mod pool;
@@ -315,6 +316,8 @@ pub struct McpManager {
     /// are connected once for every manager, instead of once per manager. `None` keeps every
     /// connection private (the CLI's single session, tests).
     pool: Option<Arc<McpPool>>,
+    /// Identity of this manager's connections for elicitation routing (see [`elicit`]).
+    id: u64,
 }
 
 impl McpManager {
@@ -330,6 +333,7 @@ impl McpManager {
             connect_done,
             reconnect_locks: Mutex::new(HashMap::new()),
             pool: None,
+            id: elicit::new_owner_id(),
         }
     }
 
@@ -365,6 +369,7 @@ impl McpManager {
             roots: self.roots.clone(),
             sampling: self.sampling.clone(),
             conns: pool::CatalogLink::Manager(Arc::downgrade(&self.conns)),
+            owner: Some(self.id),
         }
     }
 
@@ -913,13 +918,26 @@ impl McpManager {
         let arguments = args.as_object().cloned();
         let mut params = CallToolRequestParams::new(raw_name);
         params.arguments = arguments;
-        match tokio::time::timeout(self.call_timeout, peer.call_tool(params)).await {
-            Ok(Ok(result)) => {
+        let call = peer.call_tool(params);
+        tokio::pin!(call);
+        // The timeout restarts while the server is waiting on a person (elicitation).
+        let finished = loop {
+            tokio::select! {
+                result = &mut call => break Some(result),
+                () = tokio::time::sleep(self.call_timeout) => {
+                    if !elicit::user_is_answering(self.id, &server) {
+                        break None;
+                    }
+                }
+            }
+        };
+        match finished {
+            Some(Ok(result)) => {
                 self.mark(&server, ServerStatus::Connected);
                 tool_result_to_outcome(result)
             }
-            Ok(Err(e)) => self.classify_call_error(&server, e),
-            Err(_) => self.timed_out(&server),
+            Some(Err(e)) => self.classify_call_error(&server, e),
+            None => self.timed_out(&server),
         }
     }
 
@@ -1312,7 +1330,7 @@ mod tests {
         let lines = mgr.status_lines();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].status, "connected");
-        assert_eq!(lines[0].tools, 2);
+        assert_eq!(lines[0].tools, 3);
         let tools = mgr.tool_lines("test");
         assert!(tools.iter().any(|(q, _)| q == "test__echo"));
         assert!(tools.iter().any(|(q, _)| q == "test__boom"));
@@ -1803,13 +1821,13 @@ mod tests {
         // `tools/list_changed`: re-list the peer's tools (`discover_tools`) and swap them into the
         // shared connection map. Exercised here against a live in-process peer — the rmcp
         // notification *delivery* itself is the handler's trigger in production (see handler.rs).
-        let mgr = manager_with_test_server(McpConfig::default()).await; // "test": echo + boom
-        assert_eq!(mgr.tool_lines("test").len(), 2);
+        let mgr = manager_with_test_server(McpConfig::default()).await; // "test": echo + boom + ask
+        assert_eq!(mgr.tool_lines("test").len(), 3);
 
         // Re-list off the live peer (the async half of the refresh).
         let peer = mgr.peer_for("test").expect("live peer");
         let relisted = discover_tools(&peer, "test").await;
-        assert_eq!(relisted.len(), 2, "re-list sees the server's current tools");
+        assert_eq!(relisted.len(), 3, "re-list sees the server's current tools");
         assert!(relisted.iter().any(|t| t.qualified == "test__echo"));
 
         // Swap a narrowed catalog into the shared map — the same write the handler performs through

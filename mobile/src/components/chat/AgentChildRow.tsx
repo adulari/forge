@@ -7,11 +7,11 @@ import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-nati
 
 import type { AgentIndexRow } from "../../lib/api";
 import { haptics } from "../../lib/haptics";
-import { openSession } from "../../lib/nav";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { formatCost, monoFamily, tabularNums, type } from "../../theme/typography";
 import { shortModelLabel } from "../fleet/shortModelLabel";
+import { usePaneNav } from "../shell/paneNav";
 
 export function agentStatusLabel(status: AgentIndexRow["status"]): string {
   switch (status) {
@@ -28,6 +28,7 @@ export function agentStatusLabel(status: AgentIndexRow["status"]): string {
 
 function AgentChildRowImpl({ child }: { child: AgentIndexRow }) {
   const tokens = useTokens();
+  const { openSession } = usePaneNav();
   const status = agentStatusLabel(child.status);
   const bad = child.status === "failed" || child.status === "cancelled";
   return (

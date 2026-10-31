@@ -47,6 +47,23 @@ impl DetachedRegistry {
         self.lock().contains_key(child_id)
     }
 
+    /// [`abort`](Self::abort), then wait (bounded) until the task has actually stopped, so a
+    /// caller that reads or extends the child's stored transcript next cannot race a write the
+    /// dying task is still finishing.
+    pub async fn abort_and_wait(&self, child_id: &str) -> bool {
+        let Some(handle) = self.lock().remove(child_id) else {
+            return false;
+        };
+        handle.abort();
+        for _ in 0..100 {
+            if handle.is_finished() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        true
+    }
+
     /// Ids of every child still running in this process.
     pub fn running_ids(&self) -> Vec<String> {
         self.lock().keys().cloned().collect()

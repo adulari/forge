@@ -13,15 +13,15 @@ use crate::anywhere::{LocalState, StateStore, STATE_VERSION};
 
 const SECRET: &str = "sk-A-very-secret-value";
 
-struct Machine {
-    config: std::path::PathBuf,
-    data: std::path::PathBuf,
-    store: Store,
-    state: LocalState,
+pub(super) struct Machine {
+    pub(super) config: std::path::PathBuf,
+    pub(super) data: std::path::PathBuf,
+    pub(super) store: Store,
+    pub(super) state: LocalState,
     _dir: tempfile::TempDir,
 }
 
-fn machine(device: u8) -> Machine {
+pub(super) fn machine(device: u8) -> Machine {
     let dir = tempfile::tempdir().unwrap();
     let state = LocalState {
         version: STATE_VERSION,
@@ -41,17 +41,17 @@ fn machine(device: u8) -> Machine {
     }
 }
 
-struct Env(Vec<(&'static str, Option<OsString>)>);
+pub(super) struct Env(Vec<(&'static str, Option<OsString>)>);
 
 impl Env {
-    fn save() -> Self {
+    pub(super) fn save() -> Self {
         Env(["XDG_CONFIG_HOME", "XDG_DATA_HOME"]
             .iter()
             .map(|k| (*k, std::env::var_os(k)))
             .collect())
     }
 
-    fn enter(&self, machine: &Machine) {
+    pub(super) fn enter(&self, machine: &Machine) {
         std::env::set_var("XDG_CONFIG_HOME", &machine.config);
         std::env::set_var("XDG_DATA_HOME", &machine.data);
     }
@@ -68,7 +68,7 @@ impl Drop for Env {
     }
 }
 
-fn all_on() -> forge_config::AccountSyncConfig {
+pub(super) fn all_on() -> forge_config::AccountSyncConfig {
     forge_config::AccountSyncConfig {
         keys: true,
         skills: true,
@@ -78,7 +78,7 @@ fn all_on() -> forge_config::AccountSyncConfig {
     }
 }
 
-fn transfer(from: &Machine, to: &Machine) {
+pub(super) fn transfer(from: &Machine, to: &Machine) {
     let mut cursor = 0;
     for kind in ["user_setting", "skill", "command", "agent"] {
         for record in from.store.portable_sync_records(kind).unwrap() {
@@ -118,7 +118,7 @@ fn transfer(from: &Machine, to: &Machine) {
         .unwrap();
 }
 
-fn write(path: std::path::PathBuf, text: &str) {
+pub(super) fn write(path: std::path::PathBuf, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, text).unwrap();
 }
@@ -408,7 +408,7 @@ async fn revoking_a_device_reseals_keys_under_the_new_epoch_and_lists_labels_onl
     assert_eq!(epoch_of(&a), Some(2));
 }
 
-fn machine_with_epochs(device: u8, epochs: &[(u32, u8)]) -> Machine {
+pub(super) fn machine_with_epochs(device: u8, epochs: &[(u32, u8)]) -> Machine {
     let mut m = machine(device);
     let current = epochs.iter().map(|(e, _)| *e).max().unwrap();
     m.state.data_key_epochs = epochs
@@ -421,7 +421,7 @@ fn machine_with_epochs(device: u8, epochs: &[(u32, u8)]) -> Machine {
     m
 }
 
-fn live_ids_for(m: &Machine, item: &str) -> Vec<String> {
+pub(super) fn live_ids_for(m: &Machine, item: &str) -> Vec<String> {
     let mut ids = Vec::new();
     for kind in ["user_setting", "skill", "command", "agent"] {
         for r in m.store.portable_sync_records(kind).unwrap() {

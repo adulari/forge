@@ -10,7 +10,9 @@ import { isWeb } from "../../lib/platform";
 
 export type DragPayload =
   | { kind: "session"; id: string }
-  | { kind: "pane"; index: number }
+  // `slot` is the pane's stable slot id (0 for pane 0), not its position, so it stays valid while
+  // other panes open and close mid-drag.
+  | { kind: "pane"; slot: number }
   | { kind: "tab"; index: number };
 
 export const DRAG_MIME = "application/x-forge-drag";
@@ -39,11 +41,10 @@ export function useDragging(): DragPayload | null {
 export function parsePayload(raw: string | undefined): DragPayload | null {
   if (!raw) return null;
   try {
-    const value = JSON.parse(raw) as Partial<DragPayload> & { id?: unknown; index?: unknown };
+    const value = JSON.parse(raw) as { kind?: unknown; id?: unknown; index?: unknown; slot?: unknown };
     if (value.kind === "session" && typeof value.id === "string") return { kind: "session", id: value.id };
-    if ((value.kind === "pane" || value.kind === "tab") && typeof value.index === "number") {
-      return { kind: value.kind, index: value.index };
-    }
+    if (value.kind === "pane" && typeof value.slot === "number") return { kind: "pane", slot: value.slot };
+    if (value.kind === "tab" && typeof value.index === "number") return { kind: "tab", index: value.index };
   } catch {
     // Not one of ours (a file or text drag): ignore it.
   }

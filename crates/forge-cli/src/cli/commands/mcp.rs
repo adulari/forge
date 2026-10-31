@@ -11,6 +11,21 @@ pub(crate) async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
         Some(McpCmd::Agent { session, cwd }) => {
             return crate::mcp_agent::run(session, cwd).await;
         }
+        Some(McpCmd::Control { action }) => {
+            return match action {
+                None => crate::mcp_control::serve().await,
+                Some(ControlCmd::List) => {
+                    crate::mcp_control::list();
+                    Ok(())
+                }
+                Some(ControlCmd::Enable { tool }) => crate::mcp_control::set(&tool, true),
+                Some(ControlCmd::Disable { tool }) => crate::mcp_control::set(&tool, false),
+                Some(ControlCmd::Log { limit }) => {
+                    crate::mcp_control::log(limit);
+                    Ok(())
+                }
+            };
+        }
         Some(McpCmd::Import { path }) => return mcp_import(path),
         Some(McpCmd::Login {
             server,

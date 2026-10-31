@@ -288,6 +288,16 @@ pub const COMMANDS: &[Command] = &[
         usage: "/subagents [free|pinned]",
     },
     Command {
+        name: "crew",
+        desc: "list saved crews or pick the one to delegate to (@crew:name)",
+        usage: "/crew [name|off]",
+    },
+    Command {
+        name: "delegation",
+        desc: "allow or withhold subagent delegation for this thread",
+        usage: "/delegation [on|off]",
+    },
+    Command {
         name: "agents",
         desc: "list the subagent types spawn_agents can use (built-in plus your agent files)",
         usage: "/agents",
@@ -328,9 +338,19 @@ pub const COMMANDS: &[Command] = &[
         usage: "/mesh [task prompt]",
     },
     Command {
+        name: "control",
+        desc: "control tools: what agents may do to this app, and what they did",
+        usage: "/control",
+    },
+    Command {
         name: "remote",
         desc: "toggle remote control — drive this session from a phone/desktop browser",
         usage: "/remote [--lan | --local | --anywhere]",
+    },
+    Command {
+        name: "host",
+        desc: "machines added over SSH: list them, or forget one (add with `forge host add`)",
+        usage: "/host [remove NAME]",
     },
     Command {
         name: "anywhere",
@@ -346,6 +366,11 @@ pub const COMMANDS: &[Command] = &[
         name: "run",
         desc: "run project actions and see listening ports (aliases: /actions, /ports)",
         usage: "/run",
+    },
+    Command {
+        name: "import",
+        desc: "import Claude Code and Codex conversations from this computer",
+        usage: "/import",
     },
     Command {
         name: "self-mcp",
@@ -374,8 +399,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "duel",
-        desc: "race 2-3 mesh models on one task in separate worktrees, then pick the winner",
-        usage: "/duel <task>",
+        desc: "race 2-5 models in separate worktrees; --judge ranks, then merge or PR",
+        usage: "/duel [--judge[=MODEL]] [--n N] [--models a,b,c] <task>",
     },
     Command {
         name: "voice",

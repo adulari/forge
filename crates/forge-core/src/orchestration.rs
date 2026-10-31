@@ -29,6 +29,13 @@ impl Session {
         if !self.config.mesh.subagents.enabled {
             return Ok("spawn_agents is disabled ([mesh.subagents] enabled = false)".to_string());
         }
+        if self.delegation_off {
+            return Ok(
+                "delegation is switched off for this thread by the user; do the work yourself \
+                 with your own tools"
+                    .to_string(),
+            );
+        }
         let args_json = serde_json::to_string(&call.args)?;
         let max = self.config.mesh.subagents.max_agents;
         let requests = match subagent::parse_requests(&call.args, max) {
@@ -259,7 +266,7 @@ impl Session {
     /// is rebuilt, the agent definition re-resolved by name, and the same child loop runs again.
     /// `announce` emits the `SubagentStart` that gives a model-driven `send_to_agent` its own
     /// panel row; a user typing into an open child view already has one.
-    async fn follow_up_child(
+    pub(crate) async fn follow_up_child(
         &mut self,
         child_id: &str,
         agent_name: &str,
@@ -691,7 +698,7 @@ impl Session {
     /// panel.
     pub async fn run_duel(
         &mut self,
-        task: &str,
+        spec: &crate::duel_judge::DuelSpec,
     ) -> Result<(duel::DuelReport, Vec<worktree::WorktreeGuard>), CoreError> {
         let budget = self.budget_snapshot();
         let agents = Arc::new(forge_config::load_agents_layered(
@@ -753,6 +760,6 @@ impl Session {
             }),
         };
 
-        duel::run(&ctx, &parent_id, budget, task, &mut on_event).await
+        duel::run(&ctx, &parent_id, budget, spec, &mut on_event).await
     }
 }

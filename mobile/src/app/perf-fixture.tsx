@@ -1,6 +1,6 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { FlatList, StyleSheet, Text, TextInput, View } from "react-native";
+import { FlatList, Platform, StyleSheet, Text, TextInput, View } from "react-native";
 
 import { isTauri } from "../lib/platform";
 import { dumpDesktopPerformanceSnapshot, getDesktopPerformanceSnapshot, markFirstWorkloadEvent, markPerformancePhaseStart, recordCompositorKey, recordComposerInput, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor, type DesktopPerformanceSnapshot } from "../lib/performance";
@@ -56,14 +56,14 @@ export default function PerformanceFixtureScreen() {
   }, [fixtureEnabled]);
 
   useEffect(() => {
-    if (!fixtureEnabled) return;
+    if (!fixtureEnabled || Platform.OS !== "web") return;
     window.addEventListener("keydown", recordCompositorKey);
     return () => window.removeEventListener("keydown", recordCompositorKey);
   }, [fixtureEnabled]);
 
   useEffect(() => {
     const title = `Perf fixture | phase=${phase} | startup=${snapshot.startupToInteractiveMs?.toFixed(1) ?? "pending"}ms | frames=${snapshot.frameSamples} | dropped=${snapshot.droppedFrames} | long=${snapshot.longestTaskMs.toFixed(1)}ms`;
-    void getCurrentWindow().setTitle(title);
+    if (isTauri) void getCurrentWindow().setTitle(title);
     if (typeof document !== "undefined") document.title = title;
   }, [phase, snapshot]);
   useEffect(() => {

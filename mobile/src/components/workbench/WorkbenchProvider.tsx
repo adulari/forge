@@ -16,6 +16,8 @@ import {
   cycleFocus,
   focusPane,
   initialLayout,
+  openFromPane,
+  withSecondary,
   migrateLegacySplit,
   openInFocused,
   openInNewPane,
@@ -44,7 +46,7 @@ import {
   type WorkbenchSurfaceInput,
 } from "./model";
 
-export type OpenMode = "focused" | "new" | { pane: number };
+export type OpenMode = "focused" | "new" | { pane: number; tap?: boolean };
 
 export interface WorkbenchController {
   state: WorkbenchState;
@@ -262,6 +264,10 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       dispatchLayout({ type: "set", layout: openInNewPane(current, primary, id) });
       return;
     }
+    if (typeof mode === "object" && mode.tap) {
+      dispatchLayout({ type: "set", layout: openFromPane(current, primary, mode.pane, id) });
+      return;
+    }
     const result =
       mode === "focused" ? openInFocused(current, primary, id) : openInPane(current, primary, mode.pane, id);
     dispatchLayout({ type: "set", layout: result.state });
@@ -338,18 +344,18 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       bottom: { ...INITIAL_WORKBENCH_STATE.bottom },
     };
     if (preset === "focus") {
-      dispatchLayout({ type: "set", layout: { ...base, secondary: [] } });
+      dispatchLayout({ type: "set", layout: withSecondary(base, []) });
       dispatch({ type: "replace", state: hideDocks });
     } else if (preset === "side-by-side") {
-      dispatchLayout({ type: "set", layout: { ...base, secondary: [keep[0] ?? pick()] } });
+      dispatchLayout({ type: "set", layout: withSecondary(base, [keep[0] ?? pick()]) });
       dispatch({ type: "replace", state: hideDocks });
     } else if (preset === "grid") {
       const secondary: PaneSlot[] = keep.slice(0, 3);
       while (secondary.length < 3) secondary.push(pick());
-      dispatchLayout({ type: "set", layout: { ...base, secondary } });
+      dispatchLayout({ type: "set", layout: withSecondary(base, secondary) });
       dispatch({ type: "replace", state: hideDocks });
     } else {
-      dispatchLayout({ type: "set", layout: { ...base, secondary: [] } });
+      dispatchLayout({ type: "set", layout: withSecondary(base, []) });
       const git = createWorkbenchSurface({ kind: "git" });
       const tasks = createWorkbenchSurface({ kind: "tasks" });
       dispatch({

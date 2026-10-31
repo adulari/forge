@@ -60,6 +60,8 @@ pub use crate::stash_args::StashOp;
 /// (which owns the `Session`) executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
+    /// `/host` lists machines added with `forge host add`; `/host remove NAME` forgets one.
+    Host(String),
     Help,
     /// Open the `/status` inspector: every fact the header and status line can drop.
     Status,
@@ -159,6 +161,10 @@ pub enum CommandAction {
     Notes,
     /// Open the project actions and ports overlay (`/run`).
     Run,
+    /// Pick Claude Code and Codex conversations from this computer and import them (`/import`).
+    Import,
+    /// Open the control-tools menu: which tools agents may use to drive the app, and what they did.
+    Control,
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Open the latest tool call's complete output in the full-output viewer (`/output`).
@@ -178,6 +184,11 @@ pub enum CommandAction {
     /// model pin — `/subagents free` / `/subagents pinned`. `None` = bare `/subagents`, which
     /// toggles and reports the resulting state.
     Subagents(Option<bool>),
+    /// Allow (`Some(true)`) or withhold (`Some(false)`) delegation for this thread: `/delegation
+    /// on|off`. `None` = bare `/delegation`, which toggles and reports the resulting state.
+    Delegation(Option<bool>),
+    /// `/crew [name|off]`: list the saved crews, select one for this session, or clear the choice.
+    Crew(Option<String>),
     /// `/theme [name]`: list the accent palettes, or switch to one and save it.
     Theme(Option<String>),
     /// List the subagent types `spawn_agents` can use (`/agents`): built-ins plus agent files.
@@ -459,6 +470,10 @@ pub fn parse_command(line: &str) -> CommandAction {
         "subagents" | "subagent" => {
             CommandAction::Subagents(subagent_args::parse_subagents_arg(&arg))
         }
+        "crew" | "crews" => {
+            CommandAction::Crew((!arg.is_empty()).then(|| arg.trim().to_lowercase()))
+        }
+        "delegation" => CommandAction::Delegation(subagent_args::parse_delegation_arg(&arg)),
         "theme" | "palette" => {
             CommandAction::Theme((!arg.is_empty()).then(|| arg.trim().to_lowercase()))
         }
@@ -508,6 +523,9 @@ pub fn parse_command(line: &str) -> CommandAction {
         "anywhere" | "aw" => CommandAction::Anywhere,
         "notes" | "todo" | "todos" => CommandAction::Notes,
         "run" | "actions" | "ports" => CommandAction::Run,
+        "import" => CommandAction::Import,
+        "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
+        "control" => CommandAction::Control,
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),
@@ -1071,6 +1089,10 @@ mod tests {
     fn parses_anywhere_management_command() {
         assert_eq!(parse_command("/anywhere"), CommandAction::Anywhere);
         assert_eq!(parse_command("/aw"), CommandAction::Anywhere);
+        assert_eq!(
+            parse_command("/host remove box"),
+            CommandAction::Host("remove box".into())
+        );
         assert_eq!(command_category("anywhere"), "Integrations");
     }
 

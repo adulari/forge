@@ -32,6 +32,7 @@ pub(crate) mod account_sync;
 /// otherwise see them as the owner. Handlers that return secrets check it and withhold them.
 pub(crate) const RELAY_REQUEST_HEADER: &str = "x-forge-via-relay";
 mod approval_key;
+mod approvals;
 mod connector;
 mod display;
 use display::{configured_host_name, display_timestamp, human_bytes};
@@ -41,6 +42,7 @@ pub(crate) mod peers;
 pub(crate) mod push;
 mod share;
 mod sync;
+mod sync_conflict;
 pub(crate) mod tui_menu;
 
 pub(crate) fn spawn_connector(local_base_url: String) -> tokio::task::JoinHandle<()> {
@@ -347,11 +349,12 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
     match command {
         AnywhereCmd::Setup { name, recovery } => setup(name, recovery).await,
         AnywhereCmd::Login { recovery } => login(recovery).await,
-        AnywhereCmd::Approvals => list_approvals().await,
+        AnywhereCmd::Approvals => approvals::list_approvals().await,
         AnywhereCmd::Approve {
             challenge,
             expect_signing_key,
         } => approve_pairing(&challenge, expect_signing_key.as_deref()).await,
+        AnywhereCmd::SafetyCode { challenge } => approvals::print_safety_code(&challenge).await,
         AnywhereCmd::Enable { name } => enable(name).await,
         AnywhereCmd::Status => status().await,
         AnywhereCmd::Doctor => doctor().await,
@@ -783,40 +786,9 @@ fn open_approved_device_wrap(
 /// The wizard tells the user their request "appears automatically in the Approval inbox" of an
 /// enrolled device. When no enrolled surface shows it, there was previously no way to even confirm
 /// the request had reached the service — the pairing just expired with nothing to look at.
-async fn list_approvals() -> Result<()> {
-    let store = StateStore::platform()?;
-    let mut state = store.load()?;
-    let token = ensure_access_token(&store, &mut state).await?;
-    let service_url = forge_config::load()?.anywhere.service_url().to_owned();
-    let list: PairingList = send_json(
-        client()?
-            .get(format!("{service_url}/v1/pairings"))
-            .bearer_auth(token),
-    )
-    .await
-    .context("list pending device approvals")?;
-
-    if list.pairings.is_empty() {
-        println!("No enrollment requests are waiting for approval.");
-        return Ok(());
-    }
-    let now = now_ms();
-    println!("Enrollment requests waiting for approval:");
-    for pairing in &list.pairings {
-        let remaining = pairing.expires_at_ms.saturating_sub(now) / 1_000;
-        println!(
-            "  {}  expires in {remaining}s",
-            safe_display_text(&pairing.device_name)
-        );
-    }
-    println!();
-    println!("Approve with: forge anywhere approve <CHALLENGE>");
-    println!(
-        "The challenge is shown on the device that is waiting — it is deliberately not listed"
-    );
-    println!("here, so a stolen account token cannot approve a device on its own.");
-    Ok(())
-}
+/// Exit status of `forge anywhere approve` when the person typed DENY. A distinct code lets a
+/// caller such as `forge host add` tell "declined" from "approved" without parsing text.
+pub(crate) const APPROVAL_DENIED_EXIT: i32 = 3;
 
 async fn approve_pairing(encoded_challenge: &str, expect_signing_key: Option<&str>) -> Result<()> {
     let store = StateStore::platform()?;
@@ -863,7 +835,8 @@ async fn approve_pairing(encoded_challenge: &str, expect_signing_key: Option<&st
                 println!(
                     "Denied. No account access was granted; the request will expire automatically."
                 );
-                return Ok(());
+                std::io::stdout().flush().ok();
+                std::process::exit(APPROVAL_DENIED_EXIT);
             }
             _ => bail!(
                 "approval not confirmed; type exactly APPROVE or DENY and run the command again"

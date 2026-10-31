@@ -89,11 +89,13 @@ pub(crate) mod completion;
 mod context_floor;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
+pub mod control;
 pub mod deferred_tools;
 mod detached_subagents;
 pub mod dispatch;
 mod droid_loop;
 pub mod duel;
+pub mod duel_judge;
 mod empty_reply;
 mod error_report;
 mod eval_kernel;
@@ -126,6 +128,8 @@ pub use hooks_cc::forge_tool_to_cc;
 pub mod bridge_progress;
 mod child_ask;
 pub mod context_report;
+mod crew_guidance;
+pub mod delegation_flag;
 mod file_restore;
 mod instructions;
 pub mod job_wake;
@@ -167,6 +171,7 @@ mod routing_policy;
 pub mod run_budget;
 mod run_overrides;
 mod shell_diagnosis;
+pub mod subagent_wait;
 pub use run_budget::RunBudget;
 pub use session_restore::RestoredTurnState;
 mod pin_availability;
@@ -1105,11 +1110,13 @@ impl TaskScope {
                 | forge_tools::PYTHON_TOOL
                 | "spawn_agents"
                 | "send_to_agent"
+                | "steer_subagent"
                 | "run_workflow"
                 | "update_tasks"
                 | "remember"
                 | WORKTREE_TOOL
-        )
+        ) && !control::side_effect_of(tool)
+            .is_some_and(|effect| effect != forge_types::SideEffect::ReadOnly)
     }
 
     fn audit_digest(&self) -> String {
@@ -1616,6 +1623,8 @@ pub struct Session {
     /// this in — see `fleet.rs`). `None` outside `forge serve`, so `message_session` is simply
     /// not advertised there.
     fleet: Option<Arc<dyn fleet::FleetMessaging>>,
+    /// Control toolset host (see `control.rs`); `None` leaves those tools unadvertised.
+    control: Option<Arc<dyn control::ControlHost>>,
     /// Plan-and-dispatch host, wired only into coordinator sessions (see [`dispatch`]).
     dispatch: Option<Arc<dyn dispatch::SessionDispatch>>,
     /// In-session model pin set (`/model <id>`). When set, mesh routing still classifies the prompt
@@ -1643,6 +1652,12 @@ pub struct Session {
     /// releases this session's children from the active model pin so they route the mesh on their
     /// own; `Some(false)` forces inheritance. `None` = follow `mesh.subagents.inherit_pin`.
     subagent_pin_free: Option<bool>,
+    /// Per-thread switch that withholds delegation (`/delegation off`): `spawn_agents` and its
+    /// companions are neither advertised nor run. Session-scoped, like `exact_effort`: a column
+    /// for it would mean a schema migration.
+    delegation_off: bool,
+    /// The saved crew every turn delegates to (`/crew <name>`); `None` = only `@crew:` mentions.
+    active_crew: Option<String>,
     /// Per-turn shrinking cap on the usable context window (tokens), armed only after a provider
     /// context-overflow error and reset at the start of each turn. Each overflow retry lowers it so
     /// the SENT transcript view trims harder — a non-destructive self-heal (the stored transcript is
@@ -2380,6 +2395,7 @@ impl Session {
         // subagent-orchestration). Children may receive it separately only when the explicitly
         // configured recursion depth allows another generation.
         if self.config.mesh.subagents.enabled
+            && !self.delegation_off
             && self
                 .task_scope
                 .as_ref()
@@ -2403,6 +2419,8 @@ impl Session {
             // gate, same "empty until first use" story as send_to_agent above.
             specs.push(subagent::list_subagents_spec());
             specs.push(subagent::cancel_subagent_spec());
+            specs.push(subagent_wait::wait_for_subagents_spec());
+            specs.push(subagent_wait::steer_subagent_spec());
         }
         if self
             .task_scope
@@ -2501,6 +2519,7 @@ impl Session {
         {
             specs.push(fleet::list_sessions_spec());
         }
+        specs.extend(self.control_specs());
         // Plan and dispatch — only a coordinator session has a dispatch host, so neither an ordinary
         // session nor a dispatched worker can start a dispatch of its own.
         if let Some(host) = &self.dispatch {
@@ -5038,8 +5057,13 @@ mod tests {
     #[path = "deferred_dispatch.rs"]
     mod deferred_dispatch_tests;
 
+    #[path = "control_tools.rs"]
+    mod control_tools_tests;
+
     #[path = "detached_agents.rs"]
     mod detached_agents_tests;
+    #[path = "mcp_elicitation.rs"]
+    mod mcp_elicitation_tests;
     #[path = "placeholder_args.rs"]
     mod placeholder_args_tests;
     #[path = "subagent_schema.rs"]
@@ -13321,6 +13345,37 @@ mod tests {
         calls: std::sync::atomic::AtomicUsize,
         fail_first: usize,
         retry_after: Option<std::time::Duration>,
+        error: fn(Option<std::time::Duration>) -> forge_provider::ProviderError,
+    }
+    fn gateway_overloaded(
+        retry_after: Option<std::time::Duration>,
+    ) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Overloaded {
+            status: 503,
+            reason: "gateway_overloaded".into(),
+            message: "Gateway is temporarily busy.".into(),
+            retry_after,
+        }
+    }
+    fn no_provider_route(
+        retry_after: Option<std::time::Duration>,
+    ) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Overloaded {
+            status: 503,
+            reason: "no provider route".into(),
+            message: "No provider route is available. The gateway could not find an available provider route for this model and request. Try again shortly".into(),
+            retry_after,
+        }
+    }
+    fn stalled_stream(_: Option<std::time::Duration>) -> forge_provider::ProviderError {
+        // A real stall takes the whole watchdog window, so two never look like an instant
+        // identical rejection; vary the text to stand in for that.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        forge_provider::ProviderError::Unavailable(format!(
+            "no response from the model — no data for {}s",
+            120 + n
+        ))
     }
     #[async_trait::async_trait]
     impl Provider for OverloadedThenOkProvider {
@@ -13333,12 +13388,7 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_first {
-                return Err(forge_provider::ProviderError::Overloaded {
-                    status: 503,
-                    reason: "gateway_overloaded".into(),
-                    message: "Gateway is temporarily busy.".into(),
-                    retry_after: self.retry_after,
-                });
+                return Err((self.error)(self.retry_after));
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
@@ -13362,10 +13412,32 @@ mod tests {
         Vec<PresenterEvent>,
         std::time::Duration,
     ) {
+        overload_run_with(
+            gateway_overloaded,
+            fail_first,
+            retry_after_ms,
+            budget_secs,
+            attended,
+        )
+        .await
+    }
+
+    async fn overload_run_with(
+        error: fn(Option<std::time::Duration>) -> forge_provider::ProviderError,
+        fail_first: usize,
+        retry_after_ms: u64,
+        budget_secs: u64,
+        attended: bool,
+    ) -> (
+        Result<String, CoreError>,
+        Vec<PresenterEvent>,
+        std::time::Duration,
+    ) {
         let provider = Arc::new(OverloadedThenOkProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             fail_first,
             retry_after: Some(std::time::Duration::from_millis(retry_after_ms)),
+            error,
         });
         let router = Arc::new(PinnedRouter {
             model: "pin::model".into(),
@@ -13405,6 +13477,69 @@ mod tests {
                 "never described as a rejection"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn repeated_no_provider_route_is_waited_out_and_announced() {
+        // Terminal-Bench on ModelGateway: `503 No provider route` ended 17 of 63 trials on the
+        // first answer as "model not available on this account".
+        for attended in [true, false] {
+            let (result, events, _) =
+                overload_run_with(no_provider_route, 4, 3000, 600, attended).await;
+            assert_eq!(result.unwrap(), "pin::model", "attended={attended}");
+            let warnings: Vec<&String> = events
+                .iter()
+                .filter_map(|e| match e {
+                    PresenterEvent::Warning(w) if w.contains("no provider route") => Some(w),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                warnings.len(),
+                4,
+                "every wait of 3s or more is announced: {warnings:?}"
+            );
+            assert!(
+                warnings[2].contains(
+                    "provider busy (503 no provider route), retrying in 3s \
+                     (attempt 3, 9s of 10m budget used)"
+                ),
+                "{}",
+                warnings[2]
+            );
+            assert!(!warnings.iter().any(|w| w.contains("isn't available")));
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_route_budget_fails_with_the_real_gateway_text() {
+        let (result, _, _) = overload_run_with(no_provider_route, 100, 600, 1, false).await;
+        let text = result.unwrap_err().to_string();
+        assert!(
+            text.contains("provider busy (503 no provider route)")
+                && text.contains("No provider route is available"),
+            "{text}"
+        );
+        assert!(!text.contains("isn't available"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_provider_announces_every_wait_not_just_the_halfway_point() {
+        let (result, events, _) = overload_run_with(stalled_stream, 2, 0, 600, false).await;
+        assert!(result.is_ok());
+        let first = events
+            .iter()
+            .find_map(|e| match e {
+                PresenterEvent::Warning(w) if w.contains("unreachable") => Some(w.clone()),
+                _ => None,
+            })
+            .expect("the first wait is announced");
+        assert!(
+            first.contains("provider unreachable (no response from the model — no data for 12")
+                && first.contains("(attempt 1, ")
+                && first.contains("s of 10m budget used)"),
+            "{first}"
+        );
     }
 
     #[tokio::test]
@@ -13635,8 +13770,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pinned_outage_backoff_warns_once_at_halfway_then_fails_on_exhaustion() {
-        // A small budget (6s) so the halfway warning and exhaustion are both reachable without a
+    async fn pinned_outage_backoff_announces_the_wait_then_fails_on_exhaustion() {
+        // A small budget (6s) so the announced wait and exhaustion are both reachable without a
         // long real-time sleep: attempt 1's delay (jittered 4-6s off the 5s base) already exceeds
         // 50% of a 6s budget regardless of jitter, and attempt 2's delay (jittered 12-18s off the
         // 15s base) always exceeds whatever budget remains, so exhaustion follows without needing
@@ -13665,10 +13800,13 @@ mod tests {
         let halfway = events
             .iter()
             .filter(|e| {
-                matches!(e, PresenterEvent::Warning(w) if w.contains("provider unreachable") && w.contains("retrying pinned model"))
+                matches!(e, PresenterEvent::Warning(w) if w.contains("provider unreachable") && w.contains("retrying in"))
             })
             .count();
-        assert_eq!(halfway, 1, "the 50%-budget warning must fire exactly once");
+        assert_eq!(
+            halfway, 1,
+            "the one wait that fits the budget is announced once"
+        );
         let exhausted = events
             .iter()
             .filter(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("still unreachable")))

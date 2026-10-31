@@ -49,6 +49,10 @@ pub struct Question {
     /// The user may attach an optional free-text note to their choice.
     #[serde(default = "default_true")]
     pub allow_note: bool,
+    /// The free-text answer is a secret (an MCP elicitation password or token): surfaces mask it
+    /// as it is typed and the answer is never echoed into the transcript or tool cards.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 fn default_true() -> bool {
@@ -64,6 +68,7 @@ impl Question {
             multi: false,
             allow_other: allow_other || options.is_empty(),
             allow_note: false,
+            secret: false,
         }
     }
 }
@@ -404,6 +409,13 @@ pub trait Presenter: Send {
     /// death rather than a checkpoint.
     fn is_attended(&self) -> bool {
         true
+    }
+    /// Whether a person reads and answers forms on this surface. An MCP server's elicitation
+    /// (a confirmation, a token, a login link) is put to the user only where this is `true`;
+    /// everywhere else, including surfaces whose `ask` auto-picks the first option, it is
+    /// declined rather than answered on someone's behalf.
+    fn can_answer_elicitation(&self) -> bool {
+        false
     }
     fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
         None

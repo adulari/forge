@@ -15,9 +15,26 @@ pub(crate) fn parse_subagents_arg(arg: &str) -> Option<bool> {
     }
 }
 
+/// `Some(true)` = allow delegation, `Some(false)` = withhold it, `None` = toggle. Unknown text
+/// toggles, like [`parse_subagents_arg`].
+pub(crate) fn parse_delegation_arg(arg: &str) -> Option<bool> {
+    match arg.trim().to_lowercase().as_str() {
+        "on" | "allow" | "yes" | "1" => Some(true),
+        "off" | "deny" | "no" | "0" => Some(false),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegation_on_off_are_explicit() {
+        assert_eq!(parse_delegation_arg("on"), Some(true));
+        assert_eq!(parse_delegation_arg(" OFF "), Some(false));
+        assert_eq!(parse_delegation_arg(""), None);
+    }
 
     #[test]
     fn free_and_pinned_are_explicit_and_everything_else_toggles() {

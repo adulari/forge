@@ -38,6 +38,8 @@ pub(super) struct SessionMetaFields {
     pub(super) done_at: Option<i64>,
     /// `fix` / `merge` while PR Watch is armed on this session.
     pub(super) pr_watch: Option<&'static str>,
+    /// How many `/duel` candidates this session raced; 0 when it never ran one.
+    pub(super) duel_candidates: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,10 +150,11 @@ fn figures_for(cwd: &str) -> Option<GitFigures> {
 pub(super) async fn annotate(store: &std::sync::Arc<Store>, rows: &mut [SessionRow]) {
     let ids: Vec<String> = rows.iter().map(|row| row.id.clone()).collect();
     let lookup = store.clone();
-    let (parents, lifecycle) = tokio::task::spawn_blocking(move || {
+    let (parents, lifecycle, duels) = tokio::task::spawn_blocking(move || {
         (
             lookup.session_parents(&ids).unwrap_or_default(),
             lookup.session_lifecycle(&ids).unwrap_or_default(),
+            lookup.duel_candidate_counts(&ids).unwrap_or_default(),
         )
     })
     .await
@@ -167,6 +170,7 @@ pub(super) async fn annotate(store: &std::sync::Arc<Store>, rows: &mut [SessionR
             starred: lifecycle.get(&row.id).is_some_and(|l| l.0),
             done_at: lifecycle.get(&row.id).and_then(|l| l.1),
             pr_watch: crate::serve_pr_watch::mode_of(&row.id),
+            duel_candidates: duels.get(&row.id).copied().unwrap_or(0),
         };
     }
 }

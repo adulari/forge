@@ -461,24 +461,44 @@ async fn upload_entry(
         .as_slice()
         .try_into()
         .map_err(|_| anyhow::anyhow!("sync journal content hash has the wrong length"))?;
-    let start: StartUploadResponse = send_json(
-        http.post(format!("{service_url}/v1/sync/uploads"))
-            .bearer_auth(access_token)
-            .header("Idempotency-Key", sync_idempotency_key("start", entry))
-            .json(&StartUploadRequest {
-                record_kind: &entry.record_kind,
-                stable_id: &entry.stable_id,
-                revision: entry.revision,
-                logical_clock: entry.logical_clock,
-                operation: &entry.operation,
-                base_hash: entry.base_hash.map(|hash| URL_SAFE_NO_PAD.encode(hash)),
-                content_hash: URL_SAFE_NO_PAD.encode(content_hash),
-                ciphertext_bytes: prepared.envelope.len(),
-                ciphertext_sha256: URL_SAFE_NO_PAD.encode(prepared.ciphertext_sha256),
-            }),
-    )
-    .await
-    .context("reserve encrypted sync upload")?;
+    let reserve = http
+        .post(format!("{service_url}/v1/sync/uploads"))
+        .bearer_auth(access_token)
+        .header("Idempotency-Key", sync_idempotency_key("start", entry))
+        .json(&StartUploadRequest {
+            record_kind: &entry.record_kind,
+            stable_id: &entry.stable_id,
+            revision: entry.revision,
+            logical_clock: entry.logical_clock,
+            operation: &entry.operation,
+            base_hash: entry.base_hash.map(|hash| URL_SAFE_NO_PAD.encode(hash)),
+            content_hash: URL_SAFE_NO_PAD.encode(content_hash),
+            ciphertext_bytes: prepared.envelope.len(),
+            ciphertext_sha256: URL_SAFE_NO_PAD.encode(prepared.ciphertext_sha256),
+        })
+        .send()
+        .await
+        .context("reserve encrypted sync upload")?;
+    if reserve.status() == reqwest::StatusCode::CONFLICT {
+        let body = reserve.bytes().await.unwrap_or_default();
+        if super::sync_conflict::is_revision_conflict(&body) {
+            let device = decode_hex_array::<16>(
+                state_store
+                    .load()?
+                    .device_id
+                    .as_deref()
+                    .context("Anywhere device id is missing")?,
+                "device id",
+            )?;
+            if super::sync_conflict::supersede(store, device, entry, (now_ms() / 1_000) as i64)? {
+                return Ok(());
+            }
+        }
+        bail!(super::service_error(reqwest::StatusCode::CONFLICT, &body));
+    }
+    let start: StartUploadResponse = super::decode_response(reserve)
+        .await
+        .context("reserve encrypted sync upload")?;
     if !start.already_complete {
         let upload_url = start
             .upload_url

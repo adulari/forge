@@ -28,6 +28,8 @@ impl Session {
         guidance: &[String],
         tier_override: Option<TaskTier>,
     ) -> Result<LoopOutcome, CoreError> {
+        let guidance = self.guidance_with_crews(prompt, guidance);
+        let guidance = guidance.as_slice();
         // Boxed: the turn body is the largest future in the crate, and every caller (bench, serve,
         // the TUI) would otherwise inline its layout and overflow rustc's query depth.
         if IN_TURN.try_with(|_| ()).is_ok() {

@@ -40,6 +40,9 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Anywhere
         | CommandAction::Notes
         | CommandAction::Run
+        | CommandAction::Import
+        | CommandAction::Host(_)
+        | CommandAction::Control
         | CommandAction::GoalControl(
             GoalControl::Pause | GoalControl::Clear | GoalControl::Status | GoalControl::Edit(_),
         )
@@ -87,6 +90,8 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::SetEffort(_)
         | CommandAction::SetExactEffort(_)
         | CommandAction::Subagents(_)
+        | CommandAction::Delegation(_)
+        | CommandAction::Crew(_)
         | CommandAction::Agents
         | CommandAction::Plan(_)
         | CommandAction::Execute

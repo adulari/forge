@@ -101,6 +101,7 @@ aes-gcm = "0.11"
 sysinfo = { workspace = true }
 self_update = { version = "1.0.0-rc.6", default-features = false, features = ["archive-tar", "archive-zip", "checksums", "compression-tar-gz", "compression-zip-deflate", "github", "reqwest", "rustls"] }
 tower-http = { version = "0.7", features = ["cors"] }
+tower = { version = "0.5", features = ["util"] }
 # The daemon terminal dock (`WS /ws/terminal`, crates/forge-cli/src/serve_terminal.rs) spawns a
 # real interactive shell on a native PTY (Unix openpty / Windows ConPTY).
 portable-pty = "0.9"
@@ -113,7 +114,6 @@ forge-voice = { workspace = true, features = ["microphone"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
-tower = { version = "0.5", features = ["util"] }
 # Simulates a store migrated by a newer build, for the doctor schema-drift check.
 rusqlite = { workspace = true }
 # In-memory secret_store for tests (resolver=2: does not leak into production builds).

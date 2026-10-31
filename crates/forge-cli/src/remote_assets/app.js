@@ -970,7 +970,11 @@ function renderActions(s) {
       h += '</div>';
     }
     if (!opts.length || s.question_allow_other) {
-      h += '<div class="bar"><input type="text" id="ans" placeholder="answer…" enterkeyhint="done">' +
+      const form = s.question_form || [];
+      const secret = !!(form[s.question_index || 0] && form[s.question_index || 0].secret);
+      h += '<div class="bar"><input type="' + (secret ? 'password' : 'text') + '" id="ans" ' +
+        (secret ? 'autocomplete="off" autocapitalize="off" spellcheck="false" ' : '') +
+        'placeholder="' + (secret ? 'hidden as you type…' : 'answer…') + '" enterkeyhint="done">' +
         '<button class="send" data-act="answer">Answer</button></div>';
     }
   }

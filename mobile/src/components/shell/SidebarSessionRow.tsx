@@ -256,7 +256,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
         onHoverIn={() => warmSession(row.id)}
         onPressIn={() => void prefetchHistory(row.id)}
         accessibilityRole="button"
-        accessibilityLabel={`${title}, ${sessionStateWord(row)}, ${family}${diff ? `, ${diff} lines` : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}${depth > 0 ? ", fork" : ""}${row.starred ? ", starred" : ""}${row.done_at != null ? ", done" : ""}${row.pr_watch ? ", watching its pull request" : ""}`}
+        accessibilityLabel={`${title}, ${sessionStateWord(row)}, ${family}${diff ? `, ${diff} lines` : ""}${paneNumber != null && paneTotal > 1 ? `, open in pane ${paneNumber}` : ""}${depth > 0 ? ", fork" : ""}${row.starred ? ", starred" : ""}${row.done_at != null ? ", done" : ""}${row.pr_watch ? ", watching its pull request" : ""}${row.duel_candidates ? `, ${row.duel_candidates} duel candidates` : ""}`}
         accessibilityHint="Opens in the focused pane. Right-click or double-click for more, or drag onto a pane."
         style={[
           styles.row,
@@ -295,6 +295,11 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
         {row.starred ? <Text accessibilityElementsHidden style={[typeScale.monoMeta, { color: tokens.accent }]}>★</Text> : null}
         {row.pr_watch ? <Text accessibilityElementsHidden style={[typeScale.monoMeta, { color: tokens.accent }]}>◉</Text> : null}
         {row.worktree ? <Text style={[typeScale.monoMeta, { color: tokens.accent }]}>⑂</Text> : null}
+        {row.duel_candidates ? (
+          <Text accessibilityLabel={`${row.duel_candidates} candidates`} style={[typeScale.monoMeta, tabularNums, { color: tokens.ink3 }]} numberOfLines={1}>
+            {`⚔${row.duel_candidates}`}
+          </Text>
+        ) : null}
         {diff ? (
           <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.success }]} numberOfLines={1}>
             {diff.split(" ")[0]}
@@ -308,7 +313,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
         <Text style={[typeScale.monoMeta, tabularNums, { color: metricColor }]}>{metric}</Text>
       </Pressable>
       <PopoverMenu anchor={menu} entries={menuEntries} onClose={() => setMenu(null)} accessibilityLabel={`${title} actions`} width={248} />
-      {forkOpen ? <ForkSheet visible onClose={() => setForkOpen(false)} sessionId={row.id} /> : null}
+      {forkOpen ? <ForkSheet visible onClose={() => setForkOpen(false)} sessionId={row.id} onForked={(id) => onOpen(id, "focused")} /> : null}
       <ConfirmDialog
         visible={confirm != null}
         title={confirm === "delete" ? "Delete this session permanently?" : "Archive session"}

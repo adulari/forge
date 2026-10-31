@@ -398,6 +398,17 @@ fn import(s: &Screen, width: usize) -> (Vec<Line<'static>>, Option<usize>) {
             styles::faint(),
         )));
     }
+    let machine = &s.session.machine;
+    if machine.imports.claude_dir || machine.imports.codex_dir {
+        out.push(blank());
+        out.push(Line::from(Span::styled(
+            truncate(
+                "Past Claude Code and Codex conversations come over later: /import in a chat, or `forge import scan`.",
+                width,
+            ),
+            styles::faint(),
+        )));
+    }
     (out, focus)
 }
 

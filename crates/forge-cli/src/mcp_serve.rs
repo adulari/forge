@@ -384,8 +384,8 @@ impl ForgeMcp {
         if name == forge_core::fleet::MESSAGE_SESSION_TOOL {
             return Ok(self.handle_message_session(&args).await);
         }
-        if name == forge_core::fleet::LIST_SESSIONS_TOOL {
-            return Ok(self.handle_list_sessions(&args).await);
+        if Self::is_fleet_read(&name) {
+            return Ok(self.handle_fleet_read(&name, &args).await);
         }
         // Agent-created heartbeats — bridge parity with the direct path's Session::manage_heartbeats.
         // Scoped to the parent session (id from ENV_SESSION) and, like the direct path, can never
@@ -734,7 +734,7 @@ impl ForgeMcp {
             .collect();
         // Advertise the subagent virtual tools only when enabled here — spawn_agents for fresh
         // fan-out, send_to_agent for follow-ups to persisted children (persistent subagents).
-        if let Some(s) = &self.subagents {
+        if let Some(s) = self.visible_subagents() {
             let spec = subagent::spawn_agents_spec_with(s.max_agents, &s.agents);
             let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
             tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
@@ -781,7 +781,7 @@ impl ForgeMcp {
         // Fleet agent-to-agent messaging — always advertised (unlike subagents, it needs no local
         // setup: a call simply fails with a clear error if no `forge serve` daemon is reachable).
         tools.push(self.message_session_tool());
-        tools.push(self.list_sessions_tool());
+        tools.extend(self.list_sessions_tools());
         // Advertise agent-created heartbeats — bridge parity with the direct path. Always on
         // (like update_tasks/remember): the parent session id is resolved lazily at call time.
         tools.extend(bridge_budget::heartbeat_tools());

@@ -8,12 +8,14 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { hostStateText } from "../../lib/anywhere/format";
 import { useAnywhere, useAnywhereHosts } from "../../lib/anywhere/store";
 import { useAuth } from "../../lib/auth";
+import { lastSeenLabel } from "../../lib/hostPresence";
 import { probePin } from "../../lib/pinnedLan";
 import { isTauri } from "../../lib/platform";
 import { useFleetScope } from "../../lib/useScopedFleet";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
+import { Button } from "../ds/Button";
 import { HostDot } from "../anywhere/HostDot";
 import { useServerFleetStatuses } from "./ServerScopePills";
 
@@ -40,14 +42,16 @@ function useChangedCertificates(unreachableIds: string[]): Set<string> {
 export function OfflineHosts() {
   const tokens = useTokens();
   const { selectServer } = useFleetScope();
+  const { setServerDisabled } = useAuth();
   const statuses = useServerFleetStatuses();
   const { signedIn } = useAnywhere();
   const { hosts } = useAnywhereHosts();
   const unreachable = statuses.filter((status) => status.reachability === "unreachable");
   const unreachableIds = useMemo(() => unreachable.map((server) => server.id), [unreachable]);
   const certChanged = useChangedCertificates(unreachableIds);
+  const disabled = statuses.filter((status) => status.reachability === "disabled");
   const away = signedIn ? hosts.filter((host) => host.state.kind === "offline" || host.state.kind === "stale") : [];
-  if (unreachable.length === 0 && away.length === 0) return null;
+  if (unreachable.length === 0 && away.length === 0 && disabled.length === 0) return null;
 
   return (
     <View style={styles.section}>
@@ -57,7 +61,7 @@ export function OfflineHosts() {
           key={server.id}
           onPress={() => (certChanged.has(server.id) ? router.push("/connect") : selectServer(server.id))}
           accessibilityRole="button"
-          accessibilityLabel={`${server.name}, ${certChanged.has(server.id) ? "certificate changed, re-pair" : "unreachable"}`}
+          accessibilityLabel={`${server.name}, ${certChanged.has(server.id) ? "certificate changed, re-pair" : `unreachable, ${lastSeenLabel(server.lastSeenMs)}`}`}
           accessibilityHint={certChanged.has(server.id) ? "Opens pairing to scan a new code" : "Shows this server and retries it"}
           style={[styles.row, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}
         >
@@ -66,9 +70,30 @@ export function OfflineHosts() {
             {server.name}
           </Text>
           <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>
-            {certChanged.has(server.id) ? "certificate changed, re-pair" : "unreachable"}
+            {certChanged.has(server.id) ? "certificate changed, re-pair" : `offline · ${lastSeenLabel(server.lastSeenMs)}`}
           </Text>
         </Pressable>
+      ))}
+      {disabled.map((server) => (
+        <View
+          key={server.id}
+          style={[styles.row, { backgroundColor: tokens.bg2, borderColor: tokens.border }]}
+          accessibilityLabel={`${server.name}, disabled, ${lastSeenLabel(server.lastSeenMs)}`}
+        >
+          <View style={[styles.dot, { backgroundColor: tokens.ink4 }]} />
+          <Text style={[typeScale.body, styles.name, { color: tokens.ink3 }]} numberOfLines={1}>
+            {server.name}
+          </Text>
+          <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]} numberOfLines={1}>
+            disabled · {lastSeenLabel(server.lastSeenMs)}
+          </Text>
+          <Button
+            label="Re-enable"
+            variant="secondary"
+            onPress={() => void setServerDisabled(server.id, false)}
+            accessibilityLabel={`Re-enable ${server.name}`}
+          />
+        </View>
       ))}
       {away.map((host) => (
         <Pressable

@@ -1,7 +1,14 @@
 //! Command-line grammar for `forge import <source>`.
 
 use super::Scope;
-use clap::Subcommand;
+use clap::{Subcommand, ValueEnum};
+
+/// Which agent's conversations `forge import scan` / `forge import sessions` look at.
+#[derive(Clone, Copy, ValueEnum)]
+pub(crate) enum ImportAgent {
+    Claude,
+    Codex,
+}
 
 /// `forge import <source>` pulls commands/skills FROM ANOTHER AI CLI (Claude Code, Codex, Cursor,
 /// Aider) into Forge. For loading a Forge-native bundle made by `forge skill export`, use
@@ -45,6 +52,48 @@ pub(crate) enum ImportSource {
         /// Print only the session id (no report on stderr).
         #[arg(long)]
         quiet: bool,
+    },
+    /// Move a Codex CLI session (a `rollout-*.jsonl` under `~/.codex/sessions`) into Forge with
+    /// its full history. Prints the new Forge session id on stdout (the report goes to stderr).
+    CodexSession {
+        /// A Codex session id (looked up under `~/.codex/sessions`) or the path to its rollout.
+        session: String,
+        /// Session title. Defaults to the first prompt.
+        #[arg(long)]
+        title: Option<String>,
+        /// Workspace for the new session. Defaults to the rollout's working directory.
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
+        /// Print only the session id (no report on stderr).
+        #[arg(long)]
+        quiet: bool,
+    },
+    /// List the Claude Code and Codex conversations on this computer that can be imported, newest
+    /// first, marking the ones already in Forge. Reads transcripts; never modifies them.
+    Scan {
+        /// Only this agent's conversations.
+        #[arg(long, value_enum)]
+        agent: Option<ImportAgent>,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import several Claude Code / Codex conversations at once (ids from `forge import scan`),
+    /// or every one not yet in Forge with `--all`. A conversation whose directory no longer exists
+    /// here is opened in `--cwd` (default: the home directory).
+    Sessions {
+        /// Session ids to import.
+        #[arg(required_unless_present = "all")]
+        ids: Vec<String>,
+        /// Import everything not yet imported.
+        #[arg(long, conflicts_with = "ids")]
+        all: bool,
+        /// Only this agent's conversations (disambiguates an id, narrows `--all`).
+        #[arg(long, value_enum)]
+        agent: Option<ImportAgent>,
+        /// Workspace for conversations whose own directory is missing.
+        #[arg(long)]
+        cwd: Option<std::path::PathBuf>,
     },
     /// Copy Codex CLI custom prompts (`~/.codex/prompts/*.md`) into Forge as commands (user
     /// scope by default). Existing definitions are kept; malformed files are skipped.

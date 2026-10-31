@@ -17,12 +17,13 @@
 //            call TelemetrySheet's "Model" row already makes.
 //   effort → the existing EffortPicker, mounted headless (`showTrigger={false}`), which commits
 //            `/effort <level>` (or bare `/effort` to reset) over the same prompt path.
-import { ArrowUp, ChevronDown, Clock, FileCode2, FileText, Gauge, Image as ImageIcon, ListEnd, MessageSquare, Mic, MousePointer2, RotateCcw, ShieldHalf, Sparkles, Square, Upload, Zap } from "lucide-react-native";
+import { ArrowUp, ChevronDown, Clock, FileText, Gauge, Image as ImageIcon, ListEnd, MessageSquare, Mic, MousePointer2, RotateCcw, ShieldHalf, Sparkles, Square, Upload, Zap } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type ColorValue, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { onModelPickerRequest } from "../../lib/alertTargets";
 import { haptics } from "../../lib/haptics";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 import { useAppShortcut } from "../../lib/shortcuts";
@@ -48,7 +49,9 @@ import {
 } from "../../lib/visualAnnotations";
 import { isMacOS } from "../../lib/platform";
 import { recordComposerImeCommit, recordComposerInput } from "../../lib/performance";
-import { useUpdateConfig, useUpload, useWorkspaceSearch } from "../../lib/queries";
+import { useCachedSessions, useUpdateConfig, useUpload, useWorkspaceSearch } from "../../lib/queries";
+import type { WorkspaceSearchResult } from "../../lib/api";
+import { mentionOptions, type MentionOption, removeMention } from "../../lib/mentionsModel";
 import { useSessionDraft, useSessionStable } from "../../lib/sessionContext";
 import { chordHold } from "../../lib/voice/chordHold";
 import { voice } from "../../lib/voice/voice";
@@ -61,6 +64,8 @@ import { Chip } from "../ds/Chip";
 import { IconButton } from "../ds/IconButton";
 import { useToast } from "../ds/ToastHost";
 import { AttachmentTray } from "./AttachmentTray";
+import { MentionChips } from "./MentionChips";
+import { MentionMenuRow } from "./MentionMenuRow";
 import { MiniPressable } from "./MiniPressable";
 import {
   filesFromDragEvent,
@@ -88,7 +93,6 @@ import {
 import { EffortPicker } from "../session/EffortPicker";
 import {
   replaceWorkspaceMention,
-  workspaceBasename,
   workspaceMentionAtEnd,
 } from "../workspace/workspaceModel";
 import { GoalSheet } from "./GoalSheet";
@@ -351,9 +355,14 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     "files",
     8,
   );
-  const workspaceMentionResults = useMemo(
-    () => workspaceSearch.data?.results ?? [],
-    [workspaceSearch.data],
+  const cachedSessions = useCachedSessions();
+  const contextMentions = useMemo(
+    () => (workspaceMention ? mentionOptions(workspaceMentionQuery, cachedSessions, sessionId) : []),
+    [workspaceMention, workspaceMentionQuery, cachedSessions, sessionId],
+  );
+  const workspaceMentionResults = useMemo<(WorkspaceSearchResult | MentionOption)[]>(
+    () => [...contextMentions, ...(workspaceSearch.data?.results ?? [])],
+    [contextMentions, workspaceSearch.data],
   );
   const [workspaceMentionSelection, setWorkspaceMentionSelection] = useState(0);
   const workspaceMentionRef = useRef(workspaceMention);
@@ -371,6 +380,10 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     applyProgrammatic(next);
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [applyProgrammatic]);
+  const removeMentionChip = useCallback(
+    (token: string) => applyProgrammatic(removeMention(textRef.current, token)),
+    [applyProgrammatic],
+  );
   const insertWorkspaceMentionRef = useRef(insertWorkspaceMention);
   useEffect(() => {
     workspaceMentionRef.current = workspaceMention;
@@ -412,6 +425,17 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   useAppShortcut("composer.effort", () => setEffortVisible(true));
   useAppShortcut("composer.temper", openModePicker);
   useAppShortcut("composer.model", openModelPicker);
+  const openModelPickerRef = useRef(openModelPicker);
+  useEffect(() => {
+    openModelPickerRef.current = openModelPicker;
+  });
+  // A pane header's model chip asks for this session's picker.
+  useEffect(
+    () => onModelPickerRequest((id) => {
+      if (id === sessionId) openModelPickerRef.current();
+    }),
+    [sessionId],
+  );
   useAppShortcut("composer.plan", () => insertCommand("/plan "));
 
   // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the
@@ -858,11 +882,15 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
         </ScrollView>
       ) : null}
 
+      {!recording ? (
+        <MentionChips text={text} onRemove={removeMentionChip} />
+      ) : null}
+
       {!recording && attachments.length > 0 ? (
         <AttachmentTray attachments={attachments} onRemove={removeAttachment} previewUriFor={previewUriFor} />
       ) : null}
 
-      {!recording && workspaceMention && workspaceMentionQuery.length > 0 ? (
+      {!recording && workspaceMention && (workspaceMentionQuery.length > 0 || contextMentions.length > 0) ? (
         <View
           style={[
             styles.mentionMenu,
@@ -871,44 +899,19 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
           accessibilityRole="menu"
           accessibilityLabel="Workspace file suggestions"
         >
-          {workspaceSearch.isLoading ? (
+          {workspaceSearch.isLoading && workspaceMentionResults.length === 0 ? (
             <Text style={[type.meta, styles.mentionNotice, { color: tokens.ink3 }]}>
               searching workspace…
             </Text>
           ) : workspaceMentionResults.length > 0 ? (
-            workspaceMentionResults.map((result, index) => {
-              const selected = index === workspaceMentionSelection;
-              return (
-                <Pressable
-                  key={result.path}
-                  onPress={() => insertWorkspaceMention(result.path)}
-                  accessibilityRole="menuitem"
-                  accessibilityLabel={`Mention ${result.path}`}
-                  style={[
-                    styles.mentionRow,
-                    { backgroundColor: selected ? tokens.selection : "transparent" },
-                  ]}
-                >
-                  <FileCode2
-                    size={15}
-                    strokeWidth={1.75}
-                    color={selected ? tokens.accent : tokens.ink3}
-                  />
-                  <Text
-                    style={[type.body, styles.mentionPath, { color: tokens.ink }]}
-                    numberOfLines={1}
-                  >
-                    {workspaceBasename(result.path)}
-                  </Text>
-                  <Text
-                    style={[type.monoMeta, styles.mentionParent, { color: tokens.ink3 }]}
-                    numberOfLines={1}
-                  >
-                    {result.path}
-                  </Text>
-                </Pressable>
-              );
-            })
+            workspaceMentionResults.map((result, index) => (
+              <MentionMenuRow
+                key={result.path}
+                result={result}
+                selected={index === workspaceMentionSelection}
+                onSelect={insertWorkspaceMention}
+              />
+            ))
           ) : workspaceSearch.isFetched ? (
             <Text style={[type.meta, styles.mentionNotice, { color: tokens.ink3 }]}>
               no matching workspace files
@@ -1257,16 +1260,6 @@ const styles = StyleSheet.create({
     borderRadius: radii.radius8,
     overflow: "hidden",
   },
-  mentionRow: {
-    minHeight: 36,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: space.space8,
-    paddingHorizontal: space.space12,
-    paddingVertical: 6,
-  },
-  mentionPath: { flexShrink: 0, maxWidth: "38%" },
-  mentionParent: { flex: 1 },
   mentionNotice: { paddingHorizontal: space.space12, paddingVertical: space.space8 },
   // D Main / M Session Chat composer: one bordered card (radius4, hairline) wrapping the
   // optional model/effort meta row and the icon+input control row beneath it.

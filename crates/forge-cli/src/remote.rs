@@ -843,7 +843,15 @@ pub enum RemoteInput {
     /// the [`Snapshot::prompt_seq`] the page rendered its buttons from; the drain ignores a
     /// mismatch (the prompt changed under the tap). REQUIRED — a seq-less legacy (v2) answer
     /// fails to parse and is dropped, by design: it can't prove which prompt it approves.
-    Allow { yes: bool, seq: u64 },
+    ///
+    /// `note` is the optional one-line reason (on a deny) or instruction (on an allow) the user
+    /// typed; it reaches the model with the tool result. Absent from older clients.
+    Allow {
+        yes: bool,
+        seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     /// Answer a pending AskUserQuestion with a free-text line (a number picks an option). `seq`
     /// as on [`RemoteInput::Allow`].
     Answer { text: String, seq: u64 },
@@ -941,6 +949,28 @@ pub fn named_key(name: &str) -> Option<forge_tui::KeyKind> {
             K::Char(ch)
         }
     })
+}
+
+/// Longest remote note kept: one line of reasoning, not a pasted essay.
+const MAX_REMOTE_NOTE_CHARS: usize = 500;
+
+/// The confirm reply a remote [`RemoteInput::Allow`] resolves to: the allow/deny outcome plus the
+/// optional one-line note, bounded, which the model reads next to the tool result.
+pub fn allow_reply(yes: bool, note: Option<&str>) -> forge_types::ConfirmReply {
+    let outcome = if yes {
+        forge_types::ConfirmOutcome::Allow
+    } else {
+        forge_types::ConfirmOutcome::Deny
+    };
+    let note: String = note
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .chars()
+        .take(MAX_REMOTE_NOTE_CHARS)
+        .collect();
+    forge_types::ConfirmReply::with_note(outcome, &note)
 }
 
 /// True when a remote Allow/Answer's echoed `seq` targets the prompt that is pending NOW (see
@@ -2367,7 +2397,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::from_str::<RemoteInput>(r#"{"kind":"allow","yes":true,"seq":3}"#).unwrap(),
-            RemoteInput::Allow { yes: true, seq: 3 }
+            RemoteInput::Allow {
+                yes: true,
+                seq: 3,
+                note: None
+            }
         );
         assert_eq!(
             serde_json::from_str::<RemoteInput>(r#"{"kind":"answer","text":"2","seq":9}"#).unwrap(),
@@ -3552,6 +3586,31 @@ mod tests {
         assert!(
             rc.url.tls_fingerprint.is_none(),
             "loopback RemoteUrl must have no TLS fingerprint"
+        );
+    }
+
+    #[test]
+    fn allow_reply_carries_a_bounded_one_line_note() {
+        let deny = allow_reply(false, Some("  use the staging db instead\nsecond line "));
+        assert_eq!(deny.outcome, forge_types::ConfirmOutcome::Deny);
+        assert_eq!(deny.note.as_deref(), Some("use the staging db instead"));
+        assert_eq!(allow_reply(true, None).note, None);
+        assert_eq!(allow_reply(true, Some("   ")).note, None);
+        let long = "x".repeat(2000);
+        assert_eq!(allow_reply(false, Some(&long)).note.unwrap().len(), 500);
+    }
+
+    #[test]
+    fn remote_allow_without_a_note_still_parses() {
+        let input: RemoteInput =
+            serde_json::from_str(r#"{"kind":"allow","yes":false,"seq":4}"#).unwrap();
+        assert_eq!(
+            input,
+            RemoteInput::Allow {
+                yes: false,
+                seq: 4,
+                note: None
+            }
         );
     }
 }

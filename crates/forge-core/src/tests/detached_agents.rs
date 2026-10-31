@@ -215,3 +215,232 @@ async fn a_cancelled_detached_agent_settles_as_failed_in_the_panel() {
         .unwrap();
     assert!(listed.contains("[cancelled]"), "{listed}");
 }
+
+/// Admit `explore` and `plan` as detached children that never answer.
+async fn two_silent_children(session: &mut Session, msg_id: &str) {
+    let admitted = session
+        .invoke_tool(
+            msg_id,
+            &tool_call(
+                "spawn_agents",
+                serde_json::json!({
+                    "agents": [
+                        { "agent": "explore", "task": "map the crate" },
+                        { "agent": "plan", "task": "draft the plan" }
+                    ],
+                    "detached": true
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(admitted.contains("admitted 2 detached agent"), "{admitted}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_subagents_any_returns_on_the_first_finisher_and_names_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _events) = session_with(dir.path(), Arc::new(SilentProvider));
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "fan out", None)
+        .unwrap();
+    two_silent_children(&mut session, &msg_id).await;
+
+    session
+        .invoke_tool(
+            &msg_id,
+            &tool_call("cancel_subagent", serde_json::json!({ "agent": "explore" })),
+        )
+        .await
+        .unwrap();
+    let started = std::time::Instant::now();
+    let waited = session
+        .invoke_tool(
+            &msg_id,
+            &tool_call("wait_for_subagents", serde_json::json!({ "mode": "any" })),
+        )
+        .await
+        .unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "any must not wait for the silent child"
+    );
+    assert!(waited.contains("[explore ("), "{waited}");
+    assert!(waited.contains("cancelled]"), "{waited}");
+    assert!(waited.contains("Still running: plan ("), "{waited}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_subagents_all_times_out_and_says_who_is_still_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _events) = session_with(dir.path(), Arc::new(SilentProvider));
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "fan out", None)
+        .unwrap();
+    two_silent_children(&mut session, &msg_id).await;
+
+    let waited = session
+        .invoke_tool(
+            &msg_id,
+            &tool_call(
+                "wait_for_subagents",
+                serde_json::json!({ "mode": "all", "timeout_secs": 1 }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(waited.contains("timed out after 1s"), "{waited}");
+    assert!(
+        waited.contains("explore (") && waited.contains("plan ("),
+        "{waited}"
+    );
+
+    let missing = session
+        .invoke_tool(
+            &msg_id,
+            &tool_call(
+                "wait_for_subagents",
+                serde_json::json!({ "agents": ["nobody"] }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        missing.contains("no detached agent matches 'nobody'"),
+        "{missing}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn steer_subagent_redirects_a_child_and_returns_its_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _events) = session_with(dir.path(), Arc::new(MockProvider));
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "plan it", None)
+        .unwrap();
+    session
+        .invoke_tool(
+            &msg_id,
+            &tool_call(
+                "spawn_agents",
+                serde_json::json!({
+                    "agents": [{ "agent": "plan", "task": "draft the plan" }],
+                    "detached": true
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    // Whether the child is still running or already done, steering ends in its answer.
+    let steered = session
+        .invoke_tool(
+            &msg_id,
+            &tool_call(
+                "steer_subagent",
+                serde_json::json!({ "agent": "plan", "message": "focus on the API only" }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(steered.starts_with("[plan ("), "{steered}");
+
+    let bad = session
+        .invoke_tool(
+            &msg_id,
+            &tool_call("steer_subagent", serde_json::json!({ "agent": "plan" })),
+        )
+        .await
+        .unwrap();
+    assert!(bad.contains("needs both `agent`"), "{bad}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_off_withholds_spawn_agents_for_the_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _events) = session_with(dir.path(), Arc::new(MockProvider));
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "go", None)
+        .unwrap();
+    session.set_delegation_allowed(false);
+    let refused = session
+        .invoke_tool(
+            &msg_id,
+            &tool_call(
+                "spawn_agents",
+                serde_json::json!({ "agents": [{ "task": "anything" }] }),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(refused.contains("delegation is switched off"), "{refused}");
+    session.set_delegation_allowed(true);
+    assert!(session.delegation_allowed());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_any_with_an_explicit_list_blocks_for_a_new_finisher() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _events) = session_with(dir.path(), Arc::new(SilentProvider));
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "fan out", None)
+        .unwrap();
+    two_silent_children(&mut session, &msg_id).await;
+    session
+        .invoke_tool(
+            &msg_id,
+            &tool_call("cancel_subagent", serde_json::json!({ "agent": "explore" })),
+        )
+        .await
+        .unwrap();
+    let list =
+        serde_json::json!({ "agents": ["explore", "plan"], "mode": "any", "timeout_secs": 1 });
+    // First wait hands over the cancelled child.
+    let first = session
+        .invoke_tool(&msg_id, &tool_call("wait_for_subagents", list.clone()))
+        .await
+        .unwrap();
+    assert!(first.contains("[explore ("), "{first}");
+    // Looping on the same list must not re-read it: it waits for `plan` and times out.
+    let second = session
+        .invoke_tool(&msg_id, &tool_call("wait_for_subagents", list))
+        .await
+        .unwrap();
+    assert!(second.contains("timed out after 1s"), "{second}");
+    assert!(!second.contains("[explore ("), "{second}");
+    assert!(second.contains("Still running: plan ("), "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_off_refuses_every_companion_tool_not_just_spawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _events) = session_with(dir.path(), Arc::new(MockProvider));
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "go", None)
+        .unwrap();
+    session.set_delegation_allowed(false);
+    for (tool, args) in [
+        (
+            "send_to_agent",
+            serde_json::json!({"agent": "x", "message": "y"}),
+        ),
+        (
+            "steer_subagent",
+            serde_json::json!({"agent": "x", "message": "y"}),
+        ),
+        ("run_workflow", serde_json::json!({"script": "1"})),
+        ("wait_for_subagents", serde_json::json!({})),
+    ] {
+        let out = session
+            .invoke_tool(&msg_id, &tool_call(tool, args))
+            .await
+            .unwrap();
+        assert!(out.contains("delegation is switched off"), "{tool}: {out}");
+    }
+    session.set_delegation_allowed(true);
+}

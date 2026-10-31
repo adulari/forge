@@ -221,6 +221,8 @@ pub(crate) fn required(method: &Method, path: &str) -> Need {
     }
     if path.starts_with("/api/providers")
         || path.starts_with("/api/onboarding")
+        // Lists and reads other agents' conversations on the host: never a view-only grant.
+        || path.starts_with("/api/import")
         || path == "/api/anywhere/enable"
         || (!read
             && (matches!(path, "/api/update" | "/api/config") || path.starts_with("/api/mcp")))
@@ -483,56 +485,9 @@ impl Drop for AbortOnDrop {
     }
 }
 
-/// Filters inbound WebSocket frames for one connection: the scope each input kind needs, and an
-/// audit line for every approval.
-pub(crate) struct InputGate {
-    auth: ClientAuth,
-    session: String,
-}
+pub(crate) use crate::serve_revoke::upgrade_until_revoked;
 
-#[derive(Deserialize)]
-struct FrameKind {
-    kind: String,
-    #[serde(default)]
-    yes: Option<bool>,
-}
-
-pub(crate) fn input_scope(kind: &str) -> Scope {
-    match kind {
-        "allow" | "answer" => Scope::Approve,
-        _ => Scope::Prompt,
-    }
-}
-
-impl InputGate {
-    pub(crate) fn new(auth: ClientAuth, session: &str) -> Self {
-        Self {
-            auth,
-            session: session.to_string(),
-        }
-    }
-
-    /// `Some(reason)` when the frame must be dropped; the reason is shown to the client.
-    pub(crate) fn check(&self, frame: &str) -> Option<String> {
-        let kind = serde_json::from_str::<FrameKind>(frame).ok()?;
-        let scope = input_scope(&kind.kind);
-        let allowed = self.auth.allows(scope);
-        if scope == Scope::Approve || !allowed {
-            let detail = kind.yes.map(|yes| if yes { "approve" } else { "deny" });
-            access().record(AuditEntry {
-                client: self.auth.name(),
-                label: &self.auth.label,
-                route: format!("WS input {}", kind.kind),
-                session: Some(self.session.clone()),
-                decision: if allowed { "allow" } else { "deny" },
-                detail,
-                status: None,
-                ip: None,
-            });
-        }
-        (!allowed).then(|| format!("scope_denied:{}", scope.as_str()))
-    }
-}
+pub(crate) use crate::serve_input_gate::InputGate;
 
 #[derive(Serialize)]
 struct ClientView {
@@ -727,12 +682,18 @@ async fn pair(Extension(auth): Extension<ClientAuth>, body: Option<Json<PairRequ
 }
 
 async fn revoke(
+    axum::extract::State(state): axum::extract::State<Arc<DaemonState>>,
     Extension(auth): Extension<ClientAuth>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Response {
     let access = access();
     match access.clients.revoke(&id) {
         Ok(record) => {
+            let store = state.store.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::serve_push_owners::purge_revoked(&store)
+            })
+            .await;
             access.record(AuditEntry {
                 client: auth.name(),
                 label: &auth.label,

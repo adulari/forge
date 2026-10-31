@@ -15,9 +15,10 @@ pub(crate) use cli::args::host::BackupArgs;
 pub(crate) use cli::args::mcp::{McpSyncTarget, McpTransportArg};
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
 pub(crate) use cli::args::{
-    AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity,
-    GitCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat, PluginCmd, ProviderCmd,
-    QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd, VoiceOp,
+    AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ControlCmd, ExportScope,
+    FailOnSeverity, GitCmd, HostCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat,
+    PluginCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd,
+    VoiceOp,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;
@@ -71,6 +72,8 @@ mod browser_args;
 mod cli;
 mod clipboard_image;
 mod context_windows;
+mod control_http;
+mod control_settings;
 mod daemon_cwd;
 mod doctor;
 mod doctor_daemon;
@@ -79,15 +82,19 @@ mod doctor_health;
 mod doctor_providers;
 mod first_run;
 mod fleet_peers;
+mod host_add;
 mod host_caps;
 mod host_lock;
+mod hosts;
 mod image_input;
 pub(crate) mod live_observer;
 mod local;
 mod log_filter;
 mod login_path;
 mod mcp_agent;
+mod mcp_control;
 mod mcp_serve;
+mod mentions;
 mod onboarding;
 mod open_pr_hooks;
 mod ports;
@@ -107,6 +114,8 @@ mod serve_actions;
 mod serve_agents;
 mod serve_clients;
 mod serve_clients_cli;
+mod serve_control;
+mod serve_crews;
 mod serve_diagnostics;
 mod serve_dispatch;
 mod serve_fleet_ws;
@@ -115,6 +124,9 @@ mod serve_git;
 #[cfg(test)]
 mod serve_going_away;
 mod serve_history;
+mod serve_hosts;
+mod serve_import;
+mod serve_input_gate;
 mod serve_keybindings;
 mod serve_lifecycle;
 mod serve_media;
@@ -125,9 +137,13 @@ mod serve_ports;
 mod serve_pr;
 mod serve_pr_watch;
 mod serve_project_actions;
+mod serve_push_owners;
+mod serve_push_routes;
 mod serve_recovery;
+mod serve_revoke;
 mod serve_schedules;
 mod serve_skills;
+mod serve_skills_confine;
 mod serve_spend;
 mod serve_terminal;
 mod serve_terminal_util;

@@ -133,7 +133,9 @@ impl Session {
 
         let note = prompt.as_ref().and_then(|p| p.note.as_deref());
         let (result, ok) = if allowed {
-            let out = mcp.call(&call.name, &effective_args).await;
+            let out = self
+                .call_mcp_serving_elicitation(&mcp, &call.name, &effective_args)
+                .await;
             match note {
                 Some(note) => (
                     format!(
@@ -187,7 +189,7 @@ impl Session {
 impl Session {
     /// Prompt for an MCP tool. Both standing answers add an in-memory rule only: MCP rules are
     /// never written to the project config.
-    fn ask_mcp(
+    pub(crate) fn ask_mcp(
         &mut self,
         tool: &str,
         side_effect: forge_types::SideEffect,

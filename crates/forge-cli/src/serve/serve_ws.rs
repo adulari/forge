@@ -36,7 +36,7 @@ pub(super) async fn ws_handler(
             );
         }
         let rev = params.rev;
-        return ws.on_upgrade(move |socket| {
+        return crate::serve_access::upgrade_until_revoked(ws, auth, move |socket| {
             serve_local_control::pump_proxy(
                 socket,
                 serve_local_control::upstream_ws_url(&control_url, rev),
@@ -47,7 +47,8 @@ pub(super) async fn ws_handler(
         return rejection;
     }
     let Some(handle) = state.registry.get(&params.session).await else {
-        return crate::serve_agents::child_or_404(&state, &params.session, params.rev, ws).await;
+        return crate::serve_agents::child_or_404(&state, &params.session, params.rev, ws, auth)
+            .await;
     };
     let snapshot_rx = handle.snapshot_rx.clone();
     let events = handle.events.clone();
@@ -55,10 +56,9 @@ pub(super) async fn ws_handler(
     let clients = handle.ws_clients.clone();
     let going_away = Some(state.registry.signals.going_away_rx());
     let gate = crate::serve_access::InputGate::new(auth.clone(), &params.session);
-    ws.on_upgrade(move |socket| async move {
+    crate::serve_access::upgrade_until_revoked(ws, auth, move |socket| async move {
         let _attached = WsClientGuard::attach(clients);
-        let access = crate::serve_access::access();
-        let pump = remote::pump_ws_draining(
+        remote::pump_ws_draining(
             socket,
             snapshot_rx,
             events,
@@ -66,10 +66,7 @@ pub(super) async fn ws_handler(
             params.rev,
             going_away,
             Some(gate),
-        );
-        tokio::select! {
-            _ = pump => {}
-            _ = access.clients.until_revoked(&auth) => {}
-        }
+        )
+        .await
     })
 }

@@ -228,7 +228,7 @@ impl DriverState {
         }
         // The generic picker (sessions / checkpoints / models / tempers / assay / copy / duel…).
         if self.app.picker.open {
-            match key {
+            match self.app.picker.digit_shortcut(key) {
                 KeyKind::Esc => {
                     if self.app.picker.kind == Some(forge_tui::PickerKind::Models)
                         && self.app.models_drilled.is_some()
@@ -422,34 +422,26 @@ impl DriverState {
             }
             self.app.copy_candidates.clear();
         } else if kind == forge_tui::PickerKind::Duel {
-            if let Some((report, guards)) = self.duel_state.take() {
-                let repo_root =
-                    forge_core::duel::repo_root_of(&guards, std::path::Path::new(&self.cwd));
-                let repo_key = repo_root.display().to_string();
-                let winner_branch = row.id.clone();
-                let merge_note = match forge_core::duel::merge_winner(&repo_root, &winner_branch) {
-                    Ok(m) if m.conflicted_files.is_empty() => "merged cleanly".to_string(),
-                    Ok(m) => format!(
-                        "merged with conflicts in: {}",
-                        m.conflicted_files.join(", ")
-                    ),
-                    Err(e) => format!("merge failed: {e}"),
-                };
-                if let Ok(store) = crate::open_store() {
-                    for c in &report.candidates {
-                        let won = c.branch == winner_branch;
-                        let _ = store.record_duel_outcome(&repo_key, &c.model, won, &report.task);
-                    }
-                }
-                let winner_model = report
-                    .candidates
-                    .iter()
-                    .find(|c| c.branch == winner_branch)
-                    .map(|c| c.model.clone())
-                    .unwrap_or_else(|| "?".to_string());
-                self.app
-                    .note(&format!("⚔ duel winner: {winner_model} — {merge_note}"));
-                drop(guards);
+            if self.app.picker.last_alt {
+                self.turn_gen += 1;
+                self.turn_handle = start_duel_pr(
+                    &mut self.app,
+                    &mut self.duel_state,
+                    std::path::Path::new(&self.cwd),
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                    &row.id,
+                    Arc::clone(&self.pending_pr),
+                );
+            } else {
+                resolve_duel_pick(
+                    &mut self.app,
+                    &mut self.duel_state,
+                    std::path::Path::new(&self.cwd),
+                    &row.id,
+                );
             }
         } else if kind == forge_tui::PickerKind::Sessions && row.id.starts_with("observe:") {
             self.app
@@ -485,19 +477,11 @@ impl DriverState {
         if let Some(json) = self.app.view_snapshot_json() {
             self.session.lock().await.save_view_snapshot(&json);
         }
-        if let Some((report, guards)) = self.pending_duel.lock().unwrap().take() {
-            if report.candidates.is_empty() {
-                self.app.note("⚔ duel produced no usable candidates");
-            } else {
-                let rows = duel_picker_rows(&report);
-                self.app.picker.open_with(
-                    forge_tui::PickerKind::Duel,
-                    &format!("⚔ duel — pick the winner ({} candidates)", rows.len()),
-                    rows,
-                );
-                self.duel_state = Some((report, guards));
-            }
+        let finished_duel = self.pending_duel.lock().unwrap().take();
+        if let Some(result) = finished_duel {
+            open_duel_picker(&mut self.app, &mut self.duel_state, result);
         }
+        finish_duel_pr(&mut self.app, &mut self.duel_state, &self.pending_pr);
         if let Some(mut ls) = self.loop_state.take() {
             if ls.gen == g {
                 let last = {

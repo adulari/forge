@@ -10,14 +10,16 @@
 // parent has usually stopped rendering this card entirely (permission_prompt
 // went null).
 import React, { useEffect, useRef, useState } from "react";
-import { Platform, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Platform, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import Animated, { FadeOut, useAnimatedStyle, useReducedMotion, withTiming } from "react-native-reanimated";
 
 import { Button } from "../ds/Button";
 import { Card } from "../ds/Card";
 import { CommitIcon } from "../ds/CommitIcon";
+import { Input } from "../ds/Input";
 import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
+import { allowInput } from "../../lib/permissionNote";
 import { useHotkey } from "../../lib/shortcuts";
 import { type Diff, type RemoteInput } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
@@ -54,6 +56,9 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
   const [lockedSeq, setLockedSeq] = useState<number | null>(null);
   const [committed, setCommitted] = useState<"allow" | "deny" | null>(null);
   const [queued, setQueued] = useState(false);
+  // One-line reason/instruction the model reads with the tool result (Deny: why; Allow: how).
+  const [noteOpen, setNoteOpen] = useState(false);
+  const [note, setNote] = useState("");
   const ackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Hearth header reads "permission · waiting Ns" — the daemon has no waitingSince field on
@@ -71,6 +76,8 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
     setLockedSeq(null);
     setCommitted(null);
     setQueued(false);
+    setNoteOpen(false);
+    setNote("");
     const t = Date.now();
     setWaitingSince(t);
     setNow(t);
@@ -109,9 +116,10 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
     setCommitted(yes ? "allow" : "deny");
     if (yes) haptics.allow();
     else haptics.deny();
-    if (!send({ kind: "allow", yes, seq: promptSeq })) {
+    const input = allowInput(yes, promptSeq, note, noteOpen);
+    if (!send(input)) {
       if (onQueueAnswer) {
-        onQueueAnswer({ kind: "allow", yes, seq: promptSeq });
+        onQueueAnswer(input);
         setQueued(true);
         return;
       } else {
@@ -170,6 +178,22 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
             </View>
           ) : null}
 
+          {noteOpen ? (
+            <Input
+              value={note}
+              onChangeText={setNote}
+              placeholder="Reason for the model (optional)"
+              maxLength={500}
+              autoFocus
+              disabled={locked}
+              returnKeyType="done"
+              blurOnSubmit
+              accessibilityLabel="Reason for the model"
+              testID="permission-note"
+              containerStyle={styles.noteField}
+            />
+          ) : null}
+          {noteOpen ? <Text style={[typeScale.sub, { color: tokens.ink3 }, styles.noteHint]}>Sent with Allow or Deny</Text> : null}
           {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
           <View style={styles.actionsRow}>
             <View style={styles.actions}>
@@ -190,6 +214,20 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
                 style={styles.denyBtn}
               />
             </View>
+            <Pressable
+              onPress={() => {
+                if (noteOpen) setNote("");
+                setNoteOpen((open) => !open);
+              }}
+              disabled={locked}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: noteOpen }}
+              accessibilityLabel={noteOpen ? "Hide reason" : "Add a reason"}
+              hitSlop={8}
+              testID="permission-note-toggle"
+            >
+              <Text style={[typeScale.sub, { color: tokens.accent }]}>{noteOpen ? "Hide reason" : "Add reason"}</Text>
+            </Pressable>
             {Platform.OS === "web" ? (
               <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>y · n</Text>
             ) : null}
@@ -213,6 +251,8 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   diffSlot: { marginBottom: space.space12 },
+  noteField: { marginBottom: space.space4 },
+  noteHint: { marginBottom: space.space12 },
   actionsRow: { flexDirection: "row", alignItems: "center", gap: space.space12 },
   actions: { flex: 1, flexDirection: "row", gap: space.space8 },
   allowBtn: { flex: 1.4 },

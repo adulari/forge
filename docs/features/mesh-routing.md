@@ -1183,6 +1183,22 @@ budget — `mesh.pin_outage_wait_secs`, default 600 s (`crates/forge-config/src/
 via separate counters, since an outage recovers in minutes and must not eat the rate-limit
 budget. `0` disables outage backoff (immediate `FailTurn`).
 
+**Gateway routing failures and silent waits.** A gateway that is up but cannot route the request
+(`503 No provider route is available`, `502 provider_routes_exhausted`, `upstream unavailable`,
+`no healthy upstream`, `provider unavailable`) is `ProviderError::Overloaded`, not
+`NoModelAccess`: the phrase list (`GATEWAY_ROUTE_MARKERS` in `error_policy.rs`) is checked before
+the model-access markers, because the same body can carry a `model_not_available` code. A body with an explicit `model_not_found` code stays permanent (new-api answers a mistyped model with `503 No available channel for model X`), unless the gateway says "try again" or it is the exact "No provider route is available" sentence. Only 401/402/403
+and the model owner's own "model not found / does not exist or you do not have access" end a pinned
+turn at once. An overloaded error never counts toward the "rejected twice" rule. Every outage wait
+of 3 s or more (a shorter one on the first retry and every fifth) is announced with
+`announce_outage_wait`, in the chat and as a `warning` line in `--output-format stream-json`:
+`m: provider busy (503 no provider route), retrying in 20s (attempt 3, 2m10s of 10m budget used)`,
+or `provider unreachable (no response from the model — no data for 120s)` for a stalled stream.
+Before this, only the halfway point of the outage budget was announced, so an unattended run could
+sit for five minutes with no output. A provider that connects but yields nothing is cut by the
+first-event watchdog (`mesh.first_event_timeout_secs`, 120 s) and then waits like any outage; the
+total silence is bounded by `mesh.pin_outage_wait_secs`.
+
 **What the backoff warning says, and token throttles** (`crates/forge-core/src/throttle_recovery.rs`).
 The warning carries the provider's own reason, `rate limited (Bedrock: Too many tokens, please
 wait before trying again.) — retrying pinned model in 49s (attempt 3/6)`; the full error text is

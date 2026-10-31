@@ -159,21 +159,36 @@ fn body_rows(form: &QuestionForm, w: usize) -> Vec<TextLine<'static>> {
             Row::Other => {
                 let editing = form.editing == Some(Editing::Other);
                 let chosen = !draft.other.trim().is_empty();
-                let spans_desc = if editing {
+                let spans_desc = if editing && q.secret {
+                    let (masked, at) = masked_buffer(&form.buffer, form.buffer_cursor);
+                    inline_field(&masked, at, w.saturating_sub(label_w + 10))
+                } else if editing {
                     inline_field(
                         &form.buffer,
                         form.buffer_cursor,
                         w.saturating_sub(label_w + 10),
                     )
+                } else if chosen && q.secret {
+                    vec![Span::styled(masked_buffer(&draft.other, 0).0, styles::ok())]
                 } else if chosen {
                     vec![Span::styled(draft.other.clone(), styles::ok())]
+                } else if q.secret {
+                    vec![Span::styled(
+                        "hidden as you type".to_string(),
+                        styles::faint(),
+                    )]
                 } else {
                     vec![Span::styled(
                         "type your own answer".to_string(),
                         styles::faint(),
                     )]
                 };
-                (other_no.to_string(), other_label(), spans_desc)
+                let label = if q.secret {
+                    "Value".to_string()
+                } else {
+                    other_label()
+                };
+                (other_no.to_string(), label, spans_desc)
             }
             Row::Note => {
                 let editing = form.editing == Some(Editing::Note);
@@ -228,6 +243,19 @@ fn body_rows(form: &QuestionForm, w: usize) -> Vec<TextLine<'static>> {
         });
     }
     out
+}
+
+/// A secret answer as bullets, one per typed character, with the cursor mapped to the bullet
+/// string's byte offset so the block cursor sits where the next character lands.
+fn masked_buffer(buffer: &str, cursor: usize) -> (String, usize) {
+    let cursor = cursor.min(buffer.len());
+    let before = buffer.get(..cursor).map_or(0, |b| b.chars().count());
+    let total = buffer.chars().count();
+    let dot = '\u{2022}';
+    (
+        std::iter::repeat_n(dot, total).collect(),
+        before * dot.len_utf8(),
+    )
 }
 
 /// The text being typed, with a block cursor, clipped to `room` cells from its tail.

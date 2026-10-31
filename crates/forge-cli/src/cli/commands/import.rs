@@ -40,6 +40,37 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
                 },
             )
         }
+        ImportSource::CodexSession {
+            session,
+            title,
+            cwd,
+            quiet,
+        } => {
+            return super::import_sessions::import_codex_session_cmd(
+                super::import_sessions::CodexSessionArgs {
+                    session: session.clone(),
+                    title: title.clone(),
+                    cwd: cwd.clone(),
+                    quiet: *quiet,
+                },
+            )
+        }
+        ImportSource::Scan { agent, json } => {
+            return super::import_sessions::scan_cmd(agent.map(Into::into), *json)
+        }
+        ImportSource::Sessions {
+            ids,
+            all,
+            agent,
+            cwd,
+        } => {
+            return super::import_sessions::sessions_cmd(
+                ids,
+                *all,
+                agent.map(Into::into),
+                cwd.as_deref(),
+            )
+        }
         _ => {}
     }
 
@@ -71,7 +102,10 @@ pub(crate) fn import_cmd(source: ImportSource) -> Result<()> {
         ),
         ImportSource::Cursor { .. }
         | ImportSource::Aider { .. }
-        | ImportSource::ClaudeSession { .. } => unreachable!(),
+        | ImportSource::ClaudeSession { .. }
+        | ImportSource::CodexSession { .. }
+        | ImportSource::Scan { .. }
+        | ImportSource::Sessions { .. } => unreachable!(),
     };
     if !(home.exists() || label == "claude" && project) {
         println!("nothing to import: {} does not exist", home.display());
