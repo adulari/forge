@@ -50,7 +50,9 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `toggle_tool_groups` | Alt-O | Full-screen: open every tool group (new ones too), or fold them all ([tool groups](tui-tool-cards.md)) |
 | `prev_tool_group` | Alt-↑ | Full-screen: focus the previous tool group; then ↑/↓ move, Enter or Space toggle, Esc lets go |
 | `next_tool_group` | Alt-↓ | Full-screen: focus the next tool group (same keys as above) |
-| `undo` | Ctrl-Z | Undo last file write (`/undo`) |
+| `undo` | Alt-Z | Undo last file write (`/undo`). Was Ctrl-Z until v2.27, which is now the terminal's suspend chord |
+| `suspend` | Ctrl-Z | Suspend Forge to the shell; `fg` returns with the screen restored (Unix) |
+| `verbosity_cycle` | Alt-V | Cycle the transcript between quiet (reasoning hidden, tool runs folded, passing hints left out), default and everything (reasoning shown, every tool run open) |
 | `compact` | Alt-L | Compact/summarize conversation (`/compact`). Was Ctrl-L until v2.21: a config that still binds it to Ctrl-L is moved to Alt-L on load while `redraw` keeps Ctrl-L |
 | `redraw` | Ctrl-L | Repaint the screen, as in a shell or Claude Code (session and transcript untouched) |
 | `model_picker` | Alt-M | Open model picker overlay |
@@ -81,7 +83,7 @@ Some Forge defaults sit on chords a Claude Code user presses by habit and that m
 there: `Ctrl+K` (delete to end of line), `Ctrl+N` / `Ctrl+P` (history), `Ctrl+R` (history search),
 `Ctrl+Z` (suspend), `Ctrl+S` (stash) and `Alt+P` / `Alt+M` / `Alt+T` (model, mode, thinking).
 `Ctrl+L` already redraws in Forge, as in Claude Code. Several of ours are destructive when pressed by
-habit (`Ctrl+Z` undoes a file write). One line moves them all:
+habit (`Ctrl+K` runs the command center). One line moves them all:
 
 ```toml
 [keybinds]
@@ -92,7 +94,6 @@ preset = "claude-code"
 |---|---|---|
 | `command_center` | Ctrl-K | F2 |
 | `new_session` | Ctrl-N | Alt-N |
-| `undo` | Ctrl-Z | Alt-Z |
 | `checkpoint` | Ctrl-S | Alt-S |
 | `toggle_reasoning` | Ctrl-R | Alt-T |
 | `model_picker` | Alt-M | Alt-P |
@@ -100,18 +101,77 @@ preset = "claude-code"
 
 Every other action keeps its Forge default. The freed chords fall through to the composer's
 readline keys (`Ctrl+K` cuts to the end of the line, `Ctrl+N` / `Ctrl+P` walk the prompt history,
-see [tui-interaction.md](tui-interaction.md)); `Ctrl+Z`, `Ctrl+S` and `Ctrl+R` do nothing
-instead of typing a letter. A bind you set yourself under `[keybinds.binds]` always wins over the
+see [tui-interaction.md](tui-interaction.md)); `Ctrl+S` and `Ctrl+R` do nothing
+instead of typing a letter, and `Ctrl+Z` suspends as in Claude Code. A bind you set yourself under `[keybinds.binds]` always wins over the
 preset, and the configurator's reset (`r` / `R`) returns to the preset's chords. Hints, the welcome
 screen and Help name the active chord (`F2  actions`).
 
 `forge setup` asks once whether to turn the preset on (default yes when `~/.claude` exists) and
 writes `[keybinds] preset`. `preset = "forge"` is the default.
 
+### Text binds, unbinding and sequences
+
+A bind may also be written as text: `undo = "alt+z"`, `help = "ctrl+shift+h"`, `redraw = "f5"`.
+`"none"` removes a default bind, so a chord you never want (`Ctrl+Z`, say) types nothing and does
+nothing; the keybinding editor does the same with `u` or Delete.
+
+```toml
+[keybinds.binds]
+suspend = "none"
+verbosity_cycle = "alt+v"
+```
+
+**Leader key.** Off by default. `leader = true` makes Ctrl+X the leader; any other chord works too
+(`leader = "alt+space"`). Press it, and a which-key strip along the bottom lists the follow-up keys:
+
+| After the leader | Action | After the leader | Action |
+|---|---|---|---|
+| `n` | new session | `s` | checkpoint |
+| `m` | model picker | `u` | undo write |
+| `e` | cycle effort | `y` | copy last reply |
+| `t` | cycle temper | `r` | reload config |
+| `c` | compact | `x` | stash prompt |
+| `k` | command center | `z` | suspend |
+| `h` | help | `v` | cycle verbosity |
+| `,` | keybind editor | `l` | repaint |
+
+Esc cancels, an unknown key is swallowed and ends the sequence, and the window closes after
+`leader_timeout_ms` (default 2000). The leader takes the chord over from whatever action held it:
+with the default leader, stash moves from Ctrl+X to Ctrl+X then `x`.
+
+**Sequences.** `[keybinds.sequences]` maps an action to two or more space-separated steps;
+`<leader>` stands for the leader key. The first step must be a function key or a Ctrl/Alt chord the prompt does not already use
+(Ctrl+A/C/D/E/J/U/W/Y, Alt+B/F/Y), so typing, Enter and Esc are never swallowed; the leader
+follows the same rule. A sequence for an action replaces that action's built-in
+follow-up; `"none"` drops it.
+
+```toml
+[keybinds]
+leader = true
+leader_timeout_ms = 1500
+
+[keybinds.sequences]
+new_session = "<leader> o"
+help = "ctrl+g h"
+undo = "none"
+```
+
+Sequences that can never fire are reported once at startup.
+
+### `[tui]` preferences
+
+| Key | Default | Meaning |
+|---|---|---|
+| `scroll_speed` | 3 | Transcript lines per mouse-wheel notch (1-20) |
+| `cursor` | auto | Prompt cursor: `block`, `bar` or `underline` |
+| `show_tps` | true | Show the tokens-per-second rate in the status line |
+
+These apply the next time `forge chat` starts.
+
 ## 3. Implementation
 
 - **`forge-config`** (`keybinds.rs`) — `KeyCombo`, `KeybindsConfig` (`preset` plus a `BTreeMap<String, KeyCombo>`), a `Default`
-  with the binds above (the shipped default map has 27), `KeybindsConfig::defaults_for(preset)`, and `write_keybind()` / `write_keybind_preset()` (rewrite one key under
+  with the binds above (the shipped default map has 30), `KeybindsConfig::defaults_for(preset)`, and `write_keybind()` / `write_keybind_preset()` (rewrite one key under
   `[keybinds]`, preserving all other config keys). `Config` gains a `keybinds` field.
 - **`forge-tui/keybinds.rs`** — `matches(combo, key_event)` compares a combo against a crossterm
   `KeyEvent`; `resolve_action()` returns the `KeyKind` for the first matching configured action.

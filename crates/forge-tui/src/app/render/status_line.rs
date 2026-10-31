@@ -205,6 +205,7 @@ fn widget_items(widget: &forge_config::StatuslineWidget, app: &App, w: u16) -> V
         W::Throughput => app
             .throughput
             .display(app.busy, std::time::Instant::now())
+            .filter(|_| app.polish.show_tps)
             .map(|shown| {
                 vec![Item::left(
                     Class::Throughput,
@@ -376,7 +377,11 @@ fn collect_items(app: &App, w: u16) -> Vec<Item> {
             )],
         ));
     }
-    if let Some(shown) = app.throughput.display(app.busy, std::time::Instant::now()) {
+    if let Some(shown) = app
+        .throughput
+        .display(app.busy, std::time::Instant::now())
+        .filter(|_| app.polish.show_tps)
+    {
         items.push(Item::left(
             Class::Throughput,
             vec![Span::styled(shown.label(), throughput_style(&shown))],

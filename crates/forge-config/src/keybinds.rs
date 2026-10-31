@@ -14,6 +14,7 @@ use crate::{config_dir, toml_write, ConfigError};
 
 /// A key combination: a key name plus modifier flags.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(from = "KeyComboRepr")]
 pub struct KeyCombo {
     /// Key name: a single character (e.g. "c", "k", ","), or a named key
     /// ("up", "down", "left", "right", "enter", "esc", "backspace", "delete",
@@ -27,7 +28,85 @@ pub struct KeyCombo {
     pub shift: bool,
 }
 
+/// What a bind may be written as in TOML: the `{ key, ctrl, alt, shift }` table, or a string such
+/// as `"ctrl+shift+k"`, `"f2"` or `"none"` (the action is unbound).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum KeyComboRepr {
+    Text(String),
+    Table {
+        key: String,
+        #[serde(default)]
+        ctrl: bool,
+        #[serde(default)]
+        alt: bool,
+        #[serde(default)]
+        shift: bool,
+    },
+}
+
+impl From<KeyComboRepr> for KeyCombo {
+    fn from(repr: KeyComboRepr) -> Self {
+        match repr {
+            KeyComboRepr::Text(text) => KeyCombo::parse(&text),
+            KeyComboRepr::Table {
+                key,
+                ctrl,
+                alt,
+                shift,
+            } => KeyCombo {
+                key,
+                ctrl,
+                alt,
+                shift,
+            },
+        }
+    }
+}
+
+/// The key name of a bind that is switched off.
+pub const UNBOUND_KEY: &str = "none";
+
 impl KeyCombo {
+    /// A combo that matches no key: written `"none"`, it removes a default bind.
+    pub fn unbound() -> Self {
+        Self::new(UNBOUND_KEY, false, false, false)
+    }
+
+    pub fn is_unbound(&self) -> bool {
+        self.key.eq_ignore_ascii_case(UNBOUND_KEY)
+    }
+
+    /// Parse `"ctrl+alt+k"`, `"shift+tab"`, `"f2"` or `"none"`. Modifier words may come in any
+    /// order and case; the last `+`-separated part is the key (so `"ctrl++"` is Ctrl and `+`).
+    /// Text that names no key yields a combo with that text as its key, which the validity check
+    /// then reports instead of silently dropping the bind.
+    pub fn parse(text: &str) -> Self {
+        let text = text.trim();
+        let (mut ctrl, mut alt, mut shift) = (false, false, false);
+        let mut rest = text;
+        loop {
+            let lower = rest.to_ascii_lowercase();
+            let (flag, len) = if lower.starts_with("ctrl+") || lower.starts_with("ctl+") {
+                (&mut ctrl, lower.find('+').unwrap_or(0) + 1)
+            } else if lower.starts_with("alt+") {
+                (&mut alt, 4)
+            } else if lower.starts_with("shift+") {
+                (&mut shift, 6)
+            } else {
+                break;
+            };
+            if rest.len() <= len {
+                break;
+            }
+            *flag = true;
+            rest = &rest[len..];
+        }
+        let key = rest.to_ascii_lowercase();
+        let key = if key == "space" { " ".to_string() } else { key };
+        Self::new(&key, ctrl, alt, shift)
+    }
+
     fn new(key: &str, ctrl: bool, alt: bool, shift: bool) -> Self {
         Self {
             key: key.to_string(),
@@ -42,7 +121,7 @@ impl KeyCombo {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KeybindPreset {
-    /// Forge's own defaults (Ctrl+K command center, Ctrl+N new session, Ctrl+Z undo write…).
+    /// Forge's own defaults (Ctrl+K command center, Ctrl+N new session, Ctrl+Z suspend…).
     #[default]
     Forge,
     /// Claude Code muscle memory: Forge actions move to free chords so CC's keys keep CC's meaning.
@@ -59,13 +138,53 @@ impl KeybindPreset {
 }
 
 /// Configurable keybind map: action name → key combination.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeybindsConfig {
     /// The built-in keymap the binds start from (`"forge"` or `"claude-code"`).
     #[serde(default)]
     pub preset: KeybindPreset,
     #[serde(default)]
     pub binds: BTreeMap<String, KeyCombo>,
+    /// The leader key: press it, then a follow-up key (a which-key strip lists them). Off by
+    /// default. `leader = true` picks Ctrl+X; a chord such as `"ctrl+space"`-style text or a
+    /// `{ key, ctrl, alt, shift }` table picks another.
+    #[serde(default, deserialize_with = "deserialize_leader")]
+    pub leader: Option<KeyCombo>,
+    /// How long a half-typed leader or sequence waits for its next key before it is dropped.
+    #[serde(default = "default_leader_timeout_ms")]
+    pub leader_timeout_ms: u64,
+    /// Key sequences: action name -> steps separated by spaces, e.g. `new_session = "<leader> n"`
+    /// or `undo = "ctrl+x u"`. `<leader>` stands for the leader key. The first step must carry
+    /// Ctrl or Alt (or be a function key) so ordinary typing is never swallowed. An action set
+    /// to `"none"` drops its built-in leader follow-up.
+    #[serde(default)]
+    pub sequences: BTreeMap<String, String>,
+}
+
+fn default_leader_timeout_ms() -> u64 {
+    2000
+}
+
+/// The leader chord that `leader = true` selects.
+pub fn default_leader() -> KeyCombo {
+    KeyCombo::new("x", true, false, false)
+}
+
+fn deserialize_leader<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<KeyCombo>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Leader {
+        Flag(bool),
+        Combo(KeyCombo),
+    }
+    Ok(match Option::<Leader>::deserialize(deserializer)? {
+        None | Some(Leader::Flag(false)) => None,
+        Some(Leader::Flag(true)) => Some(default_leader()),
+        Some(Leader::Combo(combo)) if combo.is_unbound() => None,
+        Some(Leader::Combo(combo)) => Some(combo),
+    })
 }
 
 impl Default for KeybindsConfig {
@@ -83,7 +202,11 @@ impl Default for KeybindsConfig {
         binds.insert("toggle_tool_groups".into(), bind("o", false, true, false));
         binds.insert("prev_tool_group".into(), bind("up", false, true, false));
         binds.insert("next_tool_group".into(), bind("down", false, true, false));
-        binds.insert("undo".into(), bind("z", true, false, false));
+        // Ctrl+Z is the terminal's suspend chord; undoing a write is an Alt chord so a reflexive
+        // Ctrl+Z can never revert a file.
+        binds.insert("undo".into(), bind("z", false, true, false));
+        binds.insert("suspend".into(), bind("z", true, false, false));
+        binds.insert("verbosity_cycle".into(), bind("v", false, true, false));
         binds.insert("compact".into(), bind("l", false, true, false));
         binds.insert("redraw".into(), bind("l", true, false, false));
         binds.insert("model_picker".into(), bind("m", false, true, false));
@@ -105,6 +228,9 @@ impl Default for KeybindsConfig {
         Self {
             preset: KeybindPreset::Forge,
             binds,
+            leader: None,
+            leader_timeout_ms: default_leader_timeout_ms(),
+            sequences: BTreeMap::new(),
         }
     }
 }
@@ -112,11 +238,10 @@ impl Default for KeybindsConfig {
 /// The actions the `claude-code` preset moves, and where to. Every other action keeps its Forge
 /// default. The freed chords fall through to the composer's readline keys (Ctrl+K kill to end of
 /// line, Ctrl+N history) or are ignored (Ctrl+Z, Ctrl+S, Ctrl+R), never typed as a letter.
-fn claude_code_moves() -> [(&'static str, KeyCombo); 7] {
+fn claude_code_moves() -> [(&'static str, KeyCombo); 6] {
     [
         ("command_center", KeyCombo::new("f2", false, false, false)),
         ("new_session", KeyCombo::new("n", false, true, false)),
-        ("undo", KeyCombo::new("z", false, true, false)),
         ("checkpoint", KeyCombo::new("s", false, true, false)),
         ("toggle_reasoning", KeyCombo::new("t", false, true, false)),
         ("model_picker", KeyCombo::new("p", false, true, false)),
@@ -124,7 +249,124 @@ fn claude_code_moves() -> [(&'static str, KeyCombo); 7] {
     ]
 }
 
+/// What each key does after the leader, unless `[keybinds.sequences]` rebinds the action.
+const LEADER_FOLLOW_UPS: [(&str, &str); 16] = [
+    ("n", "new_session"),
+    ("m", "model_picker"),
+    ("e", "effort_cycle"),
+    ("t", "temper_cycle"),
+    ("c", "compact"),
+    ("k", "command_center"),
+    ("h", "help"),
+    ("s", "checkpoint"),
+    ("u", "undo"),
+    ("y", "copy_last"),
+    ("r", "reload"),
+    ("x", "stash"),
+    ("z", "suspend"),
+    ("v", "verbosity_cycle"),
+    (",", "keybind_config"),
+    ("l", "redraw"),
+];
+
+/// An action reached by pressing `steps` one after another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeySequence {
+    pub action: String,
+    pub steps: Vec<KeyCombo>,
+}
+
 impl KeybindsConfig {
+    /// Parse one sequence string (`"<leader> n"`, `"ctrl+x ctrl+k"`). `None` when it has fewer
+    /// than two steps, uses `<leader>` with no leader set, or starts with a plain key that
+    /// ordinary typing would trigger.
+    fn parse_sequence(&self, text: &str) -> Option<Vec<KeyCombo>> {
+        let steps: Vec<KeyCombo> = text
+            .split_whitespace()
+            .map(|token| {
+                if token.eq_ignore_ascii_case("<leader>") {
+                    self.leader.clone()
+                } else {
+                    Some(KeyCombo::parse(token))
+                }
+            })
+            .collect::<Option<_>>()?;
+        let first = steps.first()?;
+        (steps.len() >= 2 && Self::safe_first_step(first)).then_some(steps)
+    }
+
+    /// Whether `combo` can start a sequence without stealing ordinary typing or editing: a
+    /// function key, or a Ctrl/Alt chord that the composer does not already use. Esc, Enter,
+    /// Space, arrows and bare letters are never allowed.
+    pub fn safe_first_step(combo: &KeyCombo) -> bool {
+        const CTRL_EDITING: &str = "acdejuwy";
+        const ALT_EDITING: &str = "bfy";
+        if combo.is_unbound() {
+            return false;
+        }
+        let is_function = combo.key.len() > 1
+            && combo.key.starts_with('f')
+            && combo.key[1..].chars().all(|c| c.is_ascii_digit());
+        if is_function {
+            return true;
+        }
+        let single = combo.key.chars().count() == 1;
+        let letter = combo.key.chars().next().unwrap_or(' ');
+        (combo.ctrl || combo.alt)
+            && !(single && combo.ctrl && !combo.alt && CTRL_EDITING.contains(letter))
+            && !(single && combo.alt && !combo.ctrl && ALT_EDITING.contains(letter))
+            && combo.key != "esc"
+            && combo.key != "enter"
+            && combo.key != "backspace"
+    }
+
+    /// Every working key sequence: the leader's built-in follow-ups (while a leader is set) plus
+    /// the user's `[keybinds.sequences]`. A user sequence for an action replaces that action's
+    /// built-in follow-up; `"none"` removes it.
+    pub fn effective_sequences(&self) -> Vec<KeySequence> {
+        let mut out = Vec::new();
+        if let Some(leader) = self.leader.as_ref().filter(|l| Self::safe_first_step(l)) {
+            for (key, action) in LEADER_FOLLOW_UPS {
+                if !self.sequences.contains_key(action) {
+                    out.push(KeySequence {
+                        action: action.to_string(),
+                        steps: vec![leader.clone(), KeyCombo::parse(key)],
+                    });
+                }
+            }
+        }
+        for (action, text) in &self.sequences {
+            if let Some(steps) = self.parse_sequence(text) {
+                out.push(KeySequence {
+                    action: action.clone(),
+                    steps,
+                });
+            }
+        }
+        out
+    }
+
+    /// `(action, text)` of sequences that can never fire, for a startup note.
+    pub fn invalid_sequences(&self) -> Vec<(String, String)> {
+        let bad_leader = self
+            .leader
+            .as_ref()
+            .filter(|l| !Self::safe_first_step(l))
+            .map(|l| ("leader".to_string(), format!("{l:?}")));
+        bad_leader
+            .into_iter()
+            .chain(
+                self.sequences
+                    .iter()
+                    .filter(|(_, text)| {
+                        !text.trim().eq_ignore_ascii_case(UNBOUND_KEY)
+                            && self.parse_sequence(text).is_none()
+                    })
+                    .map(|(a, t)| (a.clone(), t.clone())),
+            )
+            .collect()
+    }
+
     /// The built-in binds of `preset`: what `r`/`R` reset to in the configurator.
     pub fn defaults_for(preset: KeybindPreset) -> Self {
         let mut keybinds = Self {
@@ -169,6 +411,7 @@ pub(crate) fn migrate_legacy_keybinds(keybinds: &mut KeybindsConfig) {
         );
     }
     crate::keybind_migration::move_compact_off_ctrl_l(keybinds);
+    crate::keybind_migration::move_undo_off_ctrl_z(keybinds);
 }
 
 /// Normalize a freshly loaded keymap: legacy migration first, then the preset.
@@ -183,6 +426,27 @@ fn user_config_doc() -> Result<(PathBuf, toml_edit::DocumentMut), ConfigError> {
     let path = dir.join("config.toml");
     let doc = toml_write::load_doc(&path)?;
     Ok((path, doc))
+}
+
+/// Drop a saved bind so the action falls back to its default (or preset) chord again. A no-op
+/// when nothing is saved for it.
+pub fn remove_keybind(action: &str) -> Result<(), ConfigError> {
+    let (path, mut doc) = user_config_doc()?;
+    if remove_bind_from(&mut doc, action) {
+        toml_write::save_doc(&path, &doc)?;
+    }
+    Ok(())
+}
+
+fn remove_bind_from(doc: &mut toml_edit::DocumentMut, action: &str) -> bool {
+    let saved = doc
+        .get("keybinds")
+        .and_then(|k| k.get("binds"))
+        .is_some_and(|b| b.get(action).is_some());
+    if saved {
+        toml_write::remove_dotted(doc, &format!("keybinds.binds.{action}"));
+    }
+    saved
 }
 
 /// Persist a single keybind to `[keybinds.binds]` in the user config TOML, preserving all other keys.
@@ -231,7 +495,7 @@ mod tests {
     #[test]
     fn keybinds_default_has_all_actions() {
         let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 28);
+        assert_eq!(kb.binds.len(), 30);
         assert_eq!(kb.preset, KeybindPreset::Forge);
         assert_eq!(kb.binds["interrupt"], combo("c", true, false, false));
         assert_eq!(kb.binds["copy_last"], combo("c", true, false, true));
@@ -247,7 +511,7 @@ mod tests {
     fn partial_keybind_override_deep_merges_over_defaults() {
         let kb = load("[keybinds.binds.toggle_reasoning]\nkey = \"x\"\nctrl = true\n");
         assert_eq!(kb.binds["toggle_reasoning"].key, "x");
-        assert_eq!(kb.binds.len(), 28);
+        assert_eq!(kb.binds.len(), 30);
         assert_eq!(kb.binds["interrupt"].key, "c");
         assert_eq!(kb.binds["help"].key, "f1");
     }
@@ -281,6 +545,7 @@ mod tests {
             let owner = kb.binds.iter().find(|(_, c)| **c == cc).map(|(a, _)| a);
             let expected_owner = match (key, alt) {
                 ("l", false) => Some("redraw"),
+                ("z", false) => Some("suspend"),
                 ("p", true) => Some("model_picker"),
                 ("t", true) => Some("toggle_reasoning"),
                 _ => None,
@@ -292,13 +557,123 @@ mod tests {
         assert_eq!(kb.binds["temper_cycle"], combo("m", false, true, false));
         assert_eq!(
             taken.len(),
-            28,
+            30,
             "the preset moves actions, it never drops one"
         );
         let mut unique = taken.clone();
         unique.sort_by_key(|c| (c.key.clone(), c.ctrl, c.alt, c.shift));
         unique.dedup();
-        assert_eq!(unique.len(), 28, "no two actions share a chord: {kb:?}");
+        assert_eq!(unique.len(), 30, "no two actions share a chord: {kb:?}");
+    }
+
+    #[test]
+    fn no_two_default_actions_share_a_chord() {
+        let kb = KeybindsConfig::default();
+        let mut chords: Vec<_> = kb.binds.values().cloned().collect();
+        chords.sort_by_key(|c| (c.key.clone(), c.ctrl, c.alt, c.shift));
+        let total = chords.len();
+        chords.dedup();
+        assert_eq!(chords.len(), total);
+    }
+
+    #[test]
+    fn a_bind_can_be_text_and_none_unbinds_it() {
+        let kb =
+            load("[keybinds.binds]\nundo = \"none\"\nhelp = \"ctrl+Shift+h\"\nredraw = \"f5\"\n");
+        assert!(kb.binds["undo"].is_unbound());
+        assert_eq!(kb.binds["help"], combo("h", true, false, true));
+        assert_eq!(kb.binds["redraw"], combo("f5", false, false, false));
+        assert_eq!(kb.binds["interrupt"].key, "c");
+    }
+
+    #[test]
+    fn the_leader_is_off_until_set_and_true_means_ctrl_x() {
+        let off = load("");
+        assert!(off.leader.is_none());
+        assert!(off.effective_sequences().is_empty());
+        assert_eq!(off.leader_timeout_ms, 2000);
+        let on = load("[keybinds]\nleader = true\n");
+        assert_eq!(on.leader, Some(combo("x", true, false, false)));
+        let custom = load("[keybinds]\nleader = \"alt+space\"\nleader_timeout_ms = 500\n");
+        assert_eq!(custom.leader, Some(combo(" ", false, true, false)));
+        assert_eq!(custom.leader_timeout_ms, 500);
+        assert!(load("[keybinds]\nleader = false\n").leader.is_none());
+    }
+
+    #[test]
+    fn leader_follow_ups_and_user_sequences_combine() {
+        let kb = load(
+            "[keybinds]\nleader = true\n[keybinds.sequences]\nnew_session = \"<leader> o\"\nundo = \"none\"\nhelp = \"ctrl+g h\"\nstash = \"q q\"\nreload = \"<leader>\"\n",
+        );
+        let seqs = kb.effective_sequences();
+        let find = |action: &str| {
+            seqs.iter()
+                .find(|s| s.action == action)
+                .map(|s| s.steps.clone())
+        };
+        let leader = combo("x", true, false, false);
+        assert_eq!(
+            find("new_session"),
+            Some(vec![leader.clone(), combo("o", false, false, false)])
+        );
+        assert_eq!(
+            find("model_picker"),
+            Some(vec![leader.clone(), combo("m", false, false, false)])
+        );
+        assert_eq!(find("undo"), None, "none drops the built-in follow-up");
+        assert_eq!(
+            find("help"),
+            Some(vec![
+                combo("g", true, false, false),
+                combo("h", false, false, false)
+            ])
+        );
+        assert_eq!(
+            find("stash"),
+            None,
+            "a plain first key would swallow typing"
+        );
+        assert_eq!(find("reload"), None, "one step is not a sequence");
+        let bad: Vec<_> = kb.invalid_sequences().into_iter().map(|(a, _)| a).collect();
+        assert_eq!(bad, vec!["reload".to_string(), "stash".to_string()]);
+    }
+
+    #[test]
+    fn a_leader_or_first_step_that_would_eat_typing_is_refused() {
+        for leader in ["space", "esc", "enter", "a", "ctrl+a", "ctrl+d", "alt+b"] {
+            let kb = load(&format!("[keybinds]\nleader = \"{leader}\"\n"));
+            assert!(kb.effective_sequences().is_empty(), "{leader}");
+            assert_eq!(kb.invalid_sequences().len(), 1, "{leader}");
+        }
+        let kb =
+            load("[keybinds.sequences]\nhelp = \"esc h\"\nundo = \"enter x\"\nreload = \"f5 r\"\n");
+        let ok: Vec<_> = kb
+            .effective_sequences()
+            .into_iter()
+            .map(|s| s.action)
+            .collect();
+        assert_eq!(ok, vec!["reload".to_string()]);
+        assert_eq!(kb.invalid_sequences().len(), 2);
+    }
+
+    #[test]
+    fn remove_keybind_deletes_only_the_saved_entry() {
+        let mut doc: toml_edit::DocumentMut =
+            "[keybinds.binds]\nsuspend = { key = \"none\" }\nhelp = { key = \"h\", ctrl = true }\n"
+                .parse()
+                .unwrap();
+        assert!(remove_bind_from(&mut doc, "suspend"));
+        assert!(!remove_bind_from(&mut doc, "never_saved"));
+        let text = doc.to_string();
+        assert!(!text.contains("suspend"), "{text}");
+        assert!(text.contains("help"), "{text}");
+    }
+
+    #[test]
+    fn leader_sequences_need_a_leader() {
+        let kb = load("[keybinds.sequences]\nnew_session = \"<leader> o\"\n");
+        assert!(kb.effective_sequences().is_empty());
+        assert_eq!(kb.invalid_sequences().len(), 1);
     }
 
     #[test]

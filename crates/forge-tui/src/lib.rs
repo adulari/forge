@@ -70,6 +70,7 @@ mod shell_mode;
 pub use shell_mode::bang_command;
 pub use stream_json::{StreamInit, StreamInitSlot, StreamJsonPresenter};
 pub use usage_source::{ModelUsage, UsageSlot, UsageSource};
+mod qr_overlay;
 mod surface;
 mod transcript;
 mod tui;

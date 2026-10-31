@@ -18,6 +18,7 @@ mod chrome_surfaces;
 mod interaction;
 mod notice_during_stream;
 mod panels;
+mod polish;
 mod queue_band;
 mod readability;
 mod remote;

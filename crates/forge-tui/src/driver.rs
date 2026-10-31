@@ -25,6 +25,8 @@ use crate::{Presenter, PresenterEvent};
 
 mod external;
 mod keymap;
+mod leader;
+mod suspend;
 pub use external::{edit_in_external_editor, external_editor_command};
 
 /// Enable mouse reporting: button (`?1000h`) + drag-motion (`?1002h`) + SGR encoding (`?1006h`).
@@ -216,6 +218,9 @@ pub struct Tui {
     /// Last modal-surface state. A transition forces a full viewport repaint so external/native
     /// output can never remain visible under an opaque overlay.
     modal_surface_open: bool,
+    /// The leader key and key sequences in progress. Behind a lock because input is polled
+    /// through `&self`.
+    leader: std::sync::Mutex<leader::Leader>,
 }
 
 /// Set while a full-screen (alternate-screen) TUI is active, so the panic hook knows to leave the
@@ -325,6 +330,7 @@ impl Tui {
             terminal,
             fullscreen,
             mouse_capture,
+            leader: std::sync::Mutex::new(leader::Leader::new(&keybinds)),
             keybinds,
             modal_surface_open: false,
         })
@@ -397,21 +403,30 @@ impl Tui {
     }
 
     pub fn draw(&mut self, app: &App) {
-        let modal_surface_open = app.modal_surface_open();
+        let modal_surface_open = app.modal_surface_open() || app.polish.qr.is_some();
         if modal_surface_open != self.modal_surface_open {
             let _ = self.terminal.clear();
             self.modal_surface_open = modal_surface_open;
         }
+        let leader = self.leader.lock().ok();
         if crate::perf::enabled() {
             let started = std::time::Instant::now();
             let _ = self.terminal.draw(|f| {
                 let render_started = std::time::Instant::now();
                 app::render_live(f, app);
+                if let Some(leader) = &leader {
+                    leader.render(f);
+                }
                 crate::perf::record(crate::perf::Metric::Render, render_started.elapsed());
             });
             crate::perf::record(crate::perf::Metric::Draw, started.elapsed());
         } else {
-            let _ = self.terminal.draw(|f| app::render_live(f, app));
+            let _ = self.terminal.draw(|f| {
+                app::render_live(f, app);
+                if let Some(leader) = &leader {
+                    leader.render(f);
+                }
+            });
         }
     }
 
@@ -438,6 +453,12 @@ impl Tui {
 
     /// Non-blocking: returns the next input event (key or paste) if one is pending, else `None`.
     pub fn poll_event(&self) -> io::Result<Option<InputEvent>> {
+        if let Ok(mut leader) = self.leader.lock() {
+            leader.sync(&self.keybinds);
+            if leader.expire(std::time::Instant::now()) {
+                return Ok(Some(InputEvent::Key(KeyKind::Pending)));
+            }
+        }
         if !event::poll(Duration::from_millis(0))? {
             return Ok(None);
         }
@@ -464,6 +485,20 @@ impl Tui {
                 }));
             }
             Event::Key(k) if k.kind == KeyEventKind::Press => {
+                // A leader or sequence in progress comes before everything else.
+                if let Ok(mut leader) = self.leader.lock() {
+                    match leader.on_key(&k, std::time::Instant::now()) {
+                        leader::Step::Pass => {}
+                        leader::Step::Consumed => {
+                            return Ok(Some(InputEvent::Key(KeyKind::Pending)))
+                        }
+                        leader::Step::Fire(action) => {
+                            let kind = crate::keybinds::action_to_key_kind(&action)
+                                .unwrap_or(KeyKind::Pending);
+                            return Ok(Some(InputEvent::Key(kind)));
+                        }
+                    }
+                }
                 // Configurable action keybinds take priority over static defaults.
                 if let Some(kind) = crate::keybinds::resolve_action(&self.keybinds, &k) {
                     return Ok(Some(InputEvent::Key(kind)));

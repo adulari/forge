@@ -26,7 +26,7 @@ impl App {
             self.input_cursor = 0;
             self.paste_blocks.clear();
             self.quit_armed = None;
-            self.note("input cleared — ↑ to recall");
+            self.ambient_note("input cleared — ↑ to recall");
             return IdleInterrupt::Cleared;
         }
         let chord = self.next_quit_chord.take().unwrap_or("Ctrl+C");

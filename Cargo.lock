@@ -2430,6 +2430,7 @@ dependencies = [
  "forge-agent-mesh",
  "forge-agent-onboarding",
  "forge-agent-types",
+ "libc",
  "pulldown-cmark",
  "qrcode",
  "ratatui",
