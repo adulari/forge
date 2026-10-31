@@ -6,8 +6,13 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Skill sync can no longer create or replace a symlink outside the skills folder.** The link name came straight from a skill's `name:` frontmatter, so a pack or a checked-in project skill named like `../../.config/autostart` could plant a link anywhere under your home. Names must now be a single plain path component, and sync only replaces symlinks that point into a Forge skills folder; symlinks you manage yourself (stow, dotfiles) are reported as conflicts and left alone. Package installs also skip symlinks in a cloned repository and refuse paths that resolve outside the clone.
+
 ### Fixed
 
+- **The Skills panel's Reinstall now works, flat `*.md` packages install, and Remove keeps skills the pack never owned.** Reinstall treats the pack's recorded skills as replaceable and says "kept your existing skill(s)" instead of "no skills found" when everything was skipped. A marketplace entry that is a single `name.md` file is staged and installed. Removing a pack deletes only the skills recorded for it, so a hand-written skill that shares the pack's name survives. Copying a `/skill` line no longer counts as a use; it is counted once, when the skill runs.
 - **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
 
 ### Added
