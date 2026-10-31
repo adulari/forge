@@ -74,6 +74,7 @@ pub(crate) async fn notify_attention_required() {
     .await;
 }
 
+mod key_blob;
 mod state;
 pub(crate) use state::*;
 
