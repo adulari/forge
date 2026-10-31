@@ -112,7 +112,8 @@ impl Session {
                 self.note_read_files(&p.name, &p.args);
             }
             let kept = self.surface_full_output(&p.name, &p.id, full.as_deref(), &result);
-            let result = crate::tool_output::fit_for_model(result, kept.as_deref());
+            let result =
+                crate::tool_output::fit_for_model_of(result, kept.as_deref(), full.is_none());
             let result = if ok {
                 let touched = crate::instructions::touched_paths(&p.name, &p.args, None);
                 self.with_scoped_instructions(&touched, result)
@@ -646,7 +647,8 @@ impl Session {
             detail: crate::tool_detail(&result),
         });
         let kept = self.surface_full_output(&call.name, &call.id, full.as_deref(), &result);
-        let mut result = crate::tool_output::fit_for_model(result, kept.as_deref());
+        let mut result =
+            crate::tool_output::fit_for_model_of(result, kept.as_deref(), full.is_none());
         if let (true, Some(note)) = (allowed, &answer.note) {
             result = format!("{result}\n\n{}", runtime_allow::note_for_model(true, note));
         }

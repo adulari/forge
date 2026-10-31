@@ -15,6 +15,10 @@ All notable changes to Forge are documented here. The format follows
 
 - **`/anywhere` opens a real Forge Anywhere menu in the terminal, with account sync in it.** One overlay shows your account, the connector and this device, the five sync categories (keys, skills, settings, MCP servers, instructions) with an on/off switch each, item and pending counts, last sync, conflicts and skipped items with their reasons, a Sync now action, a Sign in again list for logins that do not sync (Codex, xAI, MCP OAuth, run through the existing flows), and the enrolled devices. Arrows, Tab, Space/Enter and Esc drive it, it refreshes while open, and it spells out the not signed in, loading and error states with a next step. Turning keys on asks first and explains that they are sealed with a second vault key and that OAuth tokens never sync; turning any category off leaves local data in place; the web Recovery Center stays one labelled row away. The statusline now shows the sync badge on its own while any category is on (`/statusline toggle sync` hides it).
 
+### Fixed
+
+- **A tool's full output now survives the workspace wrapper.** Every session tool is wrapped to keep it inside the workspace, and the wrapper forwarded only `run`, so the uncut output a tool returns through `run_full` (shell keeps up to 1 MiB) was dropped and `/output` could only reopen the already-truncated copy. The wrapper now forwards `run_full` with the same scoping and checks.
+
 ## [2.26.0] - 2026-10-30
 
 ### Added

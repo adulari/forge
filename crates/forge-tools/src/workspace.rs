@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use forge_types::{FileDiff, SideEffect};
 use serde_json::Value;
 
-use crate::{Tool, ToolError, SESSION_EXTRA_ROOTS, SESSION_WORKSPACE};
+use crate::{Tool, ToolError, ToolRun, SESSION_EXTRA_ROOTS, SESSION_WORKSPACE};
 
 pub(crate) struct WorkspaceTool {
     pub(crate) inner: Box<dyn Tool>,
@@ -33,6 +33,35 @@ impl WorkspaceTool {
             extra_roots.extend(read_only_roots(workspace));
         }
         (args, extra_roots)
+    }
+
+    /// Scope `args` to the bound workspace and reject escapes, shared by `run` and `run_full`.
+    fn bound_args(
+        &self,
+        args: &Value,
+    ) -> Result<(Value, std::path::PathBuf, Vec<std::path::PathBuf>), ToolError> {
+        let workspace = self
+            .workspace
+            .read()
+            .map_err(|_| ToolError::Failed("session workspace binding poisoned".to_string()))?
+            .clone();
+        let extra_roots = self
+            .extra_roots
+            .read()
+            .map_err(|_| ToolError::Failed("extra tool roots binding poisoned".to_string()))?
+            .clone();
+        let (args, extra_roots) = self.scoped(args, &workspace, extra_roots);
+        validate_workspace_args(&args, &workspace, &extra_roots)?;
+        if self.inner.side_effect() != SideEffect::ReadOnly {
+            if let Some(target) = sibling_worktree_write(&args, &workspace) {
+                return Err(ToolError::Failed(format!(
+                    "'{target}' is inside another agent's worktree; write inside this session's \
+                     workspace {} instead",
+                    workspace.display()
+                )));
+            }
+        }
+        Ok((args, workspace, extra_roots))
     }
 }
 
@@ -68,31 +97,21 @@ impl Tool for WorkspaceTool {
     }
 
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
-        let workspace = self
-            .workspace
-            .read()
-            .map_err(|_| ToolError::Failed("session workspace binding poisoned".to_string()))?
-            .clone();
-        let extra_roots = self
-            .extra_roots
-            .read()
-            .map_err(|_| ToolError::Failed("extra tool roots binding poisoned".to_string()))?
-            .clone();
-        let (args, extra_roots) = self.scoped(args, &workspace, extra_roots);
-        validate_workspace_args(&args, &workspace, &extra_roots)?;
-        if self.inner.side_effect() != SideEffect::ReadOnly {
-            if let Some(target) = sibling_worktree_write(&args, &workspace) {
-                return Err(ToolError::Failed(format!(
-                    "'{target}' is inside another agent's worktree; write inside this session's \
-                     workspace {} instead",
-                    workspace.display()
-                )));
-            }
-        }
+        let (args, workspace, extra_roots) = self.bound_args(args)?;
         SESSION_EXTRA_ROOTS
             .scope(
                 extra_roots,
                 SESSION_WORKSPACE.scope(workspace, self.inner.run(&args)),
+            )
+            .await
+    }
+
+    async fn run_full(&self, args: &Value) -> Result<ToolRun, ToolError> {
+        let (args, workspace, extra_roots) = self.bound_args(args)?;
+        SESSION_EXTRA_ROOTS
+            .scope(
+                extra_roots,
+                SESSION_WORKSPACE.scope(workspace, self.inner.run_full(&args)),
             )
             .await
     }
