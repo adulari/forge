@@ -233,6 +233,23 @@ async fn bypass_floor_refuses_privilege_and_home_deletion_but_not_data_strings()
     }
 }
 
+#[tokio::test]
+async fn a_quote_opened_on_a_magic_line_cannot_hide_the_next_one() {
+    let (mut fx, _) = Fixture::new(PermissionMode::Bypass, true, Vec::new());
+    for cell in [
+        "!echo '''\n!rm -rf ~",
+        "!echo \"\"\"\n!rm -rf ~",
+        "!echo '''\n!/usr/bin/sudo -n true",
+    ] {
+        let out = fx.python(cell).await;
+        assert!(!out.starts_with("python:"), "{cell}: {out}");
+        assert!(
+            out.contains("safety floor") || out.contains("Hand it to the user"),
+            "{cell}: {out}"
+        );
+    }
+}
+
 #[test]
 fn failure_classification_and_ledger() {
     assert!(classify_tool_failure("python: error KeyError (cell 3)\ntb").is_some());

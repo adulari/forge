@@ -29,62 +29,26 @@ pub(crate) fn cell_code(args: &Value) -> Option<&str> {
     args.get("code").and_then(Value::as_str)
 }
 
-/// Quote state across lines, so a `!`-looking line inside a triple-quoted string is not a magic.
-fn triple_quote_open(line: &str, mut open: Option<&'static str>) -> Option<&'static str> {
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        match open {
-            Some(q) => {
-                if bytes[i] == b'\\' {
-                    i += 2;
-                } else if line[i..].starts_with(q) {
-                    open = None;
-                    i += 3;
-                } else {
-                    i += 1;
-                }
-            }
-            None => match bytes[i] {
-                b'#' => break,
-                c @ (b'\'' | b'"') => {
-                    let triple = if c == b'\'' { "'''" } else { "\"\"\"" };
-                    if line[i..].starts_with(triple) {
-                        open = Some(triple);
-                        i += 3;
-                    } else {
-                        i += 1;
-                        while i < bytes.len() && bytes[i] != c {
-                            i += if bytes[i] == b'\\' { 2 } else { 1 };
-                        }
-                        i += 1;
-                    }
-                }
-                _ => i += 1,
-            },
-        }
-    }
-    open
+fn is_magic(stripped: &str) -> bool {
+    (stripped.starts_with('!') && !stripped.starts_with("!="))
+        || stripped
+            .strip_prefix("%pip")
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
-/// The `!cmd` and `%pip args` statement lines of a cell, as shell text.
+/// The `!cmd` and `%pip args` statement lines of a cell, as shell text. Fails closed: every line
+/// that starts with `!` or `%pip` counts, whatever quote state the runner would carry into it, so
+/// the runner's rewrite can never expose a line the floor did not check. (A `!` line inside a
+/// triple-quoted string is therefore checked too; that errs towards refusing.)
 pub(crate) fn magic_lines(code: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut open = None;
-    for line in code.lines() {
-        if open.is_none() {
-            let stripped = line.trim_start();
-            if let Some(cmd) = stripped.strip_prefix('!') {
-                out.push(cmd.trim().to_string());
-            } else if let Some(args) = stripped.strip_prefix("%pip") {
-                if args.is_empty() || args.starts_with(char::is_whitespace) {
-                    out.push(format!("pip {}", args.trim()));
-                }
-            }
-        }
-        open = triple_quote_open(line, open);
-    }
-    out
+    code.lines()
+        .map(str::trim_start)
+        .filter(|l| is_magic(l))
+        .map(|l| match l.strip_prefix('!') {
+            Some(cmd) => cmd.trim().to_string(),
+            None => format!("pip {}", l["%pip".len()..].trim()),
+        })
+        .collect()
 }
 
 fn write_patterns() -> &'static regex::Regex {
@@ -130,11 +94,16 @@ mod tests {
     }
 
     #[test]
-    fn magic_lines_skip_strings_and_comments() {
-        let code =
-            "x = 1\n!ls -la\n  %pip install pandas\ns = '''\n!sudo true\n'''\n# !rm\nprint('!x')";
+    fn magic_lines_fail_closed_and_skip_operators_and_ordinary_code() {
+        let code = "x = 1\n!ls -la\n  %pip install pandas\n# !rm\nprint('!x')";
         assert_eq!(magic_lines(code), vec!["ls -la", "pip install pandas"]);
         assert!(magic_lines("a = 'su'\nopen('/etc/passwd').read()").is_empty());
+        assert!(magic_lines("if (\n    a\n    != b\n):\n    pass").is_empty());
+        assert_eq!(
+            magic_lines("!echo '''\n!rm -rf ~"),
+            vec!["echo '''", "rm -rf ~"],
+            "a quote opened on one magic line must not hide the next"
+        );
     }
 
     #[test]

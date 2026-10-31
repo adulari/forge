@@ -469,6 +469,12 @@ pub(super) fn permission_block(app: &App, width: u16) -> Decision {
     } else {
         "Allow for this session".to_string()
     };
+    let (always, session) = if p.tool == "python" {
+        let once = "Allow once (python cells always ask)".to_string();
+        (once.clone(), once)
+    } else {
+        (always, session)
+    };
     let labels = [
         ("Allow once".to_string(), "y  Enter"),
         (always, "a"),

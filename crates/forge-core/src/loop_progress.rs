@@ -308,6 +308,15 @@ mod tests {
     }
 
     #[test]
+    fn python_cell_counter_and_timing_do_not_hide_a_repeat() {
+        let a = CallObservation::new(1, true, false, "python: ok (cell 4, 0.3s)\nOut: 3");
+        let b = CallObservation::new(1, true, false, "python: ok (cell 5, 0.1s)\nOut: 3");
+        assert_eq!(a.result_fp(), b.result_fp());
+        let c = CallObservation::new(1, true, false, "python: ok (cell 6, 0.1s)\nOut: 4");
+        assert_ne!(a.result_fp(), c.result_fp());
+    }
+
+    #[test]
     fn shell_timing_in_the_header_does_not_change_the_fingerprints() {
         let a = line_fingerprints("shell: exit 0 in 42ms\n\nsame output\nmore output", false);
         let b = line_fingerprints("shell: exit 0 in 19ms\n\nsame output\nmore output", false);

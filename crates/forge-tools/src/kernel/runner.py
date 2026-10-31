@@ -1,5 +1,5 @@
 import sys; del sys.path[0]
-import os, io, ast, json, signal, subprocess, traceback, linecache, builtins, threading, queue, time, shlex
+import os, io, ast, json, signal, subprocess, traceback, linecache, builtins, threading, queue, time, shlex, types
 sys.path.insert(0, '')
 
 NONCE = os.environ.pop('FORGE_KERNEL_NONCE', '')
@@ -89,7 +89,7 @@ def rewrite_magics(src):
         if open_q is None:
             stripped = line.lstrip()
             indent = line[:len(line) - len(stripped)]
-            if stripped.startswith('!'):
+            if stripped.startswith('!') and not stripped.startswith('!='):
                 line = indent + '__forge_sh(%r)' % stripped[1:].strip()
             elif stripped.startswith('%pip ') or stripped == '%pip':
                 cmd = shlex.quote(sys.executable) + ' -m pip ' + stripped[4:].strip()
@@ -99,7 +99,10 @@ def rewrite_magics(src):
     return '\n'.join(out)
 
 
-ns = {'__name__': '__main__', '__builtins__': builtins, '__forge_sh': forge_sh}
+main_module = types.ModuleType('__main__')
+sys.modules['__main__'] = main_module
+ns = main_module.__dict__
+ns.update({'__builtins__': builtins, '__forge_sh': forge_sh})
 
 
 def reply(obj):

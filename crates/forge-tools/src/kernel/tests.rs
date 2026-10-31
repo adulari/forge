@@ -543,3 +543,29 @@ async fn a_missing_interpreter_reports_failed_to_start() {
     let err = kernel.hello(Duration::from_secs(5)).await.unwrap_err();
     assert!(err.contains("oops") || err.contains("no output"), "{err}");
 }
+
+#[tokio::test]
+async fn not_equal_continuation_lines_and_pickling_work() {
+    if !python3_available() {
+        return;
+    }
+    let ws = tempfile::tempdir().unwrap();
+    let tool = PythonTool::new();
+    let out = code(
+        &tool,
+        ws.path(),
+        "a, b = 1, 2\nif (\n    a\n    != b\n):\n    r = 'differs'\nr",
+    )
+    .await;
+    assert!(
+        out.starts_with("python: ok") && out.contains("Out: 'differs'"),
+        "{out}"
+    );
+    let out = code(
+        &tool,
+        ws.path(),
+        "import pickle\nclass Model:\n    x = 1\ndef f(v):\n    return v\nm = pickle.loads(pickle.dumps(Model()))\n(pickle.loads(pickle.dumps(f)) is f, type(m).__name__, __name__)",
+    )
+    .await;
+    assert!(out.contains("Out: (True, 'Model', '__main__')"), "{out}");
+}

@@ -185,6 +185,9 @@ impl App {
     /// a note goes to the model. `mcp`: the tool's standing allows are in-memory only.
     pub fn note_permission_answer(&mut self, tool: &str, answer: &ConfirmReply, mcp: bool) {
         match answer.outcome {
+            ConfirmOutcome::AlwaysAllow | ConfirmOutcome::AllowSession if tool == "python" => {
+                self.note("✓ python allowed once — python cells always ask; add a config rule for a standing grant");
+            }
             ConfirmOutcome::AlwaysAllow => {
                 let scope = if mcp {
                     "for this session"

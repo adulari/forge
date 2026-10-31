@@ -45,7 +45,7 @@ pub(super) fn line_fingerprints(result: &str, noisy: bool) -> Vec<u64> {
     let mut out = Vec::with_capacity(rest.len() + 1);
     let single_short = rest.is_empty() && first.is_some_and(|l| l.len() <= SHORT_RESULT_CHARS);
     if let Some(first) = first {
-        let header = if first.starts_with("shell:") {
+        let header = if first.starts_with("shell:") || first.starts_with("python:") {
             mask_digits(first)
         } else if noisy {
             mask_noise(first)
