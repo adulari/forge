@@ -217,11 +217,17 @@ fn strip_terminal_escapes(text: &str) -> String {
     out
 }
 
+/// A session an address resolved to.
+pub(crate) struct Found {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) cwd: String,
+}
+
 /// Resolve a typed session address against the stored sessions: id, exact title or id prefix.
-pub(crate) fn resolve_session(
-    store: &Store,
-    address: &str,
-) -> Result<forge_store::SessionSummary, String> {
+/// An exact id is also taken straight from the store, because the listing leaves out sessions
+/// that have no user message yet.
+pub(crate) fn resolve_session(store: &Store, address: &str) -> Result<Found, String> {
     let sessions = store.list_sessions().map_err(|e| e.to_string())?;
     let peers: Vec<FleetPeer> = sessions
         .iter()
@@ -231,25 +237,42 @@ pub(crate) fn resolve_session(
         Ok(peer) => sessions
             .into_iter()
             .find(|s| s.id == peer.id)
+            .map(|s| Found {
+                title: s
+                    .title
+                    .clone()
+                    .filter(|t| !t.is_empty())
+                    .or(s.preview.clone())
+                    .unwrap_or_else(|| "untitled".into()),
+                id: s.id,
+                cwd: s.cwd,
+            })
             .ok_or_else(|| "session vanished".to_string()),
-        Err(error) => Err(format!("{error} for \"{address}\"")),
+        Err(error) => {
+            let id = address.trim();
+            if store.session_exists(id).unwrap_or(false) {
+                return Ok(Found {
+                    id: id.to_string(),
+                    title: store
+                        .session_title(id)
+                        .ok()
+                        .flatten()
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_else(|| "untitled".into()),
+                    cwd: store.session_cwd(id).ok().flatten().unwrap_or_default(),
+                });
+            }
+            Err(format!("{error} for \"{address}\""))
+        }
     }
 }
 
-fn digest_of(store: &Store, summary: &forge_store::SessionSummary) -> Result<String, String> {
-    let messages = store
-        .load_messages(&summary.id)
-        .map_err(|e| e.to_string())?;
-    let title = summary
-        .title
-        .clone()
-        .filter(|t| !t.is_empty())
-        .or(summary.preview.clone())
-        .unwrap_or_else(|| "untitled".into());
+pub(crate) fn digest_of(store: &Store, found: &Found) -> Result<String, String> {
+    let messages = store.load_messages(&found.id).map_err(|e| e.to_string())?;
     Ok(session_digest(
-        &clip(&title, 60),
-        &summary.id,
-        &summary.cwd,
+        &clip(&found.title, 60),
+        &found.id,
+        &found.cwd,
         &messages,
     ))
 }

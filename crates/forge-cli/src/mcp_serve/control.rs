@@ -39,8 +39,9 @@ impl ForgeMcp {
                 "error: {name} is switched off - the user can turn it back on in Settings > Control tools"
             ));
         }
+        let me = std::env::var(forge_core::snapshot::ENV_SESSION).unwrap_or_default();
         let side_effect =
-            control::side_effect_of(name).unwrap_or(forge_types::SideEffect::External);
+            control::effective_side_effect(&HttpControl::local(), &me, name, args).await;
         let mode = self.effective_mode();
         let decision = permission::decide(mode, side_effect, name, args, &self.rules);
         let prompt = super::super::permission_relay::Prompt {
@@ -50,7 +51,6 @@ impl ForgeMcp {
         if let Err(refusal) = gate(decision, (name, side_effect, mode), prompt).await {
             return fail(refusal);
         }
-        let me = std::env::var(forge_core::snapshot::ENV_SESSION).unwrap_or_default();
         match HttpControl::local().run(&me, name, args).await {
             Ok(text) => CallToolResult::success(vec![ContentBlock::text(text)]),
             Err(text) => fail(text),

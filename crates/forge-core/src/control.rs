@@ -35,6 +35,36 @@ pub trait ControlHost: Send + Sync {
     fn disabled(&self) -> Vec<String>;
     /// Run `tool` for the session `me`. The `Err` text is shown to the model as the result.
     async fn call(&self, me: &str, tool: &str, args: &Value) -> Result<String, String>;
+    /// Whether this read reaches outside the calling session's project (another project's
+    /// transcript or terminal). Such a read goes through the permission gate like an acting tool.
+    /// Fails closed on the HTTP host; the default is for hosts that cannot tell.
+    async fn crosses_project(&self, _me: &str, _tool: &str, _args: &Value) -> bool {
+        false
+    }
+}
+
+/// Tools that read another session's content and so need the project check.
+pub fn reads_other_sessions(name: &str) -> bool {
+    matches!(name, "read_session" | "read_terminal")
+}
+
+/// The side effect the permission gate sees: the tool's own, raised to external when a read
+/// leaves the calling session's project.
+pub async fn effective_side_effect(
+    host: &dyn ControlHost,
+    me: &str,
+    name: &str,
+    args: &Value,
+) -> SideEffect {
+    let own = side_effect_of(name).unwrap_or(SideEffect::External);
+    if own == SideEffect::ReadOnly
+        && reads_other_sessions(name)
+        && host.crosses_project(me, name, args).await
+    {
+        SideEffect::External
+    } else {
+        own
+    }
 }
 
 struct Def {
@@ -304,7 +334,12 @@ impl Session {
             name: call.name.clone(),
             args: args_json.clone(),
         });
-        let side_effect = side_effect_of(&call.name).unwrap_or(SideEffect::External);
+        let side_effect = match &self.control {
+            Some(host) => {
+                effective_side_effect(host.as_ref(), &self.id, &call.name, &call.args).await
+            }
+            None => SideEffect::External,
+        };
         let mut prompt: Option<forge_types::ConfirmReply> = None;
         let mut label = "allowed";
         let (result, ok) = match (self.control.clone(), validate(&call.name, &call.args)) {

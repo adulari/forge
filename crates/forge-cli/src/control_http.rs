@@ -35,6 +35,34 @@ impl HttpControl {
         Ok(format!("{base}/{token}{path}"))
     }
 
+    /// Ask the daemon whether a read leaves the caller's project. Unreachable means yes: the
+    /// read then waits for the permission gate instead of slipping past it.
+    pub(crate) async fn crosses(&self, me: &str, tool: &str, args: &Value) -> bool {
+        let Ok(url) = self.url("/api/control/scope") else {
+            return true;
+        };
+        let Ok(http) = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        else {
+            return true;
+        };
+        let reply = http
+            .post(url)
+            .json(&json!({"tool": tool, "args": args, "me": me}))
+            .send()
+            .await;
+        match reply {
+            Ok(r) if r.status().is_success() => r
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|v| v["crosses_project"].as_bool())
+                .unwrap_or(true),
+            _ => true,
+        }
+    }
+
     /// Run `tool` on the daemon. `Ok` text is the result, `Err` text is the refusal or failure.
     pub(crate) async fn run(&self, me: &str, tool: &str, args: &Value) -> Result<String, String> {
         let http = reqwest::Client::builder()
@@ -70,5 +98,9 @@ impl ControlHost for HttpControl {
 
     async fn call(&self, me: &str, tool: &str, args: &Value) -> Result<String, String> {
         self.run(me, tool, args).await
+    }
+
+    async fn crosses_project(&self, me: &str, tool: &str, args: &Value) -> bool {
+        self.crosses(me, tool, args).await
     }
 }

@@ -5,6 +5,7 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct FakeHost {
+    cross: bool,
     calls: AtomicUsize,
     last_me: Mutex<String>,
     off: Vec<String>,
@@ -14,6 +15,9 @@ struct FakeHost {
 impl crate::control::ControlHost for FakeHost {
     fn disabled(&self) -> Vec<String> {
         self.off.clone()
+    }
+    async fn crosses_project(&self, _me: &str, _tool: &str, _args: &serde_json::Value) -> bool {
+        self.cross
     }
     async fn call(
         &self,
@@ -54,6 +58,7 @@ fn session_with(
 
 fn host(off: &[&str]) -> Arc<FakeHost> {
     Arc::new(FakeHost {
+        cross: false,
         calls: AtomicUsize::new(0),
         last_me: Mutex::new(String::new()),
         off: off.iter().map(|s| s.to_string()).collect(),
@@ -175,4 +180,91 @@ async fn a_missing_argument_and_a_switched_off_tool_never_reach_the_host() {
     .await;
     assert!(off.contains("switched off"), "{off}");
     assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_observational_turn_under_bypass_neither_offers_nor_runs_the_acting_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = host(&[]);
+    let mut session = session_with(
+        dir.path(),
+        forge_types::PermissionMode::Bypass,
+        Some(h.clone()),
+    );
+    session.task_scope = Some(crate::TaskScope::for_test(
+        "review this, read-only, do not change anything",
+        crate::TaskIntent::ReadOnlyReview,
+        forge_types::PermissionMode::Bypass,
+        1,
+        Some(dir.path().to_path_buf()),
+    ));
+    let names = advertised(&session);
+    for acting in [
+        "create_session",
+        "create_worktree",
+        "merge_worktree",
+        "send_to_session",
+        "add_schedule",
+        "add_mcp_server",
+        "probe_mcp_server",
+    ] {
+        assert!(!names.iter().any(|n| n == acting), "{acting} offered");
+    }
+    assert!(names.iter().any(|n| n == "read_session"));
+    let out = run(
+        &mut session,
+        &call(
+            "add_mcp_server",
+            serde_json::json!({"name": "x", "transport": "stdio", "command": "id"}),
+        ),
+    )
+    .await;
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0, "{out}");
+}
+
+#[tokio::test]
+async fn a_read_that_leaves_the_project_is_gated_like_an_acting_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = Arc::new(FakeHost {
+        cross: true,
+        calls: AtomicUsize::new(0),
+        last_me: Mutex::new(String::new()),
+        off: vec![],
+    });
+    let mut default = session_with(
+        dir.path(),
+        forge_types::PermissionMode::Default,
+        Some(h.clone()),
+    );
+    let denied = run(
+        &mut default,
+        &call("read_terminal", serde_json::json!({"session": "other"})),
+    )
+    .await;
+    assert!(denied.contains("permission denied"), "{denied}");
+    let mut plan = session_with(
+        dir.path(),
+        forge_types::PermissionMode::Plan,
+        Some(h.clone()),
+    );
+    let refused = run(
+        &mut plan,
+        &call("read_session", serde_json::json!({"session": "other"})),
+    )
+    .await;
+    assert!(refused.contains("permission denied"), "{refused}");
+    assert_eq!(h.calls.load(Ordering::SeqCst), 0);
+    let mut bypass = session_with(
+        dir.path(),
+        forge_types::PermissionMode::Bypass,
+        Some(h.clone()),
+    );
+    assert_eq!(
+        run(
+            &mut bypass,
+            &call("read_session", serde_json::json!({"session": "other"}))
+        )
+        .await,
+        "ran read_session"
+    );
 }

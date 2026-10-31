@@ -1096,7 +1096,8 @@ impl TaskScope {
                 | "update_tasks"
                 | "remember"
                 | WORKTREE_TOOL
-        )
+        ) && !control::side_effect_of(tool)
+            .is_some_and(|effect| effect != forge_types::SideEffect::ReadOnly)
     }
 
     fn audit_digest(&self) -> String {

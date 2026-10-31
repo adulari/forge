@@ -13,7 +13,8 @@
 
 use std::sync::{Arc, RwLock, Weak};
 
-use axum::extract::{Json, Path as AxumPath, State};
+use axum::extract::{Extension, Json, Path as AxumPath, State};
+use axum::http::Method;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -24,6 +25,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt as _;
 
 use crate::serve::{err_response, json_response, DaemonState};
+use crate::serve_clients::ClientAuth;
 
 static STATE: RwLock<Option<Weak<DaemonState>>> = RwLock::new(None);
 
@@ -45,6 +47,7 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
     Router::new()
         .route(&format!("{base}/api/control"), get(overview))
         .route(&format!("{base}/api/control/call"), post(call))
+        .route(&format!("{base}/api/control/scope"), post(scope))
         .route(
             &format!("{base}/api/control/tools/{{name}}"),
             post(set_tool),
@@ -149,14 +152,93 @@ fn pretty(value: &Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_default()
 }
 
-async fn session_id(state: &Arc<DaemonState>, address: &str) -> Result<String, String> {
+/// A session by name, id or id prefix: the live fleet first (it holds sessions that have not
+/// received a user message yet), then everything in the store.
+async fn find_session(
+    state: &Arc<DaemonState>,
+    address: &str,
+) -> Result<crate::mentions::Found, String> {
+    let live = crate::fleet_peers::local_sessions(&state.store, &state.registry, None).await;
+    let peers: Vec<forge_core::fleet::FleetPeer> = live
+        .iter()
+        .map(|s| {
+            forge_core::fleet::FleetPeer::local(
+                s.id.clone(),
+                Some(s.title.clone()).filter(|t| !t.is_empty()),
+            )
+        })
+        .collect();
+    if let Ok(peer) = forge_core::fleet::resolve_target(&peers, address) {
+        if let Some(s) = live.iter().find(|s| s.id == peer.id) {
+            return Ok(crate::mentions::Found {
+                id: s.id.clone(),
+                title: if s.title.is_empty() {
+                    "untitled".into()
+                } else {
+                    s.title.clone()
+                },
+                cwd: s.cwd.clone(),
+            });
+        }
+    }
     let store = state.store.clone();
     let address = address.to_string();
-    tokio::task::spawn_blocking(move || {
-        crate::mentions::resolve_session(&store, &address).map(|s| s.id)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || crate::mentions::resolve_session(&store, &address))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+async fn session_id(state: &Arc<DaemonState>, address: &str) -> Result<String, String> {
+    find_session(state, address).await.map(|s| s.id)
+}
+
+/// The folders a session works in: its directory and, when it has one, its worktree.
+async fn session_roots(state: &Arc<DaemonState>, id: &str) -> Vec<String> {
+    match state.registry.get(id).await {
+        Some(handle) => std::iter::once(handle.cwd.clone())
+            .chain(handle.worktree.clone())
+            .collect(),
+        None => state
+            .store
+            .session_cwd(id)
+            .ok()
+            .flatten()
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Whether a read of another session's transcript or terminal leaves the caller's project.
+/// Same project means one working folder contains the other; an unresolvable target is left to
+/// the executor to report. A caller with no session (an external agent over `forge mcp control`)
+/// has no project to stay in.
+pub(crate) async fn crosses_project(
+    state: &Arc<DaemonState>,
+    me: &str,
+    tool: &str,
+    args: &Value,
+) -> bool {
+    if me.is_empty() || !control::reads_other_sessions(tool) {
+        return false;
+    }
+    let target = match text_arg(args, "session") {
+        Some(address) => match session_id(state, address).await {
+            Ok(id) => id,
+            Err(_) => return false,
+        },
+        None => return false,
+    };
+    if target == me {
+        return false;
+    }
+    let mine = session_roots(state, me).await;
+    let theirs = session_roots(state, &target).await;
+    let same = mine.iter().any(|a| {
+        theirs
+            .iter()
+            .any(|b| forge_core::fleet::cwd_matches(a, b) || forge_core::fleet::cwd_matches(b, a))
+    });
+    !same
 }
 
 fn created(value: &Value) -> String {
@@ -227,13 +309,11 @@ async fn run(
         }
         "read_session" => {
             let address = text_arg(args, "session").ok_or("read_session needs `session`")?;
+            let found = find_session(state, address).await?;
             let store = state.store.clone();
-            let address = address.to_string();
-            tokio::task::spawn_blocking(move || {
-                crate::mentions::read_session_digest(&store, &address)
-            })
-            .await
-            .map_err(|e| e.to_string())?
+            tokio::task::spawn_blocking(move || crate::mentions::digest_of(&store, &found))
+                .await
+                .map_err(|e| e.to_string())?
         }
         "send_to_session" => {
             let target = text_arg(args, "session").ok_or("send_to_session needs `session`")?;
@@ -374,6 +454,13 @@ impl ControlHost for DaemonControl {
         let state = daemon_state().ok_or("the daemon is not running in this process")?;
         execute(&state, me, tool, args).await
     }
+
+    async fn crosses_project(&self, me: &str, tool: &str, args: &Value) -> bool {
+        match daemon_state() {
+            Some(state) => crosses_project(&state, me, tool, args).await,
+            None => true,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -385,7 +472,41 @@ struct CallRequest {
     me: String,
 }
 
-async fn call(State(state): State<Arc<DaemonState>>, Json(req): Json<CallRequest>) -> Response {
+/// The route a tool drives, so the caller's scope can be checked against what that route itself
+/// requires: the in-process executor does not pass through the access guard.
+fn tool_route(tool: &str) -> (Method, &'static str) {
+    match tool {
+        "list_projects" => (Method::GET, "/api/projects"),
+        "get_usage" => (Method::GET, "/api/usage"),
+        "read_session" => (Method::GET, "/api/sessions/x"),
+        "read_terminal" => (Method::GET, "/api/terminals"),
+        "add_mcp_server" => (Method::POST, "/api/mcp"),
+        "probe_mcp_server" => (Method::POST, "/api/mcp/probe"),
+        _ => (Method::POST, "/api/sessions"),
+    }
+}
+
+fn caller_may_run(auth: &ClientAuth, tool: &str) -> bool {
+    let (method, path) = tool_route(tool);
+    match crate::serve_access::required(&method, path) {
+        crate::serve_access::Need::Owner => auth.is_owner(),
+        crate::serve_access::Need::Scope(scope) => auth.allows(scope),
+    }
+}
+
+async fn call(
+    State(state): State<Arc<DaemonState>>,
+    auth: Option<Extension<ClientAuth>>,
+    Json(req): Json<CallRequest>,
+) -> Response {
+    if let Some(Extension(auth)) = &auth {
+        if !caller_may_run(auth, &req.tool) {
+            return json_response(&json!({
+                "ok": false,
+                "text": format!("this connection cannot use {}", req.tool),
+            }));
+        }
+    }
     if let Err(error) = control::validate(&req.tool, &req.args) {
         return json_response(&json!({"ok": false, "text": error}));
     }
@@ -395,11 +516,39 @@ async fn call(State(state): State<Arc<DaemonState>>, Json(req): Json<CallRequest
     }
 }
 
-async fn overview() -> Response {
+/// Audit lines carry argument and result excerpts, which can hold terminal output and transcript
+/// text; a connection that is not the owner sees who ran what and when, not the content.
+async fn overview(auth: Option<Extension<ClientAuth>>) -> Response {
     let disabled = crate::control_settings::disabled();
+    let owner = auth.is_none_or(|Extension(a)| a.is_owner());
+    let mut audit = recent_audit(40);
+    if !owner {
+        for line in &mut audit {
+            if let Some(object) = line.as_object_mut() {
+                object.remove("detail");
+            }
+        }
+    }
     json_response(&json!({
         "tools": control::catalog(&disabled),
-        "audit": recent_audit(40),
+        "audit": audit,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ScopeRequest {
+    tool: String,
+    #[serde(default)]
+    args: Value,
+    #[serde(default)]
+    me: String,
+}
+
+/// `POST /api/control/scope`: whether a read would leave the caller's project, so a process
+/// that gates the call itself (the terminal session, the bridge) can ask first.
+async fn scope(State(state): State<Arc<DaemonState>>, Json(req): Json<ScopeRequest>) -> Response {
+    json_response(&json!({
+        "crosses_project": crosses_project(&state, &req.me, &req.tool, &req.args).await,
     }))
 }
 
@@ -549,5 +698,115 @@ mod tests {
             overview["tools"].as_array().unwrap().len(),
             control::catalog(&[]).len()
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reads_outside_the_callers_project_are_flagged_and_unstarted_sessions_resolve_by_id() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let state = daemon(dir.path()).await;
+        let mine = dir.path().join("mine");
+        let theirs = dir.path().join("theirs");
+        let nested = mine.join("sub");
+        for d in [&mine, &theirs, &nested] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let made = |out: String| out.split_whitespace().nth(2).unwrap().to_string();
+        let me = made(
+            execute(
+                &state,
+                "",
+                "create_session",
+                &json!({"project": mine, "title": "a"}),
+            )
+            .await
+            .unwrap(),
+        );
+        let inside = made(
+            execute(
+                &state,
+                "",
+                "create_session",
+                &json!({"project": nested, "title": "b"}),
+            )
+            .await
+            .unwrap(),
+        );
+        let other = made(
+            execute(
+                &state,
+                "",
+                "create_session",
+                &json!({"project": theirs, "title": "c"}),
+            )
+            .await
+            .unwrap(),
+        );
+
+        // No user message was sent, so the stored listing omits them; the live fleet finds them.
+        let digest = execute(&state, &me, "read_session", &json!({"session": other}))
+            .await
+            .unwrap();
+        assert!(digest.contains("Digest of session"), "{digest}");
+
+        let read = |target: &str| json!({"session": target});
+        assert!(!crosses_project(&state, &me, "read_session", &read(&inside)).await);
+        assert!(!crosses_project(&state, &me, "read_session", &read(&me)).await);
+        assert!(crosses_project(&state, &me, "read_session", &read(&other)).await);
+        assert!(crosses_project(&state, &me, "read_terminal", &read(&other)).await);
+        assert!(!crosses_project(&state, "", "read_session", &read(&other)).await);
+        assert!(!crosses_project(&state, &me, "get_usage", &json!({})).await);
+    }
+
+    #[test]
+    fn a_viewer_cannot_reach_the_tools_whose_routes_need_more() {
+        let viewer = ClientAuth {
+            id: Some("v".into()),
+            label: "phone".into(),
+            scopes: vec![crate::serve_clients::Scope::View],
+        };
+        assert!(caller_may_run(&viewer, "get_usage"));
+        assert!(caller_may_run(&viewer, "read_session"));
+        for denied in [
+            "read_terminal",
+            "create_session",
+            "send_to_session",
+            "add_mcp_server",
+            "probe_mcp_server",
+            "merge_worktree",
+        ] {
+            assert!(!caller_may_run(&viewer, denied), "{denied}");
+        }
+        assert!(caller_may_run(&ClientAuth::owner(), "add_mcp_server"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_the_owner_sees_what_the_audit_lines_say() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
+        let log = forge_config::data_dir().unwrap().join("remote-audit.jsonl");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(
+            &log,
+            "{\"route\":\"control/read_terminal\",\"decision\":\"allow\",\"detail\":\"secret scrollback\"}\n",
+        )
+        .unwrap();
+        let body = |response: Response| async move {
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            serde_json::from_slice::<Value>(&bytes).unwrap()
+        };
+        let owner = body(overview(Some(Extension(ClientAuth::owner()))).await).await;
+        assert_eq!(owner["audit"][0]["detail"], "secret scrollback");
+        let viewer = ClientAuth {
+            id: Some("v".into()),
+            label: "phone".into(),
+            scopes: vec![crate::serve_clients::Scope::View],
+        };
+        let seen = body(overview(Some(Extension(viewer))).await).await;
+        assert_eq!(seen["audit"][0]["route"], "control/read_terminal");
+        assert!(seen["audit"][0].get("detail").is_none());
     }
 }
