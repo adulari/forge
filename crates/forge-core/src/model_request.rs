@@ -251,12 +251,11 @@ pub(super) async fn request_provider_response(
                 presence_penalty: crate::repetition_presence_penalty(session.repetition_pressure),
                 checkpoint: Some(checkpoint_ctx.clone()),
                 prompt_cache_key: Some(cache_key),
-                max_output_tokens: None,
                 reuse_response_chain,
                 response_chain_prefix_tokens: completion_prefix_tokens(&sent, specs),
-                response_format: None,
                 require_tool_call: std::mem::take(&mut session.require_tool_call),
-                deny_data_collection: false,
+                echo_reasoning: session.config.harness.family_echoes_reasoning(active_model),
+                ..CompletionOptions::default()
             };
             let fut =
                 provider.complete_with(active_model, &sent, specs, &completion_opts, &mut sink);

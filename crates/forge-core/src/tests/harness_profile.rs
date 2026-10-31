@@ -732,3 +732,69 @@ async fn completion_contract_is_the_tail_of_the_system_prompt_only_when_on() {
         .content
         .contains("<critical>"));
 }
+
+fn family_run(edit: impl FnOnce(&mut forge_config::HarnessConfig)) -> Run {
+    Run::new(
+        Arc::new(Script::new(vec![say("ok")])),
+        harness_config(HarnessProfile::Guarded, edit),
+        test_workspace(),
+    )
+}
+
+#[test]
+fn family_profile_follows_the_model_and_tunes_flags_and_prompt() {
+    let mut run = family_run(|h| h.family_profiles = true);
+    run.session
+        .note_harness_model("bedrock::global.moonshotai.kimi-k3");
+    assert!(run.session.harness_flags.stop_retries);
+    assert!(run.session.system_preamble()[0]
+        .content
+        .ends_with(forge_config::model_family::KIMI_PROMPT_DELTA));
+    assert_eq!(
+        run.session.toolcall_repair_max(),
+        crate::stop_guards::STOP_RETRY_MAX
+    );
+
+    run.session.note_harness_model("codex-oauth::gpt-5.6-luna");
+    assert!(!run.session.harness_flags.stop_retries);
+    assert!(!run.session.system_preamble()[0]
+        .content
+        .contains("<critical>"));
+}
+
+#[test]
+fn family_profiles_are_off_by_default() {
+    let mut run = family_run(|_| {});
+    run.session
+        .note_harness_model("bedrock::global.moonshotai.kimi-k3");
+    assert!(!run.session.harness_flags.stop_retries);
+    assert!(!run.session.system_preamble()[0]
+        .content
+        .contains("<critical>"));
+}
+
+#[test]
+fn an_explicit_flag_beats_the_family_default_in_both_directions() {
+    let mut run = family_run(|h| {
+        h.family_profiles = true;
+        h.stop_retries = false;
+        h.explicit_flags = vec!["stop_retries".into()];
+    });
+    run.session
+        .note_harness_model("bedrock::global.moonshotai.kimi-k3");
+    assert!(
+        !run.session.harness_flags.stop_retries,
+        "explicit false wins"
+    );
+
+    let mut run = family_run(|h| {
+        h.family_profiles = true;
+        h.thinking_loop_breaker = true;
+        h.explicit_flags = vec!["thinking_loop_breaker".into()];
+    });
+    run.session.note_harness_model("ollama::llama3");
+    assert!(
+        run.session.harness_flags.thinking_loop_breaker,
+        "explicit true stays"
+    );
+}

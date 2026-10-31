@@ -120,3 +120,46 @@ compaction_summary_cap = true
 ```
 
 Already covered without a flag: the progress ledger nudges at the third identical call-and-result and stops at the fifth (`repeat_interrupt` moves the stop to the seventh); `stop_retries` is the three-empty-turns stop.
+## Family profiles (A/B, default off)
+
+`[harness] family_profiles = true` turns on one more layer: a table keyed by model family
+(`crates/forge-config/src/model_family.rs`, `profile_for`). The family comes from the bare model
+name (`deepseek`, `kimi`/`moonshot`, `qwen`, `glm`, `claude`, `gpt`/`codex`, `gemini`, else
+`generic`), whatever the namespace, so `modelgateway::deepseek-v4.1-flash` and
+`inferhub::cb/deepseek-v4.1-flash` are both DeepSeek. It follows the model driving each step, like
+`harness_profile`. `/mesh` and `forge mesh` end their rationale with the active profile
+(`harness: family kimi: ...`). A full settings UI is not planned for an internal tuning table.
+
+Each row carries: edit mode, tool-doc verbosity, `[harness]` flags it defaults on, a prompt delta
+appended to the base system prompt, and reasoning handling. Explicit user config always wins: a
+flag named in `config.toml`, the project config or `FORGE_HARNESS__*` keeps its value, true or
+false. Every row starts from today's behaviour; only evidence-backed differences are listed.
+
+| Family | Differs from today |
+| --- | --- |
+| kimi | `stop_retries` on; a prompt delta ("never announce a tool call and then end the turn"); reasoning echoed on every assistant message |
+| deepseek | reasoning echoed on every assistant message (matters behind custom gateways) |
+| qwen, glm, claude, gpt, gemini, generic | nothing |
+
+Edit mode is `str_replace` for every family (the same shape as oh-my-pi's `replace` mode, which it
+gives Kimi and DeepSeek instead of hashline). Hashline and whole-file are not implemented, so the
+column is informational until the edit A/B.
+
+### Dialect fixes (always on)
+
+- **In-band tool calls.** A reply that carries the chat template's own tool-call tokens as text
+  (a complete opener outside code fences and inline code, followed by an argument or separator
+  token) now runs: Kimi `<|tool_calls_section_begin|><|tool_call_begin|>functions.NAME:IDX
+  <|tool_call_argument_begin|>{json}<|tool_call_end|>` and DeepSeek V3
+  `<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>NAME` + a json fence. ASCII-flattened
+  tokens work, a missing `<|tool_call_end|>` is tolerated, and a block with bad JSON runs nothing.
+  The live stream holds a block back only from a complete opener token, outside code, and releases
+  the text at the end of the stream if it does not parse as calls. DSML keeps its older behaviour (`chat_template_calls.rs`,
+  `dsml_stream_guard.rs`).
+- **Reasoning echo behind gateways.** Native `deepseek::` and `kimi::` ids always got
+  `reasoning_content` back on assistant messages; a custom provider serving the same model did not
+  get the empty field when a reply streamed no reasoning. With `family_profiles` on, the field is
+  sent for DeepSeek and Kimi families through any user-declared `[[providers.custom]]` gateway only, never for
+  distills or strict hosts such as groq or nvidia (`CompletionOptions::echo_reasoning`).
+  ModelGateway does not reject its absence (measured 2026-10-31), but only engages thinking on the
+  next turn when it is present.

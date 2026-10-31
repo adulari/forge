@@ -471,6 +471,16 @@ pub fn custom_provider(namespace: &str) -> Option<&'static CustomProvider> {
         .find(|p| p.namespace == namespace)
 }
 
+/// Whether `namespace` is a user-declared `[[providers.custom]]` gateway, as opposed to a native
+/// adapter or one of the built-in OpenAI-compatible hosts (groq, nvidia, together, ...).
+pub fn is_runtime_custom_provider(namespace: &str) -> bool {
+    !CUSTOM_OPENAI_PROVIDERS
+        .iter()
+        .any(|p| p.namespace == namespace)
+        && !PROVIDER_ENV_VARS.iter().any(|(n, _)| *n == namespace)
+        && custom_provider(namespace).is_some()
+}
+
 /// All custom OpenAI-compatible providers (built-in + runtime-registered).
 pub fn custom_providers() -> impl Iterator<Item = &'static CustomProvider> {
     custom_provider_registry().iter()

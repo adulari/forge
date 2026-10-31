@@ -1471,6 +1471,7 @@ pub struct RoutingInspector {
     effort: Option<EffortLevel>,
     project: ProjectContext,
     routing_context: RoutingContext,
+    family_profiles: bool,
 }
 
 impl RoutingInspector {
@@ -1512,6 +1513,11 @@ impl RoutingInspector {
         } else {
             "llm".to_string()
         };
+        explanation.rationale = routing_policy::with_family_note(
+            std::mem::take(&mut explanation.rationale),
+            &explanation.pick,
+            self.family_profiles,
+        );
         explanation
     }
 }
@@ -1782,6 +1788,10 @@ pub struct Session {
     turn_forced_stop: Option<StopReason>,
     /// The harness profile of the model currently driving the turn (harness_profile.rs).
     harness_profile: forge_config::HarnessProfile,
+    /// The `[harness]` loop flags for that model, after family defaults (model_family.rs).
+    harness_flags: forge_config::model_family::HarnessFlags,
+    /// The routed model driving the turn; picks the family prompt delta.
+    harness_model: String,
     /// The empty-reply nudge is spent until the model makes tool progress again (empty_reply.rs).
     empty_reply_nudged: bool,
     /// Empty-reply retries spent in the current streak (`[harness] stop_retries`).

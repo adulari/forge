@@ -14,8 +14,6 @@ use serde::{Deserialize, Serialize};
 
 mod adaptive_effort;
 mod agent_builtins;
-mod harness;
-pub use harness::{AutoRefineMode, HarnessConfig};
 pub mod agents;
 pub mod browser;
 pub mod cc_rules;
@@ -39,6 +37,7 @@ mod key_adoption;
 mod keybind_migration;
 mod keybindings_file;
 mod keybinds;
+pub mod model_family;
 mod progress_guard;
 pub use key_adoption::{adopt_parent_provider_keys, injected_provider_key_vars};
 pub mod account_sync;
@@ -3420,6 +3419,10 @@ pub fn load_in(root: &std::path::Path) -> Result<Config, ConfigError> {
         }
     })?;
     accumulate_permission_rules(&mut config, user_config.as_deref(), project_has_rules);
+    config.harness.explicit_flags = model_family::explicit_harness_flags(
+        user_config.as_deref(),
+        (layers.project && trusted).then_some(project_config),
+    );
     if !trusted {
         config
             .permissions

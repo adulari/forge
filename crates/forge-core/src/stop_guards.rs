@@ -73,7 +73,7 @@ impl ThinkingLoop {
 impl crate::Session {
     /// Re-issue requests for a tool call written as text.
     pub(crate) fn toolcall_repair_max(&self) -> usize {
-        if self.config.harness.stop_retries {
+        if self.harness_flags.stop_retries {
             STOP_RETRY_MAX
         } else {
             2
@@ -83,7 +83,7 @@ impl crate::Session {
     /// `[harness] thinking_loop_breaker`: push the interrupt when `text` restates an earlier
     /// tool-free reply of this stretch. Returns `true` when the turn should continue.
     pub(crate) fn thinking_loop_nudge(&mut self, text: &str, tracker: &mut ThinkingLoop) -> bool {
-        if !self.config.harness.thinking_loop_breaker || !tracker.repeats(text) {
+        if !self.harness_flags.thinking_loop_breaker || !tracker.repeats(text) {
             return false;
         }
         self.presenter.emit(crate::PresenterEvent::Warning(
@@ -97,7 +97,7 @@ impl crate::Session {
     /// calls with identical results, name the call to the model. Repeats that return new results
     /// never reach the count, so polling is unaffected.
     pub(crate) fn repeat_interrupt(&mut self) {
-        if !self.config.harness.repeat_interrupt {
+        if !self.harness_flags.repeat_interrupt {
             return;
         }
         if let Some(label) = self.ledger.repeat_label(REPEAT_INTERRUPT_AT) {

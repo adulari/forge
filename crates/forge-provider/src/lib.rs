@@ -17,6 +17,7 @@ pub use claude_bridge_auth::{
     bridge_auth_present, claude_bridge_env, BridgeAuth, BRIDGE_SETUP_HINT,
 };
 pub use claude_bridge_home::real_claude_config_dir;
+mod chat_template_calls;
 mod cli_provider;
 mod codex_oauth;
 mod codex_websocket;

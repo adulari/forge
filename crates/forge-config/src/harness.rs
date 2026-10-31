@@ -88,6 +88,14 @@ pub struct HarnessConfig {
     pub compaction_summary_cap: bool,
     #[serde(default)]
     pub edit_mode: EditMode,
+    /// Per-model-family defaults for the flags above, a prompt delta and reasoning handling
+    /// ([`crate::model_family`]; docs/features/harness-profile.md). Default off while an A/B round
+    /// decides. A flag set in a config file or `FORGE_HARNESS__*` always wins over a family default.
+    #[serde(default)]
+    pub family_profiles: bool,
+    /// `[harness]` flag names set explicitly by the user (filled at load, never written back).
+    #[serde(skip)]
+    pub explicit_flags: Vec<String>,
 }
 
 impl Default for HarnessConfig {
@@ -113,6 +121,8 @@ impl Default for HarnessConfig {
             cache_monitor: false,
             compaction_summary_cap: false,
             edit_mode: EditMode::default(),
+            family_profiles: false,
+            explicit_flags: Vec::new(),
         }
     }
 }

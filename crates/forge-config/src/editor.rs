@@ -285,6 +285,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.cache_monitor" => Some(("Behaviour", "Prompt-cache break warnings")),
         "harness.compaction_summary_cap" => Some(("Behaviour", "16k compaction summary")),
         "harness.edit_mode" => Some(("Behaviour", "File edit mode")),
+        "harness.family_profiles" => Some(("Behaviour", "Model-family profiles")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -537,6 +538,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
         "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",
         "harness.edit_mode" => "How the model edits existing files. replace: edit_file and multi_edit with exact old/new text. hashline: read_file tags each line with its number under a per-file tag and edit_file takes line anchors plus that tag, which fails with the current lines if the file changed. Suits models that often miss exact matches. Default replace.",
+        "harness.family_profiles" => "Apply tuned defaults per model family (Kimi, DeepSeek and so on): loop flags you have not set yourself, a short prompt delta and reasoning handling. A flag you set explicitly always wins. Default off.",
         "harness.repeat_interrupt" => "After 5 identical consecutive tool calls with identical results, tell the model not to repeat that call and to change approach; the progress ledger's cycle stop moves two repeats later. Wins over harness_profile = minimal. Default off.",
         "harness.stream_silence_retry" => "Abort a model stream that has been silent for 4 minutes (raises the idle window to 240s if it is shorter) and retry the same model up to twice before failing over. Any stream event, reasoning included, counts as activity, so long reasoning is never cut. Default off.",
         "harness.wait_job" => "Add a wait action to shell_job: block up to N seconds for a background job and return its exit code and the tail of its log, so the model waits instead of polling. Default off.",
