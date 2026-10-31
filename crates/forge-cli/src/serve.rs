@@ -38,6 +38,7 @@
 //!   diff, stage/unstage, commit — always inside the addressed session's own repository
 //! - `GET|PUT /api/workspace/*`       session-scoped file tree, search, text reads, and
 //!   conflict-safe edits ([`crate::serve_workspace`])
+//! - `GET|PUT|POST /api/notes[/todos...]`  per-project scratchpad and to-dos ([`crate::serve_notes`])
 //! - `GET|POST /api/schedules[/{id}/pause|resume|delete]`  the real `forge schedule` registry
 //!   ([`crate::serve_schedules`]) — store rows plus the same OS timers the CLI installs
 //! - `WS   /ws/terminal?session=<id>` a PTY-backed shell in the session's directory
@@ -1026,6 +1027,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_access::routes(&base))
         .merge(crate::serve_lifecycle::routes(&base))
         .merge(crate::serve_schedules::routes(&base))
+        .merge(crate::serve_notes::routes(&base))
         // Terminal dock (serve_terminal.rs): a real PTY in the session's directory, gated by the
         // same daemon token as every other route and granted no additional privilege.
         .route(

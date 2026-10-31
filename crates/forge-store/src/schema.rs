@@ -352,6 +352,25 @@ CREATE TABLE IF NOT EXISTS anywhere_account_sync_item (
     PRIMARY KEY (category, item_id)
 );
 
+-- Workbench Notes: one markdown scratchpad per project root plus its to-do list. Also created in
+-- migration_0050 for pre-existing DBs.
+CREATE TABLE IF NOT EXISTS project_note (
+    project    TEXT PRIMARY KEY,
+    body       TEXT NOT NULL DEFAULT '',
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS project_todo (
+    id         TEXT PRIMARY KEY,
+    project    TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    done       INTEGER NOT NULL DEFAULT 0,
+    position   INTEGER NOT NULL DEFAULT 0,
+    session_id TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_todo_project ON project_todo(project, position);
+
 -- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
 -- queued headless task; a drain executes them in isolated worktrees and records the outcome
 -- back onto the row. Local machine state only — deliberately not in PORTABLE_METADATA_TABLES

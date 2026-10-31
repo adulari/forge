@@ -91,6 +91,7 @@ mod fork_cmd;
 mod heartbeat_cmd;
 mod mesh_overlay;
 mod model_switch;
+mod notes_menu;
 mod refine_cmd;
 mod slash_commands;
 pub(crate) use dispatch::*;
@@ -769,6 +770,7 @@ pub(crate) async fn run_chat_tui(
         None;
     let mut usage_load_rx: Option<tokio::sync::oneshot::Receiver<bridge_stats::BridgeStats>> = None;
     let mut anywhere_driver = anywhere_menu::AnywhereMenuDriver::new(mock);
+    let mut notes_driver = notes_menu::NotesMenuDriver::new();
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
     // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
     // rendering-facing `VoiceOverlay`. See `apply_voice_start`/`start_voice_transcribe`.
@@ -1211,6 +1213,12 @@ pub(crate) async fn run_chat_tui(
 
             let key = match ev {
                 forge_tui::InputEvent::Paste(s) => {
+                    // `/notes` owns the keyboard, so a paste belongs to its field, not the composer behind it.
+                    if app.notes_overlay.open {
+                        app.notes_overlay.paste(&s);
+                        dirty = true;
+                        continue;
+                    }
                     // Pasting an image: terminals deliver an empty/whitespace bracketed-paste for
                     // image clipboard content, so on an empty payload probe the OS clipboard for an
                     // image and drop it in as an attachment block. Otherwise it's a normal text paste.
@@ -1608,6 +1616,13 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
+            // `/notes` owns every key while open, same as the menu above.
+            if app.notes_overlay.open {
+                notes_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
+
             // The `/config` editor is modal while open: it owns every key (filter / navigate / edit
             // / Tab scope / Esc). The editor returns an action; the shell performs the validated
             // write and refreshes the rows.
@@ -1764,6 +1779,7 @@ pub(crate) async fn run_chat_tui(
                 || app.btw_open()
                 || app.usage_overlay.open
                 || app.anywhere_menu.open
+                || app.notes_overlay.open
                 || app.status_open
                 || app.mesh_overlay.open
                 || app.at_picker.open
@@ -5017,6 +5033,9 @@ pub(crate) async fn run_chat_tui(
             dirty = true;
         }
         if anywhere_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if notes_driver.tick(&mut app) {
             dirty = true;
         }
         if app.usage_overlay.open {

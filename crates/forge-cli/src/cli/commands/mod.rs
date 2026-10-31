@@ -14,6 +14,7 @@ pub(crate) mod mcp;
 pub(crate) mod memory;
 pub(crate) mod migrate;
 pub(crate) mod models;
+pub(crate) mod notes;
 pub(crate) mod oauth_flow;
 pub(crate) mod provider;
 pub(crate) mod queue;

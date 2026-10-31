@@ -5,7 +5,7 @@ pub fn command_category(name: &str) -> &'static str {
         "sessions" | "resume" | "replay" | "rewind" | "undo" | "checkpoint" | "checkpoints"
         | "compact" | "uncompact" | "status" | "reground" | "refine" | "clear" | "btw"
         | "export" | "star" | "done" | "delete" | "archived" | "context" | "rename" | "cls"
-        | "fork" | "stash" | "timeline" => "Session",
+        | "fork" | "stash" | "timeline" | "notes" => "Session",
         "model" | "models" | "mode" | "effort" | "subagents" | "agents" | "thinking" | "mesh"
         | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" | "commit" | "diff" => "Review & ship",

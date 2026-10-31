@@ -17,6 +17,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space } from "../../theme/tokens";
 import { formatCwd, type as typeScale } from "../../theme/typography";
 import { ActionsDock } from "../actions/ActionsDock";
+import { NotesDock } from "../notes/NotesDock";
 import { GalleryDock } from "../gallery/GalleryDock";
 import { GitReviewDock } from "../git/GitReviewDock";
 import { BrowserPreviewDock } from "../preview/BrowserPreviewDock";
@@ -176,6 +177,7 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
     render: ({ sessionId }) => (sessionId ? <GalleryDock sessionId={sessionId} /> : <NeedsSession what="its images" />),
   },
   actions: { render: ({ sessionId }) => <ActionsDock sessionId={sessionId} /> },
+  notes: { render: ({ sessionId }) => <NotesDock sessionId={sessionId} /> },
 };
 
 export interface DockHostProps {

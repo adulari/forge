@@ -75,6 +75,7 @@ const WORKBENCH_PALETTE_ENTRIES: readonly WorkbenchPaletteEntry[] = [
   { menu: "view:terminal", title: "Toggle Terminal", keywords: "terminal shell dock bottom", shortcut: "workbench.terminal" },
   { menu: "view:browser-preview", title: "Toggle Browser preview", keywords: "browser preview web dock panel right" },
   { menu: "view:actions", title: "Toggle GitHub Actions", keywords: "github actions workflows runs ci dispatch dock panel right" },
+  { menu: "view:notes", title: "Toggle Notes", keywords: "notes todo to-do scratchpad checklist project dock panel right" },
   { menu: "view:gallery", title: "Toggle Gallery", keywords: "gallery images screenshots pictures evidence dock panel right" },
   { menu: "view:usage", title: "Toggle usage panel", keywords: "usage dock panel limits quota subscription spend right sidebar", shortcut: "shell.usage" },
 ];
