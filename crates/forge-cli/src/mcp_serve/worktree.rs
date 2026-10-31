@@ -79,6 +79,7 @@ impl ForgeMcp {
                 home: None,
                 daemon_owned: daemon_owned.as_deref(),
                 confine: confine.as_deref(),
+                settings: Some(&self.config.worktree),
             },
         );
         let mut text = outcome.text;

@@ -572,6 +572,9 @@ pub(crate) struct CreateSessionReq {
     /// Run the session in an isolated git worktree branched from HEAD of `cwd`.
     #[serde(default)]
     pub(crate) worktree: bool,
+    /// Name for the new worktree and its branch; random when absent. Implies `worktree`.
+    #[serde(default)]
+    pub(crate) branch: Option<String>,
     /// Optional display title.
     pub(crate) title: Option<String>,
     /// Optional model pin.
@@ -606,6 +609,9 @@ pub(crate) struct CreateSessionReq {
     pub(crate) dispatch_worker: bool,
     #[serde(default)]
     pub(crate) mcp_off: Vec<String>,
+    /// Reasoning effort for the new session (`low` .. `max`), applied before the first prompt.
+    #[serde(default)]
+    pub(crate) effort: Option<String>,
 }
 
 pub(crate) async fn serve_cmd(
@@ -1041,6 +1047,7 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_account_sync::routes(&base))
         .merge(crate::serve_access::routes(&base))
         .merge(crate::serve_lifecycle::routes(&base))
+        .merge(crate::serve_project_ops::routes(&base))
         .merge(crate::serve_schedules::routes(&base))
         .merge(crate::serve_notes::routes(&base))
         .merge(crate::serve_project_actions::routes(&base))
@@ -1272,6 +1279,7 @@ use serve_assets::*;
 use serve_changelog::*;
 use serve_config::*;
 use serve_models::*;
+pub(crate) use serve_projects::project_catalog_paths;
 use serve_projects::*;
 use serve_providers::*;
 use serve_usage::*;
@@ -1369,6 +1377,9 @@ async fn create_session(
             );
         }
     };
+    let Ok(effort) = crate::serve_worktree_start::parse_effort(req.effort.as_deref()) else {
+        return crate::serve_worktree_start::bad_effort(req.effort.as_deref());
+    };
     // Captured before `req` moves into `start_session` — a resumed session ignores it (see the
     // field doc on `CreateSessionReq::prompt`): it restores the session's own history rather than
     // starting a new turn on the caller's behalf.
@@ -1377,6 +1388,7 @@ async fn create_session(
         .clone()
         .filter(|p| !p.trim().is_empty())
         .filter(|_| req.resume.is_none());
+    let is_resume_request = req.resume.is_some();
     match start_session(&state, req).await {
         Ok(handle) => {
             let terminals = state.terminals.clone();
@@ -1386,6 +1398,11 @@ async fn create_session(
                 .clone()
                 .unwrap_or_else(|| handle.cwd.clone());
             tokio::spawn(async move { terminals.prewarm(&terminal_session, terminal_cwd).await });
+            crate::serve_worktree_start::apply_effort(
+                &handle,
+                effort.filter(|_| !is_resume_request),
+            )
+            .await;
             if let Some(text) = initial_prompt {
                 // Same send used to kick off a dispatch coordinator/worker's first turn
                 // (serve_dispatch/start.rs, serve_dispatch.rs::start_worker): queue it on the
@@ -1596,26 +1613,25 @@ pub(crate) async fn start_session(
     let mut worktree = resume_metadata
         .as_ref()
         .and_then(|(_, _, worktree, _)| worktree.clone());
-    let worktree_guard = if req.worktree {
+    let mut pending_setup = None;
+    let worktree_guard = if req.worktree || req.branch.is_some() {
         if !forge_core::worktree::is_git_repo(cwd_path) {
             return Err(StartSessionError::new(
                 StatusCode::BAD_REQUEST,
                 format!("worktree: {cwd} is not a git repository"),
             ));
         }
-        let wt_id = forge_types::new_id().chars().take(12).collect::<String>();
-        match forge_core::worktree::WorktreeGuard::create(cwd_path, &wt_id) {
-            Ok(guard) => {
-                worktree = Some(guard.path().display().to_string());
-                Some(guard)
-            }
-            Err(e) => {
-                return Err(StartSessionError::new(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("worktree create failed: {e}"),
-                ));
-            }
-        }
+        let branch = req.branch.clone();
+        let created = crate::serve_worktree_start::create_off_thread(cwd_path, branch).await;
+        let created = created.map_err(|e| {
+            StartSessionError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("worktree create failed: {e}"),
+            )
+        })?;
+        worktree = Some(created.guard.path().display().to_string());
+        pending_setup = created.pending();
+        Some(created.guard)
     } else {
         None
     };
@@ -1718,6 +1734,9 @@ pub(crate) async fn start_session(
     if let Some(guard) = worktree_guard {
         std::mem::forget(guard);
     }
+    // Copy + `setup` run behind the response and report through the snapshot; the guard is gone.
+    let resumed = worktree.as_deref().filter(|_| is_resume);
+    crate::serve_worktree_start::start_provisioning(&handle, pending_setup, resumed);
     // Resuming is an explicit "bring this back" — an archived session (from the past-sessions
     // browser) should stop being hidden once it's live again, the same way the archive button
     // hid it.
@@ -2318,18 +2337,7 @@ async fn past_sessions(
     json_response(&rows)
 }
 
-/// Derive the base repo root and branch for a daemon worktree session from its stored worktree
-/// path. Worktrees are always created at `<repo_root>/.forge/worktrees/<child_id>` on branch
-/// `forge/subagent/<child_id>` (see [`forge_core::worktree::WorktreeGuard::create`]), so both are
-/// recoverable from the path alone — no extra state, and it matches exactly what the guard's own
-/// removal uses. Returns `None` if the path is too shallow to be one of ours.
-pub(crate) fn worktree_repo_and_branch(worktree: &str) -> Option<(std::path::PathBuf, String)> {
-    let wt = std::path::Path::new(worktree);
-    let child_id = wt.file_name()?.to_str()?.to_string();
-    // `<repo_root>/.forge/worktrees/<child_id>` → strip three components back to `<repo_root>`.
-    let repo_root = wt.parent()?.parent()?.parent()?.to_path_buf();
-    Some((repo_root, format!("forge/subagent/{child_id}")))
-}
+pub(crate) use crate::serve_worktree_start::worktree_repo_and_branch;
 
 /// Tracked, staged-or-modified files in the base repo (`--untracked-files=no` so registered
 /// worktree dirs and other untracked cruft never count). A non-empty list means merging would
@@ -2359,6 +2367,7 @@ pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
 /// stderr so the caller can surface a partial failure. Callers MUST have stopped the driver
 /// first (its cwd is inside the worktree).
 fn remove_worktree(repo_root: &std::path::Path, worktree: &str, branch: &str) -> Vec<String> {
+    crate::serve_worktree_start::run_cleanup(repo_root, std::path::Path::new(worktree), branch);
     let root = repo_root.to_str().unwrap_or(".");
     let mut errs = Vec::new();
     for args in [

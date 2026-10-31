@@ -22,13 +22,15 @@ export interface BannerProps {
   onSecondary?: () => void;
   /** The "reconnecting" strip: 12pt meta text, no animation. Default false. */
   compact?: boolean;
+  /** Clamp the message to this many lines. */
+  maxLines?: number;
   visible?: boolean;
   style?: ViewStyle;
 }
 
 const SLIDE_PX = 8;
 
-export function Banner({ tone, message, actionLabel, onAction, onDismiss, secondaryLabel, onSecondary, compact = false, visible = true, style }: BannerProps) {
+export function Banner({ tone, message, actionLabel, onAction, onDismiss, secondaryLabel, onSecondary, compact = false, maxLines, visible = true, style }: BannerProps) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const translateY = useSharedValue(compact || reduced ? 0 : visible ? 0 : -SLIDE_PX);
@@ -61,7 +63,7 @@ export function Banner({ tone, message, actionLabel, onAction, onDismiss, second
       accessibilityRole="alert"
       accessibilityLabel={message}
     >
-      <Text style={[compact ? type.meta : type.sub, styles.message, { color: ink }]}>{message}</Text>
+      <Text numberOfLines={maxLines} style={[compact ? type.meta : type.sub, styles.message, { color: ink }]}>{message}</Text>
       {actionLabel && onAction ? (
         <Pressable onPress={onAction} accessibilityRole="button" accessibilityLabel={actionLabel}>
           <Text style={[type.bodyBold, styles.action, { color: ink }]}>{actionLabel}</Text>

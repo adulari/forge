@@ -45,9 +45,24 @@ impl WorktreeGuard {
     /// `forge/subagent/<child_id>`, branched from HEAD.
     pub fn create(repo_root: &Path, child_id: &str) -> Result<WorktreeGuard, WorktreeError> {
         let worktree_path = repo_root.join(".forge").join("worktrees").join(child_id);
+        Self::create_at(repo_root, child_id, worktree_path)
+    }
+
+    /// [`create`](Self::create) at an explicit `worktree_path` (`[worktree] root = "global"`).
+    /// The branch is still `forge/subagent/<child_id>`, which the daemon's merge and discard
+    /// routes recover from the worktree's directory name.
+    pub fn create_at(
+        repo_root: &Path,
+        child_id: &str,
+        worktree_path: PathBuf,
+    ) -> Result<WorktreeGuard, WorktreeError> {
         let branch = format!("forge/subagent/{child_id}");
         if let Some(parent) = worktree_path.parent() {
-            let _ = crate::ensure_dir_git_ignored(parent);
+            if worktree_path.starts_with(repo_root) {
+                let _ = crate::ensure_dir_git_ignored(parent);
+            } else {
+                std::fs::create_dir_all(parent)?;
+            }
         }
 
         run_git(

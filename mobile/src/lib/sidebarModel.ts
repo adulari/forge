@@ -4,6 +4,7 @@
 import type { SessionRow } from "./api";
 import type { ScopedRow } from "./fleetScope";
 import type { SidebarSort } from "./shellPrefs";
+import { parseWorktreePath, repoRootOf } from "./worktreePaths";
 
 export type ScopedSession = ScopedRow<SessionRow>;
 
@@ -32,6 +33,8 @@ export interface ProjectGroup {
 }
 
 export function projectName(cwd: string): string {
+  const global = parseWorktreePath(cwd);
+  if (global && global.repoRoot === null) return global.repoName.toLowerCase();
   const root = projectRoot(cwd).replace(/\/+$/, "");
   return (root.split("/").pop() || root || "~").toLowerCase();
 }
@@ -39,8 +42,7 @@ export function projectName(cwd: string): string {
 /** The checkout a session's project lives in; a worktree session reports its repo, not the
  * throwaway worktree. */
 export function projectRoot(cwd: string): string {
-  const worktree = cwd.match(/^(.+?)\/\.forge\/worktrees\//i);
-  return worktree ? worktree[1] : cwd;
+  return repoRootOf(cwd);
 }
 
 function sortKey(row: SessionRow, sort: SidebarSort): number {
@@ -104,6 +106,11 @@ export function buildProjectGroups(entries: readonly ScopedSession[], sort: Side
       group = { key, name, root: projectRoot(node.entry.row.cwd), serverId: node.entry.serverId, nodes: [], sessionCount: 0, waitingCount: 0, busyCount: 0, failedCount: 0, added: 0, removed: 0 };
       groups.set(key, group);
       cwdsOfGroup.set(key, new Set());
+    }
+    // A global-root worktree cannot name its repo's path; adopt a sibling's real one.
+    if (parseWorktreePath(group.root)?.repoRoot === null) {
+      const candidate = projectRoot(node.entry.row.cwd);
+      if (parseWorktreePath(candidate) === null) group.root = candidate;
     }
     group.nodes.push(node);
     for (const { node: member } of walkNodes([node])) {

@@ -3,6 +3,7 @@ import {
   ArchiveRestore,
   CircleCheck,
   ExternalLink,
+  GitBranch,
   Pencil,
   Play,
   Star,
@@ -46,6 +47,8 @@ export interface SessionLifecycleSheetProps {
   target: SessionLifecycleTarget | null;
   visible: boolean;
   onClose: () => void;
+  /** Opens the worktree actions (move thread, pull latest); only offered for a live session. */
+  onWorktree?: () => void;
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -56,6 +59,7 @@ export function SessionLifecycleSheet({
   target,
   visible,
   onClose,
+  onWorktree,
 }: SessionLifecycleSheetProps) {
   const tokens = useTokens();
   const toast = useToast();
@@ -278,6 +282,17 @@ export function SessionLifecycleSheet({
                   onPress={toggleDone}
                   disabled={markDone.isPending}
                 />
+                {onWorktree && current.running ? (
+                  <ListRow
+                    title="Worktree"
+                    subtitle="Move this thread to a new worktree, or pull latest"
+                    leading={<GitBranch size={19} color={tokens.ink2} />}
+                    onPress={() => {
+                      close();
+                      onWorktree();
+                    }}
+                  />
+                ) : null}
                 <ListRow
                   title="Rename session"
                   leading={<Pencil size={19} color={tokens.ink2} />}

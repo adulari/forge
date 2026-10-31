@@ -987,6 +987,15 @@ and keep going."
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
         CommandAction::Import if tui.is_some() => app.import_menu.open(super::import_menu::fallback_dir()),
         CommandAction::Import => app.note("/import opens in a terminal chat; run `forge import scan` and `forge import sessions` instead"),
+        CommandAction::Worktree(arg) => {
+            super::workspace_menu::worktree_command(&arg, session, app, tui.is_some())
+        }
+        CommandAction::Project if tui.is_some() => {
+            super::workspace_menu::open(app, forge_tui::workspace_menu::Kind::Projects)
+        }
+        CommandAction::Project => app.note("/project opens an overlay in the chat TUI"),
+        CommandAction::Clone(url) => super::workspace_menu::clone_command(&url, app, tui.is_some()),
+        CommandAction::Home => super::workspace_menu::home_command(session, app).await,
         CommandAction::Anywhere => {
             match crate::anywhere::tui_status_summary() {
                 Ok(summary) => app.note(&summary),

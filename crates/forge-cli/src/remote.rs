@@ -700,6 +700,18 @@ pub struct Snapshot {
     /// it missed (additive). Per connection, never part of the shared broadcast frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history_gap: Option<HistoryGap>,
+    /// Progress of the worktree's background copy + `setup` (additive). Absent for sessions
+    /// whose worktree needed no provisioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_setup: Option<SnapWorktreeSetup>,
+}
+
+/// `state` is `running`, `done` or `failed`; `message` is the summary or the failure with the
+/// tail of the command's output.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapWorktreeSetup {
+    pub state: String,
+    pub message: String,
 }
 
 impl Default for Snapshot {
@@ -758,6 +770,7 @@ impl Default for Snapshot {
             parent: None,
             thread_error: None,
             history_gap: None,
+            worktree_setup: None,
         }
     }
 }

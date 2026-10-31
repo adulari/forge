@@ -49,6 +49,7 @@ import { InitProjectSheet } from "../../../components/session/InitProjectSheet";
 import { AssaySheet } from "../../../components/session/AssaySheet";
 
 import { SelfMcpSheet } from "../../../components/session/SelfMcpSheet";
+import { WorktreeSheet } from "../../../components/session/WorktreeSheet";
 
 
 import { CheckpointSheet } from "../../../components/session/CheckpointSheet";
@@ -88,6 +89,7 @@ import { isSegmentPath, type SegmentValue } from "../../../lib/sessionSegments";
 import { useSessionSegment } from "../../../lib/useSessionSegment";
 import { sessionDisplayTitle } from "../../../lib/sessionTitle";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
+import { worktreeSetupBanner } from "../../../lib/worktreeCommands";
 import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../../theme/tokens";
@@ -151,6 +153,8 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
 
   const [initVisible, setInitVisible] = useState(false);
   const [projectWarningDismissed, setProjectWarningDismissed] = useState(false);
+  const [setupDismissed, setSetupDismissed] = useState<string | null>(null);
+  const [setupExpanded, setSetupExpanded] = useState(false);
   const [projectSetupRequested, setProjectSetupRequested] = useState(false);
 
   useEffect(() => {
@@ -175,6 +179,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
 
   const [latticeVisible, setLatticeVisible] = useState(false);
   const [lifecycleVisible, setLifecycleVisible] = useState(false);
+  const [worktreeVisible, setWorktreeVisible] = useState(false);
 
   // Forge Anywhere — session-surface features (host·transport meta, handoff, share-replay).
   // Gated on `signedIn` so a session opened without an Anywhere account renders identically
@@ -346,6 +351,11 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const unreachable = connectionState === "unreachable" && !sessionEnded;
   const socketChip = useMemo(() => socketChipModel(connectionState, sessionEnded), [connectionState, sessionEnded]);
   const projectNeedsInitialization = snapshot?.project_initialized === false && !projectWarningDismissed;
+  const setupBanner = worktreeSetupBanner(snapshot?.worktree_setup);
+  const setupState = snapshot?.worktree_setup?.state;
+  useEffect(() => {
+    setSetupExpanded(false);
+  }, [setupState]);
 
   const statusState: StatusDotState =
     snapshot == null
@@ -582,7 +592,9 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
           }}
           visible={lifecycleVisible}
           onClose={() => setLifecycleVisible(false)}
+          onWorktree={() => setWorktreeVisible(true)}
         /></OnFirstOpen>
+        <OnFirstOpen visible={worktreeVisible}><WorktreeSheet visible={worktreeVisible} onClose={() => setWorktreeVisible(false)} cwd={snapshot?.cwd ?? ""} send={sendWithFeedback} /></OnFirstOpen>
 
 
         {protocolWarning ? (
@@ -619,6 +631,16 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
               background={tokens.bg2}
             />
           </View>
+          {setupBanner && setupDismissed !== snapshot?.worktree_setup?.state ? (
+            <Banner
+              tone={setupBanner.tone}
+              message={setupExpanded ? setupBanner.message : setupBanner.preview}
+              maxLines={setupExpanded ? undefined : 3}
+              actionLabel={setupBanner.expandable ? (setupExpanded ? "Show less" : "Show all") : undefined}
+              onAction={setupBanner.expandable ? () => setSetupExpanded((open) => !open) : undefined}
+              onDismiss={setupBanner.dismissible ? () => setSetupDismissed(snapshot?.worktree_setup?.state ?? null) : undefined}
+            />
+          ) : null}
           {projectNeedsInitialization ? (
             <Banner
               tone="warn"

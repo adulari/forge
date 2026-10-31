@@ -54,6 +54,7 @@ export const BUILTIN_COMMANDS: string[] = [
   "/btw",
   "/side",
   "/duel",
+  "/worktree",
   "/workflow",
   "/voice",
   "/statusline",

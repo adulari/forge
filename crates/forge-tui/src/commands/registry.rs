@@ -41,6 +41,26 @@ pub const COMMANDS: &[Command] = &[
         usage: "/sessions",
     },
     Command {
+        name: "worktree",
+        desc: "git worktrees: browse, switch, create (carry changes), remove, pull",
+        usage: "/worktree [new [name] [--carry]|list|enter <name>|exit|remove <name>|pull]",
+    },
+    Command {
+        name: "project",
+        desc: "Home, clone a repository, git init, rename or hide this project",
+        usage: "/project",
+    },
+    Command {
+        name: "clone",
+        desc: "clone a repository, then switch this session to it",
+        usage: "/clone <url>",
+    },
+    Command {
+        name: "home",
+        desc: "work in the Home folder, no project",
+        usage: "/home",
+    },
+    Command {
         name: "board",
         desc: "the live project board — runs in its own terminal (forge board)",
         usage: "/board",

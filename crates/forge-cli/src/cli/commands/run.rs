@@ -101,6 +101,7 @@ mod notes_menu;
 mod refine_cmd;
 mod run_menu;
 mod slash_commands;
+mod workspace_menu;
 pub(crate) use dispatch::*;
 pub(crate) mod driver;
 pub(crate) use driver::*;
@@ -619,6 +620,7 @@ pub(crate) async fn run_chat_tui(
     app.watch_git_location(session_workspace.clone());
     let project = forge_config::project_initialization(&session_workspace);
     app.set_project_initialized(project.initialized);
+    workspace_menu::non_git_hint(&mut app, &session_workspace);
     {
         let s = session.lock().await;
         app.temper = s.temper().label().to_string();
@@ -1652,6 +1654,12 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
+            if app.workspace_menu.open {
+                workspace_menu::key(&mut app, &session, &mut remote_keys, key).await;
+                dirty = true;
+                continue;
+            }
+
             // The `/anywhere` menu owns every key while open; side effects go through its driver.
             if app.anywhere_menu.open {
                 anywhere_driver.key(&mut app, &mut tui, key)?;
@@ -1838,6 +1846,7 @@ pub(crate) async fn run_chat_tui(
                 || app.polish.qr.is_some()
                 || app.run_menu.open
                 || app.import_menu.open
+                || app.workspace_menu.open
                 || app.status_open
                 || app.mesh_overlay.open
                 || app.at_picker.open
@@ -5092,6 +5101,9 @@ pub(crate) async fn run_chat_tui(
         if run_menu_driver.tick(&mut app) {
             dirty = true;
         }
+        if workspace_menu::tick(&mut app) {
+            dirty = true;
+        }
         if anywhere_driver.tick(&mut app) {
             dirty = true;
         }
@@ -5390,6 +5402,7 @@ pub(crate) async fn run_chat_tui(
                         project_init_hint: project.hint,
                         exposure,
                         model_pinned: cached_model_pinned,
+                        worktree_setup: None,
                     },
                     remote_copy_text.clone(),
                     prompt_seq,
@@ -5713,6 +5726,7 @@ mod tests {
                 project_init_hint: None,
                 exposure: "loopback".into(),
                 model_pinned: false,
+                worktree_setup: None,
             },
             None,
             0,

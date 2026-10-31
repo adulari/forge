@@ -57,6 +57,8 @@ pub fn is_installed() -> bool {
 
 pub const TRAY_OPEN: &str = "tray:open";
 pub const TRAY_QUICK_COMPOSER: &str = "tray:quick-composer";
+/// A session in the Home scope (no project, no worktree); the webview creates it.
+pub const TRAY_HOME_SESSION: &str = "tray:home-session";
 /// Decision rows. Their menu ids carry the generation of the summary they were built from
 /// (`tray:decision:allow#7`), so a click on a row from a menu that has since been replaced is
 /// recognised as stale instead of being applied to whatever is waiting now.
@@ -295,6 +297,7 @@ fn apply<R: Runtime>(app: &AppHandle<R>, summary: &TraySummary) -> tauri::Result
         .separator()
         .item(&MenuItemBuilder::with_id(TRAY_OPEN, "Open Forge").build(app)?)
         .item(&MenuItemBuilder::with_id(TRAY_QUICK_COMPOSER, "Quick Composer").build(app)?)
+        .item(&MenuItemBuilder::with_id(TRAY_HOME_SESSION, "New Home session").build(app)?)
         .separator()
         // Windows and Linux never get the application menu bar (`lib.rs` installs it on macOS
         // only), so without this row the About panel — and with it Documentation / Report an

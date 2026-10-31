@@ -31,6 +31,10 @@ describe("projectName", () => {
     expect(projectName("/home/u/forge/.forge/worktrees/abc123def")).toBe("forge");
     expect(projectName("/")).toBe("~");
   });
+
+  it("folds a global-root worktree into its repo by name", () => {
+    expect(projectName("/home/u/.local/share/forge/worktrees/Forge-3fa9c1d2/calm-otter-3f")).toBe("forge");
+  });
 });
 
 describe("sortSessions", () => {
@@ -90,6 +94,19 @@ describe("buildProjectGroups", () => {
       "updated",
     );
     expect([groups[0].waitingCount, groups[0].busyCount, groups[0].failedCount]).toEqual([1, 1, 1]);
+  });
+
+  it("groups a global-root worktree under its repo and adopts the repo's real root", () => {
+    const groups = buildProjectGroups(
+      [
+        entry("g", { cwd: "/home/u/.local/share/forge/worktrees/forge-3fa9c1d2/calm-otter-3f", last_activity: 300 }),
+        entry("a", { cwd: "/home/u/forge", last_activity: 100 }),
+      ],
+      "updated",
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0].root).toBe("/home/u/forge");
+    expect(groups[0].sessionCount).toBe(2);
   });
 
   it("groups by server and project, and counts a shared checkout's diff once", () => {

@@ -2,6 +2,7 @@
 // supersedes Emberline: Geist (UI) + Geist Mono (technical/status/diff text)
 // everywhere, replacing the prior system-sans + JetBrains Mono pairing.
 import { Platform, type TextStyle } from "react-native";
+import { parseWorktreePath, worktreeLabel } from "../lib/worktreePaths";
 
 /**
  * Bundled mono font (Geist Mono). Native embedding (expo-font config plugin)
@@ -212,12 +213,8 @@ export function formatRelativeTime(fromMs: number, nowMs: number = Date.now()): 
  * the call site.
  */
 export function formatCwd(cwd: string): string {
-  const wtMatch = cwd.match(/^(.+?)\/\.forge\/worktrees\/([a-f0-9-]+)/i);
-  if (wtMatch) {
-    const repo = wtMatch[1].replace(/\/+$/, "").split("/").pop() ?? wtMatch[1];
-    const shortHash = wtMatch[2].slice(0, 8);
-    return `${repo} · wt ${shortHash}`;
-  }
+  const worktree = parseWorktreePath(cwd);
+  if (worktree) return worktreeLabel(worktree);
   // Fall back to basename for non-worktree paths.
   const parts = cwd.replace(/\/+$/, "").split("/");
   return parts[parts.length - 1] || cwd;

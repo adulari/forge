@@ -53,6 +53,22 @@ impl Session {
             return Ok(result);
         }
 
+        let (result, ok) = self.run_worktree_request(&request).await;
+        self.store.record_tool_call(
+            msg_id,
+            &call.name,
+            &args_json,
+            &result,
+            "allowed",
+            if ok { "ok" } else { "error" },
+        )?;
+        Ok(result)
+    }
+
+    /// Run a parsed request with no permission check and move the session if it asks to switch.
+    /// The model's tool gates first ([`Self::worktree_tool`]); a user's own `/worktree` command
+    /// is its own consent and calls this directly. Returns the text and whether it succeeded.
+    pub async fn run_worktree_request(&mut self, request: &Request) -> (String, bool) {
         let current = self.workspace.root().to_path_buf();
         let home = self.worktree_home.clone();
         let daemon_owned = self
@@ -75,19 +91,25 @@ impl Session {
         });
         // A `WorktreeCreate` hook replaces git, and a worktree one made is removed by hooks.
         let hooked = self
-            .worktree_via_hooks(&request, &current, home.as_deref(), confine.as_deref())
+            .worktree_via_hooks(request, &current, home.as_deref(), confine.as_deref())
             .await;
-        let outcome = hooked.unwrap_or_else(|| {
-            worktree_ops::execute(
-                &request,
-                &Context {
-                    current: &current,
-                    home: home.as_deref(),
-                    daemon_owned: daemon_owned.as_deref(),
-                    confine: confine.as_deref(),
-                },
-            )
-        });
+        let outcome = match hooked {
+            Some(outcome) => outcome,
+            None => {
+                // Git, the `setup`/`cleanup` commands and the ignored-file copy can run for
+                // minutes; keep them off the async workers (and out of the session's way).
+                let settings = self.config.worktree.clone();
+                run_off_thread(
+                    request.clone(),
+                    current.clone(),
+                    home.clone(),
+                    daemon_owned,
+                    confine,
+                    settings,
+                )
+                .await
+            }
+        };
         let mut result = outcome.text;
         let mut ok = outcome.ok;
         if let Some(root) = outcome.switch_to {
@@ -104,15 +126,23 @@ impl Session {
             }
             self.fire_cwd_changed(&current).await;
         }
-        self.store.record_tool_call(
-            msg_id,
-            &call.name,
-            &args_json,
-            &result,
-            "allowed",
-            if ok { "ok" } else { "error" },
-        )?;
-        Ok(result)
+        (result, ok)
+    }
+
+    /// Move the session to a different project directory (`/home`, `/project`). Unlike a
+    /// worktree switch there is no home checkout to come back to, and the checkpoint root
+    /// follows the new project.
+    pub fn switch_project(&mut self, root: &std::path::Path) -> Result<(), CoreError> {
+        self.transition_workspace(WorkspaceContext::new(root)?)?;
+        let display = self.workspace.display();
+        if let Err(error) = self.store.set_session_cwd(&self.id, &display) {
+            tracing::warn!(session_id = %self.id, %error, "session cwd not persisted after switch");
+        }
+        crate::host_move::record_workspace_switch(&self.store, &self.id, self.workspace.root());
+        self.presenter.emit(PresenterEvent::Progress(format!(
+            "now working in {display}"
+        )));
+        Ok(())
     }
 
     /// Move this live session to another root of the same repository: every root-keyed piece of
@@ -192,4 +222,141 @@ pub(crate) fn git_head_file(root: &std::path::Path) -> std::path::PathBuf {
         }
     }
     root.join(".git").join("HEAD")
+}
+
+#[derive(Default)]
+struct Handoff {
+    outcome: Option<worktree_ops::Outcome>,
+    abandoned: bool,
+}
+
+/// What to do with a worktree created for a caller that no longer exists. Only a clean, freshly
+/// created one with nothing carried into it is removed, and only with `branch -d`: anything the
+/// user's changes, or the agent, put there is theirs, so it stays and the log says where.
+pub(crate) fn discard_orphan(created: &worktree_ops::Outcome, current: &std::path::Path) {
+    let Some(path) = created.switch_to.as_deref() else {
+        return;
+    };
+    let dirty = std::process::Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["status", "--porcelain"])
+        .output()
+        .map(|o| !o.status.success() || !o.stdout.is_empty())
+        .unwrap_or(true);
+    if created.carried || dirty {
+        tracing::warn!(
+            worktree = %path.display(),
+            "a cancelled worktree request left {} in place: it holds your uncommitted changes",
+            path.display()
+        );
+        return;
+    }
+    let request = Request {
+        action: worktree_ops::Action::Remove,
+        name: None,
+        branch: None,
+        base: None,
+        path: Some(path.display().to_string()),
+        remove: false,
+        force: false,
+        keep_branch: false,
+        keep_unmerged: true,
+        carry_dirty: false,
+    };
+    let _ = worktree_ops::execute(
+        &request,
+        &Context {
+            current,
+            home: None,
+            daemon_owned: None,
+            confine: None,
+            settings: None,
+        },
+    );
+}
+
+/// Dropped while the blocking operation is still pending (the turn was cancelled): whatever it
+/// creates would be a worktree nobody switched to, so it is removed instead of left behind.
+struct OrphanGuard {
+    handoff: std::sync::Arc<std::sync::Mutex<Handoff>>,
+    current: std::path::PathBuf,
+    creates: bool,
+    armed: bool,
+}
+
+impl Drop for OrphanGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut handoff = self.handoff.lock().unwrap_or_else(|e| e.into_inner());
+        handoff.abandoned = true;
+        if let Some(created) = handoff.outcome.take().filter(|_| self.creates) {
+            let current = self.current.clone();
+            std::thread::spawn(move || discard_orphan(&created, &current));
+        }
+    }
+}
+
+pub(crate) async fn run_off_thread(
+    request: Request,
+    current: std::path::PathBuf,
+    home: Option<std::path::PathBuf>,
+    daemon_owned: Option<std::path::PathBuf>,
+    confine: Option<Vec<std::path::PathBuf>>,
+    settings: forge_config::worktree::WorktreeConfig,
+) -> worktree_ops::Outcome {
+    let handoff = std::sync::Arc::new(std::sync::Mutex::new(Handoff::default()));
+    let creates = request.action == worktree_ops::Action::Create;
+    let mut guard = OrphanGuard {
+        handoff: handoff.clone(),
+        current: current.clone(),
+        creates,
+        armed: true,
+    };
+    let task_handoff = handoff.clone();
+    let task_current = current.clone();
+    let joined = tokio::task::spawn_blocking(move || {
+        let outcome = worktree_ops::execute(
+            &request,
+            &Context {
+                current: &current,
+                home: home.as_deref(),
+                daemon_owned: daemon_owned.as_deref(),
+                confine: confine.as_deref(),
+                settings: Some(&settings),
+            },
+        );
+        let mut handoff = task_handoff.lock().unwrap_or_else(|e| e.into_inner());
+        if handoff.abandoned {
+            if creates {
+                discard_orphan(&outcome, &task_current);
+            }
+        } else {
+            handoff.outcome = Some(outcome);
+        }
+    })
+    .await;
+    let outcome = handoff
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .outcome
+        .take();
+    guard.armed = false;
+    match (joined, outcome) {
+        (Ok(()), Some(outcome)) => outcome,
+        (Err(e), _) => worktree_ops::Outcome {
+            ok: false,
+            text: format!("worktree: the operation task failed: {e}"),
+            switch_to: None,
+            carried: false,
+        },
+        (Ok(()), None) => worktree_ops::Outcome {
+            ok: false,
+            text: "worktree: the operation produced no result".into(),
+            switch_to: None,
+            carried: false,
+        },
+    }
 }

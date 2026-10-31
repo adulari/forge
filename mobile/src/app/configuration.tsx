@@ -20,6 +20,7 @@ import { groupConfigFields } from "../lib/settingsSearch";
 import { useTokens } from "../theme/ThemeProvider";
 import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
+import { WorktreeSettingsSection } from "../components/settings/WorktreeSettingsSection";
 import { SettingsShell } from "./(tabs)/settings";
 import { usePullRefresh } from "../lib/usePullRefresh";
 
@@ -131,7 +132,7 @@ function ConfigurationScreenBody() {
     {query.isError ? <Text style={[type.body, { color: tokens.danger }]}>{`Could not load configuration: ${query.error?.message || "unknown error"}. Pull to retry.`}</Text> : null}
     {query.isLoading ? <Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text> : null}
     {!query.isLoading && !query.isError && fields.length === 0 ? <Text style={[type.body, { color: tokens.ink3 }]}>No settings match that search.</Text> : null}
-    {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader>{fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} showSeparator={index < fields.length - 1} highlighted={field.key === lit} />)}</View>)}
+    {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader>{group === "Worktrees" ? <WorktreeSettingsSection fields={fields} /> : fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} showSeparator={index < fields.length - 1} highlighted={field.key === lit} />)}</View>)}
   </Screen>;
 }
 

@@ -18,6 +18,8 @@ pub(crate) struct SnapshotIdentity<'a> {
     pub exposure: String,
     /// Whether the session's model is pinned (the Session knows; `App` does not).
     pub model_pinned: bool,
+    /// Progress of the worktree's background copy + `setup`, for a daemon-hosted session.
+    pub worktree_setup: Option<remote::SnapWorktreeSetup>,
 }
 
 /// Build one wire [`remote::Snapshot`] frame from the App's remote projection. The ONE snapshot
@@ -167,6 +169,7 @@ pub(crate) fn build_snapshot_frame(
         parent: None,
         thread_error: None,
         history_gap: None,
+        worktree_setup: ident.worktree_setup,
     }
 }
 

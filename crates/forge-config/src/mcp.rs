@@ -716,6 +716,28 @@ pub fn write_mcp_toml(path: &Path, config: &McpConfig) -> Result<(), ConfigError
     crate::toml_write::save_doc(path, &doc)
 }
 
+pub(crate) fn merge_mcp_servers(
+    destination: &mut Vec<McpServerConfig>,
+    incoming: Vec<McpServerConfig>,
+) {
+    for server in incoming {
+        if let Some(existing) = destination.iter_mut().find(|item| item.name == server.name) {
+            *existing = server;
+        } else {
+            destination.push(server);
+        }
+    }
+}
+
+/// Why the MCP file at `path` would be ignored, or `None` when it is absent or parses. The
+/// loader only logs a malformed file, so a listing that shows "no servers" uses this to say why.
+pub fn mcp_toml_problem(path: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    toml::from_str::<McpConfig>(&text)
+        .err()
+        .map(|error| error.message().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

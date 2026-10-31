@@ -33,7 +33,8 @@ pub fn worktree_spec() -> forge_provider::ToolSpec {
                 "path": { "type": "string", "description": "create: where to put the worktree. enter/remove: the worktree's path." },
                 "remove": { "type": "boolean", "description": "exit: also remove the worktree being left and delete its branch." },
                 "force": { "type": "boolean", "description": "remove/exit: discard uncommitted or untracked files and delete an unmerged branch." },
-                "keep_branch": { "type": "boolean", "description": "remove/exit: keep the branch after removing the worktree." }
+                "keep_branch": { "type": "boolean", "description": "remove/exit: keep the branch after removing the worktree." },
+                "dirty": { "type": "string", "enum": ["leave", "carry"], "description": "create: what to do with uncommitted changes in the current checkout. `carry` moves them (including untracked files) into the new worktree; `leave` (default) keeps them where they are." }
             },
             "required": ["action"]
         }),
@@ -59,6 +60,11 @@ pub struct Request {
     pub remove: bool,
     pub force: bool,
     pub keep_branch: bool,
+    /// Never fall back to `branch -D`, whatever `force` says: set by the interactive overlay,
+    /// whose view of the branch is a snapshot taken before the user confirmed.
+    pub keep_unmerged: bool,
+    /// `create`: carry uncommitted changes into the new worktree instead of leaving them.
+    pub carry_dirty: bool,
 }
 
 impl Request {
@@ -92,6 +98,8 @@ impl Request {
             remove: flag("remove"),
             force: flag("force"),
             keep_branch: flag("keep_branch"),
+            keep_unmerged: flag("keep_unmerged"),
+            carry_dirty: text("dirty").as_deref() == Some("carry"),
         })
     }
 
@@ -125,6 +133,14 @@ pub struct Context<'a> {
     pub daemon_owned: Option<&'a Path>,
     /// `Some` when `[tools] confine_to_workspace` is on: the roots a session may move into.
     pub confine: Option<&'a [PathBuf]>,
+    /// `[worktree]` settings (location, copied files, setup/cleanup). `None` = defaults.
+    pub settings: Option<&'a forge_config::worktree::WorktreeConfig>,
+}
+
+impl Context<'_> {
+    fn worktree_settings(&self) -> forge_config::worktree::WorktreeConfig {
+        self.settings.cloned().unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -133,6 +149,8 @@ pub struct Outcome {
     pub text: String,
     /// The root the session must switch to, when the call moved it.
     pub switch_to: Option<PathBuf>,
+    /// The user's uncommitted changes were moved into the new worktree (`dirty: carry`).
+    pub carried: bool,
 }
 
 impl Outcome {
@@ -141,6 +159,7 @@ impl Outcome {
             ok: false,
             text: text.into(),
             switch_to: None,
+            carried: false,
         }
     }
 
@@ -149,6 +168,7 @@ impl Outcome {
             ok: true,
             text: text.into(),
             switch_to,
+            carried: false,
         }
     }
 }
@@ -336,7 +356,8 @@ pub fn slug(raw: &str) -> String {
 
 fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
     let main = main_checkout(ctx.current)?;
-    let name = req
+    let settings = ctx.worktree_settings();
+    let given = req
         .name
         .clone()
         .or_else(|| {
@@ -345,8 +366,22 @@ fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
                 .map(|b| b.rsplit('/').next().unwrap_or(b).to_string())
         })
         .map(|n| slug(&n))
-        .filter(|n| !n.is_empty())
-        .ok_or("worktree create: give a `name` or a `branch`")?;
+        .filter(|n| !n.is_empty());
+    let name = match given {
+        Some(name) => name,
+        // A generated name must not land on a branch or directory an earlier worktree left behind.
+        None => (0..20)
+            .map(|_| crate::worktree_setup::friendly_name())
+            .find(|candidate| {
+                let free_branch = req.branch.is_some()
+                    || !branch_exists(ctx.current, &format!("forge/{candidate}"));
+                let free_path = req.path.is_some()
+                    || !crate::worktree_setup::worktree_path(&main.path, &settings, candidate)
+                        .exists();
+                free_branch && free_path
+            })
+            .ok_or("worktree create: could not find an unused name; pass `name`")?,
+    };
     let branch = req
         .branch
         .clone()
@@ -355,7 +390,7 @@ fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
     let path = match req.path.as_deref() {
         Some(p) if Path::new(p).is_absolute() => PathBuf::from(p),
         Some(p) => main.path.join(p),
-        None => managed.join(&name),
+        None => crate::worktree_setup::worktree_path(&main.path, &settings, &name),
     };
     if path.exists() && std::fs::read_dir(&path).is_ok_and(|mut d| d.next().is_some()) {
         return Err(format!(
@@ -364,7 +399,12 @@ fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
             path.display()
         ));
     }
-    confined(ctx, path.parent().unwrap_or(&path))?;
+    if req.path.is_some() || !in_global_root(&settings, &main.path, &path) {
+        confined(ctx, path.parent().unwrap_or(&path))?;
+    }
+    if let Some(parent) = path.parent().filter(|_| !path.starts_with(&managed)) {
+        std::fs::create_dir_all(parent).map_err(|e| format!("worktree create: {e}"))?;
+    }
     if path.starts_with(&managed) {
         std::fs::create_dir_all(&managed).map_err(|e| format!("worktree create: {e}"))?;
         // Keeps the nested checkouts out of the main checkout's `git status`, the way the
@@ -372,17 +412,13 @@ fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
         let _ = crate::ensure_dir_git_ignored(&managed);
     }
     let path_arg = path.display().to_string();
-    let exists = git(
-        ctx.current,
-        &[
-            "rev-parse",
-            "--verify",
-            "-q",
-            &format!("refs/heads/{branch}"),
-        ],
-    )
-    .is_ok();
+    let exists = branch_exists(ctx.current, &branch);
     let base = req.base.as_deref().unwrap_or("HEAD");
+    let carried = if req.carry_dirty {
+        stash_dirty(ctx.current, &name)?
+    } else {
+        None
+    };
     let added = if exists {
         git(ctx.current, &["worktree", "add", &path_arg, &branch])
     } else {
@@ -391,17 +427,106 @@ fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
             &["worktree", "add", "-b", &branch, &path_arg, base],
         )
     };
-    added.map_err(|e| format!("worktree create: git worktree add failed: {e}"))?;
+    if let Err(e) = added {
+        if let Some(stash) = &carried {
+            let _ = pop_stash(ctx.current, stash, true);
+        }
+        return Err(format!("worktree create: git worktree add failed: {e}"));
+    }
     let path = canonical(&path);
     let how = if exists {
         format!("checked out existing branch {branch}")
     } else {
         format!("new branch {branch} from {base}")
     };
-    Ok(Outcome::done(
-        format!("created worktree {} ({how})", path.display()),
-        Some(path),
-    ))
+    let mut text = format!("created worktree {} ({how})", path.display());
+    if let Some(stash) = &carried {
+        match pop_stash(&path, stash, false) {
+            Ok(_) => text.push_str("; moved your uncommitted changes into it"),
+            Err(e) => text.push_str(&format!(
+                "; your uncommitted changes could not be applied cleanly ({e}); they are still in \
+                 `git stash list`"
+            )),
+        }
+    }
+    let provisioned = crate::worktree_setup::provision(&main.path, &path, &branch, &settings);
+    let summary = provisioned.summary();
+    if !summary.is_empty() {
+        text.push_str(&format!("; {summary}"));
+    }
+    let mut outcome = Outcome::done(text, Some(path));
+    outcome.carried = carried.is_some();
+    Ok(outcome)
+}
+
+/// Worktrees Forge itself puts under `root = "global"` sit outside the workspace by design, so
+/// `confine_to_workspace` must not refuse the user's own create/enter for them.
+fn in_global_root(
+    settings: &forge_config::worktree::WorktreeConfig,
+    main: &Path,
+    path: &Path,
+) -> bool {
+    matches!(settings.root, forge_config::worktree::WorktreeRoot::Global)
+        && canonical(path).starts_with(canonical(&crate::worktree_setup::global_root(main)))
+}
+
+fn branch_exists(dir: &Path, branch: &str) -> bool {
+    git(
+        dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// The commit of the newest stash entry, to find the entry again later.
+pub(crate) fn top_stash(dir: &Path) -> Option<String> {
+    git(dir, &["rev-parse", "--verify", "-q", "refs/stash"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Pop the stash entry made from commit `stash`, wherever it sits now. `refs/stash` is shared by
+/// every worktree of the repository, so `git stash pop` alone could apply someone else's entry.
+pub(crate) fn pop_stash(dir: &Path, stash: &str, index: bool) -> Result<String, String> {
+    let listing = git(dir, &["stash", "list", "--format=%H"])?;
+    let position = listing
+        .lines()
+        .position(|l| l.trim() == stash)
+        .ok_or("the stash entry is gone")?;
+    let target = format!("stash@{{{position}}}");
+    let mut args = vec!["stash", "pop"];
+    if index {
+        args.push("--index");
+    }
+    args.push(&target);
+    git(dir, &args)
+}
+
+/// Stash tracked and untracked changes so they can be replayed in the new worktree. `Ok(None)`
+/// when there was nothing to carry.
+fn stash_dirty(current: &Path, name: &str) -> Result<Option<String>, String> {
+    let status = git(current, &["status", "--porcelain"])?;
+    if status.trim().is_empty() {
+        return Ok(None);
+    }
+    git(
+        current,
+        &[
+            "stash",
+            "push",
+            "-u",
+            "-m",
+            &format!("forge: move to worktree {name}"),
+        ],
+    )
+    .map_err(|e| format!("worktree create: could not stash your changes: {e}"))?;
+    Ok(top_stash(current))
 }
 
 fn enter(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
@@ -422,7 +547,10 @@ fn enter(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
             entry.path.display()
         ));
     }
-    confined(ctx, &entry.path)?;
+    let main = main_checkout(ctx.current)?;
+    if !in_global_root(&ctx.worktree_settings(), &main.path, &entry.path) {
+        confined(ctx, &entry.path)?;
+    }
     let branch = entry
         .branch
         .clone()
@@ -469,7 +597,11 @@ fn exit(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
         if entry.main {
             return Err("worktree exit: refusing to remove the main checkout".to_string());
         }
-        text.push_str(&format!("; {}", remove_entry(&main.path, &entry, req)?));
+        let settings = ctx.worktree_settings();
+        text.push_str(&format!(
+            "; {}",
+            remove_entry(&main.path, &entry, req, &settings)?
+        ));
     }
     Ok(Outcome::done(text, Some(home)))
 }
@@ -497,12 +629,21 @@ fn remove_named(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
         );
     }
     let main = main_checkout(ctx.current)?;
-    Ok(Outcome::done(remove_entry(&main.path, &entry, req)?, None))
+    let settings = ctx.worktree_settings();
+    Ok(Outcome::done(
+        remove_entry(&main.path, &entry, req, &settings)?,
+        None,
+    ))
 }
 
 /// Remove one worktree and (unless kept) its branch. Without `force` it refuses a worktree with
 /// uncommitted or untracked files, and keeps a branch that is not merged into the main checkout.
-fn remove_entry(main: &Path, entry: &Entry, req: &Request) -> Result<String, String> {
+fn remove_entry(
+    main: &Path,
+    entry: &Entry,
+    req: &Request,
+    settings: &forge_config::worktree::WorktreeConfig,
+) -> Result<String, String> {
     let path = entry.path.display().to_string();
     if entry.path.is_dir() && !req.force {
         let status = git(&entry.path, &["status", "--porcelain"]).unwrap_or_default();
@@ -521,6 +662,15 @@ fn remove_entry(main: &Path, entry: &Entry, req: &Request) -> Result<String, Str
             ));
         }
     }
+    let branch_name = entry.branch.as_deref().unwrap_or("");
+    let cleanup = crate::worktree_setup::teardown(main, &entry.path, branch_name, settings);
+    if cleanup.ran && !cleanup.ok && !req.force {
+        return Err(format!(
+            "worktree: the `cleanup` command failed, so nothing was removed ({}); fix it or pass \
+             `force: true`",
+            cleanup.output.trim()
+        ));
+    }
     let mut args = vec!["worktree", "remove"];
     if req.force {
         args.push("--force");
@@ -537,10 +687,14 @@ fn remove_entry(main: &Path, entry: &Entry, req: &Request) -> Result<String, Str
     };
     match git(main, &["branch", "-d", branch]) {
         Ok(_) => text.push_str(&format!(" and deleted branch {branch}")),
-        Err(_) if req.force => match git(main, &["branch", "-D", branch]) {
+        Err(_) if req.force && !req.keep_unmerged => match git(main, &["branch", "-D", branch]) {
             Ok(_) => text.push_str(&format!(" and force-deleted unmerged branch {branch}")),
             Err(e) => text.push_str(&format!("; branch {branch} kept: {e}")),
         },
+        Err(e) if req.keep_unmerged => text.push_str(&format!(
+            "; branch {branch} kept because it is not merged into the main checkout's HEAD \
+             ({e}). Merge it, or delete it yourself with `git branch -D {branch}`."
+        )),
         Err(e) => text.push_str(&format!(
             "; branch {branch} kept because it is not merged into the main checkout's HEAD \
              ({e}). Merge it, or remove again with `force: true` to delete it."

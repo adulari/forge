@@ -8,6 +8,9 @@ import {
   Clock,
   Eye,
   Flame,
+  FolderCog,
+  GitFork,
+  Home,
   History,
   LayoutPanelLeft,
   MoonStar,
@@ -80,6 +83,23 @@ const WORKBENCH_PALETTE_ENTRIES: readonly WorkbenchPaletteEntry[] = [
   { menu: "view:ports", title: "Toggle Ports", keywords: "ports listening dev server localhost actions run dock panel right" },
   { menu: "view:gallery", title: "Toggle Gallery", keywords: "gallery images screenshots pictures evidence dock panel right" },
   { menu: "view:usage", title: "Toggle usage panel", keywords: "usage dock panel limits quota subscription spend right sidebar", shortcut: "shell.usage" },
+];
+
+interface ProjectPaletteEntry {
+  id: string;
+  title: string;
+  keywords: string;
+  Icon: typeof Plus;
+  /** Opens the project picker straight into this flow on the new-session screen. */
+  action?: "clone" | "manage";
+  /** Or runs a desktop-menu action (the Home session, shared with the tray). */
+  menu?: DesktopMenuId;
+}
+
+const PROJECT_PALETTE_ENTRIES: readonly ProjectPaletteEntry[] = [
+  { id: "action:clone-repository", title: "Clone repository", keywords: "clone repository git github url gh project add", Icon: GitFork, action: "clone" },
+  { id: "action:home-session", title: "New session in Home", keywords: "home no project scratch chat session new", Icon: Home, menu: "tray:home-session" },
+  { id: "action:manage-projects", title: "Manage projects", keywords: "manage projects rename hide relocate repair duplicates", Icon: FolderCog, action: "manage" },
 ];
 
 export interface PaletteSourceOptions {
@@ -169,6 +189,21 @@ export function usePaletteSources(options: PaletteSourceOptions) {
         },
       },
     ];
+
+    for (const entry of PROJECT_PALETTE_ENTRIES) {
+      items.push({
+        id: entry.id,
+        section: "commands",
+        title: entry.title,
+        keywords: entry.keywords,
+        leading: <entry.Icon size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+        onSelect: () => {
+          close();
+          if (entry.menu) runDesktopMenuAction(entry.menu);
+          else router.push({ pathname: "/new-session", params: { projectAction: entry.action } });
+        },
+      });
+    }
 
     if (activeSessionId) {
       items.push({

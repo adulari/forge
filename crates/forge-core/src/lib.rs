@@ -209,6 +209,9 @@ mod user_shell;
 pub use user_shell::UserShellRun;
 pub mod wakeup;
 pub(crate) use tool_output::tool_detail;
+pub mod project_ops;
+pub mod project_registry;
+pub mod remote_url;
 mod spend_guard;
 mod turn_context;
 pub mod turn_contract;
@@ -222,6 +225,7 @@ mod workspace_context;
 pub mod worktree;
 pub mod worktree_ops;
 pub mod worktree_reclaim;
+pub mod worktree_setup;
 pub mod zero_retention;
 
 pub use llm_router::LlmRouter;

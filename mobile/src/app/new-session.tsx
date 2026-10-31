@@ -15,7 +15,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { router, useLocalSearchParams } from "expo-router";
 import { Check, ChevronDown, X } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Platform, StyleSheet, Text, TextInput, View } from "react-native";
+import { Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 
 import { HostDot } from "../components/anywhere/HostDot";
@@ -27,11 +27,12 @@ import { Screen } from "../components/ds/Screen";
 import { SectionHeader } from "../components/ds/SectionHeader";
 import { Segmented } from "../components/ds/Segmented";
 import { Sheet } from "../components/ds/Sheet";
-import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
 import { McpSessionChips } from "../components/mcp/McpSessionChips";
 import { ModelPicker } from "../components/session/ModelPicker";
+import { EffortChips } from "../components/session/EffortChips";
 import { ProjectPicker } from "../components/session/ProjectPicker";
+import { WorktreeChoice } from "../components/session/WorktreeChoice";
 import { ApiError, isUnsupportedPromptFieldError, type CreateSessionResponse } from "../lib/api";
 import { hostStateText } from "../lib/anywhere/format";
 import { anywhereClient, useAnywhere, useAnywhereHosts } from "../lib/anywhere/store";
@@ -41,14 +42,24 @@ import { useIncomingShare } from "../lib/incomingShare";
 import { appendIncomingShareText } from "../lib/incomingShareCore";
 import { goBackOr } from "../lib/nav";
 import { buildInitialPromptQueue, offlineQueueKey } from "../lib/offlineQueue";
+import { withoutUnsupportedFields } from "../lib/createSessionCompat";
 import {
-  DEFAULT_WORKTREE_PREFERENCE,
-  isKnownGitRepo,
-  lastProjectStorageKey,
-  recommendedWorktree,
-  withWorktreeToggled,
-  type WorktreePreference,
-} from "../lib/projectSelection";
+  branchNameProblem,
+  effectiveWorktreeMode,
+  effortForRequest,
+  friendlyBranchHint,
+  parseSessionDefaults,
+  restorableDefaults,
+  serializeSessionDefaults,
+  sessionDefaultsKey,
+  worktreeRequest,
+  type DefaultField,
+  type EffortChoice,
+  type WorktreeMode,
+} from "../lib/newSessionDefaults";
+import { isKnownGitRepo, lastProjectStorageKey } from "../lib/projectSelection";
+import { useHomeProject } from "../lib/queriesProjects";
+import { rememberableProject } from "../lib/worktreePaths";
 import { transportForBaseUrl } from "../lib/serverTargets";
 import { useCreateSession, useProjects } from "../lib/queries";
 import { getSecureItem, setSecureItem } from "../lib/secureStore";
@@ -168,13 +179,6 @@ function HostPicker({
   );
 }
 
-// A worktree session's cwd is `<repo>/.forge/worktrees/<id>`; remembering that as the project
-// would nest the next worktree inside it.
-function projectRootOf(cwd: string): string {
-  const i = cwd.indexOf("/.forge/worktrees/");
-  return i > 0 ? cwd.slice(0, i) : cwd;
-}
-
 export default function NewSessionScreen() {
   const tokens = useTokens();
   const { scheme } = useTheme();
@@ -183,7 +187,10 @@ export default function NewSessionScreen() {
     cwd?: string | string[];
     title?: string | string[];
     incomingShare?: string | string[];
+    projectAction?: string | string[];
   }>();
+  const projectActionParam = Array.isArray(params.projectAction) ? params.projectAction[0] : params.projectAction;
+  const projectAction = projectActionParam === "clone" || projectActionParam === "manage" ? projectActionParam : undefined;
   const requestedCwd = Array.isArray(params.cwd) ? params.cwd[0] : params.cwd;
   // Fleet/rail TaskComposer hands its typed text over as ?title= — the composer IS the
   // new-session affordance (HANDOFF rule 6), so that text must survive the navigation.
@@ -200,24 +207,72 @@ export default function NewSessionScreen() {
   const [cwd, setCwd] = useState(requestedCwd ?? "");
   const [task, setTask] = useState(requestedTitle ?? "");
   const [model, setModel] = useState("");
-  const [worktreePref, setWorktreePref] = useState<WorktreePreference>(DEFAULT_WORKTREE_PREFERENCE);
+  const [worktreeExplicit, setWorktreeExplicit] = useState<{ cwd: string; mode: WorktreeMode } | null>(null);
+  const [branch, setBranch] = useState("");
+  const [existingPath, setExistingPath] = useState<string | null>(null);
+  const [effort, setEffort] = useState<EffortChoice>("auto");
   const [temper, setTemper] = useState<Temper>("Ask");
+  const touched = useRef(new Set<DefaultField>());
+  const home = useHomeProject();
   const [mcpOff, setMcpOff] = useState<string[]>([]);
   const create = useCreateSession();
   const toast = useToast();
 
   // A worktree needs a git repo underneath it — the daemon's own default cwd is very often just
   // a home/workspace folder, not one (see projectSelection.ts). `null` means "the catalog never
-  // told us" (manual path, still loading) — only an explicit `false` turns the toggle off.
-  const cwdIsGitRepo = useMemo(() => isKnownGitRepo(cwd, projects.data ?? null), [cwd, projects.data]);
-  const worktree = useMemo(
-    () => recommendedWorktree(cwd, cwdIsGitRepo, worktreePref),
-    [cwd, cwdIsGitRepo, worktreePref],
+  // told us" (manual path, still loading) — only an explicit `false` turns worktrees off.
+  const isHome = !!home.data && cwd === home.data.path;
+  const cwdIsGitRepo = useMemo(
+    () => (isHome ? false : isKnownGitRepo(cwd, projects.data ?? null)),
+    [cwd, isHome, projects.data],
   );
-  const onWorktreeChange = useCallback(
-    (value: boolean) => setWorktreePref((pref) => withWorktreeToggled(pref, cwd, value)),
+  const worktreeMode = effectiveWorktreeMode(
+    worktreeExplicit?.cwd === cwd ? worktreeExplicit.mode : null,
+    cwdIsGitRepo,
+    true,
+  );
+  const branchHint = useMemo(() => friendlyBranchHint(cwd.length * 7 + 3), [cwd]);
+  const onWorktreeModeChange = useCallback(
+    (mode: WorktreeMode) => {
+      touched.current.add("worktree");
+      setWorktreeExplicit({ cwd, mode });
+    },
     [cwd],
   );
+  const changeModel = useCallback((value: string) => {
+    touched.current.add("model");
+    setModel(value);
+  }, []);
+  const changeTemper = useCallback((value: Temper) => {
+    touched.current.add("temper");
+    setTemper(value);
+  }, []);
+  const changeEffort = useCallback((value: EffortChoice) => {
+    touched.current.add("effort");
+    setEffort(value);
+  }, []);
+
+  useEffect(() => {
+    setExistingPath(null);
+  }, [cwd]);
+
+  // Seed model, temper, effort and worktree mode from the project's last session. Anything the
+  // user already changed on this screen wins over the restore.
+  useEffect(() => {
+    if (!activeServerId || !cwd.trim()) return;
+    let cancelled = false;
+    void getSecureItem(sessionDefaultsKey(activeServerId, cwd)).then((raw) => {
+      if (cancelled) return;
+      const restore = restorableDefaults(parseSessionDefaults(raw), touched.current);
+      if (restore.model !== undefined) setModel(restore.model);
+      if (restore.temper !== undefined) setTemper(restore.temper as Temper);
+      if (restore.effort !== undefined) setEffort(restore.effort);
+      if (restore.worktree !== undefined) setWorktreeExplicit({ cwd, mode: restore.worktree });
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeServerId, cwd]);
 
   useEffect(() => {
     if (
@@ -304,22 +359,33 @@ export default function NewSessionScreen() {
     }
 
     if (create.isPending) return;
+    if (worktreeMode === "existing" && !existingPath) return;
+    if (worktreeMode === "new" && branchNameProblem(branch) !== null) return;
     const trimmedCwd = cwd.trim();
     const trimmedTask = task.trim();
+    const wt = worktreeRequest({ mode: worktreeMode, cwd: trimmedCwd, branch, existingPath });
     const baseBody = {
-      cwd: trimmedCwd || undefined,
+      cwd: wt.cwd || undefined,
       title: trimmedTask || undefined,
       model: model.trim() || undefined,
-      worktree,
+      worktree: wt.worktree,
+      branch: wt.branch,
+      effort: effortForRequest(effort),
       temper,
       mcp_off: mcpOff.length > 0 ? mcpOff : undefined,
     };
+    const submit = (body: typeof baseBody & { prompt?: string }) =>
+      create.mutateAsync(body).catch((err: unknown) => {
+        const retry = withoutUnsupportedFields(body, err);
+        if (!retry) throw err;
+        return create.mutateAsync(retry);
+      });
 
     void (async () => {
       let res: CreateSessionResponse;
       let promptDelivered = false;
       try {
-        res = await create.mutateAsync({ ...baseBody, prompt: trimmedTask || undefined });
+        res = await submit({ ...baseBody, prompt: trimmedTask || undefined });
         promptDelivered = trimmedTask.length > 0;
       } catch (err) {
         // Any other failure (bad cwd, daemon down, ...) is a real error — `create.error` is
@@ -330,10 +396,22 @@ export default function NewSessionScreen() {
         // the durable offline-prompt queue a live chat screen drains on its first socket-open
         // edge, so the task text still survives the gap between "session created" and "this new
         // screen's WS connects" instead of being silently dropped.
-        res = await create.mutateAsync(baseBody);
+        res = await submit(baseBody);
       }
       if (incomingShareId) void consumeShare(incomingShareId);
-      if (activeServerId) void setSecureItem(lastProjectStorageKey(activeServerId), projectRootOf(res.cwd));
+      if (activeServerId) {
+        const project = worktreeMode === "existing" && trimmedCwd ? trimmedCwd : rememberableProject(res.cwd, trimmedCwd);
+        void setSecureItem(lastProjectStorageKey(activeServerId), project);
+        void setSecureItem(
+          sessionDefaultsKey(activeServerId, project),
+          serializeSessionDefaults({
+            model: model.trim(),
+            temper,
+            effort,
+            worktree: worktreeMode === "existing" ? undefined : worktreeMode,
+          }),
+        );
+      }
       const initialQueue = promptDelivered ? [] : buildInitialPromptQueue(task);
       const seedQueue = initialQueue.length > 0
         ? AsyncStorage.setItem(offlineQueueKey(baseUrl, res.id), JSON.stringify(initialQueue)).catch(() => {
@@ -352,7 +430,7 @@ export default function NewSessionScreen() {
       // A failed retry (the non-prompt path) leaves `create.error` set by mutateAsync — nothing
       // further to do here, the error text is already what `serverError` renders.
     });
-  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktree, temper, mcpOff, activeServerId, baseUrl, consumeShare, incomingShareId]);
+  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktreeMode, branch, existingPath, effort, temper, mcpOff, activeServerId, baseUrl, consumeShare, incomingShareId]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -376,7 +454,10 @@ export default function NewSessionScreen() {
         : null;
 
   const submitPending = isOfflineHostQueue ? queuing : create.isPending;
-  const canSubmit = !submitPending;
+  const worktreeIncomplete =
+    !isOfflineHostQueue
+    && ((worktreeMode === "existing" && !existingPath) || (worktreeMode === "new" && branchNameProblem(branch) !== null));
+  const canSubmit = !submitPending && !worktreeIncomplete;
   const submitLabel = isOfflineHostQueue ? "Queue remote job" : "Forge session";
   const sharedCallout = incomingShareId && pendingShare?.id === incomingShareId ? (
     <Banner
@@ -395,7 +476,7 @@ export default function NewSessionScreen() {
     <View>
       <Text style={[typeScale.section, styles.sectionLabel, { color: tokens.ink4 }]}>Where &amp; how</Text>
       <View>
-        <ProjectPicker value={cwd} onChange={rememberProject} />
+        <ProjectPicker value={cwd} onChange={rememberProject} initialAction={projectAction} />
         {showHostPicker ? (
           <HostPicker
             value={hostChoice}
@@ -405,25 +486,26 @@ export default function NewSessionScreen() {
             hosts={anywhereHosts}
           />
         ) : null}
-        <ModelPicker value={model} onChange={setModel} />
+        <ModelPicker value={model} onChange={changeModel} />
       </View>
       <View style={styles.temperBlock}>
-        <Segmented options={TEMPER_OPTIONS} value={temper} onChange={setTemper} />
+        <Segmented options={TEMPER_OPTIONS} value={temper} onChange={changeTemper} />
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>{TEMPER_HINT[temper]}</Text>
       </View>
+      <EffortChips value={effort} onChange={changeEffort} />
       <McpSessionChips off={mcpOff} onChange={setMcpOff} />
-      <View style={styles.worktreeRow}>
-        <Switch
-          value={worktree}
-          onValueChange={onWorktreeChange}
-          disabled={cwdIsGitRepo === false}
-          accessibilityLabel="Isolated git worktree"
-        />
-        <Text style={[typeScale.body, styles.worktreeLabel, { color: tokens.ink }]}>Isolated git worktree</Text>
-        <Text style={[typeScale.meta, { color: tokens.ink4 }]}>
-          {cwdIsGitRepo === false ? "not a git project" : "recommended"}
-        </Text>
-      </View>
+      <WorktreeChoice
+        cwd={cwd}
+        mode={worktreeMode}
+        onModeChange={onWorktreeModeChange}
+        branch={branch}
+        onBranchChange={setBranch}
+        branchHint={branchHint}
+        existingPath={existingPath}
+        onExistingChange={setExistingPath}
+        isGitRepo={cwdIsGitRepo}
+        isHome={isHome}
+      />
       {showHostPicker && hostChoice.kind === "anywhere" ? (
         isOfflineHostQueue ? (
           // M New Session L183 — warn-tinted callout, shown only for the offline-host
@@ -510,9 +592,11 @@ export default function NewSessionScreen() {
           />
         </View>
 
-        <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} wide />
-        {sharedCallout}
-        {whereAndHow}
+        <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
+          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} wide />
+          {sharedCallout}
+          {whereAndHow}
+        </ScrollView>
 
         <View style={styles.modalFooterRow}>
           <Text style={[typeScale.monoMeta, { color: tokens.ink4 }]}>↵ forge · esc cancel</Text>
@@ -627,15 +711,14 @@ const styles = StyleSheet.create({
   taskHint: { marginTop: space.space12, lineHeight: 16 },
   sectionLabel: { paddingTop: space.space24, paddingBottom: space.space4 },
   temperBlock: { gap: space.space4, paddingVertical: space.space12 },
-  worktreeRow: { flexDirection: "row", alignItems: "center", gap: space.space12, minHeight: 52 },
-  worktreeLabel: { flex: 1 },
   errorText: { paddingTop: space.space8 },
   defaultHostDot: { width: 7, height: 7, borderRadius: 3.5 },
   hostSheetContent: { paddingHorizontal: space.space16, paddingBottom: space.space32, gap: space.space12 },
   hostNote: { paddingTop: space.space8 },
   offlineCallout: { marginTop: space.space8, borderWidth: 1, borderRadius: radii.radius4, padding: space.space12 },
-  modalRoot: { flex: 1, alignItems: "center", justifyContent: "flex-start", paddingTop: 110, padding: space.space24 },
-  modalCard: { width: MODAL_WIDTH, maxWidth: "100%", borderWidth: 1, padding: space.space24 },
+  modalRoot: { flex: 1, alignItems: "center", justifyContent: "flex-start", paddingTop: 48, padding: space.space24 },
+  modalCard: { width: MODAL_WIDTH, maxWidth: "100%", maxHeight: "100%", borderWidth: 1, padding: space.space24 },
+  modalScroll: { flexShrink: 1 },
   modalHeaderRow: { flexDirection: "row", alignItems: "center" },
   modalFooterRow: { flexDirection: "row", alignItems: "center", gap: space.space12, marginTop: space.space16 },
   flexSpacer: { flex: 1 },

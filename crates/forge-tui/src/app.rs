@@ -402,6 +402,8 @@ pub struct App {
     pub run_menu: crate::run_menu::RunMenu,
     /// The `/import` picker for Claude Code and Codex conversations, while open.
     pub import_menu: crate::import_menu::ImportMenu,
+    /// The `/worktree` and `/project` overlay, while open.
+    pub workspace_menu: crate::workspace_menu::WorkspaceMenu,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.

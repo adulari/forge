@@ -517,6 +517,11 @@ export interface CreateSessionRequest {
   temper?: string;
   /** MCP server names to leave out of this session only. */
   mcp_off?: string[];
+  /** Name for the new worktree and its branch. Implies `worktree`; a friendly random name is
+   * used when `worktree` is true and this is omitted. An older daemon rejects the field. */
+  branch?: string;
+  /** "low".."max", applied before the first prompt. */
+  effort?: string;
   /** Run the new session's first turn with this text immediately, server-side — added so the
    * task composer's very first prompt survives even when this device's WebSocket to the new
    * session never reaches `open` before the screen unmounts (see mobile/src/app/new-session.tsx).
@@ -579,6 +584,10 @@ export interface ProjectCatalog {
   default_cwd: string;
   recent: ProjectRow[];
   roots: ProjectRow[];
+  /** Projects the user switched off; absent from older daemons. */
+  hidden?: ProjectRow[];
+  /** Recent folders that no longer exist, listed so they can be relocated; absent from older daemons. */
+  missing?: ProjectRow[];
 }
 
 export interface BrowseProjectsResponse {

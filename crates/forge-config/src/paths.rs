@@ -17,6 +17,11 @@ pub fn data_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("dev", "forge", "forge").map(|d| d.data_dir().to_path_buf())
 }
 
+/// Whether `path` sits under the directory that holds `[worktree] root = "global"` checkouts.
+pub fn is_global_worktree_path(path: &Path) -> bool {
+    data_dir().is_some_and(|d| path.starts_with(d.join("worktrees")))
+}
+
 /// Claude Code's home directory (`~/.claude`), source for `forge import claude`. `None` if no
 /// home directory resolves on this platform.
 pub fn claude_dir() -> Option<PathBuf> {

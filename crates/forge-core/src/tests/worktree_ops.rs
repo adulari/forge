@@ -33,6 +33,7 @@ fn ctx(current: &Path) -> Context<'_> {
         home: None,
         daemon_owned: None,
         confine: None,
+        settings: None,
     }
 }
 
@@ -132,6 +133,7 @@ fn confinement_refuses_a_worktree_outside_the_workspace_and_extra_roots() {
     let only_main = [main.clone()];
     let confined = Context {
         confine: Some(&only_main),
+        settings: None,
         ..ctx(&main)
     };
     let out = execute(
@@ -142,6 +144,7 @@ fn confinement_refuses_a_worktree_outside_the_workspace_and_extra_roots() {
     let widened = [main.clone(), dir.path().join("elsewhere")];
     let allowed = Context {
         confine: Some(&widened),
+        settings: None,
         ..ctx(&main)
     };
     assert!(execute(&req(json!({"action": "enter", "branch": "side"})), &allowed).ok);
@@ -284,4 +287,124 @@ fn a_daemon_session_leaving_a_second_worktree_returns_to_its_own() {
         "{}",
         out.text
     );
+}
+
+#[test]
+fn pop_stash_applies_the_named_entry_not_the_newest() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = repo(dir.path());
+    std::fs::write(main.join("a.txt"), "mine\n").unwrap();
+    git(&main, &["stash", "push", "-m", "mine"]);
+    let mine = top_stash(&main).unwrap();
+    std::fs::write(main.join("a.txt"), "theirs\n").unwrap();
+    git(&main, &["stash", "push", "-m", "theirs"]);
+    pop_stash(&main, &mine, false).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(main.join("a.txt")).unwrap(),
+        "mine\n"
+    );
+    assert_eq!(git(&main, &["stash", "list"]).lines().count(), 1);
+    assert!(pop_stash(&main, &mine, false).is_err());
+}
+
+#[test]
+fn global_root_worktrees_pass_confinement_for_create_and_enter() {
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("XDG_DATA_HOME", dir.path().join("data"));
+    let main = repo(dir.path());
+    let settings = forge_config::worktree::WorktreeConfig {
+        root: forge_config::worktree::WorktreeRoot::Global,
+        ..Default::default()
+    };
+    let only_main = [main.clone()];
+    let confined = Context {
+        confine: Some(&only_main),
+        settings: Some(&settings),
+        ..ctx(&main)
+    };
+    let created = execute(&req(json!({"action": "create", "name": "far"})), &confined);
+    assert!(created.ok, "{}", created.text);
+    let path = created.switch_to.unwrap();
+    assert!(!path.starts_with(&main), "{}", path.display());
+    let entered = execute(
+        &req(json!({"action": "enter", "branch": "forge/far"})),
+        &confined,
+    );
+    assert!(entered.ok, "{}", entered.text);
+}
+
+#[test]
+fn the_overlay_never_force_deletes_a_branch_that_gained_commits() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = repo(dir.path());
+    let made = execute(
+        &req(json!({"action": "create", "name": "wip"})),
+        &ctx(&main),
+    );
+    let wt = made.switch_to.unwrap();
+    std::fs::write(wt.join("new.txt"), "x\n").unwrap();
+    git(&wt, &["add", "new.txt"]);
+    git(&wt, &["commit", "-qm", "unmerged work"]);
+    let out = execute(
+        &req(
+            json!({"action": "remove", "path": wt.to_str().unwrap(), "force": true, "keep_unmerged": true}),
+        ),
+        &ctx(&main),
+    );
+    assert!(out.ok, "{}", out.text);
+    assert!(out.text.contains("kept"), "{}", out.text);
+    assert!(!git(&main, &["branch", "--list", "forge/wip"]).is_empty());
+}
+
+async fn cancelled_create(main: &Path, carry: bool) -> PathBuf {
+    let settings = forge_config::worktree::WorktreeConfig {
+        setup: Some("sleep 2".into()),
+        ..Default::default()
+    };
+    let request = req(json!({
+        "action": "create",
+        "name": "orphan",
+        "dirty": if carry { "carry" } else { "leave" },
+    }));
+    let call = crate::session_worktree::run_off_thread(
+        request,
+        main.to_path_buf(),
+        None,
+        None,
+        None,
+        settings,
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(500), call)
+            .await
+            .is_err(),
+        "the create should still be running when it is cancelled"
+    );
+    let path = main.join(".forge/worktrees/orphan");
+    // The abandoned blocking task finishes its setup, then decides what to do with the worktree.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    path
+}
+
+#[tokio::test]
+async fn cancelling_a_create_that_carried_changes_keeps_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = repo(dir.path());
+    std::fs::write(main.join("a.txt"), "my uncommitted work\n").unwrap();
+    let path = cancelled_create(&main, true).await;
+    assert!(path.is_dir(), "the worktree must survive");
+    assert_eq!(
+        std::fs::read_to_string(path.join("a.txt")).unwrap(),
+        "my uncommitted work\n"
+    );
+    assert!(!git(&main, &["branch", "--list", "forge/orphan"]).is_empty());
+}
+
+#[tokio::test]
+async fn cancelling_a_clean_create_removes_only_the_fresh_worktree() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = repo(dir.path());
+    let path = cancelled_create(&main, false).await;
+    assert!(!path.exists(), "a clean, empty worktree is cleaned up");
+    assert!(git(&main, &["branch", "--list", "forge/orphan"]).is_empty());
 }

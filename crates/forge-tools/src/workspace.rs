@@ -311,9 +311,18 @@ pub fn sibling_worktree_write(args: &Value, workspace: &std::path::Path) -> Opti
     let origin = worktree_origin(workspace)?;
     let managed = origin.join(".forge").join("worktrees");
     let own = crate::core_tools::normalize_target(workspace);
+    // `[worktree] root = "global"` siblings share one `<data>/worktrees/<repo>-<hash>/` folder.
+    let global_group = own
+        .parent()
+        .filter(|group| forge_config::is_global_worktree_path(group))
+        .map(std::path::Path::to_path_buf);
     path_arg_targets(args, workspace)
         .into_iter()
-        .find(|target| target.starts_with(&managed) && !target.starts_with(&own))
+        .find(|target| {
+            let sibling = target.starts_with(&managed)
+                || global_group.as_ref().is_some_and(|g| target.starts_with(g));
+            sibling && !target.starts_with(&own)
+        })
         .map(|target| target.display().to_string())
 }
 
