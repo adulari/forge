@@ -15,6 +15,7 @@ use ratatui::Terminal;
 mod child_view;
 mod chrome;
 mod chrome_surfaces;
+mod duel_picker;
 mod interaction;
 mod notice_during_stream;
 mod panels;

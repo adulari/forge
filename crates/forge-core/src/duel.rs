@@ -12,12 +12,16 @@ use forge_mesh::BudgetState;
 use forge_provider::StreamEvent;
 use forge_types::PermissionMode;
 
+use crate::duel_judge::{DuelSpec, JudgeVerdict};
 use crate::subagent::{self, AgentCtx, Lifecycle, ResolvedAgent};
 use crate::{worktree, CoreError};
 
 /// How many models `/duel` races (also the hard cap on the arena size — one worktree per
 /// candidate, so this bounds concurrent disk/build load too).
-pub const MAX_CANDIDATES: usize = 3;
+pub const MAX_CANDIDATES: usize = 5;
+
+/// How many models race when `/duel` is given no `--n`.
+pub const DEFAULT_CANDIDATES: usize = 3;
 
 /// Timeout for a candidate's post-implementation test run, in its own worktree.
 const DUEL_TEST_TIMEOUT_SECS: u64 = 120;
@@ -62,6 +66,20 @@ pub struct DuelCandidate {
 pub struct DuelReport {
     pub task: String,
     pub candidates: Vec<DuelCandidate>,
+    /// The judge's ranking, when `--judge` was asked for and it answered.
+    pub verdict: Option<JudgeVerdict>,
+    /// Why a requested judge pass produced no verdict.
+    pub judge_error: Option<String>,
+}
+
+impl DuelReport {
+    /// Candidate indices in display order: the judge's ranking when there is one, else as raced.
+    pub fn display_order(&self) -> Vec<usize> {
+        match &self.verdict {
+            Some(v) => v.ranking.iter().map(|j| j.index).collect(),
+            None => (0..self.candidates.len()).collect(),
+        }
+    }
 }
 
 /// A message from a candidate's task back to the draining loop below (mirrors `subagent`'s
@@ -86,9 +104,10 @@ pub async fn run(
     ctx: &AgentCtx,
     parent_id: &str,
     budget: BudgetState,
-    task: &str,
+    spec: &DuelSpec,
     on_event: &mut (dyn FnMut(Lifecycle) + Send),
 ) -> Result<(DuelReport, Vec<worktree::WorktreeGuard>), CoreError> {
+    let task = spec.task.as_str();
     if !worktree::is_git_repo(&ctx.repo_root) {
         return Err(CoreError::Precondition("duel needs a git repo".to_string()));
     }
@@ -99,31 +118,39 @@ pub async fn run(
         ));
     }
 
-    let readiness = crate::readiness::ProviderReadiness::snapshot(&ctx.config, &ctx.store);
-    let health = readiness.health;
-    let quota = readiness.quota;
-    let project = crate::project_context::compute(&ctx.repo_root);
-    let decisions = ctx
-        .router
-        .route_candidates(
-            task,
-            false,
-            budget,
-            &health,
-            &quota,
-            None,
-            &project,
-            MAX_CANDIDATES,
-        )
-        .await;
-
-    // Defensive dedupe: a `Router` impl could hand back the same model twice.
-    let mut seen_models = std::collections::HashSet::new();
-    let decisions: Vec<_> = decisions
-        .into_iter()
-        .filter(|d| seen_models.insert(d.model.clone()))
-        .take(MAX_CANDIDATES)
-        .collect();
+    let decisions = if spec.models.is_empty() {
+        let readiness = crate::readiness::ProviderReadiness::snapshot(&ctx.config, &ctx.store);
+        let health = readiness.health;
+        let quota = readiness.quota;
+        let project = crate::project_context::compute(&ctx.repo_root);
+        let want = spec.n.unwrap_or(DEFAULT_CANDIDATES).min(MAX_CANDIDATES);
+        let routed = ctx
+            .router
+            .route_candidates(task, false, budget, &health, &quota, None, &project, want)
+            .await;
+        // Defensive dedupe: a `Router` impl could hand back the same model twice.
+        let mut seen_models = std::collections::HashSet::new();
+        routed
+            .into_iter()
+            .filter(|d| seen_models.insert(d.model.clone()))
+            .take(want)
+            .collect::<Vec<_>>()
+    } else {
+        // Named models are raced as given, repeats included: three runs of one model is a
+        // legitimate way to see its variance.
+        spec.models
+            .iter()
+            .map(|model| forge_mesh::RoutingDecision {
+                tier: forge_types::TaskTier::Standard,
+                model: model.clone(),
+                rationale: "named in /duel --models".to_string(),
+                fallbacks: Vec::new(),
+                pinned: true,
+                unroutable: false,
+                effort: None,
+            })
+            .collect()
+    };
     if decisions.len() < 2 {
         return Err(CoreError::Precondition(
             "mesh offered only one usable model — /duel needs at least two to race".to_string(),
@@ -159,6 +186,10 @@ pub async fn run(
             .store
             .create_child_session(".", &mode_label, parent_id)
             .map_err(CoreError::from)?;
+        // The `duel:` title is how the session list counts a parent's candidates.
+        let _ = ctx
+            .store
+            .set_session_title(&child_id, &format!("duel:{model_short}"));
         let guard = {
             let repo_root = ctx.repo_root.clone();
             let cid = child_id.clone();
@@ -294,10 +325,22 @@ pub async fn run(
     }
 
     let candidates: Vec<DuelCandidate> = slots.into_iter().flatten().collect();
+    let (verdict, judge_error) = match &spec.judge {
+        Some(choice) => {
+            let fallback = candidates.first().map_or("", |c| c.model.as_str());
+            match crate::duel_judge::judge(ctx, task, &candidates, choice, fallback).await {
+                Ok(v) => (Some(v), None),
+                Err(e) => (None, Some(e)),
+            }
+        }
+        None => (None, None),
+    };
     Ok((
         DuelReport {
             task: task.to_string(),
             candidates,
+            verdict,
+            judge_error,
         },
         guards,
     ))
@@ -317,6 +360,63 @@ pub fn repo_root_of(guards: &[worktree::WorktreeGuard], fallback: &Path) -> std:
 pub fn merge_winner(repo_root: &Path, branch: &str) -> Result<worktree::MergeReport, CoreError> {
     worktree::merge_worktree_back(repo_root, branch)
         .map_err(|e| CoreError::Internal(format!("duel merge failed: {e}")))
+}
+
+/// Title and body for a PR opened from a duel winner: the task, who won and why, and the numbers.
+pub fn winner_pr_text(report: &DuelReport, index: usize) -> (String, String) {
+    let c = &report.candidates[index];
+    let first_line = report.task.lines().next().unwrap_or("").trim();
+    let mut title: String = first_line.chars().take(68).collect();
+    if first_line.chars().count() > 68 {
+        title.push_str("...");
+    }
+    let title = format!("feat: {title}");
+    let tests = match c.tests_passed {
+        Some(true) => "passed",
+        Some(false) => "failed",
+        None => "not run",
+    };
+    let mut body = format!(
+        "{}\n\n---\nWinner of a /duel between {} candidates: `{}` ({} files, +{} -{}, tests {tests}).\n",
+        report.task.trim(),
+        report.candidates.len(),
+        c.model,
+        c.files_changed,
+        c.added,
+        c.removed,
+    );
+    if let Some(v) = &report.verdict {
+        if let Some(j) = v.judgement_for(index) {
+            body.push_str(&format!(
+                "\nJudge `{}` ranked it #{} ({:.1}/10): {}\n",
+                v.judge_model, j.rank, j.score, j.critique
+            ));
+        }
+        if !v.rationale.is_empty() {
+            body.push_str(&format!("\nRationale: {}\n", v.rationale));
+        }
+    }
+    (title, body)
+}
+
+/// Open a pull request from the candidate at `index`: its worktree already holds a committed
+/// branch, so this is the ordinary `open_pr` push-and-create run from there.
+pub async fn open_winner_pr(
+    report: &DuelReport,
+    guards: &[worktree::WorktreeGuard],
+    index: usize,
+) -> Result<String, String> {
+    let branch = &report.candidates[index].branch;
+    let guard = guards
+        .iter()
+        .find(|g| g.branch() == branch)
+        .ok_or("that candidate's worktree is gone")?;
+    let (title, body) = winner_pr_text(report, index);
+    forge_tools::create_pr_in(
+        guard.path(),
+        &serde_json::json!({ "title": title, "body": body }),
+    )
+    .await
 }
 
 /// Parse `git diff --shortstat` output into `(files_changed, added, removed)`. Any field the
@@ -393,6 +493,62 @@ async fn run_tests_in(dir: &Path) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn report_with_verdict() -> DuelReport {
+        let cand = |m: &str| DuelCandidate {
+            model: m.to_string(),
+            child_id: m.to_string(),
+            branch: format!("forge/{m}"),
+            files_changed: 2,
+            added: 10,
+            removed: 1,
+            tests_passed: Some(true),
+            duration_ms: 1,
+            cost_usd: 0.0,
+            summary: String::new(),
+            ok: true,
+        };
+        let j = |index, rank, score: f64, critique: &str| crate::duel_judge::Judgement {
+            index,
+            rank,
+            score,
+            critique: critique.to_string(),
+        };
+        DuelReport {
+            task: "add pagination\nto /users".to_string(),
+            candidates: vec![cand("a"), cand("b"), cand("c")],
+            verdict: Some(JudgeVerdict {
+                judge_model: "j::m".into(),
+                ranking: vec![
+                    j(2, 1, 9.0, "tidy"),
+                    j(0, 2, 5.0, "ok"),
+                    j(1, 3, 1.0, "bad"),
+                ],
+                rationale: "c is tidy".into(),
+                cost_usd: 0.0,
+            }),
+            judge_error: None,
+        }
+    }
+
+    #[test]
+    fn display_order_follows_the_judge_then_the_race() {
+        let mut r = report_with_verdict();
+        assert_eq!(r.display_order(), vec![2, 0, 1]);
+        r.verdict = None;
+        assert_eq!(r.display_order(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn winner_pr_text_carries_the_judge_and_a_one_line_title() {
+        let r = report_with_verdict();
+        let (title, body) = winner_pr_text(&r, 2);
+        assert_eq!(title, "feat: add pagination");
+        assert!(body.contains("add pagination\nto /users"));
+        assert!(body.contains("`c`"));
+        assert!(body.contains("ranked it #1 (9.0/10): tidy"));
+        assert!(body.contains("Rationale: c is tidy"));
+    }
 
     #[test]
     fn parse_shortstat_reads_files_insertions_and_deletions() {

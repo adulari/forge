@@ -226,7 +226,9 @@ fn picker_enter_text(kind: Option<PickerKind>) -> &'static str {
         Some(PickerKind::Models) => "Enter open this provider or pin this model",
         Some(PickerKind::ModelPin) | Some(PickerKind::ModelRung) => "Enter pin for this session",
         Some(PickerKind::CopyBlocks) => "Enter copy to the clipboard, w write to a file",
-        Some(PickerKind::Duel) => "Enter merge this candidate, Esc discard all",
+        Some(PickerKind::Duel) => {
+            "Enter merge this candidate, p open a PR from it, Esc discard all"
+        }
         _ => "Enter select",
     }
 }
@@ -272,6 +274,13 @@ fn picker_view(app: &App) -> View {
         spans
     });
     let mut footer = vec![hint("↑↓", "move"), hint("Enter", "select")];
+    if p.kind == Some(PickerKind::Duel) {
+        footer = vec![
+            hint("↑↓", "move"),
+            hint("Enter", "merge"),
+            hint("p", "open PR"),
+        ];
+    }
     if p.kind == Some(PickerKind::Sessions) {
         footer.insert(0, hint("Tab", "archived"));
     }
@@ -285,6 +294,8 @@ fn picker_view(app: &App) -> View {
         "Esc",
         if p.kind == Some(PickerKind::RewindAction) {
             "back"
+        } else if p.kind == Some(PickerKind::Duel) {
+            "discard"
         } else {
             "close"
         },

@@ -364,8 +364,8 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "duel",
-        desc: "race 2-3 mesh models on one task in separate worktrees, then pick the winner",
-        usage: "/duel <task>",
+        desc: "race 2-5 models on one task in separate worktrees; --judge ranks them, then merge or open a PR",
+        usage: "/duel [--judge[=MODEL]] [--n N] [--models a,b,c] <task>",
     },
     Command {
         name: "voice",

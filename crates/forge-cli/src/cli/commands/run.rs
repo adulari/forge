@@ -83,6 +83,8 @@ pub(crate) mod copy;
 pub(crate) use copy::*;
 mod pickers;
 pub(crate) use pickers::*;
+mod duel_flow;
+pub(crate) use duel_flow::*;
 mod rewind_menu;
 pub(crate) use rewind_menu::*;
 mod anywhere_menu;
@@ -2334,7 +2336,7 @@ pub(crate) async fn run_chat_tui(
                                     args,
                                 ));
                             }
-                            DispatchOutcome::RunDuel { task } => {
+                            DispatchOutcome::RunDuel { spec } => {
                                 turn_gen += 1;
                                 turn_handle = Some(spawn_duel(
                                     &session,
@@ -2343,7 +2345,7 @@ pub(crate) async fn run_chat_tui(
                                     &mut app,
                                     &mut busy,
                                     &mut busy_since,
-                                    task,
+                                    spec,
                                     Arc::clone(&pending_duel),
                                 ));
                             }
@@ -2856,46 +2858,15 @@ pub(crate) async fn run_chat_tui(
                                 // (won only for the winner) so future routing in this repo softly
                                 // favors it, then drop every guard (removes every worktree+branch —
                                 // the winner's diff is already applied, so its branch isn't needed).
-                                if let Some((report, guards)) = duel_state.take() {
-                                    let repo_root =
-                                        forge_core::duel::repo_root_of(&guards, &session_workspace);
-                                    let repo_key = repo_root.display().to_string();
-                                    let winner_branch = row.id.clone();
-                                    let merge_note = match forge_core::duel::merge_winner(
-                                        &repo_root,
-                                        &winner_branch,
-                                    ) {
-                                        Ok(m) if m.conflicted_files.is_empty() => {
-                                            "merged cleanly".to_string()
-                                        }
-                                        Ok(m) => format!(
-                                            "merged with conflicts in: {}",
-                                            m.conflicted_files.join(", ")
-                                        ),
-                                        Err(e) => format!("merge failed: {e}"),
-                                    };
-                                    if let Ok(store) = crate::open_store() {
-                                        for c in &report.candidates {
-                                            let won = c.branch == winner_branch;
-                                            let _ = store.record_duel_outcome(
-                                                &repo_key,
-                                                &c.model,
-                                                won,
-                                                &report.task,
-                                            );
-                                        }
-                                    }
-                                    let winner_model = report
-                                        .candidates
-                                        .iter()
-                                        .find(|c| c.branch == winner_branch)
-                                        .map(|c| c.model.clone())
-                                        .unwrap_or_else(|| "?".to_string());
-                                    app.note(&format!(
-                                        "⚔ duel winner: {winner_model} — {merge_note}"
-                                    ));
-                                    drop(guards);
-                                }
+                                let open_pr = app.picker.last_alt;
+                                resolve_duel_pick(
+                                    &mut app,
+                                    &mut duel_state,
+                                    &session_workspace,
+                                    &row.id,
+                                    open_pr,
+                                )
+                                .await;
                             } else if kind == forge_tui::PickerKind::Sessions
                                 && row.id.starts_with("observe:")
                             {
@@ -3679,7 +3650,7 @@ pub(crate) async fn run_chat_tui(
                                         args,
                                     ));
                                 }
-                                DispatchOutcome::RunDuel { task } => {
+                                DispatchOutcome::RunDuel { spec } => {
                                     turn_gen += 1;
                                     turn_handle = Some(spawn_duel(
                                         &session,
@@ -3688,7 +3659,7 @@ pub(crate) async fn run_chat_tui(
                                         &mut app,
                                         &mut busy,
                                         &mut busy_since,
-                                        task,
+                                        spec,
                                         Arc::clone(&pending_duel),
                                     ));
                                 }
@@ -4250,7 +4221,7 @@ pub(crate) async fn run_chat_tui(
                                         args,
                                     ));
                                 }
-                                DispatchOutcome::RunDuel { task } => {
+                                DispatchOutcome::RunDuel { spec } => {
                                     turn_gen += 1;
                                     turn_handle = Some(spawn_duel(
                                         &session,
@@ -4259,7 +4230,7 @@ pub(crate) async fn run_chat_tui(
                                         &mut app,
                                         &mut busy,
                                         &mut busy_since,
-                                        task,
+                                        spec,
                                         Arc::clone(&pending_duel),
                                     ));
                                 }
@@ -4676,18 +4647,9 @@ pub(crate) async fn run_chat_tui(
                 // `/duel`: a finished report is waiting in `pending_duel` — open the picker over
                 // its candidates (diffstat / test badge / duration / cost) and hold the report +
                 // worktree guards in `duel_state` until the user picks a winner or cancels.
-                if let Some((report, guards)) = pending_duel.lock().unwrap().take() {
-                    if report.candidates.is_empty() {
-                        app.note("⚔ duel produced no usable candidates");
-                    } else {
-                        let rows = duel_picker_rows(&report);
-                        app.picker.open_with(
-                            forge_tui::PickerKind::Duel,
-                            &format!("⚔ duel — pick the winner ({} candidates)", rows.len()),
-                            rows,
-                        );
-                        duel_state = Some((report, guards));
-                    }
+                let finished_duel = pending_duel.lock().unwrap().take();
+                if let Some(result) = finished_duel {
+                    open_duel_picker(&mut app, &mut duel_state, result);
                 }
                 // `/loop`: if this was a loop turn, decide whether to run another iteration —
                 // sentinel/iteration-cap policy, then (only on genuine completion) quality gates,

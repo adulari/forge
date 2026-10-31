@@ -110,7 +110,9 @@ pub(crate) enum DispatchOutcome {
     },
     /// `/duel <task>` — race 2-3 mesh models on the same task, each in its own worktree
     /// (docs/features/duel.md), in a background task like a turn.
-    RunDuel { task: String },
+    RunDuel {
+        spec: forge_core::duel_judge::DuelSpec,
+    },
     /// `/mesh` — overlay opened immediately; receiver delivers the computed `MeshOverlay` (None =
     /// no catalog).
     PendingMesh(tokio::sync::oneshot::Receiver<Option<forge_tui::MeshOverlay>>),
@@ -711,12 +713,13 @@ and keep going."
         // `/duel <task>` — model arena: race 2-3 mesh models on the same task, each in its own
         // isolated worktree, then pick a winner from a comparable picker.
         CommandAction::Duel(text) => {
-            let text = text.trim().to_string();
-            if text.is_empty() {
-                app.note("usage: /duel <task> — races 2-3 mesh models on the same task");
-                return Ok(DispatchOutcome::Handled);
-            }
-            return Ok(DispatchOutcome::RunDuel { task: text });
+            return Ok(match forge_core::duel_judge::DuelSpec::parse(&text) {
+                Ok(spec) => DispatchOutcome::RunDuel { spec },
+                Err(e) => {
+                    app.note(&e);
+                    DispatchOutcome::Handled
+                }
+            });
         }
         // `/voice` (also Ctrl+V) — open the recording overlay. If the configured whisper model
         // isn't on disk yet, kick off the download in the background (progress feeds the overlay)

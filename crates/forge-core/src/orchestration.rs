@@ -685,7 +685,7 @@ impl Session {
     /// panel.
     pub async fn run_duel(
         &mut self,
-        task: &str,
+        spec: &crate::duel_judge::DuelSpec,
     ) -> Result<(duel::DuelReport, Vec<worktree::WorktreeGuard>), CoreError> {
         let budget = self.budget_snapshot();
         let agents = Arc::new(forge_config::load_agents_layered(
@@ -747,6 +747,6 @@ impl Session {
             }),
         };
 
-        duel::run(&ctx, &parent_id, budget, task, &mut on_event).await
+        duel::run(&ctx, &parent_id, budget, spec, &mut on_event).await
     }
 }

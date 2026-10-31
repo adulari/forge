@@ -987,7 +987,7 @@ impl DriverState {
                     args,
                 ));
             }
-            DispatchOutcome::RunDuel { task } => {
+            DispatchOutcome::RunDuel { spec } => {
                 self.turn_gen += 1;
                 self.turn_handle = Some(spawn_duel(
                     &self.session,
@@ -996,7 +996,7 @@ impl DriverState {
                     &mut self.app,
                     &mut self.busy,
                     &mut self.busy_since,
-                    task,
+                    spec,
                     Arc::clone(&self.pending_duel),
                 ));
             }

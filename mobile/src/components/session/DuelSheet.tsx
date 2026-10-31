@@ -12,7 +12,10 @@ import { space } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
 import { Button } from "../ds/Button";
 import { Input } from "../ds/Input";
+import { Segmented } from "../ds/Segmented";
 import { Sheet } from "../ds/Sheet";
+import { Switch } from "../ds/Switch";
+import { DEFAULT_CANDIDATES, duelCommand } from "./duelModel";
 
 export function DuelSheet({
   visible,
@@ -28,10 +31,12 @@ export function DuelSheet({
 }) {
   const tokens = useTokens();
   const [task, setTask] = useState("");
+  const [judge, setJudge] = useState(false);
+  const [candidates, setCandidates] = useState(String(DEFAULT_CANDIDATES));
 
   const start = (text: string) => {
     const trimmed = text.trim();
-    if (trimmed && send({ kind: "prompt", text: `/duel ${trimmed}` })) {
+    if (trimmed && send({ kind: "prompt", text: duelCommand(trimmed, { judge, candidates: Number(candidates) }) })) {
       setTask("");
       onClose();
     }
@@ -40,11 +45,11 @@ export function DuelSheet({
   const draft = currentPrompt?.trim();
 
   return (
-    <Sheet visible={visible} onClose={onClose} accessibilityLabel="Start model duel" snapPoints={[0.6]}>
+    <Sheet visible={visible} onClose={onClose} accessibilityLabel="Start model duel" snapPoints={[0.8]}>
       <View style={styles.content}>
         <Text style={[typeScale.headingBold, { color: tokens.ink }]}>Model duel</Text>
         <Text style={[typeScale.sub, styles.subtitle, { color: tokens.ink3 }]}>
-          Race Forge&apos;s best models on the same task in isolated worktrees, then merge the winning answer.
+          Race Forge&apos;s best models on the same task in isolated worktrees, then merge the winning answer or open a PR from it.
         </Text>
 
         <Input
@@ -57,6 +62,22 @@ export function DuelSheet({
           returnKeyType="send"
           onSubmitEditing={() => start(task)}
         />
+        <View style={styles.optionRow}>
+          <Text style={[typeScale.body, { color: tokens.ink }]}>Models</Text>
+          <Segmented
+            testID="duel-candidates"
+            options={["2", "3", "4", "5"].map((n) => ({ value: n, label: n }))}
+            value={candidates}
+            onChange={setCandidates}
+          />
+        </View>
+        <View style={styles.optionRow}>
+          <View style={styles.optionText}>
+            <Text style={[typeScale.body, { color: tokens.ink }]}>Crown with AI</Text>
+            <Text style={[typeScale.meta, { color: tokens.ink4 }]}>A cheap model grades the diffs and ranks them.</Text>
+          </View>
+          <Switch value={judge} onValueChange={setJudge} accessibilityLabel="Crown with an AI judge" />
+        </View>
         <Button
           label="Start duel"
           onPress={() => start(task)}
@@ -83,7 +104,7 @@ export function DuelSheet({
         ) : null}
 
         <Text style={[typeScale.meta, styles.footnote, { color: tokens.ink4 }]}>
-          When both models finish, a picker opens to compare their answers side by side and pick the winner.
+          When the models finish, a picker opens to compare their answers, then merge the winner or open a PR from it.
         </Text>
       </View>
     </Sheet>
@@ -93,6 +114,8 @@ export function DuelSheet({
 const styles = StyleSheet.create({
   content: { paddingHorizontal: space.space20, paddingBottom: space.space32, gap: space.space12 },
   subtitle: { marginTop: 2, marginBottom: space.space4 },
+  optionRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.space12, minHeight: 44 },
+  optionText: { flex: 1, gap: 2 },
   orLabel: { paddingTop: space.space4 },
   draftRow: { minHeight: 52, justifyContent: "center", gap: 2, borderTopWidth: StyleSheet.hairlineWidth },
   footnote: { paddingTop: space.space4 },
