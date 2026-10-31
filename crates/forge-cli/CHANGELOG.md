@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.26.1] - 2026-10-31
+
 ### Added
 
 - **The browser preview and the file viewer got the tools of a small editor.** The preview dock remembers your last eight addresses (shown when you focus the address bar and on the empty page), names side-by-side preview tabs after the page they show, and has a Console toggle that lists `console.*` output and uncaught errors from the page with an error count on the button. After picking an element, one button types its selector into the session's running terminal without pressing Enter. In the web app the dock frames `localhost` servers in an iframe, with element picking and the console disabled and labelled "Element picking needs the desktop app". In Files, folders now open in place as a lazy tree (with Collapse all and a highlighted selection), single-click opens a file as an italic preview tab that the next click replaces until you edit or double-click it, a dot on the tab marks unsaved edits, and Mod+S saves. Each file has Edit, Code (line numbers and syntax colours, virtualized) and Preview views, markdown renders as a document, SVG renders from your live draft, PDFs show in a frame (new `GET /api/workspace/pdf`, 25 MB cap, `%PDF-` magic required), and Reveal in file tree jumps back to the file.
@@ -5539,7 +5541,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.0...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.1...HEAD
+[2.26.1]: https://github.com/Adulari/forge/compare/v2.26.0...v2.26.1
 [2.26.0]: https://github.com/Adulari/forge/compare/v2.25.2...v2.26.0
 [2.25.2]: https://github.com/Adulari/forge/compare/v2.25.1...v2.25.2
 [2.25.1]: https://github.com/Adulari/forge/compare/v2.25.0...v2.25.1
