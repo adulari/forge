@@ -84,7 +84,10 @@ pub(crate) fn welcome_text(configured: bool, color: bool) -> String {
             "  forge setup               guided: keys, CLI-bridge subscriptions, local models\n",
         );
         out.push_str(
-            "  forge auth <provider>     direct: store one API key (anthropic, openai, groq, …)\n\n",
+            "  forge auth <provider>     direct: store one API key (anthropic, openai, groq, …)\n",
+        );
+        out.push_str(
+            "  forge doctor --fix        update the claude / codex / agy CLIs you already have\n\n",
         );
         out.push_str(&format!("{bold}Then{reset}\n"));
     } else {

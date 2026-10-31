@@ -118,6 +118,15 @@ fn classification_maps_routes_to_scopes() {
     assert_eq!(scope(Method::GET, "/api/config"), "view");
     assert_eq!(scope(Method::GET, "/api/import/scan"), "manage-providers");
     assert_eq!(scope(Method::POST, "/api/import"), "manage-providers");
+    assert_eq!(
+        scope(Method::POST, "/api/agent-installs/update-all"),
+        "manage-providers"
+    );
+    assert_eq!(
+        scope(Method::POST, "/api/agent-installs/claude-cli/run"),
+        "manage-providers"
+    );
+    assert_eq!(scope(Method::GET, "/api/agent-installs"), "view");
     assert_eq!(scope(Method::POST, "/api/push/subscribe"), "view");
     assert_eq!(scope(Method::GET, "/api/remote-access"), "owner");
     assert_eq!(scope(Method::DELETE, "/api/clients/abc"), "owner");

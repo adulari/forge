@@ -404,6 +404,8 @@ pub struct App {
     pub import_menu: crate::import_menu::ImportMenu,
     /// The `/worktree` and `/project` overlay, while open.
     pub workspace_menu: crate::workspace_menu::WorkspaceMenu,
+    /// The `/clis` menu (install and update the subscription CLIs), while open.
+    pub agents_menu: crate::agents_menu::AgentsMenu,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.

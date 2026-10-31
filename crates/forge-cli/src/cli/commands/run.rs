@@ -89,6 +89,7 @@ mod duel_flow;
 pub(crate) use duel_flow::*;
 mod rewind_menu;
 pub(crate) use rewind_menu::*;
+mod agents_menu;
 mod anywhere_menu;
 mod dispatch;
 mod fork_cmd;
@@ -795,6 +796,7 @@ pub(crate) async fn run_chat_tui(
     let mut notes_driver = notes_menu::NotesMenuDriver::new();
     let mut run_menu_driver = run_menu::RunMenuDriver::new();
     let mut import_driver = import_menu::ImportMenuDriver::new();
+    let mut agents_driver = agents_menu::AgentsMenuDriver::new(mock);
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
     // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
     // rendering-facing `VoiceOverlay`. See `apply_voice_start`/`start_voice_transcribe`.
@@ -1671,6 +1673,11 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
                 continue;
             }
+            if app.agents_menu.open {
+                agents_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
 
             // `/notes` owns every key while open, same as the menu above.
             if app.notes_overlay.open {
@@ -1847,6 +1854,7 @@ pub(crate) async fn run_chat_tui(
                 || app.run_menu.open
                 || app.import_menu.open
                 || app.workspace_menu.open
+                || app.agents_menu.open
                 || app.status_open
                 || app.mesh_overlay.open
                 || app.at_picker.open
@@ -5111,6 +5119,9 @@ pub(crate) async fn run_chat_tui(
             dirty = true;
         }
         if import_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if agents_driver.tick(&mut app) {
             dirty = true;
         }
         if app.usage_overlay.open {

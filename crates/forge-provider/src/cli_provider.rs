@@ -228,6 +228,16 @@ impl CliKind {
         }
     }
 
+    /// The executable's bare name (`claude`, `codex`, `agy`).
+    pub fn binary_name(self) -> &'static str {
+        self.default_binary()
+    }
+
+    /// Where the CLI resolves on this machine, or `None` when it is not installed.
+    pub fn binary_path(self) -> Option<std::path::PathBuf> {
+        resolve_on_path(self.default_binary())
+    }
+
     /// All bridge kinds.
     pub fn all() -> [CliKind; 3] {
         [CliKind::ClaudeCode, CliKind::Codex, CliKind::Antigravity]

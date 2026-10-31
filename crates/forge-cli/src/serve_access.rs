@@ -224,6 +224,7 @@ pub(crate) fn required(method: &Method, path: &str) -> Need {
         // Lists and reads other agents' conversations on the host: never a view-only grant.
         || path.starts_with("/api/import")
         || path == "/api/anywhere/enable"
+        || (!read && path.starts_with("/api/agent-installs"))
         || (!read
             && (matches!(path, "/api/update" | "/api/config") || path.starts_with("/api/mcp")))
     {

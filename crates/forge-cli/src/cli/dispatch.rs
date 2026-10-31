@@ -365,8 +365,8 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             previous,
         } => benchmarks_cmd(refresh, export_mirror, previous).await,
         Command::Local { sub } => local_cmd(sub).await,
-        Command::Doctor => {
-            let fails = doctor::run().await?;
+        Command::Doctor { fix } => {
+            let fails = doctor::run(fix).await?;
             if fails > 0 {
                 std::process::exit(1);
             }

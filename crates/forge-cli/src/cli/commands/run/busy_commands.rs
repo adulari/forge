@@ -43,6 +43,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Import
         | CommandAction::Host(_)
         | CommandAction::Control
+        | CommandAction::AgentClis
         | CommandAction::GoalControl(
             GoalControl::Pause | GoalControl::Clear | GoalControl::Status | GoalControl::Edit(_),
         )

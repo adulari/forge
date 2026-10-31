@@ -41,7 +41,7 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
   { href: "/anywhere", title: "Forge Anywhere", subtitle: "Remote hosts and devices", keywords: "anywhere relay remote hosts devices pair account" },
   { href: "/anywhere/sync", title: "Sync across machines", subtitle: "Keys, skills and settings on every machine", keywords: "sync account anywhere machines keys skills settings mcp instructions encrypted devices" },
   { href: "/usage", title: "Usage", subtitle: "Spend and subscription limits", keywords: "usage quota limits spend cost tokens" },
-  { href: "/providers", title: "Providers & accounts", subtitle: "Model providers and logins", keywords: "providers accounts login api key anthropic openai" },
+  { href: "/providers", title: "Providers & accounts", subtitle: "Model providers and logins", keywords: "providers accounts login api key anthropic openai install update upgrade agent cli claude codex antigravity outdated" },
   { href: "/models", title: "Models & mesh", subtitle: "Routing and model health", keywords: "models mesh routing tiers health failover" },
   { href: "/plans", title: "Plans", subtitle: "Saved plans", keywords: "plans approval steps" },
   { href: "/mcp", title: "MCP servers", subtitle: "Tool servers", keywords: "mcp servers tools external" },

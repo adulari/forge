@@ -684,7 +684,11 @@ pub(crate) enum Command {
     },
     /// Diagnose your setup — config, providers/keys, CLI bridges, Ollama, git, terminal — with
     /// actionable fixes. Paste its output into bug reports. Exits non-zero if anything is broken.
-    Doctor,
+    Doctor {
+        /// Update outdated agent CLIs (claude, codex, agy) by running each vendor's own updater.
+        #[arg(long)]
+        fix: bool,
+    },
     /// Automatic error reports: see exactly what would be sent, what was sent, switch the mode,
     /// or report a problem yourself. Reports never contain prompts, replies, code, paths or keys.
     Report(crate::report_args::ReportArgs),

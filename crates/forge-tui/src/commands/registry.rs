@@ -393,6 +393,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/import",
     },
     Command {
+        name: "clis",
+        desc: "install and update the Claude Code, Codex and Antigravity CLIs",
+        usage: "/clis",
+    },
+    Command {
         name: "self-mcp",
         desc: "toggle self-MCP mode: a sub-Forge MCP agent this session can call as tools",
         usage: "/self-mcp [enable|disable]",
