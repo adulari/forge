@@ -2399,6 +2399,7 @@ dependencies = [
  "forge-agent-config",
  "forge-agent-device",
  "forge-agent-index",
+ "forge-agent-lsp",
  "forge-agent-proxy",
  "forge-agent-types",
  "futures",

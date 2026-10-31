@@ -40,6 +40,7 @@ pub mod harness;
 mod job_object;
 pub mod kernel;
 mod lattice_tool;
+pub mod lsp_tool;
 mod open_pr;
 mod proxy;
 mod sandbox;

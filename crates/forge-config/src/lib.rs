@@ -1829,6 +1829,7 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
         // so they need the same secrets-glob floor.
         deny("search", &secrets),
         deny("glob", &secrets),
+        deny("lsp", &secrets),
         // Secrets must also be blocked for write/edit/delete — overwriting a .env or deleting an
         // SSH key is as dangerous as reading it. Also block /etc writes (system config tampering).
         deny("write_file", &{

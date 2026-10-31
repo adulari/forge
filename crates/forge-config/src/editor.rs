@@ -287,6 +287,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.edit_mode" => Some(("Behaviour", "File edit mode")),
         "harness.family_profiles" => Some(("Behaviour", "Model-family profiles")),
         "harness.eval_kernel" => Some(("Behaviour", "Persistent Python kernel")),
+        "harness.lsp_nav" => Some(("Behaviour", "LSP navigation tool")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -547,6 +548,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.cache_monitor" => "Warn immediately, with the cause, when a request breaks the provider prompt cache: the tool list changed or an already-sent message was rewritten. Without it the warning needs two rewrites in a row. Default off.",
         "harness.compaction_summary_cap" => "Cap a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k. Default off.",
         "harness.eval_kernel" => "Advertise a `python` tool: a persistent per-session Python kernel. Runs code with shell-level permissions. Applies to new sessions. Default off.",
+        "harness.lsp_nav" => "Add a deferred read-only lsp tool (definition, hover, references; Python via ty/pyright). Library definitions come back with source inline. Default off.",
         _ => return None,
     })
 }

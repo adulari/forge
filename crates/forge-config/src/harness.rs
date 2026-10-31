@@ -100,6 +100,9 @@ pub struct HarnessConfig {
     /// permissions. Default off (docs/features/eval-kernel.md).
     #[serde(default)]
     pub eval_kernel: bool,
+    /// Register the deferred, read-only `lsp` navigation tool (definition, hover, references).
+    #[serde(default)]
+    pub lsp_nav: bool,
 }
 
 impl Default for HarnessConfig {
@@ -128,6 +131,7 @@ impl Default for HarnessConfig {
             family_profiles: false,
             explicit_flags: Vec::new(),
             eval_kernel: false,
+            lsp_nav: false,
         }
     }
 }
