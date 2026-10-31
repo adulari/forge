@@ -182,6 +182,12 @@ fn decide_in_with(
     if is_shell_tool(tool_name) && denial_note(tool_name, args).is_some() {
         return Deny;
     }
+    if is_shell_tool(tool_name)
+        && forge_types::shell_command_text(args)
+            .is_some_and(|cmd| out_of_bounds_delete(&cmd, workspace).is_some())
+    {
+        return Deny;
+    }
     if matched
         .iter()
         .any(|r| r.source == RuleSource::Builtin && r.decision == Deny)
@@ -459,10 +465,12 @@ mod auto;
 mod auto_safe;
 mod catastrophic;
 mod narrowing;
+mod workspace_delete;
 pub use catastrophic::{catastrophic_shell, privilege_escalation};
 pub use narrowing::{
     append_withheld, narrow_read, split_denied_paths, with_withheld_note, DeniedPaths,
 };
+pub use workspace_delete::out_of_bounds_delete;
 mod expose;
 pub use expose::{
     always_asks as is_public_expose, confirm_call, confirm_label, EXPOSE_PROMPT_PREFIX,
@@ -752,9 +760,10 @@ mod tests {
         ] {
             assert_eq!(decide_ae(cmd), Allow, "{cmd}");
         }
+        for cmd in ["rm -rf ../sibling", "rm -rf /srv/data"] {
+            assert_eq!(decide_ae(cmd), Deny, "{cmd}");
+        }
         for cmd in [
-            "rm -rf ../sibling",
-            "rm -rf /srv/data",
             "rm -rf $BUILD",
             "cd .. && rm -rf proj2",
             "cp build/app ~/bin/app",
