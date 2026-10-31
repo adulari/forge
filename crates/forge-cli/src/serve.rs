@@ -637,6 +637,7 @@ pub(crate) async fn serve_cmd(
         crate::serve_recovery::open_store_or_recover(&listener, &format!("/{token}"), cert_host)
             .await?,
     );
+    crate::serve_push_owners::spawn_sweeper(store.clone());
     let registry = Arc::new(SessionRegistry::new());
     // Other machines for session messaging; answers nothing while Forge Anywhere is off.
     registry.set_remote_hosts(Some(Arc::new(crate::anywhere::peers::AnywhereHosts)));
@@ -1100,10 +1101,13 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
             )),
         )
         .route(&format!("{base}/api/push/key"), get(push_key))
-        .route(&format!("{base}/api/push/subscribe"), post(push_subscribe))
+        .route(
+            &format!("{base}/api/push/subscribe"),
+            post(crate::serve_push_routes::push_subscribe),
+        )
         .route(
             &format!("{base}/api/push/unsubscribe"),
-            post(push_unsubscribe),
+            post(crate::serve_push_routes::push_unsubscribe),
         )
         .route(&format!("{base}/api/answer"), post(answer))
         .route(
@@ -2783,228 +2787,6 @@ async fn push_key(State(state): State<Arc<DaemonState>>) -> Response {
     }
 }
 
-/// Body of `POST /api/push/subscribe` / `unsubscribe` — three shapes on the same two routes,
-/// discriminated structurally (untagged) by which fields are present:
-/// - the browser's `PushSubscription.toJSON()` (Web Push) — `{endpoint, keys}`. No explicit
-///   `kind` marker, since existing web clients already POST exactly this shape.
-/// - a native device token (APNs) — `{device_token, environment}`.
-/// - a Live Activity's per-activity push token — `{session_id, push_token, environment}`.
-///
-/// Untagged deserialization tries each variant in order and picks the first whose required
-/// fields are all present, so field NAMES (not a `kind` tag) are the discriminator — every
-/// variant here has a field name no other variant shares.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum SubscribeReq {
-    LiveActivity {
-        session_id: String,
-        push_token: String,
-        #[serde(default)]
-        environment: String,
-    },
-    Apns {
-        device_token: String,
-        #[serde(default)]
-        environment: String,
-        /// The device's end-to-end notification key (P-256 public key + RFC 8291 auth secret).
-        /// Optional: an app build without the Notification Service Extension omits it and keeps
-        /// the generic lock-screen alert.
-        #[serde(default)]
-        keys: SubscribeKeys,
-    },
-    Webpush {
-        endpoint: String,
-        #[serde(default)]
-        keys: SubscribeKeys,
-    },
-}
-
-#[derive(serde::Deserialize, Default)]
-struct SubscribeKeys {
-    #[serde(default)]
-    p256dh: String,
-    #[serde(default)]
-    auth: String,
-}
-
-/// Validate a Web Push subscription before storing it: a well-formed push endpoint URL plus
-/// decodable RFC 8291 keys of exactly the right shape (65-byte uncompressed P-256 point, 16-byte
-/// auth). Garbage is rejected at the door, not discovered at send time.
-fn validate_subscription(endpoint: &str, keys: &SubscribeKeys) -> Result<(), &'static str> {
-    if endpoint.len() > 2048 {
-        return Err("endpoint too long");
-    }
-    if crate::push::endpoint_origin(endpoint).is_none() {
-        return Err("endpoint is not an http(s) URL");
-    }
-    validate_keys(keys)
-}
-
-/// The RFC 8291 key pair shape shared by Web Push subscriptions and an iOS device's end-to-end
-/// notification key. The point is checked to be on the curve, so an unusable key is refused at
-/// registration instead of silently downgrading every later alert to the generic text.
-fn validate_keys(keys: &SubscribeKeys) -> Result<(), &'static str> {
-    match crate::push::b64url_decode(&keys.p256dh) {
-        Some(k)
-            if k.len() == 65 && k[0] == 0x04 && p256::PublicKey::from_sec1_bytes(&k).is_ok() => {}
-        _ => return Err("keys.p256dh must be a base64url 65-byte uncompressed P-256 point"),
-    }
-    match crate::push::b64url_decode(&keys.auth) {
-        Some(a) if a.len() == 16 => {}
-        _ => return Err("keys.auth must be a base64url 16-byte secret"),
-    }
-    Ok(())
-}
-
-/// A stored APNs environment is either `"production"` or `"sandbox"` — anything else (including
-/// an omitted/empty field) safely falls back to sandbox, mirroring `ApnsNotifier::host`'s own
-/// fallback: a misrouted sandbox token merely fails rather than reaching the wrong audience.
-fn normalize_apns_environment(environment: &str) -> &'static str {
-    if environment == "production" {
-        "production"
-    } else {
-        "sandbox"
-    }
-}
-
-/// `POST /api/push/subscribe` — store (deduped) so a notification reaches this
-/// browser/device/Live Activity.
-async fn push_subscribe(
-    State(state): State<Arc<DaemonState>>,
-    axum::Json(req): axum::Json<SubscribeReq>,
-) -> Response {
-    match req {
-        SubscribeReq::LiveActivity {
-            session_id,
-            push_token,
-            environment,
-        } => {
-            if state.apns.is_none() {
-                return err_response(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "native push is unavailable (no APNs key configured)",
-                );
-            }
-            if session_id.is_empty() {
-                return err_response(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "session_id must be non-empty",
-                );
-            }
-            if !crate::apns::is_valid_token(&push_token) {
-                return err_response(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "push_token must be 64 lowercase hexadecimal characters",
-                );
-            }
-            let environment = normalize_apns_environment(&environment).to_string();
-            let store = state.store.clone();
-            let stored = tokio::task::spawn_blocking(move || {
-                store.upsert_live_activity_token(&session_id, &push_token, &environment)
-            })
-            .await;
-            match stored {
-                Ok(Ok(())) => json_response(&serde_json::json!({ "ok": true })),
-                _ => err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "storing the live activity token failed",
-                ),
-            }
-        }
-        SubscribeReq::Apns {
-            device_token,
-            environment,
-            keys,
-        } => {
-            if state.apns.is_none() {
-                return err_response(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "native push is unavailable (no APNs key configured)",
-                );
-            }
-            if !crate::apns::is_valid_token(&device_token) {
-                return err_response(
-                    axum::http::StatusCode::BAD_REQUEST,
-                    "device_token must be 64 lowercase hexadecimal characters",
-                );
-            }
-            let environment = normalize_apns_environment(&environment).to_string();
-            let e2e = if keys.p256dh.is_empty() && keys.auth.is_empty() {
-                None
-            } else if let Err(msg) = validate_keys(&keys) {
-                return err_response(axum::http::StatusCode::BAD_REQUEST, msg);
-            } else {
-                Some(forge_store::ApnsE2eKey {
-                    p256dh: keys.p256dh,
-                    auth: keys.auth,
-                })
-            };
-            let store = state.store.clone();
-            let stored = tokio::task::spawn_blocking(move || {
-                store.upsert_apns_subscription_with_key(&device_token, &environment, e2e.as_ref())
-            })
-            .await;
-            match stored {
-                Ok(Ok(_)) => json_response(&serde_json::json!({ "ok": true })),
-                _ => err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "storing the subscription failed",
-                ),
-            }
-        }
-        SubscribeReq::Webpush { endpoint, keys } => {
-            if state.push.is_none() {
-                return err_response(
-                    axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                    "web push is unavailable (no VAPID key)",
-                );
-            }
-            if let Err(msg) = validate_subscription(&endpoint, &keys) {
-                return err_response(axum::http::StatusCode::BAD_REQUEST, msg);
-            }
-            let store = state.store.clone();
-            let stored = tokio::task::spawn_blocking(move || {
-                store.upsert_push_subscription(&endpoint, &keys.p256dh, &keys.auth)
-            })
-            .await;
-            match stored {
-                Ok(Ok(_)) => json_response(&serde_json::json!({ "ok": true })),
-                _ => err_response(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "storing the subscription failed",
-                ),
-            }
-        }
-    }
-}
-
-/// `POST /api/push/unsubscribe` — forget a subscription (by endpoint/device token/session id).
-async fn push_unsubscribe(
-    State(state): State<Arc<DaemonState>>,
-    axum::Json(req): axum::Json<SubscribeReq>,
-) -> Response {
-    let store = state.store.clone();
-    match req {
-        // `push_token` isn't needed to delete (session_id is the key) — it's only required by
-        // the shared request shape's discriminator.
-        SubscribeReq::LiveActivity { session_id, .. } => {
-            let _ =
-                tokio::task::spawn_blocking(move || store.delete_live_activity_token(&session_id))
-                    .await;
-        }
-        SubscribeReq::Apns { device_token, .. } => {
-            let _ =
-                tokio::task::spawn_blocking(move || store.delete_apns_subscription(&device_token))
-                    .await;
-        }
-        SubscribeReq::Webpush { endpoint, .. } => {
-            let _ = tokio::task::spawn_blocking(move || store.delete_push_subscription(&endpoint))
-                .await;
-        }
-    }
-    json_response(&serde_json::json!({ "ok": true }))
-}
-
 /// Body of `POST /api/answer` — a notification action resolving a permission prompt.
 #[derive(serde::Deserialize)]
 struct AnswerReq {
@@ -3071,16 +2853,15 @@ async fn upload(
     let Some(handle) = state.registry.get(&params.session).await else {
         return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
     };
-    let dir = std::path::Path::new(&handle.cwd)
-        .join(".forge")
-        .join("uploads")
-        .join(remote::sanitize_upload_name(&handle.session_id));
+    let Some(uploads_root) = unlinked_uploads_root(std::path::Path::new(&handle.cwd)) else {
+        return err_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "the uploads directory is a symlink",
+        );
+    };
+    let dir = uploads_root.join(remote::sanitize_upload_name(&handle.session_id));
     // Keep uploads out of the user's `git status` / broad staging without editing their ignores.
-    let _ = forge_core::ensure_dir_git_ignored(
-        &std::path::Path::new(&handle.cwd)
-            .join(".forge")
-            .join("uploads"),
-    );
+    let _ = forge_core::ensure_dir_git_ignored(&uploads_root);
     let mut stored: Vec<serde_json::Value> = Vec::new();
     loop {
         let field = match multipart.next_field().await {
@@ -3231,6 +3012,17 @@ struct ServeUploadParams {
 /// `.forge/uploads/` directory with the exact same canonicalize + `starts_with` check used in
 /// `handle_remote_attach`/`store_upload`'s callers; anything outside it (or an unknown session,
 /// or a missing file) is a 403/404 — never a 500.
+/// `<cwd>/.forge/uploads`, or `None` when `.forge` or `uploads` is a symlink. A repo can commit
+/// such a link to point uploads (reads and writes) at any directory the daemon can reach.
+fn unlinked_uploads_root(cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+    let forge = cwd.join(".forge");
+    let uploads = forge.join("uploads");
+    let linked = |path: &std::path::Path| {
+        std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+    };
+    (!linked(&forge) && !linked(&uploads)).then_some(uploads)
+}
+
 async fn serve_upload(
     State(state): State<Arc<DaemonState>>,
     Query(params): Query<ServeUploadParams>,
@@ -3247,7 +3039,13 @@ async fn serve_upload(
         Ok(Some(cwd)) => cwd,
         _ => return err_response(axum::http::StatusCode::NOT_FOUND, "no such session"),
     };
-    let root = std::path::Path::new(&cwd).join(".forge").join("uploads");
+    let Some(root) = unlinked_uploads_root(std::path::Path::new(&cwd)) else {
+        return err_response(
+            axum::http::StatusCode::FORBIDDEN,
+            "the uploads directory is a symlink",
+        );
+    };
+    let root = root.join(remote::sanitize_upload_name(&params.session));
     let confined = std::fs::canonicalize(&params.path)
         .ok()
         .zip(std::fs::canonicalize(&root).ok())
@@ -6256,6 +6054,28 @@ pub(crate) mod tests {
         let resp = router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
 
+        // A repo whose `.forge/uploads` is a symlink must not turn the route into a file reader.
+        #[cfg(unix)]
+        {
+            let linked = std::env::temp_dir()
+                .join(format!("forge-serve-upload-link-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&linked);
+            std::fs::create_dir_all(linked.join(".forge")).unwrap();
+            std::os::unix::fs::symlink(&dir, linked.join(".forge").join("uploads")).unwrap();
+            let linked_session = store
+                .create_session(&linked.display().to_string(), "safe")
+                .unwrap();
+            let req = axum::http::Request::get(format!(
+                "/tok/api/upload?session={linked_session}&path={}",
+                outside.display()
+            ))
+            .body(axum::body::Body::empty())
+            .unwrap();
+            let resp = router.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+            let _ = std::fs::remove_dir_all(&linked);
+        }
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -6414,12 +6234,15 @@ pub(crate) mod tests {
             .oneshot(post_json("/api/push/subscribe", sub_body.clone()))
             .await
             .unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        // Re-subscribing dedupes; a malformed key is a 400.
-        router
-            .clone()
-            .oneshot(post_json("/api/push/subscribe", sub_body))
-            .await
+        // The route only accepts real push services over https; the loopback mock endpoint
+        // is stored directly, as the route would have.
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+        store
+            .upsert_push_subscription(
+                &endpoint,
+                &crate::push::b64url(ua_public.as_bytes()),
+                &crate::push::b64url(&auth),
+            )
             .unwrap();
         assert_eq!(store.list_push_subscriptions().unwrap().len(), 1);
         let bad = serde_json::json!({

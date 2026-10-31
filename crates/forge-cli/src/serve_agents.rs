@@ -160,6 +160,7 @@ pub(crate) async fn child_or_404(
     session: &str,
     since: u64,
     ws: WebSocketUpgrade,
+    auth: crate::serve_clients::ClientAuth,
 ) -> Response {
     let store = state.store.clone();
     let id = session.to_string();
@@ -173,7 +174,7 @@ pub(crate) async fn child_or_404(
     }
     let state = state.clone();
     let child_id = session.to_string();
-    ws.on_upgrade(move |socket| async move {
+    crate::serve_access::upgrade_until_revoked(ws, auth, move |socket| async move {
         let mut first = build_snapshot(&state, &child_id).await.unwrap_or_default();
         first.revision = 1;
         let (snapshot_tx, snapshot_rx) =

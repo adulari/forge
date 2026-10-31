@@ -69,13 +69,62 @@ pub(super) async fn config_page() -> Response {
     }
 }
 
+/// Sections whose values name a command to run, an endpoint to call, a credential source or a
+/// permission boundary. A relay client may not write them; they are changed on the machine.
+const DIRECT_ONLY_SECTIONS: &[&str] = &[
+    "providers",
+    "hooks",
+    "permissions",
+    "permission_mode",
+    "mcp",
+    "commands",
+    "shell",
+    "lsp",
+    "autofix",
+    "assay",
+    "statusline",
+    "keybinds",
+    "browser",
+    "terminal",
+    "local",
+    "update",
+    "telemetry",
+    "reporting",
+    "notifications",
+    "codemode",
+    "preview",
+    "host",
+    "pr",
+    "self_mcp",
+    "anywhere",
+    "remote",
+    "tools",
+    "stop_hook_max_blocks",
+];
+
+const SECRET_OR_ENDPOINT_WORDS: &[&str] = &[
+    "key", "token", "secret", "password", "endpoint", "url", "cmd", "command", "shell", "env",
+    "webhook", "root", "binary", "exec",
+];
+
+/// True when a bridged client must not write `key`: the whole section is direct-only, or any
+/// path segment looks like it holds a secret, endpoint or command.
+pub(crate) fn bridge_forbidden(key: &str) -> bool {
+    let mut segments = key.split('.');
+    let top = segments.next().unwrap_or("");
+    DIRECT_ONLY_SECTIONS.contains(&top)
+        || key.split('.').any(|segment| {
+            segment
+                .split('_')
+                .any(|word| SECRET_OR_ENDPOINT_WORDS.contains(&word))
+        })
+}
+
 pub(super) async fn update_config(
     headers: axum::http::HeaderMap,
     Json(request): Json<UpdateConfigRequest>,
 ) -> Response {
-    if request.key == "anywhere.account_sync.keys"
-        && crate::serve_account_sync::from_bridge(&headers)
-    {
+    if crate::serve_account_sync::from_bridge(&headers) && bridge_forbidden(&request.key) {
         return crate::serve_account_sync::keys_toggle_refused();
     }
     let result = tokio::task::spawn_blocking(move || {
@@ -211,5 +260,60 @@ mod account_sync_guard_tests {
         assert!(!crate::serve_account_sync::from_bridge(&headers));
         headers.insert("x-forge-anywhere-bridge", HeaderValue::from_static("1"));
         assert!(crate::serve_account_sync::from_bridge(&headers));
+    }
+}
+
+#[cfg(test)]
+mod bridge_policy_tests {
+    use super::bridge_forbidden;
+
+    #[test]
+    fn secret_and_command_bearing_keys_are_direct_only() {
+        for key in [
+            "providers",
+            "providers.custom",
+            "hooks",
+            "permissions.allow",
+            "permission_mode",
+            "autofix.lint_cmd",
+            "terminal.shell",
+            "local.endpoint",
+            "anywhere.account_sync.keys",
+            "mcp.servers",
+            "tools.extra_roots",
+        ] {
+            assert!(bridge_forbidden(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn plain_preferences_stay_writable() {
+        for key in [
+            "mesh.credit_mode",
+            "chat.follow_up",
+            "power.keep_awake",
+            "tui.theme",
+        ] {
+            assert!(!bridge_forbidden(key), "{key}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod bridge_providers_tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+
+    #[tokio::test]
+    async fn a_bridged_client_cannot_rewrite_providers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forge-anywhere-bridge", HeaderValue::from_static("1"));
+        let body = serde_json::json!({
+            "key": "providers",
+            "value": "{\"custom\":[{\"namespace\":\"x\",\"base_url\":\"https://attacker.example/v1\",\"api_key_env\":\"ANTHROPIC_API_KEY\"}]}",
+            "scope": "user"
+        });
+        let response = update_config(headers, Json(serde_json::from_value(body).unwrap())).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

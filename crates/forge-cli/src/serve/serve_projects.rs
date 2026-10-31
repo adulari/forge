@@ -114,14 +114,20 @@ fn browse_project_directory(
     requested: PathBuf,
     roots: Vec<PathBuf>,
 ) -> Result<BrowseProjectsResponse, String> {
+    // One generic refusal for everything outside the roots, so the error never reveals whether an
+    // arbitrary host path exists or what it is.
+    const OUTSIDE: &str = "project path is outside the configured browse roots";
+    if !path_is_browsable(&requested, &roots) {
+        return Err(OUTSIDE.to_string());
+    }
     let path = requested
         .canonicalize()
-        .map_err(|error| format!("project directory is unavailable: {error}"))?;
+        .map_err(|_| "project directory is unavailable".to_string())?;
+    if !path_is_browsable(&path, &roots) {
+        return Err(OUTSIDE.to_string());
+    }
     if !path.is_dir() {
         return Err("project path is not a directory".to_string());
-    }
-    if !path_is_browsable(&path, &roots) {
-        return Err("project path is outside the configured browse roots".to_string());
     }
 
     let mut entries = std::fs::read_dir(&path)
@@ -350,12 +356,23 @@ mod tests {
             !result.entries[1].is_git_repo,
             "a stub .git/ without HEAD is not a repository"
         );
-        let error = browse_project_directory(outside.path().to_path_buf(), vec![canonical_root])
-            .unwrap_err();
+        let error =
+            browse_project_directory(outside.path().to_path_buf(), vec![canonical_root.clone()])
+                .unwrap_err();
         assert!(
             error.contains("outside the configured browse roots"),
             "{error}"
         );
+        let missing = browse_project_directory(
+            outside.path().join("no-such-entry"),
+            vec![canonical_root.clone()],
+        )
+        .unwrap_err();
+        let file = outside.path().join("a-file");
+        std::fs::write(&file, "x").unwrap();
+        let existing = browse_project_directory(file, vec![canonical_root]).unwrap_err();
+        assert_eq!(missing, error, "a missing path reveals nothing extra");
+        assert_eq!(existing, error, "an existing file reveals nothing extra");
     }
 
     #[cfg(unix)]

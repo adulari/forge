@@ -468,6 +468,7 @@ impl PushNotifier {
             store,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(8))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .context("building reqwest client for push notifier")?,
         })

@@ -60,12 +60,13 @@ impl Drop for FleetClient {
 
 pub(crate) async fn fleet_ws_handler(
     State(state): State<Arc<DaemonState>>,
+    axum::Extension(auth): axum::Extension<crate::serve_clients::ClientAuth>,
     ws: WebSocketUpgrade,
 ) -> Response {
     let fleet_rx = state.registry.subscribe_fleet();
     let going_away = state.registry.signals.going_away_rx();
     let attached = FleetClient::attach(&state.registry.signals.fleet_clients);
-    ws.on_upgrade(move |socket| async move {
+    crate::serve_access::upgrade_until_revoked(ws, auth, move |socket| async move {
         let _attached = attached;
         pump_fleet_ws(socket, fleet_rx, going_away).await;
     })

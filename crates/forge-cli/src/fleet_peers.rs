@@ -681,11 +681,13 @@ pub(crate) struct PeersQuery {
 /// registry of their own (the CLI bridge, a terminal session).
 pub(crate) async fn peers_sessions(
     State(state): State<Arc<DaemonState>>,
+    axum::Extension(auth): axum::Extension<crate::serve_clients::ClientAuth>,
     Query(q): Query<PeersQuery>,
 ) -> Response {
     let filter = ListFilter {
         cwd: q.cwd.filter(|c| !c.trim().is_empty()),
-        local_only: q.local_only,
+        // A client paired to this host sees this host's sessions, not the account's other machines.
+        local_only: q.local_only || !auth.is_owner(),
     };
     json_response(&list_all(&state.store, &state.registry, q.self_id.as_deref(), &filter).await)
 }

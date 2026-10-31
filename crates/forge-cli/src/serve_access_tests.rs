@@ -365,3 +365,86 @@ async fn approvals_and_refusals_land_in_the_audit_log() {
     assert!(!log.contains(&viewer), "client tokens are never logged");
     let _ = std::fs::remove_dir_all(&h.dir);
 }
+
+#[tokio::test]
+async fn a_view_only_client_cannot_slip_frames_past_the_gate_with_a_malformed_field() {
+    let h = harness("gate-malformed").await;
+    let viewer = pair(&h, "viewer", "tv").await;
+    let full = pair(&h, "full", "phone").await;
+    let viewer_gate = InputGate::new(access().clients.authenticate(&viewer).unwrap(), "s");
+    for frame in [
+        r#"{"kind":"prompt","text":"rm -rf ~","yes":0}"#,
+        r#"{"kind":"prompt","text":"x","yes":"x"}"#,
+        r#"{"kind":"key","key":"BTab","yes":0}"#,
+        r#"{"kind":"answer","text":"1","seq":1,"yes":"x"}"#,
+        r#"{"kind":"allow","yes":"maybe","seq":1}"#,
+        r#"{"kind":"steer","text":"x","yes":[]}"#,
+        r#"{"text":"no kind at all"}"#,
+        r#"{"kind":7}"#,
+        r#"[1,2]"#,
+        "not json",
+    ] {
+        assert!(viewer_gate.check(frame).is_some(), "{frame}");
+    }
+    let full_gate = InputGate::new(access().clients.authenticate(&full).unwrap(), "s");
+    assert!(full_gate
+        .check(r#"{"kind":"prompt","text":"hi","yes":0}"#)
+        .is_none());
+    assert!(full_gate
+        .check(r#"{"kind":"prompt","text":"hi"}"#)
+        .is_none());
+    assert_eq!(
+        viewer_gate
+            .check(r#"{"kind":"prompt","text":"hi"}"#)
+            .as_deref(),
+        Some("scope_denied:prompt")
+    );
+}
+
+#[tokio::test]
+async fn revoking_a_client_cuts_work_run_on_its_behalf() {
+    let h = harness("run-until-revoked").await;
+    let token = pair(&h, "full", "phone").await;
+    let auth = access().clients.authenticate(&token).unwrap();
+    let id = auth.id.clone().unwrap();
+    let running = tokio::spawn(run_until_revoked(auth, std::future::pending()));
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!running.is_finished());
+    access().clients.revoke(&id).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), running)
+        .await
+        .expect("a revoked client's socket work stops within seconds")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn revoking_a_client_deletes_its_push_subscriptions_and_protects_others() {
+    use crate::serve_push_owners as owners;
+    let h = harness("push-owners").await;
+    let a_token = pair(&h, "full", "A").await;
+    let b_token = pair(&h, "full", "B").await;
+    let a = access().clients.authenticate(&a_token).unwrap();
+    let b = access().clients.authenticate(&b_token).unwrap();
+    let store = forge_store::Store::open_in_memory().unwrap();
+    let a_endpoint = "https://fcm.googleapis.com/fcm/send/a";
+    store
+        .upsert_push_subscription(a_endpoint, "p", "a")
+        .unwrap();
+    owners::record(&a, "webpush", a_endpoint);
+    store
+        .upsert_live_activity_token("sess", &"a".repeat(64), "production")
+        .unwrap();
+    owners::record(&a, "live", "sess");
+    assert!(
+        !owners::may_modify(&b, "live", "sess"),
+        "B cannot take A's activity"
+    );
+    assert!(owners::may_modify(&a, "live", "sess"));
+    assert!(owners::may_modify(&ClientAuth::owner(), "live", "sess"));
+
+    assert_eq!(owners::purge_revoked(&store), 0);
+    access().clients.revoke(a.id.as_deref().unwrap()).unwrap();
+    assert_eq!(owners::purge_revoked(&store), 2);
+    assert!(store.list_push_subscriptions().unwrap().is_empty());
+    assert!(store.get_live_activity_token("sess").unwrap().is_none());
+}
