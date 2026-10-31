@@ -39,9 +39,9 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 /// A lazily-initialized language-server slot for one `(language, repo-root)` pair, behind its
 /// own lock so a hung server only blocks callers waiting on that same pair.
-type ServerSlot = Arc<Mutex<ServerEntry>>;
+pub(crate) type ServerSlot = Arc<Mutex<ServerEntry>>;
 
-fn global_permits() -> &'static Arc<Semaphore> {
+pub(crate) fn global_permits() -> &'static Arc<Semaphore> {
     static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
     PERMITS.get_or_init(|| Arc::new(Semaphore::new(MAX_LIVE_SERVERS)))
 }
@@ -53,16 +53,16 @@ fn global_permits() -> &'static Arc<Semaphore> {
 /// and one identical warning per edited file. Recording the failure lets Forge skip the attempt
 /// until the cooldown expires, and a later success (once the toolchain is repaired) clears it, so
 /// diagnostics come back on their own without restarting Forge.
-struct ServerEntry {
-    server: Option<LspServer>,
+pub(crate) struct ServerEntry {
+    pub(crate) server: Option<LspServer>,
     consecutive_failures: u32,
     /// Set once this pair is given up on, holding the reason to report instead of retrying.
-    abandoned: Option<String>,
+    pub(crate) abandoned: Option<String>,
     retry_at: Option<Instant>,
     last_used: Instant,
     idle_generation: u64,
     idle_timer: Option<tokio::task::AbortHandle>,
-    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    pub(crate) permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl Default for ServerEntry {
@@ -82,12 +82,12 @@ impl Default for ServerEntry {
 
 impl ServerEntry {
     /// Whether a start attempt is still suppressed by the current cooldown.
-    fn cooling_down(&self, now: Instant) -> bool {
+    pub(crate) fn cooling_down(&self, now: Instant) -> bool {
         self.retry_at.is_some_and(|retry_at| now < retry_at)
     }
 
     /// Drop any live server, extend the cooldown, and return how long the next attempt waits.
-    fn record_failure(&mut self, now: Instant) -> Duration {
+    pub(crate) fn record_failure(&mut self, now: Instant) -> Duration {
         self.server = None;
         self.permit = None;
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
@@ -113,13 +113,13 @@ impl ServerEntry {
     /// dies minutes later while indexing, so clearing here reset the counter to zero before every
     /// failure — the exponential backoff never once doubled, and 386 consecutive failures all
     /// reported the same "retrying in 30s".
-    fn clear_failure(&mut self) {
+    pub(crate) fn clear_failure(&mut self) {
         self.consecutive_failures = 0;
         self.abandoned = None;
         self.retry_at = None;
     }
 
-    fn touch(&mut self) -> u64 {
+    pub(crate) fn touch(&mut self) -> u64 {
         self.last_used = Instant::now();
         self.idle_generation = self.idle_generation.wrapping_add(1);
         self.idle_generation
@@ -167,8 +167,10 @@ fn failure_backoff(consecutive_failures: u32) -> Duration {
 /// blocks callers waiting on *that* entry; the outer `servers` lock is only ever held briefly to
 /// look up or insert the entry itself, never across the slow spawn/initialize/diagnostics work.
 pub struct LspRegistry {
-    config: LspConfig,
-    servers: Mutex<HashMap<(String, PathBuf), ServerSlot>>,
+    pub(crate) config: LspConfig,
+    /// Built for the `lsp` navigation tool: Python falls back to ty/pyright/basedpyright.
+    pub(crate) nav: bool,
+    pub(crate) servers: Mutex<HashMap<(String, PathBuf), ServerSlot>>,
 }
 
 impl LspRegistry {
@@ -176,15 +178,24 @@ impl LspRegistry {
     pub fn from_config(config: &LspConfig) -> Self {
         Self {
             config: config.clone(),
+            nav: false,
             servers: Mutex::new(HashMap::new()),
         }
     }
 
-    fn idle_ttl(&self) -> Duration {
+    /// [`Self::from_config`] for a session that registers the `lsp` navigation tool.
+    pub fn from_config_nav(config: &LspConfig) -> Self {
+        Self {
+            nav: true,
+            ..Self::from_config(config)
+        }
+    }
+
+    pub(crate) fn idle_ttl(&self) -> Duration {
         Duration::from_secs(self.config.idle_timeout_secs.max(1))
     }
 
-    fn memory_limit_bytes(&self) -> Option<u64> {
+    pub(crate) fn memory_limit_bytes(&self) -> Option<u64> {
         self.config
             .memory_limit_mb
             .checked_mul(1024 * 1024)
@@ -229,46 +240,9 @@ impl LspRegistry {
         let idle_ttl = self.idle_ttl();
         let rust_resource_profile = uses_rust_analyzer_profile(lang, &cmd);
 
-        // Only the map lookup/insert happens under the registry-wide lock; the entry's own
-        // lock (acquired below, after this guard is dropped) is what serializes the actual
-        // spawn/initialize/diagnostics work for that one (language, repo-root) pair.
-        let entry = {
-            let mut servers = self.servers.lock().await;
-            let now = Instant::now();
-            // Do not wait behind a diagnostic request while holding the registry lock. Busy slots
-            // stay alive; idle ones are dropped (and kill_on_drop reaps their child).
-            servers.retain(|_, entry| {
-                entry
-                    .try_lock()
-                    .map(|slot| !slot.is_idle_for(now, idle_ttl) || slot.cooling_down(now))
-                    .unwrap_or(true)
-            });
-            if !servers.contains_key(&key) && servers.len() >= MAX_SERVER_SLOTS {
-                let evict = servers
-                    .iter()
-                    .filter_map(|(key, entry)| {
-                        entry
-                            .try_lock()
-                            .ok()
-                            .map(|slot| (key.clone(), slot.last_used))
-                    })
-                    .min_by_key(|(_, last_used)| *last_used)
-                    .map(|(key, _)| key);
-                if let Some(evict) = evict {
-                    debug!("lsp: evicting least-recently-used server slot to enforce root limit");
-                    servers.remove(&evict);
-                } else {
-                    // All analyzers are busy. Diagnostics are best-effort; never overcommit.
-                    return Self::unavailable_diagnostic(
-                        abs_path,
-                        "all language-server slots are busy",
-                    );
-                }
-            }
-            servers
-                .entry(key)
-                .or_insert_with(|| Arc::new(Mutex::new(ServerEntry::default())))
-                .clone()
+        let Some(entry) = self.slot_for(key, idle_ttl).await else {
+            // All analyzers are busy. Diagnostics are best-effort; never overcommit.
+            return Self::unavailable_diagnostic(abs_path, "all language-server slots are busy");
         };
 
         let memory_limit_mb = self.config.memory_limit_mb;
@@ -415,6 +389,47 @@ impl LspRegistry {
         diagnostics
     }
 
+    /// The slot for `key`, creating it. Only the map lookup/insert happens under the
+    /// registry-wide lock; the slot's own lock is what serializes spawn/initialize/requests for
+    /// that one (language, repo-root) pair. `None` when every slot is busy.
+    pub(crate) async fn slot_for(
+        &self,
+        key: (String, PathBuf),
+        idle_ttl: Duration,
+    ) -> Option<ServerSlot> {
+        let mut servers = self.servers.lock().await;
+        let now = Instant::now();
+        // Do not wait behind a diagnostic request while holding the registry lock. Busy slots
+        // stay alive; idle ones are dropped (and kill_on_drop reaps their child).
+        servers.retain(|_, entry| {
+            entry
+                .try_lock()
+                .map(|slot| !slot.is_idle_for(now, idle_ttl) || slot.cooling_down(now))
+                .unwrap_or(true)
+        });
+        if !servers.contains_key(&key) && servers.len() >= MAX_SERVER_SLOTS {
+            let evict = servers
+                .iter()
+                .filter_map(|(key, entry)| {
+                    entry
+                        .try_lock()
+                        .ok()
+                        .map(|slot| (key.clone(), slot.last_used))
+                })
+                .min_by_key(|(_, last_used)| *last_used)
+                .map(|(key, _)| key);
+            let evict = evict?;
+            debug!("lsp: evicting least-recently-used server slot to enforce root limit");
+            servers.remove(&evict);
+        }
+        Some(
+            servers
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(ServerEntry::default())))
+                .clone(),
+        )
+    }
+
     /// Keep analyzer failures visible to callers that intentionally use the historical
     /// `Vec<Diagnostic>` API. This is an informational hint, never a source-code error.
     fn unavailable_diagnostic(path: &Path, reason: impl Into<String>) -> Vec<Diagnostic> {
@@ -530,7 +545,12 @@ fn initialization_options_for(rust_resource_profile: bool) -> Option<Value> {
 }
 
 /// Process-wide capacity permits are held for the lifetime of each live analyzer.
-fn arm_idle_timer(slot: &mut ServerEntry, entry: ServerSlot, generation: u64, delay: Duration) {
+pub(crate) fn arm_idle_timer(
+    slot: &mut ServerEntry,
+    entry: ServerSlot,
+    generation: u64,
+    delay: Duration,
+) {
     if let Some(previous) = slot.idle_timer.take() {
         previous.abort();
     }
@@ -558,7 +578,7 @@ fn arm_idle_timer(slot: &mut ServerEntry, entry: ServerSlot, generation: u64, de
 }
 
 /// Render a captured stderr tail as a trailing clause, or nothing when the server was silent.
-fn stderr_clause(cause: &str) -> String {
+pub(crate) fn stderr_clause(cause: &str) -> String {
     if cause.is_empty() {
         String::new()
     } else {
@@ -614,7 +634,7 @@ pub fn which(cmd: &str) -> Option<PathBuf> {
     None
 }
 
-fn path_to_uri(path: &Path) -> String {
+pub(crate) fn path_to_uri(path: &Path) -> String {
     let p = if path.is_absolute() {
         path.to_path_buf()
     } else {

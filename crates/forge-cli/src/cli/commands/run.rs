@@ -25,6 +25,7 @@ mod commit_prompt;
 mod delete_flow;
 mod dispatch_checks;
 mod exit_hint;
+mod lsp_nav;
 mod ui_events;
 mod update_flow;
 pub(crate) use autonomous::*;

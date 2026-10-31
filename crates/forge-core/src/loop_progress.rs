@@ -21,7 +21,7 @@ pub(crate) use text::hash_str;
 
 /// Tools that cannot change the working tree: a step made only of these is never a reason to
 /// look at it. Everything else (a shell command, a script, an external server's tool) might.
-const TREE_SAFE_TOOLS: [&str; 14] = [
+const TREE_SAFE_TOOLS: [&str; 15] = [
     "read_file",
     "list_dir",
     "glob",
@@ -29,6 +29,7 @@ const TREE_SAFE_TOOLS: [&str; 14] = [
     "web_fetch",
     "web_search",
     "lattice",
+    "lsp",
     "shell_job",
     "update_tasks",
     "ask_user",

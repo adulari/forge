@@ -28,6 +28,7 @@ pub mod evidence;
 pub mod fs_write;
 mod job_object;
 mod lattice_tool;
+pub mod lsp_tool;
 mod open_pr;
 mod proxy;
 mod sandbox;

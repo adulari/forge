@@ -1585,6 +1585,9 @@ pub struct HarnessConfig {
     /// and move the progress ledger's cycle stop two repeats later.
     #[serde(default)]
     pub repeat_interrupt: bool,
+    /// Register the deferred, read-only `lsp` navigation tool (definition, hover, references).
+    #[serde(default)]
+    pub lsp_nav: bool,
 }
 
 impl Default for HarnessConfig {
@@ -1599,6 +1602,7 @@ impl Default for HarnessConfig {
             stop_retries: false,
             thinking_loop_breaker: false,
             repeat_interrupt: false,
+            lsp_nav: false,
         }
     }
 }
@@ -1905,6 +1909,7 @@ pub fn builtin_deny_rules() -> Vec<PermissionRule> {
         // so they need the same secrets-glob floor.
         deny("search", &secrets),
         deny("glob", &secrets),
+        deny("lsp", &secrets),
         // Secrets must also be blocked for write/edit/delete — overwriting a .env or deleting an
         // SSH key is as dangerous as reading it. Also block /etc writes (system config tampering).
         deny("write_file", &{

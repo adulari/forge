@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,6 +27,13 @@ pub struct LspServer {
     stdout: BufReader<ChildStdout>,
     next_id: u64,
     documents: HashMap<String, i32>,
+    /// Hash of the text last sent for each open document, so nav can tell a changed file from an
+    /// unchanged one without resending it.
+    doc_hashes: HashMap<String, u64>,
+    /// Server capabilities from the initialize result (nav servers only read it).
+    pub(crate) capabilities: Value,
+    /// Open `$/progress` tokens; a non-empty set means the server is still indexing.
+    progress_active: HashSet<String>,
     /// Bounded tail of the server's stderr. A server that dies during the handshake reports the
     /// real cause here (a missing rustup component, a bad config) while stdout only shows EOF.
     stderr: Arc<Mutex<String>>,
@@ -113,6 +121,9 @@ impl LspServer {
             stdout,
             next_id: 1,
             documents: HashMap::new(),
+            doc_hashes: HashMap::new(),
+            capabilities: Value::Null,
+            progress_active: HashSet::new(),
             stderr,
             stderr_reader,
             memory_guard,
@@ -156,8 +167,28 @@ impl LspServer {
         timeout: Duration,
         initialization_options: Option<Value>,
     ) -> std::io::Result<()> {
+        self.initialize_inner(root_uri, timeout, initialization_options, false)
+            .await
+    }
+
+    /// Initialize declaring the navigation capabilities (definition, references, hover).
+    pub(crate) async fn initialize_nav(
+        &mut self,
+        root_uri: &str,
+        timeout: Duration,
+    ) -> std::io::Result<()> {
+        self.initialize_inner(root_uri, timeout, None, true).await
+    }
+
+    async fn initialize_inner(
+        &mut self,
+        root_uri: &str,
+        timeout: Duration,
+        initialization_options: Option<Value>,
+        nav: bool,
+    ) -> std::io::Result<()> {
         let id = self.new_id();
-        let req = initialize_request(id, root_uri, initialization_options);
+        let req = initialize_request(id, root_uri, initialization_options, nav);
         write_msg(&mut self.stdin, &req).await?;
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -181,6 +212,10 @@ impl LspServer {
                                 sanitize_log_text(message)
                             )));
                         }
+                        self.capabilities = msg
+                            .pointer("/result/capabilities")
+                            .cloned()
+                            .unwrap_or(Value::Null);
                         break;
                     }
                 }
@@ -240,8 +275,167 @@ impl LspServer {
                 }
             })
         };
+        self.doc_hashes.insert(uri.to_string(), text_hash(text));
         write_msg(&mut self.stdin, &notif).await?;
         Ok(current_version)
+    }
+
+    /// [`Self::sync_document`], skipped when the server already holds exactly this text.
+    pub(crate) async fn sync_if_changed(
+        &mut self,
+        uri: &str,
+        lang: &str,
+        text: &str,
+    ) -> std::io::Result<()> {
+        if self.doc_hashes.get(uri) == Some(&text_hash(text)) {
+            return Ok(());
+        }
+        self.sync_document(uri, lang, text).await.map(|_| ())
+    }
+
+    /// Bring every document this server holds in line with the disk. Shell and script edits never
+    /// pass through a dispatcher hook, so nav calls would otherwise answer from stale text.
+    pub(crate) async fn resync_from_disk(&mut self) -> std::io::Result<()> {
+        let mut uris: Vec<String> = self.documents.keys().cloned().collect();
+        uris.sort();
+        uris.truncate(RESYNC_DOCUMENT_CAP);
+        for uri in uris {
+            let Some(path) = crate::position::uri_to_path(&uri) else {
+                continue;
+            };
+            match std::fs::read_to_string(&path) {
+                Ok(text) => {
+                    if self.doc_hashes.get(&uri) != Some(&text_hash(&text)) {
+                        self.sync_document(&uri, "", &text).await?;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    self.documents.remove(&uri);
+                    self.doc_hashes.remove(&uri);
+                    let close = json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/didClose",
+                        "params": { "textDocument": { "uri": uri } }
+                    });
+                    write_msg(&mut self.stdin, &close).await?;
+                }
+                Err(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the server has an open `$/progress` task (still indexing).
+    pub(crate) fn is_indexing(&self) -> bool {
+        !self.progress_active.is_empty()
+    }
+
+    /// Send one request and wait for its response, answering the server's own requests and
+    /// discarding everything else. A passed `deadline` sends `$/cancelRequest`.
+    pub(crate) async fn request(
+        &mut self,
+        method: &str,
+        params: Value,
+        deadline: tokio::time::Instant,
+    ) -> Result<Value, NavError> {
+        let mut retried = false;
+        let mut id = self.new_id();
+        self.send_request(id, method, &params).await?;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let read = if remaining.is_zero() {
+                None
+            } else {
+                tokio::time::timeout(remaining, read_msg(&mut self.stdout))
+                    .await
+                    .ok()
+            };
+            let msg = match read {
+                None => {
+                    let cancel = json!({
+                        "jsonrpc": "2.0",
+                        "method": "$/cancelRequest",
+                        "params": { "id": id }
+                    });
+                    let _ = write_msg(&mut self.stdin, &cancel).await;
+                    return Err(NavError::TimedOut);
+                }
+                Some(Ok(Some(msg))) => msg,
+                Some(Ok(None)) => return Err(NavError::Transport("server closed stdout".into())),
+                Some(Err(error)) => return Err(NavError::Transport(error.to_string())),
+            };
+            if msg.get("method").is_some() {
+                self.answer_incoming(&msg).await?;
+                continue;
+            }
+            if msg.get("id").and_then(Value::as_u64) != Some(id) {
+                continue;
+            }
+            if let Some(error) = msg.get("error") {
+                let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
+                if code == CONTENT_MODIFIED && !retried {
+                    retried = true;
+                    id = self.new_id();
+                    self.send_request(id, method, &params).await?;
+                    continue;
+                }
+                let text = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("request failed");
+                return Err(NavError::Server(sanitize_log_text(text)));
+            }
+            return Ok(msg.get("result").cloned().unwrap_or(Value::Null));
+        }
+    }
+
+    async fn send_request(
+        &mut self,
+        id: u64,
+        method: &str,
+        params: &Value,
+    ) -> Result<(), NavError> {
+        let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        write_msg(&mut self.stdin, &req)
+            .await
+            .map_err(|error| NavError::Transport(error.to_string()))
+    }
+
+    /// Handle a server-initiated message: answer its requests, track progress, drop the rest.
+    async fn answer_incoming(&mut self, msg: &Value) -> Result<(), NavError> {
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        if method == "$/progress" {
+            let token = msg
+                .pointer("/params/token")
+                .map(Value::to_string)
+                .unwrap_or_default();
+            match msg.pointer("/params/value/kind").and_then(Value::as_str) {
+                Some("begin") => {
+                    self.progress_active.insert(token);
+                }
+                Some("end") => {
+                    self.progress_active.remove(&token);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+        let Some(id) = msg.get("id") else {
+            return Ok(());
+        };
+        let result = if method == "workspace/configuration" {
+            let items = msg
+                .pointer("/params/items")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            Value::Array(vec![Value::Null; items])
+        } else {
+            Value::Null
+        };
+        let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
+        write_msg(&mut self.stdin, &reply)
+            .await
+            .map_err(|error| NavError::Transport(error.to_string()))
     }
 
     pub async fn collect_diagnostics(
@@ -298,10 +492,34 @@ impl LspServer {
     }
 }
 
+/// Most documents re-read from disk before one nav request.
+const RESYNC_DOCUMENT_CAP: usize = 64;
+/// LSP `ContentModified`: the server's state changed under the request; one retry is allowed.
+const CONTENT_MODIFIED: i64 = -32801;
+
+/// Why a navigation request produced no result.
+#[derive(Debug)]
+pub enum NavError {
+    TimedOut,
+    Transport(String),
+    Server(String),
+}
+
+fn text_hash(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Quiet time after a matching publishDiagnostics before it is taken as the final set.
 const DIAGNOSTICS_SETTLE: Duration = Duration::from_millis(750);
 
-fn initialize_request(id: u64, root_uri: &str, initialization_options: Option<Value>) -> Value {
+fn initialize_request(
+    id: u64,
+    root_uri: &str,
+    initialization_options: Option<Value>,
+    nav: bool,
+) -> Value {
     let mut params = json!({
         "processId": std::process::id(),
         "rootUri": root_uri,
@@ -311,6 +529,20 @@ fn initialize_request(id: u64, root_uri: &str, initialization_options: Option<Va
             }
         }
     });
+    if nav {
+        params["capabilities"] = json!({
+            "textDocument": {
+                "publishDiagnostics": {},
+                "definition": { "linkSupport": true },
+                "references": {},
+                "hover": { "contentFormat": ["plaintext", "markdown"] }
+            },
+            "general": { "positionEncodings": ["utf-16"] },
+            "workspace": { "configuration": true },
+            "window": { "workDoneProgress": true }
+        });
+        params["workspaceFolders"] = json!([{ "uri": root_uri, "name": "workspace" }]);
+    }
     if let Some(options) = initialization_options {
         params
             .as_object_mut()
@@ -548,6 +780,7 @@ mod tests {
             7,
             "file:///workspace",
             Some(json!({"numThreads": 1, "checkOnSave": false})),
+            false,
         );
 
         assert_eq!(request["id"], 7);
@@ -555,6 +788,125 @@ mod tests {
         assert_eq!(
             request["params"]["initializationOptions"],
             json!({"numThreads": 1, "checkOnSave": false})
+        );
+    }
+
+    /// A fake server that echoes everything it is sent into `log` and replays `frames` first.
+    #[cfg(unix)]
+    async fn fake_server(
+        frames: &[Value],
+        dir: &std::path::Path,
+    ) -> (LspServer, std::path::PathBuf) {
+        let mut bytes = Vec::new();
+        for frame in frames {
+            let body = serde_json::to_vec(frame).unwrap();
+            bytes.extend(format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes());
+            bytes.extend(body);
+        }
+        let replay = dir.join("replay");
+        let log = dir.join("log");
+        std::fs::write(&replay, bytes).unwrap();
+        let script = format!(
+            "cat {}; cat <&0 >{} & exec sleep 30",
+            replay.display(),
+            log.display()
+        );
+        let server = LspServer::spawn("/bin/sh", &["-c".to_string(), script])
+            .await
+            .unwrap();
+        (server, log)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_skips_noise_answers_server_requests_and_returns_its_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = [
+            json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":"file:///x","diagnostics":[]}}),
+            json!({"jsonrpc":"2.0","id":99,"result":"late reply to a cancelled request"}),
+            json!({"jsonrpc":"2.0","id":7,"method":"workspace/configuration","params":{"items":[{},{}]}}),
+            json!({"jsonrpc":"2.0","method":"$/progress","params":{"token":"t","value":{"kind":"begin"}}}),
+            json!({"jsonrpc":"2.0","id":1,"result":{"ok":true}}),
+        ];
+        let (mut server, log) = fake_server(&frames, dir.path()).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let result = server
+            .request("textDocument/definition", json!({"a": 1}), deadline)
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"ok": true}));
+        assert!(server.is_indexing());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let sent = std::fs::read_to_string(log).unwrap();
+        assert!(
+            sent.contains(r#""method":"textDocument/definition""#),
+            "{sent}"
+        );
+        assert!(
+            sent.contains(r#""id":7,"jsonrpc":"2.0","result":[null,null]"#),
+            "{sent}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn request_cancels_on_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut server, log) = fake_server(&[], dir.path()).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+        let error = server
+            .request("textDocument/hover", json!({}), deadline)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, NavError::TimedOut), "{error:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let sent = std::fs::read_to_string(log).unwrap();
+        assert!(
+            sent.contains(r#""method":"$/cancelRequest","params":{"id":1}"#),
+            "{sent}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn resync_sends_changes_only_for_edited_and_deleted_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut server, log) = fake_server(&[], dir.path()).await;
+        let a = dir.path().join("a.py");
+        let b = dir.path().join("b.py");
+        let c = dir.path().join("c.py");
+        for path in [&a, &b, &c] {
+            std::fs::write(path, "one").unwrap();
+            let uri = format!("file://{}", path.display());
+            server.sync_document(&uri, "python", "one").await.unwrap();
+        }
+        std::fs::write(&b, "two").unwrap();
+        std::fs::remove_file(&c).unwrap();
+        server.resync_from_disk().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let sent = std::fs::read_to_string(log).unwrap();
+        assert_eq!(sent.matches("textDocument/didOpen").count(), 3, "{sent}");
+        assert_eq!(sent.matches("textDocument/didChange").count(), 1, "{sent}");
+        assert!(sent.contains(&format!("file://{}", b.display())));
+        assert_eq!(sent.matches("textDocument/didClose").count(), 1, "{sent}");
+    }
+
+    #[test]
+    fn non_nav_initialize_request_is_unchanged() {
+        let plain = initialize_request(1, "file:///w", None, false);
+        assert_eq!(
+            plain["params"]["capabilities"],
+            json!({"textDocument": {"publishDiagnostics": {}}})
+        );
+        assert!(plain["params"].get("workspaceFolders").is_none());
+        let nav = initialize_request(1, "file:///w", None, true);
+        assert_eq!(
+            nav["params"]["capabilities"]["general"]["positionEncodings"],
+            json!(["utf-16"])
+        );
+        assert_eq!(
+            nav["params"]["capabilities"]["workspace"]["configuration"],
+            true
         );
     }
 

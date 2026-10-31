@@ -518,6 +518,7 @@ pub(crate) async fn build_session_with_self_mcp(
     }
 
     let lsp_config = config.lsp.clone();
+    let lsp_pool = super::lsp_nav::build(&config, &mut tools);
     let mut session = match resume {
         Some(ref prefix) => {
             let full = resolve_session(&store, prefix)?;
@@ -664,9 +665,7 @@ pub(crate) async fn build_session_with_self_mcp(
         }
     }
     if lsp_config.enabled {
-        session.set_lsp(Some(std::sync::Arc::new(
-            forge_lsp::LspRegistry::from_config(&lsp_config),
-        )));
+        session.set_lsp(lsp_pool);
     }
     clock.mark("skills + mcp + lsp");
     super::skill_invoke::apply_one_shot_grant(&mut session);

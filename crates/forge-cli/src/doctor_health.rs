@@ -394,13 +394,38 @@ pub(crate) fn anywhere_checks() -> Vec<Check> {
     }
 }
 
-/// The "Language servers" report section, present only when `[lsp] enabled`.
+/// The "Language servers" report section, present when `[lsp] enabled` or `[harness] lsp_nav`.
 pub(crate) fn lsp_section() -> Option<(&'static str, Vec<Check>)> {
     let config = forge_config::load().ok()?;
-    config
-        .lsp
-        .enabled
-        .then(|| ("Language servers", lsp_checks(&config.lsp)))
+    if !config.lsp.enabled && !config.harness.lsp_nav {
+        return None;
+    }
+    let mut checks = if config.lsp.enabled {
+        lsp_checks(&config.lsp)
+    } else {
+        Vec::new()
+    };
+    if config.harness.lsp_nav {
+        checks.push(lsp_nav_check(&config.lsp));
+    }
+    Some(("Language servers", checks))
+}
+
+fn lsp_nav_check(config: &forge_config::LspConfig) -> Check {
+    match forge_lsp::LspRegistry::from_config_nav(config).nav_candidate() {
+        Some(server) => check(
+            Status::Ok,
+            "lsp navigation",
+            format!("the lsp tool will use `{server}` for Python"),
+            None,
+        ),
+        None => check(
+            Status::Warn,
+            "lsp navigation",
+            "no Python language server found (ty, pyright-langserver, basedpyright-langserver): the lsp tool will report unavailable",
+            None,
+        ),
+    }
 }
 
 fn lsp_checks(config: &forge_config::LspConfig) -> Vec<Check> {

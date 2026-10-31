@@ -933,6 +933,38 @@ mod tests {
     }
 
     #[test]
+    fn builtin_secret_denylist_covers_the_lsp_tool() {
+        let rules = forge_config::builtin_deny_rules();
+        for p in ["./.env", "/home/u/.ssh/id_ecdsa"] {
+            assert_eq!(
+                decide(
+                    PermissionMode::Bypass,
+                    SideEffect::ReadOnly,
+                    "lsp",
+                    &path(p),
+                    &rules
+                ),
+                Deny,
+                "lsp must not open {p}"
+            );
+        }
+        assert_ne!(
+            decide(
+                PermissionMode::Default,
+                SideEffect::ReadOnly,
+                "lsp",
+                &path("./app.py"),
+                &rules
+            ),
+            Deny
+        );
+        assert!(
+            !crate::deferred_tools::is_core("lsp"),
+            "lsp is deferred unless lean_core_extra names it"
+        );
+    }
+
+    #[test]
     fn builtin_secret_denylist_covers_env_variants_and_keys() {
         // Exercises the REAL forge_config::builtin_deny_rules() end-to-end through decide(), so the
         // expanded secret list is actually enforced (not just present as strings).
