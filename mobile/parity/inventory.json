@@ -832,5 +832,11 @@
     "platform": "desktop",
     "reason": "The Keys & tokens sync category can only be switched on a computer connected directly; phones and Anywhere connections see it locked.",
     "category": "capability"
+  },
+  {
+    "file": "mobile/src/components/workspace/FilePreview.tsx",
+    "platform": "web and desktop",
+    "reason": "SVG and PDF previews need a browser image and frame; phones show the source and a note",
+    "category": "behavior"
   }
 ]

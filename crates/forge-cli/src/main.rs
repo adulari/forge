@@ -129,6 +129,7 @@ mod serve_terminal;
 mod serve_terminal_util;
 mod serve_update;
 mod serve_workspace;
+mod serve_workspace_pdf;
 mod session_delete;
 mod startup_trace;
 mod telemetry;

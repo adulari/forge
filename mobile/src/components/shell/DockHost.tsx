@@ -43,6 +43,7 @@ import { terminalTitle } from "./terminalModel";
 import { markTerminalClosed, tabsForSession, tabTerminalId } from "./terminalTabs";
 import { useTerminalActivity } from "./useTerminalActivity";
 import { UsageDock } from "./UsageDock";
+import { useWorkspaceDirty } from "../workspace/workspaceDirty";
 
 export type DockKind = WorkbenchSurfaceKind;
 
@@ -70,9 +71,15 @@ function DockTab({
   onReorder?: (from: number, to: number) => void;
 }) {
   const tokens = useTokens();
+  const workbench = useWorkbench();
+  const unsaved = useWorkspaceDirty(tab.sessionId, tab.kind === "files" ? tab.resourceId : null);
   const ref = useRef<View>(null);
   const [over, setOver] = useState(false);
   useDragSource(ref, { kind: "tab", index });
+  // react-native-web forwards onDoubleClick to the DOM node; native ignores the prop.
+  const pinOnDoubleClick = {
+    onDoubleClick: () => tab.preview && workbench.pinSurface(tab.placement, tab.id),
+  } as object;
   const accepts = useCallback((payload: DragPayload) => payload.kind === "tab" && payload.index !== index, [index]);
   const drop = useCallback(
     (payload: DragPayload) => {
@@ -88,15 +95,22 @@ function DockTab({
     >
       <Pressable
         onPress={() => onActivate?.(tab.id)}
+        {...pinOnDoubleClick}
         accessibilityRole="tab"
         accessibilityState={{ selected: active }}
         accessibilityLabel={`Open ${tab.title} surface`}
         accessibilityHint="Drag to reorder"
         style={styles.tabLabel}
       >
-        <Text style={[typeScale.bodyBold, { color: active ? tokens.ink : tokens.ink3 }]} numberOfLines={1}>
+        <Text
+          style={[typeScale.bodyBold, { color: active ? tokens.ink : tokens.ink3 }, tab.preview && styles.previewTitle]}
+          numberOfLines={1}
+        >
           {tab.title}
         </Text>
+        {unsaved ? (
+          <View accessibilityLabel="Unsaved changes" style={[styles.unseenDot, { backgroundColor: tokens.warn }]} />
+        ) : null}
         {signal?.kind === "streaming" ? (
           <Text
             accessibilityLabel="Printing output"
@@ -157,7 +171,7 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
   },
   preview: {
     render: ({ sessionId, surface }) =>
-      sessionId && surface ? <BrowserPreviewDock sessionId={sessionId} surface={surface} /> : <NeedsSession what="its preview" />,
+      sessionId && surface ? <BrowserPreviewDock key={surface.id} sessionId={sessionId} surface={surface} /> : <NeedsSession what="its preview" />,
   },
   terminal: {
     render: ({ sessionId, surface, openTerminal, closeFinishedTerminal }) => (
@@ -448,6 +462,7 @@ const styles = StyleSheet.create({
   tabLabel: { flexShrink: 1, flexDirection: "row", alignItems: "center", alignSelf: "stretch" },
   unseenDot: { width: 6, height: 6, borderRadius: 3, marginLeft: space.space8, alignSelf: "center" },
   liveBadge: { marginLeft: space.space8, paddingHorizontal: 4, borderRadius: 2, overflow: "hidden", alignSelf: "center" },
+  previewTitle: { fontStyle: "italic" },
   exitLabel: { marginLeft: space.space8, flexShrink: 0 },
   tabClose: { width: 20, height: 20, marginLeft: 2, alignItems: "center", justifyContent: "center" },
   headerSpacer: { flex: 1 },

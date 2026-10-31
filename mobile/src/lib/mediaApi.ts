@@ -28,6 +28,11 @@ export function workspaceImageUrl(baseUrl: string, session: string, path: string
   return `${baseUrl}/api/workspace/image${query({ session, path, w: width })}`;
 }
 
+/** A `.pdf` in the session's workspace, for a frame (crates/forge-cli/src/serve_workspace_pdf.rs). */
+export function workspacePdfUrl(baseUrl: string, session: string, path: string): string {
+  return `${baseUrl}/api/workspace/pdf${query({ session, path })}`;
+}
+
 export function evidenceImageUrl(baseUrl: string, session: string, file: string, width?: number): string {
   return `${baseUrl}/api/evidence/image${query({ session, file, w: width })}`;
 }

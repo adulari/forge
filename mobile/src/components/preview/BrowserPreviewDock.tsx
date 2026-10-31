@@ -6,10 +6,13 @@ import {
   MousePointer2,
   Plus,
   RefreshCw,
+  ScrollText,
+  SquareTerminal,
 } from "lucide-react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -35,8 +38,12 @@ import {
   type PreviewBounds,
   type PreviewViewport,
 } from "../../lib/browserPreview";
+import { useAuth } from "../../lib/auth";
 import { isTauri } from "../../lib/platform";
-import { addVisualAnnotation } from "../../lib/visualAnnotations";
+import { appendConsoleEntries, consoleCounts, useConsoleEntries } from "../../lib/previewConsole";
+import { isLoopbackUrl, loadRecents, rememberRecent } from "../../lib/previewRecents";
+import { insertIntoTerminal } from "../../lib/terminalInsert";
+import { addVisualAnnotation, type VisualAnnotation } from "../../lib/visualAnnotations";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
@@ -44,6 +51,9 @@ import { IconButton } from "../ds/IconButton";
 import { useToast } from "../ds/ToastHost";
 import { useWorkbench } from "../workbench/WorkbenchProvider";
 import { type WorkbenchSurface } from "../workbench/model";
+import { PreviewConsolePanel } from "./PreviewConsolePanel";
+import { PreviewTabStrip } from "./PreviewTabStrip";
+import { RecentUrls } from "./RecentUrls";
 
 interface BrowserPreviewDockProps {
   sessionId: string;
@@ -55,6 +65,7 @@ const VIEWPORTS: readonly { value: PreviewViewport; label: string }[] = [
   { value: "mobile", label: "390" },
   { value: "tablet", label: "768" },
 ];
+const PICKER_NEEDS_DESKTOP = "Element picking needs the desktop app";
 const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 2;
 const ZOOM_STEP = 0.1;
@@ -67,6 +78,8 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
   const tokens = useTokens();
   const toast = useToast();
   const workbench = useWorkbench();
+  const { baseUrl } = useAuth();
+  const isWebFrame = Platform.OS === "web" && !isTauri;
   const label = previewLabel(surface.id);
   const initial = getPreviewPreferences(label);
   const bodyRef = useRef<View>(null);
@@ -79,6 +92,25 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
   const [loading, setLoading] = useState(false);
   const [pickerActive, setPickerActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [recents, setRecents] = useState<string[]>([]);
+  const [recentsOpen, setRecentsOpen] = useState(false);
+  const [consoleOpen, setConsoleOpen] = useState(false);
+  const [lastPick, setLastPick] = useState<VisualAnnotation | null>(null);
+  const [frameKey, setFrameKey] = useState(0);
+  const consoleEntries = useConsoleEntries(label);
+  const problems = consoleCounts(consoleEntries);
+  const blurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    void loadRecents().then((stored) => {
+      if (!disposed) setRecents(stored);
+    });
+    return () => {
+      disposed = true;
+      if (blurTimer.current) clearTimeout(blurTimer.current);
+    };
+  }, []);
 
   const measureBounds = useCallback(
     () =>
@@ -121,9 +153,12 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
       },
       (event) => {
         if (disposed || event.label !== label) return;
-        addVisualAnnotation(sessionId, event.annotation);
+        setLastPick(addVisualAnnotation(sessionId, event.annotation));
         setPickerActive(false);
         toast.show("Element added to the composer", { tone: "success" });
+      },
+      (event) => {
+        if (!disposed && event.label === label) appendConsoleEntries(label, event.entries);
       },
     )
       .then((cleanup) => {
@@ -163,12 +198,18 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
   const submitUrl = async () => {
     try {
       const normalized = normalizePreviewUrl(draftUrl);
+      if (isWebFrame && !isLoopbackUrl(normalized)) {
+        throw new Error("The web app previews local servers only. Open this address in the desktop app.");
+      }
       setError(null);
-      setLoading(true);
+      setLoading(!isWebFrame);
       setUrl(normalized);
       setDraftUrl(normalized);
+      setRecentsOpen(false);
       setPreviewPreferences(label, { url: normalized });
-      if (normalized === currentUrlRef.current) await navigateBrowserPreview(label, normalized);
+      void rememberRecent(normalized).then(setRecents);
+      if (isWebFrame) setFrameKey((key) => key + 1);
+      else if (normalized === currentUrlRef.current) await navigateBrowserPreview(label, normalized);
     } catch (cause) {
       setLoading(false);
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -195,6 +236,30 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
     setPreviewPreferences(label, { viewport: next });
   };
 
+  const pickRecent = (recent: string) => {
+    setDraftUrl(recent);
+    setRecentsOpen(false);
+    setError(null);
+    setLoading(!isWebFrame);
+    setUrl(recent);
+    setPreviewPreferences(label, { url: recent });
+    void rememberRecent(recent).then(setRecents);
+    if (isWebFrame) setFrameKey((key) => key + 1);
+    else if (recent === currentUrlRef.current) void run(() => navigateBrowserPreview(label, recent));
+  };
+
+  const insertPickIntoTerminal = async () => {
+    if (!lastPick || !baseUrl) return;
+    try {
+      const typed = await insertIntoTerminal(baseUrl, sessionId, lastPick.selector);
+      toast.show(typed ? "Selector typed into the terminal" : "No running terminal in this session", {
+        tone: typed ? "success" : "neutral",
+      });
+    } catch (cause) {
+      toast.show(cause instanceof Error ? cause.message : "Could not reach the terminal.", { tone: "danger" });
+    }
+  };
+
   const addTab = () => {
     const count = workbench.state.right.tabs.filter((tab) => tab.kind === "preview").length + 1;
     workbench.openSurface({
@@ -215,9 +280,13 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
     }
   };
 
+  const previewTabs = workbench.state.right.tabs.filter(
+    (tab) => tab.kind === "preview" && tab.sessionId === sessionId,
+  );
+
   const onBodyLayout = (_event: LayoutChangeEvent) => setLayoutVersion((version) => version + 1);
 
-  if (!isTauri) {
+  if (!isTauri && !isWebFrame) {
     return (
       <View style={styles.unavailable}>
         <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Desktop browser preview</Text>
@@ -236,20 +305,20 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
           <IconButton
             icon={<ArrowLeft size={16} color={tokens.ink2} />}
             onPress={() => void run(() => moveBrowserPreviewHistory(label, -1))}
-            disabled={!url}
+            disabled={!url || isWebFrame}
             accessibilityLabel="Go back in preview"
             style={styles.compactButton}
           />
           <IconButton
             icon={<ArrowRight size={16} color={tokens.ink2} />}
             onPress={() => void run(() => moveBrowserPreviewHistory(label, 1))}
-            disabled={!url}
+            disabled={!url || isWebFrame}
             accessibilityLabel="Go forward in preview"
             style={styles.compactButton}
           />
           <IconButton
             icon={<RefreshCw size={15} color={tokens.ink2} />}
-            onPress={() => void run(() => reloadBrowserPreview(label))}
+            onPress={() => (isWebFrame ? setFrameKey((key) => key + 1) : void run(() => reloadBrowserPreview(label)))}
             disabled={!url}
             accessibilityLabel="Reload preview"
             style={styles.compactButton}
@@ -262,6 +331,13 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
             value={draftUrl}
             onChangeText={setDraftUrl}
             onSubmitEditing={() => void submitUrl()}
+            onFocus={() => {
+              if (blurTimer.current) clearTimeout(blurTimer.current);
+              setRecentsOpen(true);
+            }}
+            onBlur={() => {
+              blurTimer.current = setTimeout(() => setRecentsOpen(false), 160);
+            }}
             autoCapitalize="none"
             autoCorrect={false}
             spellCheck={false}
@@ -294,20 +370,60 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
             setPickerActive(next);
             void run(() => setBrowserPreviewPicker(label, next));
           }}
-          disabled={!url}
-          accessibilityLabel={pickerActive ? "Cancel element picker" : "Pick element for prompt"}
+          disabled={!url || isWebFrame}
+          accessibilityLabel={
+            isWebFrame ? PICKER_NEEDS_DESKTOP : pickerActive ? "Cancel element picker" : "Pick element for prompt"
+          }
           style={[
             styles.compactButton,
             pickerActive && { backgroundColor: tokens.selection },
           ]}
         />
         <IconButton
-          icon={<Plus size={16} color={tokens.ink2} />}
-          onPress={addTab}
-          accessibilityLabel="Add browser preview tab"
+          icon={<SquareTerminal size={16} color={lastPick ? tokens.ink2 : tokens.ink4} />}
+          onPress={() => void insertPickIntoTerminal()}
+          disabled={!lastPick || isWebFrame}
+          accessibilityLabel="Insert picked element into terminal"
           style={styles.compactButton}
         />
+        <IconButton
+          icon={
+            <ScrollText
+              size={16}
+              color={consoleOpen ? tokens.accent : problems.error > 0 ? tokens.danger : tokens.ink2}
+            />
+          }
+          onPress={() => setConsoleOpen((open) => !open)}
+          disabled={isWebFrame}
+          accessibilityLabel={
+            isWebFrame
+              ? "Console needs the desktop app"
+              : consoleOpen
+                ? "Hide console"
+                : `Show console${problems.error > 0 ? `, ${problems.error} errors` : ""}`
+          }
+          style={[styles.compactButton, consoleOpen && { backgroundColor: tokens.selection }]}
+        />
+        {previewTabs.length < 2 ? (
+          <IconButton
+            icon={<Plus size={16} color={tokens.ink2} />}
+            onPress={addTab}
+            accessibilityLabel="Add browser preview tab"
+            style={styles.compactButton}
+          />
+        ) : null}
       </View>
+
+      {previewTabs.length >= 2 ? (
+        <PreviewTabStrip
+          tabs={previewTabs}
+          activeId={surface.id}
+          onActivate={(id) => workbench.activateSurface("right", id)}
+          onClose={(id) => workbench.closeSurface("right", id)}
+          onAdd={addTab}
+        />
+      ) : null}
+      {recentsOpen ? <RecentUrls urls={recents} onPick={pickRecent} /> : null}
 
       <View style={[styles.tools, { borderBottomColor: tokens.border }]}>
         <View style={styles.viewportOptions} accessibilityRole="tablist">
@@ -341,6 +457,12 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
           })}
         </View>
         <View style={styles.toolSpacer} />
+        {isWebFrame ? (
+          <Text style={[typeScale.meta, { color: tokens.ink4 }]} numberOfLines={1}>
+            {PICKER_NEEDS_DESKTOP}
+          </Text>
+        ) : null}
+        {isWebFrame ? null : (<>
         <IconButton
           icon={<Minus size={14} color={tokens.ink3} />}
           onPress={() => changeZoom(-ZOOM_STEP)}
@@ -369,6 +491,7 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
           accessibilityLabel="Zoom preview in"
           style={styles.tinyButton}
         />
+        </>)}
       </View>
 
       {error ? (
@@ -387,17 +510,38 @@ export function BrowserPreviewDock({ sessionId, surface }: BrowserPreviewDockPro
           <View style={styles.empty}>
             <Text style={[typeScale.bodyBold, { color: tokens.ink }]}>Open a local app or URL</Text>
             <Text style={[typeScale.sub, styles.emptyCopy, { color: tokens.ink3 }]}>
-              Enter a development port such as 5173, localhost address, or HTTPS URL. Use the
-              pointer tool to attach an exact DOM element to your next Forge prompt.
+              {isWebFrame
+                ? "Enter a development port such as 5173 or a localhost address. The web app frames local servers only; the desktop app opens any site and can pick elements."
+                : "Enter a development port such as 5173, localhost address, or HTTPS URL. Use the pointer tool to attach an exact DOM element to your next Forge prompt."}
             </Text>
+            {recents.length > 0 ? <RecentUrls urls={recents.slice(0, 5)} onPick={pickRecent} /> : null}
+          </View>
+        ) : isWebFrame ? (
+          <View style={[styles.frameStage, { backgroundColor: tokens.bg1 }]}>
+            <View style={[styles.frameBox, viewportWidth(viewport)]}>
+              {React.createElement("iframe", {
+                key: `${url}:${frameKey}`,
+                src: url,
+                title: "Browser preview",
+                onLoad: () => setLoading(false),
+                style: { width: "100%", height: "100%", border: 0, background: "#fff" },
+              })}
+            </View>
           </View>
         ) : null}
       </View>
+      {consoleOpen && !isWebFrame ? <PreviewConsolePanel label={label} /> : null}
     </View>
   );
 }
 
+function viewportWidth(viewport: PreviewViewport): { width: number | "100%" } {
+  return { width: viewport === "mobile" ? 390 : viewport === "tablet" ? 768 : "100%" };
+}
+
 const styles = StyleSheet.create({
+  frameStage: { flex: 1, alignItems: "center" },
+  frameBox: { height: "100%", maxWidth: "100%" },
   root: { flex: 1, minHeight: 0 },
   chrome: {
     minHeight: 42,
