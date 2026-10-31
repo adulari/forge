@@ -1187,7 +1187,7 @@ budget. `0` disables outage backoff (immediate `FailTurn`).
 (`503 No provider route is available`, `502 provider_routes_exhausted`, `upstream unavailable`,
 `no healthy upstream`, `provider unavailable`) is `ProviderError::Overloaded`, not
 `NoModelAccess`: the phrase list (`GATEWAY_ROUTE_MARKERS` in `error_policy.rs`) is checked before
-the model-access markers, because the same body can carry a `model_not_available` code. Only 401/402/403
+the model-access markers, because the same body can carry a `model_not_available` code. A body with an explicit `model_not_found` code stays permanent (new-api answers a mistyped model with `503 No available channel for model X`), unless the gateway says "try again" or it is the exact "No provider route is available" sentence. Only 401/402/403
 and the model owner's own "model not found / does not exist or you do not have access" end a pinned
 turn at once. An overloaded error never counts toward the "rejected twice" rule. Every outage wait
 of 3 s or more (a shorter one on the first retry and every fifth) is announced with

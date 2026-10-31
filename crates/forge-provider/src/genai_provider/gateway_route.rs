@@ -12,8 +12,6 @@ use super::*;
 const GATEWAY_ROUTE_MARKERS: &[&str] = &[
     "no provider route",
     "no_provider_route",
-    "no available provider",
-    "no_available_provider",
     "provider route",
     "provider_route",
     "provider unavailable",
@@ -22,7 +20,6 @@ const GATEWAY_ROUTE_MARKERS: &[&str] = &[
     "upstream_unavailable",
     "no healthy upstream",
     "no available upstream",
-    "no available channel",
 ];
 
 /// The first [`GATEWAY_ROUTE_MARKERS`] phrase in `text`, in words (`no provider route`).
@@ -34,8 +31,22 @@ fn gateway_route_phrase(text: &str) -> Option<String> {
         .map(|m| m.replace('_', " "))
 }
 
-pub(super) fn is_gateway_route_failure(text: &str) -> bool {
-    gateway_route_phrase(text).is_some()
+/// Whether `body`/`message` describe a gateway that cannot route right now. A body that also
+/// carries an explicit model-access code (`model_not_found`: new-api answers a mistyped or
+/// disabled model with `503 No available channel for model X`) is the model owner's permanent
+/// refusal and stays one, unless the gateway itself calls it transient ("try again shortly") or
+/// it is the exact ModelGateway sentence "No provider route is available".
+pub(super) fn is_gateway_route_failure(body: &str, message: &str) -> bool {
+    let combined = format!("{body}\n{message}");
+    if gateway_route_phrase(&combined).is_none() {
+        return false;
+    }
+    let l = combined.to_ascii_lowercase();
+    let transient = ["try again", "retry shortly", "retry later", "temporarily"]
+        .iter()
+        .any(|m| l.contains(m))
+        || l.contains("no provider route is available");
+    transient || !is_model_access_failure(&combined)
 }
 
 /// What to show for a route failure: the gateway's own category/code when that already names the
@@ -53,7 +64,7 @@ fn route_reason(body: &str, message: &str) -> String {
     .into_iter()
     .flatten()
     .filter_map(|v| v.as_str())
-    .find(|n| is_gateway_route_failure(n));
+    .find(|n| gateway_route_phrase(n).is_some());
     named
         .map(str::to_string)
         .or_else(|| gateway_route_phrase(message))

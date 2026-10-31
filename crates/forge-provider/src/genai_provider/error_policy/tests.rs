@@ -297,3 +297,35 @@ fn the_model_owners_refusal_and_auth_and_billing_stay_permanent() {
         assert!(e.is_permanent(), "{status} {body} -> {e:?}");
     }
 }
+
+/// new-api (the gateway behind several resellers) answers a mistyped or disabled model with
+/// `503 No available channel for model X under group default (distributor)` and code
+/// `model_not_found`. That is the model owner's permanent refusal: a route phrase must not turn
+/// it into a ten-minute wait.
+#[test]
+fn a_new_api_model_not_found_stays_permanent_whatever_status_carries_it() {
+    let body = r#"{"error":{"message":"No available channel for model gpt-9 under group default (distributor)","type":"new_api_error","code":"model_not_found"}}"#;
+    for status in [503, 400, 404] {
+        let e = classify_status(status, "HTTP error".into(), body, None);
+        assert!(
+            matches!(e, ProviderError::NoModelAccess(_)),
+            "{status} -> {e:?}"
+        );
+    }
+    let no_provider =
+        r#"{"error":{"message":"No available provider for model gpt-9","code":"model_not_found"}}"#;
+    let e = classify_status(503, "HTTP error".into(), no_provider, None);
+    assert!(matches!(e, ProviderError::NoModelAccess(_)), "{e:?}");
+    let streamed = classify_text(body, body.into());
+    assert!(
+        matches!(streamed, ProviderError::NoModelAccess(_)),
+        "{streamed:?}"
+    );
+}
+
+#[test]
+fn a_route_phrase_with_a_model_code_is_transient_when_the_gateway_says_try_again() {
+    let body = r#"{"error":{"message":"Provider unavailable for this model, try again shortly","code":"model_not_available"}}"#;
+    let e = classify_status(503, "HTTP error".into(), body, None);
+    assert!(e.is_overloaded(), "{e:?}");
+}

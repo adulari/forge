@@ -519,9 +519,7 @@ pub(super) fn classify_status(
     if let Some(kind) = typed_error {
         return bedrock_error::classify(&kind, message, retry_after.filter(|_| !exhausted));
     }
-    if !(401..=403).contains(&code)
-        && (is_gateway_route_failure(body) || is_gateway_route_failure(&message))
-    {
+    if !(401..=403).contains(&code) && is_gateway_route_failure(body, &message) {
         return gateway_route_error(
             code,
             body,
@@ -605,7 +603,7 @@ pub(super) fn classify_text(text: &str, message: String) -> ProviderError {
     if bedrock_profile_blip(text) {
         return ProviderError::Unavailable(message);
     }
-    if is_gateway_route_failure(text) {
+    if is_gateway_route_failure(text, "") {
         return gateway_route_error(503, text, &message, None, retry_after);
     }
     // Permanent incapability first — a streamed "tool calling is not supported" / "402 requires
