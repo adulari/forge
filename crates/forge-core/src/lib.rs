@@ -13770,8 +13770,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pinned_outage_backoff_warns_once_at_halfway_then_fails_on_exhaustion() {
-        // A small budget (6s) so the halfway warning and exhaustion are both reachable without a
+    async fn pinned_outage_backoff_announces_the_wait_then_fails_on_exhaustion() {
+        // A small budget (6s) so the announced wait and exhaustion are both reachable without a
         // long real-time sleep: attempt 1's delay (jittered 4-6s off the 5s base) already exceeds
         // 50% of a 6s budget regardless of jitter, and attempt 2's delay (jittered 12-18s off the
         // 15s base) always exceeds whatever budget remains, so exhaustion follows without needing
@@ -13800,10 +13800,13 @@ mod tests {
         let halfway = events
             .iter()
             .filter(|e| {
-                matches!(e, PresenterEvent::Warning(w) if w.contains("provider unreachable") && w.contains("retrying pinned model"))
+                matches!(e, PresenterEvent::Warning(w) if w.contains("provider unreachable") && w.contains("retrying in"))
             })
             .count();
-        assert_eq!(halfway, 1, "the 50%-budget warning must fire exactly once");
+        assert_eq!(
+            halfway, 1,
+            "the one wait that fits the budget is announced once"
+        );
         let exhausted = events
             .iter()
             .filter(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("still unreachable")))

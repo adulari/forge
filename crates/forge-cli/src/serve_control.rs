@@ -120,7 +120,12 @@ async fn api(
         }
         None => axum::body::Body::empty(),
     };
-    let request = builder.body(body).map_err(|e| e.to_string())?;
+    let mut request = builder.body(body).map_err(|e| e.to_string())?;
+    // Bypasses the access middleware, so the daemon vouches for itself: this is its own control
+    // server, already gated per tool by `control_settings`.
+    request
+        .extensions_mut()
+        .insert(crate::serve_clients::ClientAuth::owner());
     let response = crate::serve::daemon_routes(state.clone())
         .oneshot(request)
         .await
