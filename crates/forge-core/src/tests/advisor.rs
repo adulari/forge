@@ -456,3 +456,35 @@ fn labels_and_prompt_constants() {
     });
     assert!(text.contains("CONCERN: check X") && !text.contains("Suggested check"));
 }
+
+#[tokio::test]
+async fn an_empty_answer_is_never_reviewed() {
+    let mut r = run(vec![write("out.txt")], Advisor::Reply(BLOCKER), on, MODEL);
+    r.session.run_turn("write out.txt").await.unwrap();
+    let mut pre = None;
+    let redrive = r
+        .session
+        .advisor_review_done("  \n", MODEL, 1, None, &mut pre)
+        .await;
+    assert!(!redrive);
+    assert_eq!(
+        r.advisor_calls(),
+        0,
+        "no call for a stop that has no answer"
+    );
+    assert!(!r.session.advisor_reviewed, "the shot is not spent either");
+}
+
+#[tokio::test]
+async fn a_benched_active_model_never_reviews() {
+    let r = run(vec![say("x")], Advisor::Reply(OK), on, MODEL);
+    assert_eq!(r.session.advisor_model(MODEL).as_deref(), Some(MODEL));
+    r.store
+        .bench_model(
+            MODEL,
+            chrono::Utc::now().timestamp() + 600,
+            "empty response",
+        )
+        .unwrap();
+    assert_eq!(r.session.advisor_model(MODEL), None);
+}

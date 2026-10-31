@@ -215,7 +215,7 @@ pub(crate) fn redrive_text(advice: &Advice) -> String {
 impl Session {
     /// Who reviews: `[harness.advisor] model` when it is a safe side-call model, else the model
     /// driving the turn. A CLI bridge or a subscription never reviews: a plan is not spent on
-    /// optional work. Never asks the router (a stale router pin once leaked into side calls).
+    /// optional work, and neither does a benched one. Never asks the router (a stale router pin once leaked into side calls).
     pub(crate) fn advisor_model(&self, active: &str) -> Option<String> {
         let usable =
             |m: &str| !forge_provider::is_cli_bridge(m) && !forge_mesh::catalog::is_subscription(m);
@@ -237,7 +237,8 @@ impl Session {
                 "ignoring [harness.advisor] model for this session"
             );
         }
-        usable(active).then(|| active.to_string())
+        let healthy = !self.provider_readiness().health.is_benched(active);
+        (usable(active) && healthy).then(|| active.to_string())
     }
 
     /// Review the candidate final answer once per turn. `true` means the turn goes back to the
@@ -252,6 +253,7 @@ impl Session {
     ) -> bool {
         let cfg = &self.config.harness.advisor;
         if !cfg.enabled
+            || answer.trim().is_empty()
             || self.advisor_reviewed
             || !self.turn_unfinished_tasks.is_empty()
             || !(self.edits_this_turn > 0 || self.mutations_this_turn + pass_mutations > 0)
