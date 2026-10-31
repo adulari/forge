@@ -976,6 +976,7 @@ and keep going."
         CommandAction::Run => {
             app.note("/run needs the interactive TUI; define actions under [[actions]] in .forge/config.toml");
         }
+        CommandAction::Control => super::control_menu::open(app, None),
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
         CommandAction::Import if tui.is_some() => app.import_menu.open(super::import_menu::fallback_dir()),
         CommandAction::Import => app.note("/import opens in a terminal chat; run `forge import scan` and `forge import sessions` instead"),

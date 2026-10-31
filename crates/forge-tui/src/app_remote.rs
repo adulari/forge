@@ -12,10 +12,7 @@ impl App {
     /// remote module — the caller maps this into the snapshot type.
     pub fn remote_snapshot(&self) -> RemoteSnapshot {
         let (question_options, question_allow_other) = match &self.form {
-            Some(form) => {
-                let q = form.question();
-                (q.options.clone(), q.allow_other)
-            }
+            Some(form) => (form.question().options.clone(), form.question().allow_other),
             None => (Vec::new(), false),
         };
         RemoteSnapshot {
@@ -188,6 +185,7 @@ pub fn picker_kind_wire(kind: crate::commands::PickerKind) -> &'static str {
         P::Duel => "picker:duel",
         P::RewindAction => "picker:rewind_action",
         P::ErrorReport => "picker:error_report",
+        P::ControlTools => "picker:control_tools",
     }
 }
 

@@ -24,6 +24,8 @@ export function workspaceMentionAtEnd(text: string): WorkspaceMention | null {
 }
 
 export function workspaceMentionToken(path: string): string {
+  const session = /^session:(.+)$/s.exec(path);
+  if (session && /\s/.test(session[1])) return `@session:{${session[1]}}`;
   return /\s/.test(path) ? `@{${path}}` : `@${path}`;
 }
 

@@ -714,6 +714,7 @@ pub(crate) async fn serve_cmd(
         anywhere_enable,
     });
     crate::push_tool::install_daemon_sink(crate::push_tool::channels_for(&state, true));
+    crate::serve_control::install(&state);
     crate::power::start(registry.clone());
     crate::host_caps::install_helper_limit();
     let app = daemon_router(state.clone());
@@ -936,7 +937,7 @@ pub(crate) fn daemon_router(state: Arc<DaemonState>) -> Router {
     crate::serve_access::guard(state.clone(), daemon_routes(state))
 }
 
-fn daemon_routes(state: Arc<DaemonState>) -> Router {
+pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
     use tower_http::cors::CorsLayer;
     let base = state.base.clone();
     Router::new()
@@ -1043,6 +1044,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_notes::routes(&base))
         .merge(crate::serve_project_actions::routes(&base))
         .merge(crate::serve_ports::routes(&base))
+        .merge(crate::serve_control::routes(&base))
         // Terminal dock (serve_terminal.rs): a real PTY in the session's directory, gated by the
         // same daemon token as every other route and granted no additional privilege.
         .route(

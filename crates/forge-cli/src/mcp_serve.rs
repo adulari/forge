@@ -384,8 +384,8 @@ impl ForgeMcp {
         if name == forge_core::fleet::MESSAGE_SESSION_TOOL {
             return Ok(self.handle_message_session(&args).await);
         }
-        if name == forge_core::fleet::LIST_SESSIONS_TOOL {
-            return Ok(self.handle_list_sessions(&args).await);
+        if Self::is_fleet_read(&name) {
+            return Ok(self.handle_fleet_read(&name, &args).await);
         }
         // Agent-created heartbeats — bridge parity with the direct path's Session::manage_heartbeats.
         // Scoped to the parent session (id from ENV_SESSION) and, like the direct path, can never
@@ -781,7 +781,7 @@ impl ForgeMcp {
         // Fleet agent-to-agent messaging — always advertised (unlike subagents, it needs no local
         // setup: a call simply fails with a clear error if no `forge serve` daemon is reachable).
         tools.push(self.message_session_tool());
-        tools.push(self.list_sessions_tool());
+        tools.extend(self.list_sessions_tools());
         // Advertise agent-created heartbeats — bridge parity with the direct path. Always on
         // (like update_tasks/remember): the parent session id is resolved lazily at call time.
         tools.extend(bridge_budget::heartbeat_tools());

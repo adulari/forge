@@ -238,6 +238,7 @@ impl Session {
             lsp_baselines: Default::default(),
             skills: None,
             fleet: None,
+            control: None,
             dispatch: None,
             pinned_model: None,
             pinned_effort: None,

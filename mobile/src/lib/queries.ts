@@ -367,6 +367,18 @@ export function useSessions() {
   return query;
 }
 
+/** Sessions already in the cache, without a fetch, timer or widget sync of their own: the
+ * composer's `@session:` menu reads names from whatever the sidebar already loaded. */
+export function useCachedSessions(): SessionRow[] {
+  const { baseUrl } = useAuth();
+  const query = useQuery<SessionRow[]>({
+    queryKey: keys(baseUrl).sessions,
+    queryFn: () => getSessions(baseUrl as string),
+    enabled: false,
+  });
+  return query.data ?? [];
+}
+
 /** When the mesh routes a turn to a model the cached catalog cannot name, the host discovered it
  * after that snapshot was taken — ask it to rediscover rather than leaving the model list unable
  * to explain the answer on screen. Each unknown id triggers at most one refresh, so a pinned id

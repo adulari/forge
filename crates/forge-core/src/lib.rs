@@ -89,6 +89,7 @@ pub(crate) mod completion;
 mod context_floor;
 pub mod context_pack;
 pub(crate) mod context_pipeline;
+pub mod control;
 pub mod deferred_tools;
 mod detached_subagents;
 pub mod dispatch;
@@ -1109,7 +1110,8 @@ impl TaskScope {
                 | "update_tasks"
                 | "remember"
                 | WORKTREE_TOOL
-        )
+        ) && !control::side_effect_of(tool)
+            .is_some_and(|effect| effect != forge_types::SideEffect::ReadOnly)
     }
 
     fn audit_digest(&self) -> String {
@@ -1616,6 +1618,8 @@ pub struct Session {
     /// this in — see `fleet.rs`). `None` outside `forge serve`, so `message_session` is simply
     /// not advertised there.
     fleet: Option<Arc<dyn fleet::FleetMessaging>>,
+    /// Control toolset host (see `control.rs`); `None` leaves those tools unadvertised.
+    control: Option<Arc<dyn control::ControlHost>>,
     /// Plan-and-dispatch host, wired only into coordinator sessions (see [`dispatch`]).
     dispatch: Option<Arc<dyn dispatch::SessionDispatch>>,
     /// In-session model pin set (`/model <id>`). When set, mesh routing still classifies the prompt
@@ -2501,6 +2505,7 @@ impl Session {
         {
             specs.push(fleet::list_sessions_spec());
         }
+        specs.extend(self.control_specs());
         // Plan and dispatch — only a coordinator session has a dispatch host, so neither an ordinary
         // session nor a dispatched worker can start a dispatch of its own.
         if let Some(host) = &self.dispatch {
@@ -5037,6 +5042,9 @@ mod tests {
 
     #[path = "deferred_dispatch.rs"]
     mod deferred_dispatch_tests;
+
+    #[path = "control_tools.rs"]
+    mod control_tools_tests;
 
     #[path = "detached_agents.rs"]
     mod detached_agents_tests;

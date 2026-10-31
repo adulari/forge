@@ -695,6 +695,7 @@ pub(crate) async fn picker_accept(
                 let _ = forge_config::write_permission_mode(mode);
             }
         }
+        forge_tui::PickerKind::ControlTools => super::control_menu::accept(app, row),
         // Assay's choice is handled in the render loop (it spawns a background task), never here.
         forge_tui::PickerKind::AssayChoice => {}
         // The models browser drills/steps within the render loop; Enter never resolves here.

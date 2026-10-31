@@ -1180,6 +1180,32 @@ mod blocks {
     }
 
     #[test]
+    fn a_session_mention_with_a_spaced_name_is_braced_and_the_fixed_ones_are_plain() {
+        let mut app = App::default();
+        app.input = "see @ses".into();
+        app.input_cursor = app.input.len();
+        app.at_picker.open_with(
+            "ses",
+            ["terminal", "session:auth fix"].map(String::from).to_vec(),
+        );
+        app.at_picker.selected = 0;
+        assert_eq!(
+            app.at_picker.selected_path().as_deref(),
+            Some("session:auth fix")
+        );
+        app.accept_at_path();
+        assert_eq!(app.input, "see @session:{auth fix} ");
+
+        let mut app = App::default();
+        app.input = "and @term".into();
+        app.input_cursor = app.input.len();
+        app.at_picker
+            .open_with("term", vec!["terminal".to_string()]);
+        app.accept_at_path();
+        assert_eq!(app.input, "and @terminal ");
+    }
+
+    #[test]
     fn composer_continuation_rows_hang_at_two_cells_and_a_scrolled_input_says_so() {
         let mut app = App {
             input: "line one\nline two".into(),

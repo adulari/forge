@@ -260,6 +260,8 @@ impl App {
         let is_dir = path.ends_with('/');
         let text = if is_dir {
             format!("@{path}")
+        } else if let Some(name) = path.strip_prefix("session:").filter(|n| n.contains(' ')) {
+            format!("@session:{{{name}}} ")
         } else {
             format!("@{path} ")
         };

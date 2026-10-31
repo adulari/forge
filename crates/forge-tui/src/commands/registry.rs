@@ -328,6 +328,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/mesh [task prompt]",
     },
     Command {
+        name: "control",
+        desc: "control tools: what agents may do to this app, and what they did",
+        usage: "/control",
+    },
+    Command {
         name: "remote",
         desc: "toggle remote control — drive this session from a phone/desktop browser",
         usage: "/remote [--lan | --local | --anywhere]",

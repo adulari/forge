@@ -88,7 +88,8 @@ pub(crate) fn sync_at_picker_to_at_token(app: &mut forge_tui::App) {
             app.at_picker.query = tok.query;
             app.at_picker.clamp();
         } else {
-            let files = load_at_files();
+            let mut files = crate::mentions::picker_entries();
+            files.extend(load_at_files());
             app.at_picker.open_with(&tok.query, files);
             app.at_picker.set_modified(load_modified_files());
         }

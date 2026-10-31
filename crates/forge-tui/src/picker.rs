@@ -43,6 +43,9 @@ pub enum PickerKind {
     /// An error report waiting for a decision (ask mode, or a `/bug` preview). Each row's `id` is
     /// `send@<id>`, `skip@<id>` or `always@<id>`.
     ErrorReport,
+    /// The control-tools menu (`/control`): Enter switches the tool on the row on or off. Each
+    /// row's `id` is the tool name; audit rows carry an `audit` id and do nothing.
+    ControlTools,
 }
 
 /// One row in an interactive picker: an opaque `id` the loop acts on, plus two display strings.

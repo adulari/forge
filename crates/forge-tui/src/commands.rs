@@ -163,6 +163,8 @@ pub enum CommandAction {
     Run,
     /// Pick Claude Code and Codex conversations from this computer and import them (`/import`).
     Import,
+    /// Open the control-tools menu: which tools agents may use to drive the app, and what they did.
+    Control,
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Open the latest tool call's complete output in the full-output viewer (`/output`).
@@ -514,6 +516,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "run" | "actions" | "ports" => CommandAction::Run,
         "import" => CommandAction::Import,
         "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
+        "control" => CommandAction::Control,
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),

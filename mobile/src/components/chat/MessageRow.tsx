@@ -22,6 +22,7 @@ import { AttachmentRow } from "./Attachments";
 import type { SentAttachment } from "./attach";
 import { JobNoticeRows } from "./JobNoticeRow";
 import { Markdown } from "./Markdown";
+import { MentionChips } from "./MentionChips";
 import { useChatProseStyle } from "./proseStyle";
 import { ReasoningDisclosure } from "./ReasoningDisclosure";
 import { SystemOutput } from "./SystemOutput";
@@ -269,6 +270,7 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
           <>
             {isUser ? <SkillInvocation text={userText} /> : null}
             <Markdown content={userText} style={prose} mentions={isUser} />
+            {isUser ? <MentionChips text={userText} /> : null}
           </>
         )}
       </Pressable>

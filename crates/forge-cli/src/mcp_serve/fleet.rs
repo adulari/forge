@@ -11,6 +11,9 @@ use rmcp::model::{CallToolResult, ContentBlock, JsonObject, Tool};
 use serde_json::Value;
 use std::sync::Arc;
 
+#[path = "control.rs"]
+mod control;
+
 use super::ForgeMcp;
 use crate::fleet_peers::HttpFleet;
 
@@ -38,8 +41,23 @@ impl ForgeMcp {
         tool_of(message_session_spec())
     }
 
-    pub(super) fn list_sessions_tool(&self) -> Tool {
-        tool_of(list_sessions_spec())
+    /// `list_sessions` plus the control toolset, which shares its daemon transport.
+    pub(super) fn list_sessions_tools(&self) -> Vec<Tool> {
+        let mut tools = vec![tool_of(list_sessions_spec())];
+        tools.extend(control::tools());
+        tools
+    }
+
+    pub(super) fn is_fleet_read(name: &str) -> bool {
+        name == forge_core::fleet::LIST_SESSIONS_TOOL || forge_core::control::is_control_tool(name)
+    }
+
+    pub(super) async fn handle_fleet_read(&self, name: &str, args: &Value) -> CallToolResult {
+        if forge_core::control::is_control_tool(name) {
+            self.handle_control(name, args).await
+        } else {
+            self.handle_list_sessions(args).await
+        }
     }
 
     pub(super) async fn handle_message_session(&self, args: &Value) -> CallToolResult {

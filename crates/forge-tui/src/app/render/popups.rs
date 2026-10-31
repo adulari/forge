@@ -227,6 +227,7 @@ fn picker_enter_text(kind: Option<PickerKind>) -> &'static str {
         Some(PickerKind::ModelPin) | Some(PickerKind::ModelRung) => "Enter pin for this session",
         Some(PickerKind::CopyBlocks) => "Enter copy to the clipboard, w write to a file",
         Some(PickerKind::Duel) => "Enter merge this candidate, Esc discard all",
+        Some(PickerKind::ControlTools) => "Enter turn this tool on or off",
         _ => "Enter select",
     }
 }

@@ -257,6 +257,9 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
                 store: session.store.clone(),
             },
         )));
+        session.set_control_host(Some(std::sync::Arc::new(
+            crate::serve_control::DaemonControl,
+        )));
     }
 
     let session = std::sync::Arc::new(tokio::sync::Mutex::new(session));
