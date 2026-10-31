@@ -19,7 +19,8 @@ import { Input } from "../ds/Input";
 import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
 import { nextSelection, optionIndexForKey } from "../../lib/questionKeys";
-import { type FormAnswer, type FormQuestion, type QuestionOption, type RemoteInput } from "../../lib/ws";
+import { formAnswerText, type AnswerDraft } from "../../lib/questionAnswers";
+import { type FormQuestion, type QuestionOption, type RemoteInput } from "../../lib/ws";
 import { useStrike } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, radii, space } from "../../theme/tokens";
@@ -36,11 +37,7 @@ export interface QuestionCardProps {
   onQueueAnswer?: (input: Extract<RemoteInput, { kind: "allow" | "answer" }>) => void;
 }
 
-interface Draft {
-  selected: string[];
-  other: string;
-  note: string;
-}
+type Draft = AnswerDraft;
 
 const emptyDraft = (): Draft => ({ selected: [], other: "", note: "" });
 const answered = (d: Draft): boolean => d.selected.length > 0 || d.other.trim().length > 0;
@@ -101,12 +98,7 @@ export function QuestionCard(props: QuestionCardProps) {
       queued={queued}
       onSubmit={(drafts) => {
         if (structured) {
-          const answers: FormAnswer[] = drafts.map((d) => ({
-            selected: d.selected,
-            other: d.other.trim().length > 0 ? d.other.trim() : null,
-            note: d.note.trim().length > 0 ? d.note.trim() : null,
-          }));
-          deliver(JSON.stringify({ answers }));
+          deliver(formAnswerText(drafts));
         } else {
           // Legacy host: one question, answer by option number or free text.
           const d = drafts[0];
@@ -242,14 +234,27 @@ function FormBody({
 
       {showOther ? (
         <Input
+          label={q.secret ? "Value" : undefined}
           value={d.other}
           onChangeText={(t) => update(q.multi ? { other: t } : { other: t, selected: [] })}
-          placeholder={q.options.length === 0 ? "type your answer…" : "other — type your own answer…"}
+          placeholder={q.secret ? "Hidden as you type" : q.options.length === 0 ? "type your answer…" : "other — type your own answer…"}
           editable={!locked}
           returnKeyType={last ? "send" : "next"}
           onSubmitEditing={() => (canAdvance ? next() : undefined)}
           containerStyle={styles.field}
-          accessibilityLabel="free-text answer"
+          accessibilityLabel={q.secret ? "secret answer, hidden" : "free-text answer"}
+          testID={q.secret ? "secret-answer" : undefined}
+          {...(q.secret
+            ? {
+                secureTextEntry: true,
+                autoCapitalize: "none" as const,
+                autoCorrect: false,
+                spellCheck: false,
+                autoComplete: "off" as const,
+                textContentType: "none" as const,
+                clearable: false,
+              }
+            : {})}
         />
       ) : null}
 

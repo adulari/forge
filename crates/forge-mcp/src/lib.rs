@@ -38,6 +38,7 @@ use serde_json::Value;
 
 mod connect_log;
 mod content;
+pub mod elicit;
 mod handler;
 pub mod oauth;
 mod pool;
@@ -913,13 +914,26 @@ impl McpManager {
         let arguments = args.as_object().cloned();
         let mut params = CallToolRequestParams::new(raw_name);
         params.arguments = arguments;
-        match tokio::time::timeout(self.call_timeout, peer.call_tool(params)).await {
-            Ok(Ok(result)) => {
+        let call = peer.call_tool(params);
+        tokio::pin!(call);
+        // The timeout restarts while the server is waiting on a person (elicitation).
+        let finished = loop {
+            tokio::select! {
+                result = &mut call => break Some(result),
+                () = tokio::time::sleep(self.call_timeout) => {
+                    if !elicit::user_is_answering() {
+                        break None;
+                    }
+                }
+            }
+        };
+        match finished {
+            Some(Ok(result)) => {
                 self.mark(&server, ServerStatus::Connected);
                 tool_result_to_outcome(result)
             }
-            Ok(Err(e)) => self.classify_call_error(&server, e),
-            Err(_) => self.timed_out(&server),
+            Some(Err(e)) => self.classify_call_error(&server, e),
+            None => self.timed_out(&server),
         }
     }
 

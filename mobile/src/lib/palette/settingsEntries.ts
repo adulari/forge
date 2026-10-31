@@ -16,6 +16,7 @@ export type SettingsHref =
   | "/configuration"
   | "/skills"
   | "/hooks"
+  | "/crews"
   | "/session-tree"
   | "/workflows"
   | "/prs"
@@ -44,6 +45,7 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
   { href: "/configuration", title: "Configuration", subtitle: "Daemon configuration", keywords: "config toml configuration permissions" },
   { href: "/skills", title: "Skills", subtitle: "Installed skills and commands", keywords: "skills commands slash catalog" },
   { href: "/hooks", title: "Hooks", subtitle: "Pre and post tool hooks", keywords: "hooks shell pre post tool" },
+  { href: "/crews", title: "Crews", subtitle: "Saved subagent rosters", keywords: "crews crew subagents team roster delegate agents roles" },
   { href: "/session-tree", title: "Session tree", subtitle: "Parent and child sessions", keywords: "tree subagents children fork" },
   { href: "/prs", title: "Pull requests", subtitle: "Open PRs across projects", keywords: "pull requests prs github review merge checks" },
   { href: "/remote-access", title: "Remote access", subtitle: "Pair devices and manage who can connect", keywords: "remote access pair qr devices clients revoke token viewer scopes lan tailscale tunnel" },

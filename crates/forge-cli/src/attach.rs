@@ -565,13 +565,21 @@ mod tests {
         let allow = interpret_json(interpret_input("y", &Pending::Permission(7)));
         assert_eq!(
             serde_json::from_value::<RemoteInput>(allow).unwrap(),
-            RemoteInput::Allow { yes: true, seq: 7 }
+            RemoteInput::Allow {
+                yes: true,
+                seq: 7,
+                note: None
+            }
         );
 
         let deny = interpret_json(interpret_input("no", &Pending::Permission(7)));
         assert_eq!(
             serde_json::from_value::<RemoteInput>(deny).unwrap(),
-            RemoteInput::Allow { yes: false, seq: 7 }
+            RemoteInput::Allow {
+                yes: false,
+                seq: 7,
+                note: None
+            }
         );
 
         let answer = interpret_json(interpret_input("2", &Pending::Question(3)));

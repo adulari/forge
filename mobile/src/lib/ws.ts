@@ -158,6 +158,8 @@ export interface FormQuestion {
   multi: boolean;
   allow_other: boolean;
   allow_note: boolean;
+  /** MCP elicitation of a password/token: render masked, never echo. Absent = false. */
+  secret?: boolean;
 }
 
 /** The answer to one `FormQuestion`, sent back as `answer{text: JSON.stringify({answers})}`. */
@@ -291,7 +293,7 @@ export type RemoteInput =
   // Reorders / promotes one server-queued prompt; index+text echo Snapshot.queued like dequeue.
   | { kind: "queue_move"; index: number; text: string; to: number }
   | { kind: "queue_send_now"; index: number; text: string }
-  | { kind: "allow"; yes: boolean; seq: number }
+  | { kind: "allow"; yes: boolean; seq: number; note?: string }
   | { kind: "answer"; text: string; seq: number }
   | { kind: "interrupt" }
   // Cancels one server-queued prompt; index+text echo Snapshot.queued so a shifted queue is

@@ -54,7 +54,9 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
              immediately with each child's id/name/model, the children keep running in the \
              background, and their results are delivered as a labeled message the next time you \
              speak — use this for long-running work you don't need to block on. Check on a \
-             detached batch with `list_subagents`; stop one early with `cancel_subagent`."
+             detached batch with `list_subagents`, block on it with `wait_for_subagents`, \
+             redirect a running one with `steer_subagent`, or stop one early with \
+             `cancel_subagent`."
         ),
         schema: serde_json::json!({
             "type": "object",
@@ -73,6 +75,12 @@ pub fn spawn_agents_spec(max_agents: usize) -> ToolSpec {
                             "task": {
                                 "type": "string",
                                 "description": "the self-contained subtask for this agent"
+                            },
+                            "tags": {
+                                "type": "array",
+                                "maxItems": MAX_TAGS,
+                                "items": {"type": "string"},
+                                "description": "optional short labels for the kind of work (for example `refactor`, `tests`, `docs`); the router learns which models suit which kinds"
                             }
                         },
                         "required": ["task"]
@@ -238,12 +246,59 @@ pub fn parse_requests(
             .filter(|a| !a.trim().is_empty())
             .unwrap_or(GENERAL_PURPOSE_AGENT)
             .to_string();
-        out.push(AgentRequest {
-            agent,
-            task: task.to_string(),
-        });
+        let tags = parse_tags(entry);
+        let task = if tags.is_empty() {
+            task.to_string()
+        } else {
+            // The router classifies and learns from the task text, so the tags travel in it.
+            format!("{task}\n\n(Task tags: {})", tags.join(", "))
+        };
+        out.push(AgentRequest { agent, task });
     }
     Ok(out)
+}
+
+/// Most tags kept per agent, and the longest one: labels, not sentences.
+const MAX_TAGS: usize = 4;
+const MAX_TAG_LEN: usize = 24;
+
+/// The optional `tags` of one `spawn_agents` entry: lowercase `[a-z0-9_-]` words, deduplicated.
+pub fn parse_tags(entry: &serde_json::Value) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for raw in entry
+        .get("tags")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let tag: String = raw
+            .trim()
+            .to_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .split('-')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-")
+            .chars()
+            .take(MAX_TAG_LEN)
+            .collect();
+        if !tag.is_empty() && !tags.contains(&tag) {
+            tags.push(tag);
+        }
+        if tags.len() == MAX_TAGS {
+            break;
+        }
+    }
+    tags
 }
 
 /// A request resolved against the loaded agent types — owned so it can move into a spawned
@@ -564,5 +619,24 @@ mod tests {
             system_prompt_with_skills(&r, Path::new("/nonexistent-forge-root"), false),
             r.system_prompt
         );
+    }
+
+    #[test]
+    fn tags_are_normalized_bounded_and_ride_in_the_task() {
+        let args = serde_json::json!({"agents": [{
+            "task": "tidy the parser",
+            "tags": ["Refactor", "refactor", " Tests & Docs ", "a", "b", "c", ""]
+        }]});
+        assert_eq!(
+            parse_tags(&args["agents"][0]),
+            ["refactor", "tests-docs", "a", "b"]
+        );
+        let reqs = parse_requests(&args, 4).unwrap();
+        assert!(reqs[0].task.starts_with("tidy the parser"));
+        assert!(reqs[0]
+            .task
+            .contains("Task tags: refactor, tests-docs, a, b"));
+        let plain = parse_requests(&serde_json::json!({"agents": [{"task": "x"}]}), 4).unwrap();
+        assert_eq!(plain[0].task, "x");
     }
 }

@@ -314,6 +314,7 @@ async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
                     .send(crate::remote::RemoteInput::Allow {
                         yes: false,
                         seq: snapshot.prompt_seq,
+                        note: None,
                     })
                     .await;
                 registry().update(&watch.session_id, |w| {

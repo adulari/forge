@@ -383,6 +383,10 @@ pub(crate) async fn dispatch_command(
         CommandAction::Subagents(explicit) => {
             super::subagents::set_subagent_pin_release(session, app, explicit).await;
         }
+        CommandAction::Crew(choice) => super::subagents::run_crew(session, app, choice).await,
+        CommandAction::Delegation(explicit) => {
+            super::subagents::set_delegation(session, app, explicit).await;
+        }
         CommandAction::Theme(name) => super::theme_cmd::run_theme(app, name),
         CommandAction::Agents => super::agents_cmd::list_agents(session, app).await,
         // `/models` opens the interactive model browser: a provider list (with global counts in

@@ -23,6 +23,8 @@ const SCRIPT_DENY: &[&str] = &[
     crate::subagent::SEND_TO_AGENT_TOOL,
     crate::subagent::LIST_SUBAGENTS_TOOL,
     crate::subagent::CANCEL_SUBAGENT_TOOL,
+    crate::subagent_wait::WAIT_FOR_SUBAGENTS_TOOL,
+    crate::subagent_wait::STEER_SUBAGENT_TOOL,
     crate::ASK_USER_TOOL,
     crate::PRESENT_PLAN_TOOL,
     crate::USE_SKILL_TOOL,

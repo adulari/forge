@@ -35,6 +35,8 @@ export const BUILTIN_COMMANDS: string[] = [
   "/loop",
   "/effort",
   "/subagents",
+  "/delegation",
+  "/crew",
   "/remember",
   "/memories",
   // Inspection / tooling

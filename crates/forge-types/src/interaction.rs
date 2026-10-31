@@ -49,6 +49,10 @@ pub struct Question {
     /// The user may attach an optional free-text note to their choice.
     #[serde(default = "default_true")]
     pub allow_note: bool,
+    /// The free-text answer is a secret (an MCP elicitation password or token): surfaces mask it
+    /// as it is typed and the answer is never echoed into the transcript or tool cards.
+    #[serde(default)]
+    pub secret: bool,
 }
 
 fn default_true() -> bool {
@@ -64,6 +68,7 @@ impl Question {
             multi: false,
             allow_other: allow_other || options.is_empty(),
             allow_note: false,
+            secret: false,
         }
     }
 }

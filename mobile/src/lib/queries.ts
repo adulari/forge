@@ -12,6 +12,7 @@ import {
 } from "@tanstack/react-query";
 import { markFirstDataResolve } from "./performance";
 import { fillHistoryGap, mergeNewestHistoryPage } from "./historyMerge";
+import type { Crew, CrewBody } from "./crews";
 import { catalogHasModel } from "./modelCatalog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useIsFocused } from "expo-router";
@@ -21,6 +22,9 @@ import {
   getSessionTree,
   type HookRow,
   getHooks,
+  getCrews,
+  putCrew,
+  deleteCrew,
   type SkillRow,
   getSkills,
   type WorkflowRow,
@@ -202,6 +206,7 @@ function keys(baseUrl: string | null) {
     models: ["models", baseUrl] as const,
     providers: ["providers", baseUrl] as const,
     hooks: ["hooks", baseUrl] as const,
+    crews: ["crews", baseUrl] as const,
     plans: ["plans", baseUrl] as const,
 
     mcp: ["mcp", baseUrl] as const,
@@ -558,6 +563,23 @@ export function useSessionTree() { const { baseUrl } = useAuth(); return useQuer
 export function useSkills(session?: string | null) { const { baseUrl } = useAuth(); return useQuery<SkillRow[]>({ queryKey: [...keys(baseUrl).skills, session ?? null], queryFn: () => getSkills(baseUrl as string, session), enabled: baseUrl != null }); }
 export function useWorkflows(sessionId?: string) { const { baseUrl } = useAuth(); return useQuery<WorkflowRow[]>({ queryKey: keys(baseUrl).workflows(sessionId), queryFn: () => getWorkflows(baseUrl as string, sessionId), enabled: baseUrl != null }); }
 export function useHooks() { const { baseUrl } = useAuth(); return useQuery<HookRow[]>({ queryKey: keys(baseUrl).hooks, queryFn: () => getHooks(baseUrl as string), enabled: baseUrl != null }); }
+export function useCrews() { const { baseUrl } = useAuth(); return useQuery<Crew[]>({ queryKey: keys(baseUrl).crews, queryFn: () => getCrews(baseUrl as string), enabled: baseUrl != null }); }
+export function useSaveCrew() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CrewBody) => putCrew(baseUrl as string, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).crews }),
+  });
+}
+export function useDeleteCrew() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => deleteCrew(baseUrl as string, name),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: keys(baseUrl).crews }),
+  });
+}
 export function useModels() {
   const { baseUrl } = useAuth();
   const isFocused = useIsFocused();

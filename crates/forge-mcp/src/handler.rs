@@ -13,7 +13,8 @@
 //!   optional [`SamplingHandler`] the host (forge-core) installs; absent → a clean
 //!   method-not-found error (never a panic).
 //! - **`roots/list`** — the workspace root(s) the host configured.
-//! - **elicitation** — capability advertised; the minimal handler (rmcp's default) declines.
+//! - **elicitation** — a server asking the user for input mid-call. Routed to the host through
+//!   [`crate::elicit`]; with no host listening (nothing mid-call to ask on) it declines.
 //! - **`notifications/tools/list_changed`** — re-list the server's tools and swap them into the
 //!   shared live catalog, so runtime tool changes are picked up *without* a reconnect.
 //!
@@ -27,7 +28,8 @@ use std::sync::Arc;
 
 use rmcp::model::{
     ClientCapabilities, ClientInfo, CreateMessageRequestMethod, CreateMessageRequestParams,
-    CreateMessageResult, ListRootsResult, Root,
+    CreateMessageResult, ElicitRequestParams, ElicitResult, ElicitationAction, ListRootsResult,
+    Root,
 };
 use rmcp::service::{NotificationContext, RequestContext, RoleClient};
 use rmcp::{ClientHandler, ErrorData as McpError};
@@ -110,6 +112,43 @@ impl ClientHandler for ForgeClientHandler {
             // No host sampling installed — decline cleanly instead of panicking.
             None => Err(McpError::method_not_found::<CreateMessageRequestMethod>()),
         }
+    }
+
+    async fn create_elicitation(
+        &self,
+        request: ElicitRequestParams,
+        _ctx: RequestContext<RoleClient>,
+    ) -> Result<ElicitResult, McpError> {
+        use crate::elicit::{route, ElicitForm, ElicitPrompt, ElicitReply};
+        let (message, prompt) = match request {
+            ElicitRequestParams::FormElicitationParams {
+                message,
+                requested_schema,
+                ..
+            } => {
+                let schema = serde_json::to_value(&requested_schema).unwrap_or_default();
+                (
+                    message,
+                    ElicitPrompt::Form(ElicitForm::from_schema(&schema)),
+                )
+            }
+            ElicitRequestParams::UrlElicitationParams { message, url, .. } => {
+                (message, ElicitPrompt::Url(url))
+            }
+            _ => return Ok(ElicitResult::new(ElicitationAction::Decline)),
+        };
+        Ok(match route(&self.server_name, message, prompt).await {
+            ElicitReply::Accept(values) => {
+                let result = ElicitResult::new(ElicitationAction::Accept);
+                if values.is_empty() {
+                    result
+                } else {
+                    result.with_content(serde_json::Value::Object(values))
+                }
+            }
+            ElicitReply::Decline => ElicitResult::new(ElicitationAction::Decline),
+            ElicitReply::Cancel => ElicitResult::new(ElicitationAction::Cancel),
+        })
     }
 
     async fn list_roots(

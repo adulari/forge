@@ -9,6 +9,7 @@
 // wire (UI_RULES.md #4).
 
 import { parseNoticesResponse, type NoticesResponse } from "./notices/core";
+import type { Crew, CrewBody } from "./crews";
 import { noteHostResponse } from "./hostStatus";
 import { tFetch, TWebSocket } from "./transport";
 import type { DaemonUpdateInfo } from "./updateBanner";
@@ -621,6 +622,8 @@ export interface AnswerRequest {
   session: string;
   seq: number;
   allow: boolean;
+  /** One-line reason (deny) or instruction (allow) the model reads with the tool result. */
+  note?: string;
 }
 
 export interface ErrorBody {
@@ -1014,6 +1017,16 @@ export function updateConfig(baseUrl: string, body: UpdateConfigRequest): Promis
 }
 
 export function getHooks(baseUrl: string): Promise<HookRow[]> { return expectArray(request(baseUrl, "/api/hooks"), "hooks"); }
+export async function getCrews(baseUrl: string, cwd?: string): Promise<Crew[]> {
+  const body = await expectObject(request<{ crews?: Crew[] }>(baseUrl, `/api/crews${qs({ cwd })}`), "crews");
+  return Array.isArray(body.crews) ? body.crews : [];
+}
+export function putCrew(baseUrl: string, body: CrewBody): Promise<{ ok: boolean; path?: string }> {
+  return request(baseUrl, "/api/crews", { method: "PUT", body: JSON.stringify(body) });
+}
+export function deleteCrew(baseUrl: string, name: string): Promise<{ ok: boolean }> {
+  return request(baseUrl, `/api/crews${qs({ name })}`, { method: "DELETE" });
+}
 export function getPlans(baseUrl: string): Promise<PlanRow[]> { return expectArray(request(baseUrl, "/api/plans"), "plans"); }
 
 export function createMcpServer(baseUrl: string, body: CreateMcpServerRequest): Promise<McpResponse> { return request(baseUrl, "/api/mcp", { method: "POST", body: JSON.stringify(body) }); }

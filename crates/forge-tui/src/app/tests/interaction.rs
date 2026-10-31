@@ -585,6 +585,40 @@ fn question_form_renders_tabs_checkboxes_other_and_note_rows() {
 }
 
 #[test]
+fn a_secret_question_masks_the_field_and_the_scrollback_record() {
+    let mut app = App::default();
+    app.open_form(vec![forge_types::Question {
+        header: "Token".into(),
+        secret: true,
+        allow_note: false,
+        ..forge_types::Question::single("API token for the deploy server", &[], true)
+    }]);
+    for c in "hunter2".chars() {
+        app.form_key(KeyKind::Char(c));
+    }
+    let typing = screen_wh(&app, 90, LIVE_H);
+    println!("{typing}");
+    assert!(
+        !typing.contains("hunter2"),
+        "secret leaked while typing: {typing}"
+    );
+    assert!(
+        typing.contains("\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"),
+        "{typing}"
+    );
+    match app.form_key(KeyKind::Enter) {
+        Some(crate::FormOutcome::Submit(a)) => assert_eq!(a[0].other.as_deref(), Some("hunter2")),
+        other => panic!("{other:?}"),
+    }
+    let record = flush_text(&mut app);
+    assert!(
+        !record.contains("hunter2"),
+        "secret reached scrollback: {record}"
+    );
+    assert!(record.contains("hidden"), "{record}");
+}
+
+#[test]
 fn an_answered_question_leaves_a_faint_two_row_record() {
     let mut app = App::default();
     let opt = |l: &str, d: &str| QChoice {

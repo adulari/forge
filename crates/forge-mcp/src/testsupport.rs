@@ -38,13 +38,14 @@ impl ServerHandler for EchoServer {
                 "Echo back the msg argument",
                 Arc::new(schema.clone()),
             ),
-            Tool::new("boom", "Always fails", Arc::new(schema)),
+            Tool::new("boom", "Always fails", Arc::new(schema.clone())),
+            Tool::new("ask", "Elicit a count and a token", Arc::new(schema)),
         ]))
     }
     async fn call_tool(
         &self,
         req: CallToolRequestParams,
-        _ctx: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         // This mock always completes; `.into()` wraps it as CallToolResponse::Complete.
         match req.name.as_ref() {
@@ -61,6 +62,31 @@ impl ServerHandler for EchoServer {
                 )
             }
             "boom" => Ok(CallToolResult::error(vec![ContentBlock::text("kaboom")]).into()),
+            // Asks the client for an integer, a secret, a choice and a flag, then reports what
+            // came back, so a test can follow a value through the whole elicitation round trip.
+            "ask" => {
+                let params: rmcp::model::ElicitRequestParams =
+                    serde_json::from_value(serde_json::json!({
+                        "mode": "form",
+                        "message": "Need two things",
+                        "requestedSchema": {
+                            "type": "object",
+                            "properties": {
+                                "count": {"type": "integer", "title": "Count", "minimum": 1, "maximum": 9},
+                                "api_token": {"type": "string", "title": "API token"},
+                                "env": {"type": "string", "title": "Env", "enum": ["dev", "prod"]},
+                                "dry_run": {"type": "boolean", "title": "Dry run"}
+                            },
+                            "required": ["count", "api_token"]
+                        }
+                    }))
+                    .expect("valid elicitation request");
+                let text = match ctx.peer.create_elicitation(params).await {
+                    Ok(result) => serde_json::to_string(&result).unwrap_or_default(),
+                    Err(e) => format!("elicitation failed: {e}"),
+                };
+                Ok(CallToolResult::success(vec![ContentBlock::text(text)]).into())
+            }
             other => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "unknown tool {other}"
             ))])

@@ -1021,6 +1021,7 @@ fn daemon_routes(state: Arc<DaemonState>) -> Router {
         )
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
+        .merge(crate::serve_crews::routes(&base))
         .merge(crate::serve_skills::routes(&base))
         .merge(crate::serve_account_sync::routes(&base))
         .merge(crate::serve_access::routes(&base))
@@ -3011,6 +3012,8 @@ struct AnswerReq {
     session: String,
     seq: u64,
     allow: bool,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 /// `POST /api/answer` — approve/deny a pending permission prompt WITHOUT a page: the service
@@ -3043,6 +3046,7 @@ async fn answer(
         .send(remote::RemoteInput::Allow {
             yes: req.allow,
             seq: req.seq,
+            note: req.note,
         })
         .await
         .is_err()

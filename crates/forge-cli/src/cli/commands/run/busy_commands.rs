@@ -85,6 +85,8 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::SetEffort(_)
         | CommandAction::SetExactEffort(_)
         | CommandAction::Subagents(_)
+        | CommandAction::Delegation(_)
+        | CommandAction::Crew(_)
         | CommandAction::Agents
         | CommandAction::Plan(_)
         | CommandAction::Execute
