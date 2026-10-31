@@ -540,10 +540,6 @@ const PINNED_RL_DELAY_CAP_SECS: u64 = 60;
 /// instead of blocking indefinitely.
 const PINNED_RL_TOTAL_WAIT_SECS: u64 = 180;
 
-/// One pinned-backoff delay. `attempt` is 1-based. A server `Retry-After` (when the provider
-/// error carried one) is respected verbatim — the server knows its own reset better than our
-/// blind schedule. Otherwise: exponential base delay with ±20% jitter (`jitter` ∈ [0,1] maps to
-/// a 0.8-1.2 factor) so many pinned turns limited at once don't retry in lockstep.
 /// Cheap jitter in [0,1) without a rand dependency: sub-second wall-clock nanos.
 fn wall_clock_jitter() -> f64 {
     f64::from(
@@ -554,6 +550,10 @@ fn wall_clock_jitter() -> f64 {
     ) / 1e9
 }
 
+/// One pinned-backoff delay. `attempt` is 1-based. A server `Retry-After` (when the provider
+/// error carried one) is respected verbatim — the server knows its own reset better than our
+/// blind schedule. Otherwise: exponential base delay with ±20% jitter (`jitter` ∈ [0,1] maps to
+/// a 0.8-1.2 factor) so many pinned turns limited at once don't retry in lockstep.
 fn pinned_backoff_delay(
     attempt: u32,
     retry_after: Option<std::time::Duration>,
@@ -13347,7 +13347,7 @@ mod tests {
         // Terminal-Bench: a gateway answered an identical, instant 503 overload and the turn died
         // as "its provider rejected it twice". Busy is not refused: retry until it clears.
         for attended in [true, false] {
-            let (result, events, _) = overload_run(4, 10, 600, attended).await;
+            let (result, events, _) = overload_run(3, 1000, 600, attended).await;
             assert_eq!(result.unwrap(), "pin::model", "attended={attended}");
             assert!(
                 events.iter().any(|e| matches!(e, PresenterEvent::Warning(w)
@@ -13365,15 +13365,37 @@ mod tests {
 
     #[tokio::test]
     async fn overload_retry_after_sets_the_wait() {
-        let (result, _, elapsed) = overload_run(2, 300, 600, true).await;
+        let (result, _, elapsed) = overload_run(2, 1500, 600, true).await;
         assert!(result.is_ok());
         assert!(
-            elapsed >= std::time::Duration::from_millis(600),
-            "two Retry-After waits of 300ms must both be honoured, took {elapsed:?}"
+            elapsed >= std::time::Duration::from_millis(3000),
+            "two Retry-After waits of 1.5s must both be honoured, took {elapsed:?}"
         );
         assert!(
-            elapsed < std::time::Duration::from_secs(4),
+            elapsed < std::time::Duration::from_secs(8),
             "Retry-After replaces the 5s blind schedule, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_after_zero_cannot_spin_and_the_warning_is_rate_limited() {
+        let (result, events, elapsed) = overload_run(1000, 0, 4, true).await;
+        let text = result.unwrap_err().to_string();
+        assert!(
+            text.contains("provider busy (503 gateway_overloaded)"),
+            "{text}"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_secs(3),
+            "a Retry-After of 0 is floored at 1s, took {elapsed:?}"
+        );
+        let busy_warnings = events
+            .iter()
+            .filter(|e| matches!(e, PresenterEvent::Warning(w) if w.contains("provider busy")))
+            .count();
+        assert!(
+            busy_warnings <= 1,
+            "one warning for the first four retries: {busy_warnings}"
         );
     }
 

@@ -120,7 +120,11 @@ impl Session {
         let command = forge_types::shell_command_text(args).unwrap_or_default();
         if permission::is_shell_tool(tool) && permission::denial_note(tool, args).is_none() {
             let workspace = self.workspace_binding.read().ok().map(|g| g.clone());
-            let reason = permission::out_of_bounds_delete(&command, workspace.as_deref())?;
+            let reason = permission::out_of_bounds_delete(
+                &command,
+                workspace.as_deref(),
+                args.get("cwd").and_then(serde_json::Value::as_str),
+            )?;
             self.presenter.emit(PresenterEvent::Warning(format!(
                 "refused `{command}`: {reason}"
             )));
