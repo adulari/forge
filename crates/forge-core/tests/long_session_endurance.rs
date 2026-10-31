@@ -201,8 +201,10 @@ async fn hundreds_of_turns_survive_repeated_compaction_and_resume() {
         }
     }
 
+    // A ceiling for pathological slowness (quadratic compaction, runaway resume), not a speed
+    // benchmark: the self-hosted runner shares a busy machine and a healthy run has taken 108s.
     assert!(
-        started.elapsed() < Duration::from_secs(90),
+        started.elapsed() < Duration::from_secs(240),
         "the deterministic {TURNS}-turn endurance run became pathologically slow: {:?}",
         started.elapsed()
     );
