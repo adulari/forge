@@ -78,6 +78,7 @@ mod local_presence;
 use local_presence::LocalPresenceGuard;
 
 mod atfiles;
+mod control_menu;
 pub(crate) use atfiles::*;
 pub(crate) mod copy;
 pub(crate) use copy::*;
@@ -529,6 +530,12 @@ pub(crate) async fn run_chat_tui(
                     .await
                     .set_fleet_messaging(Some(std::sync::Arc::new(
                         crate::fleet_peers::HttpFleet::local(),
+                    )));
+                probe_session
+                    .lock()
+                    .await
+                    .set_control_host(Some(std::sync::Arc::new(
+                        crate::control_http::HttpControl::local(),
                     )));
             }
         });
@@ -3844,7 +3851,17 @@ pub(crate) async fn run_chat_tui(
                                     // Expand `@path` mentions: read those files and ride their
                                     // contents along as turn guidance, leaving the echoed line clean.
                                     attach_at_images(&prompt, None, &session, &mut app).await;
-                                    let (file_blocks, included, skipped) = expand_at_files(&prompt);
+                                    let (mut file_blocks, included, skipped) =
+                                        expand_at_files(&prompt);
+                                    file_blocks.extend(
+                                        crate::mentions::apply(
+                                            &prompt,
+                                            std::path::Path::new("."),
+                                            &session,
+                                            &mut app,
+                                        )
+                                        .await,
+                                    );
                                     if !included.is_empty() {
                                         app.note(&format!("📎 included {}", included.join(", ")));
                                     }
@@ -4415,7 +4432,16 @@ pub(crate) async fn run_chat_tui(
                                     &mut app,
                                 )
                                 .await;
-                                let (file_blocks, included, skipped) = expand_at_files(&prompt);
+                                let (mut file_blocks, included, skipped) = expand_at_files(&prompt);
+                                file_blocks.extend(
+                                    crate::mentions::apply(
+                                        &prompt,
+                                        &hook_workspace,
+                                        &session,
+                                        &mut app,
+                                    )
+                                    .await,
+                                );
                                 if !included.is_empty() {
                                     app.note(&format!("📎 included {}", included.join(", ")));
                                 }

@@ -15,9 +15,10 @@ pub(crate) use cli::args::host::BackupArgs;
 pub(crate) use cli::args::mcp::{McpSyncTarget, McpTransportArg};
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
 pub(crate) use cli::args::{
-    AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity,
-    GitCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat, PluginCmd, ProviderCmd,
-    QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd, VoiceOp,
+    AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ControlCmd, ExportScope,
+    FailOnSeverity, GitCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat,
+    PluginCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd,
+    VoiceOp,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;
@@ -71,6 +72,8 @@ mod browser_args;
 mod cli;
 mod clipboard_image;
 mod context_windows;
+mod control_http;
+mod control_settings;
 mod daemon_cwd;
 mod doctor;
 mod doctor_daemon;
@@ -87,7 +90,9 @@ mod local;
 mod log_filter;
 mod login_path;
 mod mcp_agent;
+mod mcp_control;
 mod mcp_serve;
+mod mentions;
 mod onboarding;
 mod open_pr_hooks;
 mod power;
@@ -106,6 +111,7 @@ mod serve_actions;
 mod serve_agents;
 mod serve_clients;
 mod serve_clients_cli;
+mod serve_control;
 mod serve_diagnostics;
 mod serve_dispatch;
 mod serve_fleet_ws;

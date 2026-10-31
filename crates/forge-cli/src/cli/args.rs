@@ -1419,7 +1419,8 @@ pub(crate) use import::ImportSource;
 
 #[path = "args/mcp.rs"]
 pub(crate) mod mcp;
-pub(crate) use mcp::{McpCmd, ServeTransportArg};
+#[allow(unused_imports)] // used by the binary, not the completions facade
+pub(crate) use mcp::{ControlCmd, McpCmd, ServeTransportArg};
 
 #[path = "args/plugins.rs"]
 pub(crate) mod plugins;

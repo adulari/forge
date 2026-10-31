@@ -247,6 +247,9 @@ impl Session {
         if call.name == fleet::LIST_SESSIONS_TOOL {
             return self.list_sessions(msg_id, call).await;
         }
+        if self.control.is_some() && crate::control::is_control_tool(&call.name) {
+            return self.control_tool(msg_id, call).await;
+        }
         // Plan and dispatch: recorded through the host the daemon wires into coordinator sessions.
         if call.name == crate::dispatch::DISPATCH_SESSIONS_TOOL {
             return self.dispatch_sessions(msg_id, call).await;

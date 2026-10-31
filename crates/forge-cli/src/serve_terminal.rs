@@ -248,6 +248,8 @@ impl TerminalHandle {
     }
 }
 
+mod scrollback;
+
 #[derive(Default)]
 pub(crate) struct TerminalRegistry {
     terminals: Mutex<HashMap<TerminalKey, Arc<TerminalHandle>>>,

@@ -31,7 +31,7 @@ export const WEB_TOP_BAR_HEIGHT = 40;
 
 // Every route reached from the Settings rail belongs to the Settings tab; without this the
 // top bar showed no active tab on any sub-page.
-const SETTINGS_FAMILY = /^\/(settings|appearance|desktop|keybindings|diagnostics|legal|anywhere|usage|providers|models|plans|mcp|configuration|skills|hooks|session-tree|workflows|prs|remote-access)(\/|$)/;
+const SETTINGS_FAMILY = /^\/(settings|appearance|desktop|keybindings|diagnostics|legal|anywhere|usage|providers|models|plans|mcp|configuration|skills|hooks|control|session-tree|workflows|prs|remote-access)(\/|$)/;
 
 export interface WebTopBarProps {
   /** Doubles the combined usage ring as the ⌘U dock toggle affordance — see

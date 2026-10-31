@@ -132,7 +132,7 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows" | "/prs" | "/remote-access";
+type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/control" | "/session-tree" | "/workflows" | "/prs" | "/remote-access";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
@@ -151,6 +151,7 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
   { key: "configuration", label: "Configuration", href: "/configuration" },
   { key: "skills", label: "Skills", href: "/skills" },
   { key: "hooks", label: "Hooks", href: "/hooks" },
+  { key: "control", label: "Control tools", href: "/control" },
   { key: "session-tree", label: "Session tree", href: "/session-tree" },
   { key: "workflows", label: "Workflows", href: "/workflows" },
   { key: "prs", label: "Pull requests", href: "/prs" },
@@ -681,6 +682,7 @@ export function SettingsScreen() {
           <NavListRow label="Configuration" onPress={() => router.push("/configuration")} />
           <NavListRow label="Skills" meta={skillsCountLabel} onPress={() => router.push("/skills")} />
           <NavListRow label="Hooks" meta={hooksCountLabel} onPress={() => router.push("/hooks")} />
+          <NavListRow label="Control tools" onPress={() => router.push("/control")} />
           <NavListRow label="Session tree" onPress={() => router.push("/session-tree")} />
           <NavListRow label="Workflows" onPress={() => router.push("/workflows")} />
           <NavListRow label="Pull requests" onPress={() => router.push("/prs")} showSeparator={false} />

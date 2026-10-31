@@ -404,7 +404,12 @@ impl DriverState {
                 // Expand `@path` mentions exactly like the TUI submit path.
                 attach_at_images(&prompt, Some(&hook_workspace), &self.session, &mut self.app)
                     .await;
-                let (file_blocks, included, skipped) = expand_at_files_in(&prompt, &hook_workspace);
+                let (mut file_blocks, included, skipped) =
+                    expand_at_files_in(&prompt, &hook_workspace);
+                file_blocks.extend(
+                    crate::mentions::apply(&prompt, &hook_workspace, &self.session, &mut self.app)
+                        .await,
+                );
                 if !included.is_empty() {
                     self.app
                         .note(&format!("📎 included {}", included.join(", ")));

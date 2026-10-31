@@ -187,7 +187,7 @@ impl Session {
 impl Session {
     /// Prompt for an MCP tool. Both standing answers add an in-memory rule only: MCP rules are
     /// never written to the project config.
-    fn ask_mcp(
+    pub(crate) fn ask_mcp(
         &mut self,
         tool: &str,
         side_effect: forge_types::SideEffect,

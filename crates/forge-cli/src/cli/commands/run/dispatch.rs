@@ -953,6 +953,7 @@ and keep going."
             };
             return Ok(DispatchOutcome::ToggleRemote { exposure });
         }
+        CommandAction::Control => super::control_menu::open(app, None),
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
         CommandAction::Anywhere => {
             match crate::anywhere::tui_status_summary() {
