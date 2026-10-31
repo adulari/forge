@@ -47,6 +47,8 @@ pub(crate) struct CompactionBudget {
     pub verbatim_tokens: usize,
     /// Recent tool rounds kept next to the summary.
     pub keep_rounds_tokens: usize,
+    /// `[harness] compaction_summary_cap` held the summary below its normal share.
+    pub summary_capped: bool,
 }
 
 impl CompactionBudget {
@@ -92,13 +94,23 @@ impl CompactionBudget {
             summary_tokens,
             verbatim_tokens,
             keep_rounds_tokens,
+            summary_capped: false,
         }
+    }
+
+    /// The budget with the summary held to at most `cap` tokens.
+    pub(crate) fn with_summary_cap(mut self, cap: Option<usize>) -> Self {
+        if let Some(cap) = cap.filter(|cap| *cap < self.summary_tokens) {
+            self.summary_tokens = cap.max(SUMMARY_FLOOR_TOKENS);
+            self.summary_capped = true;
+        }
+        self
     }
 
     /// Whether the summary is held below its old ceiling, which is when the summarizer must be
     /// told the size.
     pub(crate) fn summary_is_scaled(&self) -> bool {
-        self.summary_tokens < COMPACT_OUTPUT_TOKENS / 2
+        self.summary_capped || self.summary_tokens < COMPACT_OUTPUT_TOKENS / 2
     }
 
     /// `max_output_tokens` of the summary call: the summary's size plus the scratch section it is
@@ -175,6 +187,29 @@ impl ThrashGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_summary_cap_lowers_a_big_window_and_leaves_a_small_one() {
+        let big = CompactionBudget::for_trigger(838_860, 0);
+        assert_eq!(big.summary_tokens, COMPACT_OUTPUT_TOKENS);
+        assert!(!big.summary_is_scaled() || big.summary_capped);
+        let capped = big.with_summary_cap(Some(16_000));
+        assert_eq!(capped.summary_tokens, 16_000);
+        assert!(
+            capped.summary_is_scaled(),
+            "the summarizer is told the size"
+        );
+        assert!(capped.output_tokens() <= COMPACT_OUTPUT_TOKENS);
+
+        let small = CompactionBudget::for_trigger(24_000, 0);
+        let kept = small.with_summary_cap(Some(16_000));
+        assert_eq!(kept.summary_tokens, small.summary_tokens);
+        assert!(!kept.summary_capped);
+        assert_eq!(
+            big.with_summary_cap(None).summary_tokens,
+            COMPACT_OUTPUT_TOKENS
+        );
+    }
 
     const PINNED: usize = 1_200;
 

@@ -45,3 +45,20 @@ fn sleeps_first(call: &forge_types::ToolCall) -> bool {
         })
         .is_match(&text)
 }
+
+#[cfg(test)]
+mod wait_tests {
+    use super::is_waiting;
+
+    #[test]
+    fn a_timed_out_shell_job_wait_counts_as_waiting() {
+        let call = forge_types::ToolCall {
+            id: "c".into(),
+            name: "shell_job".into(),
+            args: serde_json::json!({"action": "wait", "id": 7}),
+        };
+        let head = "job 7 is running after 60s without exiting; call wait again, or read its log \
+                    — last 30 lines:\n\nquiet";
+        assert!(is_waiting(&call, true, head));
+    }
+}

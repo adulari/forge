@@ -1,3 +1,5 @@
+//! `[harness]` settings: Continual Harness and the opt-in loop/stop behaviours.
+
 use serde::{Deserialize, Serialize};
 
 use crate::default_true;
@@ -61,6 +63,28 @@ pub struct HarnessConfig {
     /// returns the job id and output so far; `job_wake` delivers completion. Off by default.
     #[serde(default)]
     pub shell_autobackground: bool,
+    /// Factory Droid's stream-silence watchdog: a model stream silent for 4 minutes (the idle
+    /// window is raised to 240s when it is shorter) is aborted and the SAME model is retried,
+    /// instead of failing over at once. Streams that deliver any event, reasoning included, are
+    /// never cut.
+    #[serde(default)]
+    pub stream_silence_retry: bool,
+    /// Advertise a `wait` action on `shell_job`: block up to N seconds for a background job and
+    /// return its exit code and log tail, instead of polling.
+    #[serde(default)]
+    pub wait_job: bool,
+    /// Keep the cached request prefix append-only: the task-list snapshot leaves the pinned
+    /// context block (which sits before the whole transcript) and is appended to the transcript
+    /// when it changes.
+    #[serde(default)]
+    pub append_only_prefix: bool,
+    /// Warn at once, naming the cause, when a request breaks the provider prompt cache (tool list
+    /// changed, or an already-sent message was rewritten) instead of after two in a row.
+    #[serde(default)]
+    pub cache_monitor: bool,
+    /// Cap a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k.
+    #[serde(default)]
+    pub compaction_summary_cap: bool,
 }
 
 impl Default for HarnessConfig {
@@ -80,6 +104,11 @@ impl Default for HarnessConfig {
             read_shaping: false,
             script_parallel: false,
             shell_autobackground: false,
+            stream_silence_retry: false,
+            wait_job: false,
+            append_only_prefix: false,
+            cache_monitor: false,
+            compaction_summary_cap: false,
         }
     }
 }

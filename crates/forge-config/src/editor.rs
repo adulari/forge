@@ -278,6 +278,11 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.stop_retries" => Some(("Behaviour", "Stop retries")),
         "harness.thinking_loop_breaker" => Some(("Behaviour", "Thinking-loop breaker")),
         "harness.repeat_interrupt" => Some(("Behaviour", "Repeat-call interrupt")),
+        "harness.stream_silence_retry" => Some(("Behaviour", "Stream-silence retry")),
+        "harness.wait_job" => Some(("Behaviour", "Wait for background job")),
+        "harness.append_only_prefix" => Some(("Behaviour", "Append-only prompt prefix")),
+        "harness.cache_monitor" => Some(("Behaviour", "Prompt-cache break warnings")),
+        "harness.compaction_summary_cap" => Some(("Behaviour", "16k compaction summary")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -530,6 +535,11 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
         "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",
         "harness.repeat_interrupt" => "After 5 identical consecutive tool calls with identical results, tell the model not to repeat that call and to change approach; the progress ledger's cycle stop moves two repeats later. Wins over harness_profile = minimal. Default off.",
+        "harness.stream_silence_retry" => "Abort a model stream that has been silent for 4 minutes (raises the idle window to 240s if it is shorter) and retry the same model up to twice before failing over. Any stream event, reasoning included, counts as activity, so long reasoning is never cut. Default off.",
+        "harness.wait_job" => "Add a wait action to shell_job: block up to N seconds for a background job and return its exit code and the tail of its log, so the model waits instead of polling. Default off.",
+        "harness.append_only_prefix" => "Keep the cached prompt prefix append-only: the task-list snapshot moves out of the pinned session context (which sits before the whole transcript) into a note appended when the list changes, so a changed list no longer re-bills the conversation. Default off.",
+        "harness.cache_monitor" => "Warn immediately, with the cause, when a request breaks the provider prompt cache: the tool list changed or an already-sent message was rewritten. Without it the warning needs two rewrites in a row. Default off.",
+        "harness.compaction_summary_cap" => "Cap a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k. Default off.",
         _ => return None,
     })
 }

@@ -17,16 +17,16 @@ fn summary() -> String {
 /// Records every main-loop request. Answers the summarizer with a well-formed summary, and a
 /// scripted first reply with tool calls when `first_calls` is set.
 #[derive(Default)]
-struct Recorder {
-    requests: Mutex<Vec<Vec<Message>>>,
-    first_calls: Mutex<Vec<forge_types::ToolCall>>,
+pub(super) struct Recorder {
+    pub(super) requests: Mutex<Vec<Vec<Message>>>,
+    pub(super) first_calls: Mutex<Vec<forge_types::ToolCall>>,
 }
 
 impl Recorder {
-    fn requests(&self) -> Vec<Vec<Message>> {
+    pub(super) fn requests(&self) -> Vec<Vec<Message>> {
         self.requests.lock().unwrap().clone()
     }
-    fn last(&self) -> Vec<Message> {
+    pub(super) fn last(&self) -> Vec<Message> {
         self.requests().pop().expect("a request was made")
     }
 }
@@ -87,7 +87,7 @@ impl Provider for Recorder {
     }
 }
 
-fn workspace(agents_md: Option<&str>) -> std::path::PathBuf {
+pub(super) fn workspace(agents_md: Option<&str>) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("forge-pinned-{}", forge_types::new_id()));
     std::fs::create_dir_all(&dir).unwrap();
     if let Some(body) = agents_md {
@@ -96,7 +96,7 @@ fn workspace(agents_md: Option<&str>) -> std::path::PathBuf {
     dir
 }
 
-fn quiet_config() -> Config {
+pub(super) fn quiet_config() -> Config {
     let mut config = Config::default();
     config.mesh.rate_limit_wait_secs = 0;
     config.mesh.auto_memory = false;
@@ -113,7 +113,7 @@ fn router() -> Arc<FixedRouter> {
     })
 }
 
-fn start(
+pub(super) fn start(
     store: &Arc<Store>,
     dir: &std::path::Path,
     provider: &Arc<Recorder>,

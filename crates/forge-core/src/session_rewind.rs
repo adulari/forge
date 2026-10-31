@@ -134,7 +134,8 @@ impl Session {
         let budget = CompactionBudget::for_trigger(
             self.effective_compaction_trigger(None),
             self.pinned_tokens(),
-        );
+        )
+        .with_summary_cap(self.summary_cap());
         // The rows come from the store, so tool results are already the full stored text.
         let folded = fold_inputs(&messages, &[]);
         let directive = focus

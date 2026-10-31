@@ -24,6 +24,7 @@ pub mod codemode;
 mod commit_policy;
 mod compact_model;
 mod config_diagnostics;
+mod harness;
 pub mod setting_sources;
 pub mod skill_usage;
 mod system_prompt_overrides;
@@ -68,6 +69,7 @@ pub use agents::{agent_catalog, load_agents, load_agents_layered, map_tool_name,
 pub use commit_policy::CommitPolicy;
 pub use compact_model::CompactModel;
 pub use hard_stop::HardStop;
+pub use harness::{AutoRefineMode, HarnessConfig};
 pub use harness_profile::{resolve_harness_profile, HarnessProfile};
 pub use hooks::{cc_hooks_from_settings, is_regex_matcher, HookConfig, HookEvent, HookKind};
 pub use install_notices::{install_notice_seen, mark_install_notice_seen, CLI_BRIDGE_TERMS};
