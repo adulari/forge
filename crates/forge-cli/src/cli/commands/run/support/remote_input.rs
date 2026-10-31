@@ -4,14 +4,42 @@ use super::*;
 /// commit — cursor move + synthesized Enter — is never interleaved by local typing), then the
 /// terminal's own events. Remote keys become plain [`forge_tui::InputEvent::Key`]s here, so from
 /// this point on they are indistinguishable from local keystrokes — the ONE code path both take.
+///
+/// The bool is the event's origin: true for a remote, fleet or control channel, false for the
+/// terminal on this machine.
 pub(crate) fn next_input_event(
     remote_keys: &mut std::collections::VecDeque<forge_tui::KeyKind>,
     tui: &mut forge_tui::Tui,
-) -> Result<Option<forge_tui::InputEvent>> {
+) -> Result<Option<(forge_tui::InputEvent, bool)>> {
     if let Some(k) = remote_keys.pop_front() {
-        return Ok(Some(forge_tui::InputEvent::Key(k)));
+        return Ok(Some((forge_tui::InputEvent::Key(k), true)));
     }
-    tui.poll_event().context("reading input")
+    Ok(tui
+        .poll_event()
+        .context("reading input")?
+        .map(|ev| (ev, false)))
+}
+
+static REMOTE_ORIGIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Record where the input being handled right now came from. Set per event in the key loop and
+/// per input in the remote drain, so a host-only command is judged by who typed it, not by which
+/// code path it reached.
+pub(crate) fn set_remote_origin(remote: bool) {
+    REMOTE_ORIGIN.store(remote, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub(crate) fn remote_origin() -> bool {
+    REMOTE_ORIGIN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The refusal for `text` when the input being handled came from a remote channel.
+pub(crate) fn origin_refusal(text: &str) -> Option<&'static str> {
+    if remote_origin() {
+        remote_command_refusal(text)
+    } else {
+        None
+    }
 }
 
 /// True when any modal surface owns the keyboard — the same set `remote_overlay()` projects.
@@ -32,6 +60,10 @@ pub(crate) fn any_remote_modal_open(app: &forge_tui::App) -> bool {
 /// that change what leaves this machine, destroy data, or block the host terminal on its own
 /// stdin, so they only run from the keyboard here.
 pub(crate) fn remote_command_refusal(text: &str) -> Option<&'static str> {
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('/') || trimmed.starts_with("//") {
+        return None;
+    }
     match forge_tui::parse_command(text) {
         forge_tui::CommandAction::Keys => {
             Some("⌨ /keys is host-only (a fullscreen keybind configurator on the host terminal)")
@@ -444,6 +476,52 @@ mod host_only_tests {
         }
         assert!(remote_command_refusal("/status").is_none());
         assert!(remote_command_refusal("fix the bug").is_none());
+    }
+
+    #[test]
+    fn plain_prompts_that_start_with_a_command_word_are_not_commands() {
+        for text in [
+            "delete the dead code",
+            "Delete the unused imports in foo.rs",
+            "anywhere we log, add the id",
+            "aw snap, it broke",
+            "keys are missing",
+            "//delete",
+        ] {
+            assert!(remote_command_refusal(text).is_none(), "{text}");
+        }
+    }
+
+    #[test]
+    fn remote_chars_spelling_a_host_only_command_are_refused_at_submit() {
+        use forge_tui::{InputOutcome, KeyKind};
+        for command in ["/anywhere", "/delete"] {
+            let mut app = forge_tui::App::default();
+            let mut submitted = None;
+            for ch in command.chars().map(KeyKind::Char).chain([KeyKind::Enter]) {
+                if let InputOutcome::Submit(line) = app.edit_key(ch) {
+                    submitted = Some(line);
+                }
+            }
+            let line = submitted.expect("the typed line submits");
+            set_remote_origin(true);
+            assert!(
+                origin_refusal(&line).is_some(),
+                "{command} from a remote key"
+            );
+            set_remote_origin(false);
+            assert!(origin_refusal(&line).is_none(), "{command} at the keyboard");
+            assert!(!app.anywhere_menu.open && app.session_delete.is_none());
+        }
+        set_remote_origin(false);
+    }
+
+    #[test]
+    fn remote_keys_are_dropped_while_a_host_only_menu_is_open() {
+        let mut app = forge_tui::App::default();
+        assert!(!host_only_modal_open(&app));
+        app.anywhere_menu.open = true;
+        assert!(host_only_modal_open(&app));
     }
 
     #[test]

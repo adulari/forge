@@ -207,6 +207,12 @@ pub(crate) async fn dispatch_command(
     assay_scope: &mut forge_types::AssayScope,
 ) -> Result<DispatchOutcome> {
     use forge_tui::CommandAction;
+    // The last line of defence: whichever path a host-only command took here (typed as remote
+    // keys, a palette pick), a remote origin never opens its menu or confirms its action.
+    if let Some(refusal) = super::support::origin_refusal(line) {
+        app.note(refusal);
+        return Ok(DispatchOutcome::Handled);
+    }
     app.note_command_used(line);
     let action = forge_tui::parse_command(line);
     // Commands that need the session lock (held by the running turn) are queued by the input
