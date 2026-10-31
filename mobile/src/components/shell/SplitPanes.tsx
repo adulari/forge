@@ -20,6 +20,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Pressable, ScrollView, StyleSheet, Text, View, type LayoutChangeEvent } from "react-native";
 
 import { SessionChat } from "../../app/session/[id]/index";
+import { requestModelPicker, setRenderedPanes } from "../../lib/alertTargets";
+import { providerIdOf } from "../../lib/providerFamily";
 import { useSessions } from "../../lib/queries";
 import { useShortcutLabel } from "../../lib/shortcuts";
 import { SessionProvider, useSessionCtx } from "../../lib/sessionContext";
@@ -28,20 +30,27 @@ import { hexToRgba, radii, space, statusDotColor, type StatusDotState } from "..
 import { formatCwd, type as typeScale } from "../../theme/typography";
 import { Button } from "../ds/Button";
 import { EmptyState } from "../ds/EmptyState";
+import { ProviderGlyph } from "../ds/ProviderGlyph";
+import { shortModelLabel } from "../fleet/shortModelLabel";
+import { OverlayHost } from "../overlay/OverlayHost";
 import {
   DEFAULT_WEIGHTS,
   MIN_ROW_SHARE,
   clampFraction,
+  indexOfSlotId,
   minWeight,
+  nextPaneSize,
   normalizeWeights,
   paneGeometry,
   resizeBoundary,
+  secondaryRenderOrder,
   type PaneRect,
   type PaneSeam,
   type PaneWeights,
 } from "../workbench/layoutModel";
 import { useWorkbench } from "../workbench/WorkbenchProvider";
 import { useSessionRow } from "./activeSession";
+import { PaneNavContext, secondaryPaneNav } from "./paneNav";
 import { ResizeHandle } from "./ResizeHandle";
 import { useDragSource, useDragging, useDropTarget, type DragPayload } from "./sessionDrag";
 
@@ -85,13 +94,14 @@ function HeaderAction({
 }
 
 interface PaneActions {
-  /** Pane index for drag-to-swap; null while there is nothing to swap with. */
-  dragIndex: number | null;
+  /** Stable slot id (0 for pane 0) for drag-to-swap; null while there is nothing to swap with. */
+  dragSlot: number | null;
   focused: boolean;
   maximized: boolean;
   /** Swapping needs a second pane to swap with. */
   canSwap: boolean;
   hiddenNote: string | null;
+  onFocus: () => void;
   onMaximize: () => void;
   onSwap: () => void;
   onClose: () => void;
@@ -100,6 +110,9 @@ interface PaneActions {
 function PaneHeader({
   title,
   project,
+  model,
+  provider,
+  chipSessionId,
   state,
   canApprove,
   onApprove,
@@ -107,6 +120,10 @@ function PaneHeader({
 }: {
   title: string;
   project: string | null;
+  model: string | null;
+  provider: string | null;
+  /** Session whose composer owns the model picker; null when the chip is informational only. */
+  chipSessionId: string | null;
   state: StatusDotState;
   canApprove: boolean;
   onApprove: () => void;
@@ -116,11 +133,12 @@ function PaneHeader({
   const maximizeHint = useShortcutLabel("workbench.maximize");
   const headerRef = useRef<View>(null);
   // Grab a pane by its header and drop it on another pane to swap them.
-  useDragSource(headerRef, actions.dragIndex != null ? { kind: "pane", index: actions.dragIndex } : null);
+  useDragSource(headerRef, actions.dragSlot != null ? { kind: "pane", slot: actions.dragSlot } : null);
   return (
     <View ref={headerRef} style={[styles.header, { borderBottomColor: tokens.border }]}>
       {actions.focused ? <View pointerEvents="none" style={[styles.focusBar, { backgroundColor: tokens.accent }]} /> : null}
       <View style={[styles.dot, { backgroundColor: statusDotColor(state, tokens) }]} />
+      {model ? <ProviderGlyph provider={providerIdOf({ model, provider })} size={12} /> : null}
       <Text style={[typeScale.bodyBold, styles.headerTitle, { color: tokens.ink }]} numberOfLines={1}>
         {title}
       </Text>
@@ -128,6 +146,27 @@ function PaneHeader({
         <Text style={[typeScale.monoMeta, styles.headerProject, { color: tokens.ink3 }]} numberOfLines={1}>
           {project}
         </Text>
+      ) : null}
+      {model ? (
+        <Pressable
+          testID="pane-model-chip"
+          disabled={chipSessionId == null}
+          onPress={() => {
+            if (chipSessionId == null) return;
+            actions.onFocus();
+            requestModelPicker(chipSessionId);
+          }}
+          accessibilityRole="button"
+          accessibilityLabel={`Change model, now ${shortModelLabel(model)}`}
+          style={({ pressed, hovered }: { pressed: boolean; hovered?: boolean }) => [
+            styles.modelChip,
+            { backgroundColor: hovered || pressed ? tokens.bg3 : tokens.bg2, borderColor: tokens.border },
+          ]}
+        >
+          <Text style={[typeScale.monoMeta, { color: tokens.ink2 }]} numberOfLines={1}>
+            {shortModelLabel(model)}
+          </Text>
+        </Pressable>
       ) : null}
       <View style={styles.headerSpacer} />
       {actions.hiddenNote ? (
@@ -178,6 +217,9 @@ function PrimaryPaneHeader({ sessionId, actions }: { sessionId: string; actions:
     <PaneHeader
       title={row?.title || `session ${sessionId.slice(0, 8)}`}
       project={row ? formatCwd(row.cwd) : null}
+      model={row?.model ?? null}
+      provider={row?.provider ?? null}
+      chipSessionId={sessionId}
       state={state}
       canApprove={!!row?.waiting}
       // The decision itself is answered in the pane below (the permission card is right there)
@@ -204,6 +246,9 @@ function SecondaryPaneBody({ sessionId, actions }: { sessionId: string; actions:
       <PaneHeader
         title={snapshot?.title || row?.title || `session ${sessionId.slice(0, 8)}`}
         project={snapshot ? formatCwd(snapshot.cwd) : row ? formatCwd(row.cwd) : null}
+        model={snapshot?.model ?? row?.model ?? null}
+        provider={row?.provider ?? null}
+        chipSessionId={sessionId}
         state={state}
         canApprove={pending && snapshot != null}
         onApprove={() => {
@@ -214,6 +259,9 @@ function SecondaryPaneBody({ sessionId, actions }: { sessionId: string; actions:
       <View style={styles.paneBody}>
         <SessionChat />
       </View>
+      {/* The session shell's own OverlayHost only reads pane 0's socket, so a picker a secondary
+          pane asks for (model chip, /model) would never appear without one here. */}
+      <OverlayHost />
     </>
   );
 }
@@ -278,12 +326,19 @@ function PanePicker({ index, actions }: { index: number; actions: PaneActions })
 }
 
 function SecondaryPane({ sessionId, index, actions }: { sessionId: string | null; index: number; actions: PaneActions }) {
+  const { openSession, focusPane, openSurface } = useWorkbench();
+  const nav = useMemo(
+    () => secondaryPaneNav({ openSession, focusPane, openSurface }, index),
+    [openSession, focusPane, openSurface, index],
+  );
   if (!sessionId) return <PanePicker index={index} actions={actions} />;
   return (
     // Keyed so switching the session tears the provider (and its socket) down
     // instead of handing a live provider a different id.
     <SessionProvider key={sessionId} sessionId={sessionId}>
-      <SecondaryPaneBody sessionId={sessionId} actions={actions} />
+      <PaneNavContext.Provider value={nav}>
+        <SecondaryPaneBody sessionId={sessionId} actions={actions} />
+      </PaneNavContext.Provider>
     </SessionProvider>
   );
 }
@@ -358,7 +413,7 @@ export function PaneGrid({ primary }: PaneGridProps) {
 
   const onLayout = useCallback((event: LayoutChangeEvent) => {
     const { width, height } = event.nativeEvent.layout;
-    setSize((current) => (current && current.width === width && current.height === height ? current : { width, height }));
+    setSize((current) => nextPaneSize(current, width, height));
   }, []);
 
   const geometry = useMemo(
@@ -433,6 +488,13 @@ export function PaneGrid({ primary }: PaneGridProps) {
   useEffect(() => {
     if (active && layout.maximized == null && geometry && layout.focus >= visible) focusPane(visible - 1);
   }, [active, geometry, layout.focus, layout.maximized, visible, focusPane]);
+  // The alert watchers sit above the workbench: tell them how many panes are really on screen.
+  const maximizedNow = active ? layout.maximized : null;
+  const renderedCount = geometry?.visible ?? null;
+  useEffect(() => {
+    setRenderedPanes(renderedCount == null ? null : { count: renderedCount, maximized: maximizedNow });
+  }, [renderedCount, maximizedNow]);
+  useEffect(() => () => setRenderedPanes(null), []);
   const hidden = active && layout.maximized == null ? total - visible : 0;
   const multi = active && (geometry?.rects.filter(Boolean).length ?? 0) > 1;
 
@@ -441,22 +503,27 @@ export function PaneGrid({ primary }: PaneGridProps) {
     maximized: layout.maximized === index,
     canSwap: active && layout.maximized == null,
     hiddenNote: hidden > 0 && index === visible - 1 ? `+${hidden} hidden` : null,
+    onFocus: () => workbench.focusPane(index),
     onMaximize: () => workbench.toggleMaximize(index),
     onSwap: () => workbench.swapWithPrimary(Math.max(1, index)),
-    dragIndex: multi ? index : null,
+    dragSlot: multi ? (index === 0 ? 0 : (layout.slotIds[index - 1] ?? null)) : null,
     onClose: () => workbench.closePane(index),
   });
 
   // A drop on pane `index`: a session opens there, a dragged pane swaps places with it.
   const dropOn = (index: number) => (payload: DragPayload) => {
     if (payload.kind === "session") workbench.openSession(payload.id, { pane: index });
-    else if (payload.kind === "pane" && payload.index !== index) {
-      if (payload.index === 0 || index === 0) workbench.swapWithPrimary(Math.max(payload.index, index));
-      else workbench.swapPanes(payload.index, index);
+    else if (payload.kind === "pane") {
+      // The dragged pane's slot id is resolved to where it sits now, so a pane that opened or
+      // closed mid-drag cannot redirect the swap.
+      const from = indexOfSlotId(layout, payload.slot);
+      if (from < 0 || from === index) return;
+      if (from === 0 || index === 0) workbench.swapWithPrimary(Math.max(from, index));
+      else workbench.swapPanes(from, index);
     }
   };
   const acceptsOn = (index: number) => (payload: DragPayload) =>
-    payload.kind === "session" || (payload.kind === "pane" && payload.index !== index);
+    payload.kind === "session" || (payload.kind === "pane" && indexOfSlotId(layout, payload.slot) !== index);
   const dropLabel = dragging?.kind === "pane" ? "Swap here" : "Open here";
 
   const focusOn = (index: number) => () => {
@@ -474,23 +541,22 @@ export function PaneGrid({ primary }: PaneGridProps) {
       >
         {active && primaryId ? <PrimaryPaneHeader sessionId={primaryId} actions={actionsFor(0)} /> : null}
         <View style={styles.paneBody}>{primary}</View>
-        {dragging != null && dragging.kind !== "tab" && geometry?.rects[0] && !(dragging.kind === "pane" && dragging.index === 0) ? (
+        {dragging != null && dragging.kind !== "tab" && geometry?.rects[0] && !(dragging.kind === "pane" && dragging.slot === 0) ? (
           <DropZone label={dropLabel} accepts={acceptsOn(0)} onDrop={dropOn(0)} style={styles.paneDrop} />
         ) : null}
       </View>
 
       {active
-        ? layout.secondary.map((slot, i) => {
-            const index = i + 1;
+        ? secondaryRenderOrder(layout).map(({ slot, index, slotId }) => {
             const rect = geometry?.rects[index] ?? null;
             return (
               <View
-                key={`pane-${index}`}
+                key={`pane-${slotId}`}
                 style={[styles.pane, rectStyle(rect), { borderLeftColor: tokens.border }]}
                 onStartShouldSetResponderCapture={focusOn(index)}
               >
                 <SecondaryPane sessionId={slot} index={index} actions={actionsFor(index)} />
-                {dragging != null && dragging.kind !== "tab" && rect && !(dragging.kind === "pane" && dragging.index === index) ? (
+                {dragging != null && dragging.kind !== "tab" && rect && !(dragging.kind === "pane" && dragging.slot === slotId) ? (
                   <DropZone label={dropLabel} accepts={acceptsOn(index)} onDrop={dropOn(index)} style={styles.paneDrop} />
                 ) : null}
               </View>
@@ -546,6 +612,7 @@ const styles = StyleSheet.create({
   focusBar: { position: "absolute", top: 0, left: 0, right: 0, height: 2 },
   headerTitle: { flexShrink: 1 },
   headerProject: { flexShrink: 2 },
+  modelChip: { flexShrink: 1, maxWidth: 140, paddingHorizontal: space.space8, height: 20, justifyContent: "center", borderRadius: radii.radius4, borderWidth: StyleSheet.hairlineWidth },
   headerSpacer: { flex: 1 },
   headerAction: { width: 26, height: 26, borderRadius: 3, alignItems: "center", justifyContent: "center" },
   headerActionDisabled: { opacity: 0.5 },

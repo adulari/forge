@@ -303,7 +303,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
         <Text style={[typeScale.monoMeta, tabularNums, { color: metricColor }]}>{metric}</Text>
       </Pressable>
       <PopoverMenu anchor={menu} entries={menuEntries} onClose={() => setMenu(null)} accessibilityLabel={`${title} actions`} width={248} />
-      {forkOpen ? <ForkSheet visible onClose={() => setForkOpen(false)} sessionId={row.id} /> : null}
+      {forkOpen ? <ForkSheet visible onClose={() => setForkOpen(false)} sessionId={row.id} onForked={(id) => onOpen(id, "focused")} /> : null}
       <ConfirmDialog
         visible={confirm != null}
         title={confirm === "delete" ? "Delete this session permanently?" : "Archive session"}

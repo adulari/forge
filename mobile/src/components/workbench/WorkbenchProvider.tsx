@@ -16,6 +16,7 @@ import {
   cycleFocus,
   focusPane,
   initialLayout,
+  withSecondary,
   migrateLegacySplit,
   openInFocused,
   openInNewPane,
@@ -333,18 +334,18 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
       bottom: { ...INITIAL_WORKBENCH_STATE.bottom },
     };
     if (preset === "focus") {
-      dispatchLayout({ type: "set", layout: { ...base, secondary: [] } });
+      dispatchLayout({ type: "set", layout: withSecondary(base, []) });
       dispatch({ type: "replace", state: hideDocks });
     } else if (preset === "side-by-side") {
-      dispatchLayout({ type: "set", layout: { ...base, secondary: [keep[0] ?? pick()] } });
+      dispatchLayout({ type: "set", layout: withSecondary(base, [keep[0] ?? pick()]) });
       dispatch({ type: "replace", state: hideDocks });
     } else if (preset === "grid") {
       const secondary: PaneSlot[] = keep.slice(0, 3);
       while (secondary.length < 3) secondary.push(pick());
-      dispatchLayout({ type: "set", layout: { ...base, secondary } });
+      dispatchLayout({ type: "set", layout: withSecondary(base, secondary) });
       dispatch({ type: "replace", state: hideDocks });
     } else {
-      dispatchLayout({ type: "set", layout: { ...base, secondary: [] } });
+      dispatchLayout({ type: "set", layout: withSecondary(base, []) });
       const git = createWorkbenchSurface({ kind: "git" });
       const tasks = createWorkbenchSurface({ kind: "tasks" });
       dispatch({

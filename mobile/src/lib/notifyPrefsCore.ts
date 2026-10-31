@@ -185,9 +185,13 @@ export function detectFleetAlerts(previous: ReadonlyMap<string, FleetRowState>, 
   return alerts;
 }
 
-/** Sessions on screen: the routed one plus every other pane, or just the maximized pane. */
-export function visibleSessionIds(paneIds: readonly (string | null)[], maximized: number | null, splitActive: boolean): string[] {
-  const shown = splitActive ? (maximized != null ? [paneIds[maximized] ?? null] : paneIds) : paneIds.slice(0, 1);
+/**
+ * Sessions on screen: the routed one plus every pane the grid actually renders, or just the
+ * maximized pane. `rendered` is the pane grid's own count (panes are hidden from the end when the
+ * window is narrow); null means no grid is mounted, so only the routed session is visible.
+ */
+export function visibleSessionIds(paneIds: readonly (string | null)[], maximized: number | null, rendered: number | null): string[] {
+  const shown = rendered == null ? paneIds.slice(0, 1) : maximized != null ? [paneIds[maximized] ?? null] : paneIds.slice(0, rendered);
   return shown.filter((id): id is string => id != null);
 }
 

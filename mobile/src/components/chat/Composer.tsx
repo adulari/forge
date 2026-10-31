@@ -23,6 +23,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { type ColorValue, Platform, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import { onModelPickerRequest } from "../../lib/alertTargets";
 import { haptics } from "../../lib/haptics";
 import { BUILTIN_COMMANDS, isKnownCommand, useSkillCommands } from "../../lib/commands";
 import { useAppShortcut } from "../../lib/shortcuts";
@@ -412,6 +413,17 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   useAppShortcut("composer.effort", () => setEffortVisible(true));
   useAppShortcut("composer.temper", openModePicker);
   useAppShortcut("composer.model", openModelPicker);
+  const openModelPickerRef = useRef(openModelPicker);
+  useEffect(() => {
+    openModelPickerRef.current = openModelPicker;
+  });
+  // A pane header's model chip asks for this session's picker.
+  useEffect(
+    () => onModelPickerRequest((id) => {
+      if (id === sessionId) openModelPickerRef.current();
+    }),
+    [sessionId],
+  );
   useAppShortcut("composer.plan", () => insertCommand("/plan "));
 
   // `suggestedPrompt` keeps echoing the STALE pre-send value for a beat after a send clears the

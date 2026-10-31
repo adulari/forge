@@ -29,7 +29,18 @@ function worktreeLabel(path: string): string {
   return seg.length > 16 ? `${seg.slice(0, 15)}…` : seg;
 }
 
-export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; onClose: () => void; sessionId: string }) {
+export function ForkSheet({
+  visible,
+  onClose,
+  sessionId,
+  onForked,
+}: {
+  visible: boolean;
+  onClose: () => void;
+  sessionId: string;
+  /** Where the new session opens; defaults to pushing its route (pane 0). */
+  onForked?: (id: string) => void;
+}) {
   const tokens = useTokens();
   const history = useHistory(sessionId);
   const sessions = useSessions();
@@ -87,7 +98,8 @@ export function ForkSheet({ visible, onClose, sessionId }: { visible: boolean; o
       if (mode === "move") archive.mutate(sessionId);
       reset();
       close();
-      router.push(`/session/${session.id}`);
+      if (onForked) onForked(session.id);
+      else router.push(`/session/${session.id}`);
     };
     fork.mutate(
       { id: sessionId, body: buildForkRequest(draft) },

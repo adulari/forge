@@ -146,11 +146,23 @@ describe("fleet alerts", () => {
 });
 
 describe("visible sessions", () => {
-  it("counts every pane of an active split and only the maximized one when set", () => {
-    expect(visibleSessionIds(["main", "right", null], null, true)).toEqual(["main", "right"]);
-    expect(visibleSessionIds(["main", "right"], 1, true)).toEqual(["right"]);
-    expect(visibleSessionIds(["main", "right"], null, false)).toEqual(["main"]);
-    expect(visibleSessionIds([null], null, false)).toEqual([]);
+  it("counts every rendered pane and only the maximized one when set", () => {
+    expect(visibleSessionIds(["main", "right", null], null, 3)).toEqual(["main", "right"]);
+    expect(visibleSessionIds(["main", "right"], 1, 2)).toEqual(["right"]);
+    expect(visibleSessionIds([null], null, 1)).toEqual([]);
+  });
+
+  it("counts only the routed session when no pane grid is mounted (compact or narrow windows)", () => {
+    expect(visibleSessionIds(["main", "right", "third"], null, null)).toEqual(["main"]);
+  });
+
+  it("does not count panes the grid hides on a narrow window", () => {
+    expect(visibleSessionIds(["a", "b", "c", "d"], null, 2)).toEqual(["a", "b"]);
+    expect(visibleSessionIds(["a", "b", "c", "d"], null, 1)).toEqual(["a"]);
+  });
+
+  it("a maximized pane overrides the rendered count", () => {
+    expect(visibleSessionIds(["a", "b", "c"], 2, 1)).toEqual(["c"]);
   });
 });
 

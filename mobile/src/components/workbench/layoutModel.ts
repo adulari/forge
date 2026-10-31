@@ -34,6 +34,13 @@ export interface DockSizes {
 
 export interface PaneLayoutState {
   secondary: PaneSlot[];
+  /**
+   * In-memory identity of each secondary pane, parallel to `secondary` (never persisted). The view
+   * keys panes by it, so closing a pane does not hand its neighbour's React element (and live
+   * socket) to another session. Ids are 1-based; 0 means "pane 0" in drag payloads.
+   */
+  slotIds: number[];
+  nextSlotId: number;
   /** Index into `[primary, ...secondary]`. */
   focus: number;
   /** A pane shown alone while the others stay mounted but hidden. */
@@ -51,6 +58,8 @@ export const DEFAULT_WEIGHTS: PaneWeights = {
 export function initialLayout(): PaneLayoutState {
   return {
     secondary: [],
+    slotIds: [],
+    nextSlotId: 1,
     focus: 0,
     maximized: null,
     weights: { cols2: [...DEFAULT_WEIGHTS.cols2], cols3: [...DEFAULT_WEIGHTS.cols3], grid: [...DEFAULT_WEIGHTS.grid] },
@@ -80,6 +89,54 @@ export function visiblePaneCount(total: number, width: number): number {
   return Math.min(total, columns);
 }
 
+/**
+ * Replaces the whole secondary list. A slot that already shows the same session keeps its id, so
+ * a preset that keeps a pane does not remount it; everything else gets a fresh id.
+ */
+export function withSecondary(state: PaneLayoutState, secondary: PaneSlot[]): PaneLayoutState {
+  const spare = new Map<string, number[]>();
+  state.secondary.forEach((slot, i) => {
+    const id = state.slotIds[i];
+    if (slot != null && id != null) spare.set(slot, [...(spare.get(slot) ?? []), id]);
+  });
+  let next = state.nextSlotId;
+  const slotIds = secondary.map((slot) => (slot != null ? spare.get(slot)?.shift() : undefined) ?? next++);
+  return { ...state, secondary, slotIds, nextSlotId: next };
+}
+
+/**
+ * Secondary panes in the order the view renders them: ascending slot id, keyed by it. Panes are
+ * absolutely positioned, so DOM order carries no meaning; a stable order means closing or
+ * inserting a pane never asks React to move a live node (which drops scroll and focus on web).
+ */
+export function secondaryRenderOrder(state: PaneLayoutState): { slot: PaneSlot; index: number; slotId: number }[] {
+  return state.secondary
+    .map((slot, i) => ({ slot, index: i + 1, slotId: state.slotIds[i] ?? 0 }))
+    .sort((a, b) => a.slotId - b.slotId);
+}
+
+/** Current pane index (>= 1) of secondary slot id `slot`; 0 maps to pane 0; -1 when it is gone. */
+export function indexOfSlotId(state: PaneLayoutState, slot: number): number {
+  if (slot === 0) return 0;
+  const at = state.slotIds.indexOf(slot);
+  return at < 0 ? -1 : at + 1;
+}
+
+export interface PaneSize {
+  width: number;
+  height: number;
+}
+
+/**
+ * The grid's size after an `onLayout`. A collapsed container (an expanding dock, a hidden route)
+ * reports 0 on an axis: keep the last real size, otherwise `visiblePaneCount` drops to a single
+ * pane and focus jumps to pane 0.
+ */
+export function nextPaneSize(current: PaneSize | null, width: number, height: number): PaneSize | null {
+  if (width === 0 || height === 0) return current;
+  return current && current.width === width && current.height === height ? current : { width, height };
+}
+
 function clampIndex(state: PaneLayoutState, index: number): number {
   return Math.max(0, Math.min(paneCount(state) - 1, index));
 }
@@ -107,6 +164,8 @@ export function addPane(state: PaneLayoutState, slot: PaneSlot): PaneLayoutState
   return {
     ...state,
     secondary: [...state.secondary, slot],
+    slotIds: [...state.slotIds, state.nextSlotId],
+    nextSlotId: state.nextSlotId + 1,
     focus: state.secondary.length + 1,
     maximized: null,
   };
@@ -121,11 +180,12 @@ export function setSlot(state: PaneLayoutState, index: number, slot: PaneSlot): 
 export function removePane(state: PaneLayoutState, index: number): PaneLayoutState {
   if (index < 1 || index > state.secondary.length) return state;
   const secondary = state.secondary.filter((_, i) => i !== index - 1);
+  const slotIds = state.slotIds.filter((_, i) => i !== index - 1);
   let focus = state.focus;
   if (focus === index) focus = index - 1;
   else if (focus > index) focus -= 1;
   const maximized = state.maximized === index ? null : state.maximized != null && state.maximized > index ? state.maximized - 1 : state.maximized;
-  return { ...state, secondary, focus, maximized: secondary.length === 0 ? null : maximized };
+  return { ...state, secondary, slotIds, focus, maximized: secondary.length === 0 ? null : maximized };
 }
 
 /** Closing pane 0: the first secondary session becomes the routed one. */
@@ -135,6 +195,7 @@ export function promoteFirstSecondary(state: PaneLayoutState): { state: PaneLayo
   const next: PaneLayoutState = {
     ...state,
     secondary: rest,
+    slotIds: state.slotIds.slice(1),
     focus: 0,
     maximized: rest.length === 0 ? null : state.maximized === 0 ? 0 : null,
   };
@@ -201,8 +262,10 @@ export function swapSecondary(state: PaneLayoutState, a: number, b: number): Pan
   if (a < 1 || b < 1 || a > state.secondary.length || b > state.secondary.length || a === b) return state;
   const secondary = [...state.secondary];
   [secondary[a - 1], secondary[b - 1]] = [secondary[b - 1] ?? null, secondary[a - 1] ?? null];
+  const slotIds = [...state.slotIds];
+  [slotIds[a - 1], slotIds[b - 1]] = [slotIds[b - 1] as number, slotIds[a - 1] as number];
   const focus = state.focus === a ? b : state.focus === b ? a : state.focus;
-  return { ...state, secondary, focus };
+  return { ...state, secondary, slotIds, focus };
 }
 
 /** Smallest weight a pane may shrink to, as a share of the container, for `count` panes. */
@@ -287,8 +350,7 @@ export function parseLayout(raw: unknown): PaneLayoutState {
     if (typeof raw.dock.right === "number" && Number.isFinite(raw.dock.right)) dock.right = raw.dock.right;
   }
   return {
-    ...base,
-    secondary,
+    ...withSecondary(base, secondary),
     weights: {
       cols2: parseNumberArray(weights.cols2, 2, DEFAULT_WEIGHTS.cols2),
       cols3: parseNumberArray(weights.cols3, 3, DEFAULT_WEIGHTS.cols3),
@@ -306,7 +368,7 @@ export function migrateLegacySplit(raw: string | null): PaneLayoutState | null {
     if (!isRecord(parsed) || typeof parsed.on !== "boolean") return null;
     const base = initialLayout();
     if (!parsed.on) return base;
-    return { ...base, secondary: [typeof parsed.secondary === "string" ? parsed.secondary : null] };
+    return withSecondary(base, [typeof parsed.secondary === "string" ? parsed.secondary : null]);
   } catch {
     return null;
   }
