@@ -95,13 +95,22 @@ fn only_hashline_mode_changes_the_tools_and_the_prompt() {
 
     assert!(spec(&off_specs, "multi_edit").is_some());
     assert!(spec(&off_specs, "edit_file").unwrap().schema["properties"]["old"].is_object());
-    assert!(!off.system_preamble()[0].content.contains("path#TAG"));
+    let first = |s: &Session, model: &str| {
+        s.transcript_with_preamble_and_tools(model, &[])[0]
+            .content
+            .clone()
+    };
+    assert!(!first(&off, "direct::m").contains("path#TAG"));
 
     assert!(spec(&on_specs, "multi_edit").is_none());
     let edit = spec(&on_specs, "edit_file").unwrap();
     assert!(edit.schema["properties"]["edits"].is_object());
     assert!(edit.schema["properties"]["old"].is_null());
-    assert!(on.system_preamble()[0].content.contains("path#TAG"));
+    assert!(first(&on, "direct::m").contains("path#TAG"));
+    assert!(
+        !first(&on, "claude-cli::sonnet").contains("path#TAG"),
+        "a CLI bridge keeps replace-mode tools, so it gets no anchor guidance"
+    );
     let _ = std::fs::remove_dir_all(dir);
 }
 

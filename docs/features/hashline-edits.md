@@ -7,8 +7,9 @@ a missed whitespace match cannot fail an edit.
 ## What the model sees
 
 - `read_file` (single and batched) returns `[path#TAG]` then `N:text` rows. `TAG` is 16 bits of
-  FNV-1a over the whole file, trailing spaces/tabs/CR ignored per line. Rows over 1000 characters
-  are clipped when shown; the line is still edited whole by number.
+  FNV-1a over the whole file, trailing spaces/tabs/CR ignored per line. Lines are returned whole
+  (the total read cap still applies); only edit summaries and stale-tag context clip lines over 1000
+  characters.
 - `edit_file` takes `{path, tag, edits}`; each edit is `{start, end?, new}` (replace the lines,
   empty `new` deletes) or `{after, new}` (insert; `0` is the top). Numbers refer to the file as read;
   edits are applied bottom-up so earlier edits never shift later anchors. Overlapping edits are
@@ -26,7 +27,7 @@ a missed whitespace match cannot fail an edit.
 `read_file`/`edit_file` read. The tool name stays `edit_file`, so the permission broker, hooks,
 checkpoints (`/undo`), diff previews and tool-card rows are unchanged. A family-profile layer only
 needs to set `harness.edit_mode` in the config it hands the session. Bridged claude/codex sessions
-(`forge mcp-serve`) keep replace mode.
+(`forge mcp-serve`) keep replace mode, and the prompt addendum is withheld from CLI-bridge models.
 
 omp keeps `replace` for Kimi, MiMo, MiniMax, DeepSeek, StepFun and similar families
 (`packages/coding-agent/src/utils/edit-mode.ts`), so the default stays `replace`.

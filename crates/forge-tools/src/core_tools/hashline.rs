@@ -105,10 +105,17 @@ fn clip(text: &str) -> String {
     }
 }
 
-fn rows(lines: &[Line<'_>], from: usize, to: usize) -> String {
+/// Tagged rows for `from..to`. `whole` keeps every line whole (a read, where a line that is
+/// cut cannot be edited); otherwise long lines are clipped (error context and edit summaries).
+fn rows(lines: &[Line<'_>], from: usize, to: usize, whole: bool) -> String {
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate().take(to).skip(from) {
-        out.push_str(&format!("{}:{}\n", i + 1, clip(line.text)));
+        let text = if whole {
+            line.text.to_string()
+        } else {
+            clip(line.text)
+        };
+        out.push_str(&format!("{}:{text}\n", i + 1));
     }
     out
 }
@@ -121,7 +128,7 @@ pub(super) fn render(label: &str, content: &str, span: Option<(usize, usize)>) -
         None => (0, lines.len()),
     };
     let mut out = format!("[{label}#{}]\n", file_tag(content));
-    out.push_str(&rows(&lines, from.min(to), to));
+    out.push_str(&rows(&lines, from.min(to), to, true));
     out.truncate(out.trim_end_matches('\n').len());
     out
 }
@@ -180,7 +187,8 @@ fn parse(args: &Value, line_count: usize) -> Result<Vec<Edit>, ToolError> {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::BadArgs(format!("edit #{n}: missing string `new`")))?;
         let start = number(item, "start")?.filter(|s| *s != 0);
-        let after = number(item, "after")?;
+        // A model that fills every optional property sends `after: 0` beside `start`.
+        let after = number(item, "after")?.filter(|after| start.is_none() || *after != 0);
         let kind = match (start, after) {
             (Some(start), None) => {
                 let end = number(item, "end")?.filter(|e| *e != 0).unwrap_or(start);
@@ -292,7 +300,7 @@ fn stale(label: &str, given: &str, content: &str, args: &Value) -> ToolError {
          Nothing was applied. Current lines around line {anchor}:\n[{label}#{tag}]\n{}\
          Re-issue the edit with tag #{tag} and the line numbers from this view; read_file the span \
          if you need more.",
-        rows(&lines, from, to)
+        rows(&lines, from, to, false)
     ))
 }
 
@@ -382,7 +390,7 @@ pub(super) fn apply(label: &str, content: &str, args: &Value) -> Result<Applied,
             break;
         }
         let take = (hi - lo).min(budget);
-        body.push_str(&rows(&new_lines_view, lo, lo + take));
+        body.push_str(&rows(&new_lines_view, lo, lo + take, false));
         budget -= take;
         if lo + take < hi {
             body.push_str("…\n");
@@ -673,19 +681,38 @@ mod tests {
     }
 
     #[test]
-    fn a_very_long_line_is_clipped_when_shown_but_edited_whole() {
+    fn a_very_long_line_is_read_whole_so_it_can_be_edited_whole() {
         let long = "x".repeat(5000);
         let src = format!("short\n{long}\nend\n");
         let shown_text = render("big.txt", &src, None);
-        assert!(shown_text.contains("…(+4000 chars)"));
-        assert!(shown_text.len() < 1500);
+        assert!(shown_text.contains(&format!("2:{long}")) && !shown_text.contains('…'));
         let out = updated(&src, json!([{"start": 1, "new": "SHORT"}]));
         assert!(
             out.contains(&long),
             "an untouched long line survives byte for byte"
         );
-        let multibyte = "é".repeat(1200);
-        assert!(render("m.txt", &format!("{multibyte}\n"), None).contains("…(+200 chars)"));
+        let applied = edit(&src, json!([{"start": 3, "new": "END"}])).unwrap();
+        assert!(
+            applied.summary.contains("…(+4000 chars)"),
+            "summaries stay short"
+        );
+    }
+
+    #[test]
+    fn placeholder_after_zero_beside_start_does_not_reject_a_replace() {
+        let src = "a\nb\n";
+        assert_eq!(
+            updated(src, json!([{"start": 2, "after": 0, "new": "B"}])),
+            "a\nB\n"
+        );
+        assert_eq!(
+            updated(src, json!([{"after": 0, "new": "top"}])),
+            "top\na\nb\n"
+        );
+        let both = edit(src, json!([{"start": 2, "after": 1, "new": "x"}]))
+            .err()
+            .unwrap();
+        assert!(both.to_string().contains("either `start`"));
     }
 
     #[test]
