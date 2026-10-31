@@ -677,7 +677,9 @@ impl Session {
 
         // The call ran, so `ok` stays true for the failure tracker and the commit bookkeeping, but
         // a shell command that exited non-zero must not be drawn with a success mark.
-        let shown_ok = ok && !(call.name == "shell" && shell_command_did_fail(&result));
+        let shown_ok = ok
+            && !(call.name == "shell" && shell_command_did_fail(&result))
+            && !(call.name == forge_tools::PYTHON_TOOL && crate::eval_kernel::cell_failed(&result));
         self.presenter.emit(PresenterEvent::ToolResult {
             name: call.name.clone(),
             ok: shown_ok,

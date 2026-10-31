@@ -61,9 +61,10 @@ pub use background::{ShellJobTool, JOB_HINT};
 pub use rtk::RtkRewriter;
 mod batch;
 mod capture;
-mod output;
+pub(crate) mod output;
 use capture::read_capped;
-use group::{kill_process_group, put_in_own_process_group, terminate, GroupKillOnDrop};
+pub(crate) use group::{kill_process_group, put_in_own_process_group};
+use group::{terminate, GroupKillOnDrop};
 use output::{render_streams, stream_text, truncate_for_model};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;

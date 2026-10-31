@@ -128,7 +128,7 @@ pub(crate) fn category(card: &ToolCard) -> Category {
         "read_file" => Category::Read,
         "list_dir" => Category::List,
         "search" | "grep" | "glob" => Category::Search,
-        "shell" | "shell_job" => Category::Shell,
+        "shell" | "shell_job" | "python" => Category::Shell,
         "run_code" => Category::Script,
         "delete_file" => Category::Deleted,
         "write_file" | "edit_file" | "multi_edit" | "apply_patch" | "append_file"

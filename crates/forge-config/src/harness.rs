@@ -96,6 +96,10 @@ pub struct HarnessConfig {
     /// `[harness]` flag names set explicitly by the user (filled at load, never written back).
     #[serde(skip)]
     pub explicit_flags: Vec<String>,
+    /// Advertise a persistent per-session `python` kernel; it runs code with shell-level
+    /// permissions. Default off (docs/features/eval-kernel.md).
+    #[serde(default)]
+    pub eval_kernel: bool,
 }
 
 impl Default for HarnessConfig {
@@ -123,6 +127,7 @@ impl Default for HarnessConfig {
             edit_mode: EditMode::default(),
             family_profiles: false,
             explicit_flags: Vec::new(),
+            eval_kernel: false,
         }
     }
 }

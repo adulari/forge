@@ -286,6 +286,7 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.compaction_summary_cap" => Some(("Behaviour", "16k compaction summary")),
         "harness.edit_mode" => Some(("Behaviour", "File edit mode")),
         "harness.family_profiles" => Some(("Behaviour", "Model-family profiles")),
+        "harness.eval_kernel" => Some(("Behaviour", "Persistent Python kernel")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -545,6 +546,7 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.append_only_prefix" => "Keep the cached prompt prefix append-only: the task-list snapshot moves out of the pinned session context (which sits before the whole transcript) into a note appended when the list changes, so a changed list no longer re-bills the conversation. Default off.",
         "harness.cache_monitor" => "Warn immediately, with the cause, when a request breaks the provider prompt cache: the tool list changed or an already-sent message was rewritten. Without it the warning needs two rewrites in a row. Default off.",
         "harness.compaction_summary_cap" => "Cap a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k. Default off.",
+        "harness.eval_kernel" => "Advertise a `python` tool: a persistent per-session Python kernel. Runs code with shell-level permissions. Applies to new sessions. Default off.",
         _ => return None,
     })
 }
@@ -859,6 +861,23 @@ mod tests {
         let text = brief(&error);
         assert!(!text.contains("TOML source string"), "{text}");
         assert!(!text.contains("for key"), "{text}");
+    }
+
+    #[test]
+    fn eval_kernel_is_off_by_default_and_has_a_curated_row() {
+        let empty: Config = Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string("[harness]\n"))
+            .extract()
+            .unwrap();
+        assert!(!empty.harness.eval_kernel);
+        assert_eq!(
+            setting_group_and_label("harness.eval_kernel"),
+            (
+                "Behaviour".to_string(),
+                "Persistent Python kernel".to_string()
+            )
+        );
+        assert!(setting_help("harness.eval_kernel").is_some_and(|h| h.contains("`python` tool")));
     }
 
     #[test]

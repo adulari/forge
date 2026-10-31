@@ -8,7 +8,7 @@ use tokio::process::{Child, Command};
 use super::KILL_GRACE;
 
 /// Put the child in its own process group so a timeout kill takes down the whole tree.
-pub(super) fn put_in_own_process_group(cmd: &mut Command) {
+pub(crate) fn put_in_own_process_group(cmd: &mut Command) {
     #[cfg(unix)]
     {
         cmd.process_group(0);
@@ -34,7 +34,7 @@ impl Drop for GroupKillOnDrop {
     }
 }
 
-pub(super) fn kill_process_group(pgid: Option<i32>) {
+pub(crate) fn kill_process_group(pgid: Option<i32>) {
     #[cfg(unix)]
     if let Some(pg) = pgid {
         unsafe { libc::kill(-pg, libc::SIGKILL) };

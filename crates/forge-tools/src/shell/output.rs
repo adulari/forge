@@ -44,7 +44,7 @@ fn binary_aware_text(bytes: &[u8]) -> String {
     out
 }
 
-pub(super) fn strip_ansi(text: &str) -> String {
+pub(crate) fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -79,7 +79,7 @@ pub(super) fn strip_ansi(text: &str) -> String {
     out
 }
 
-pub(super) fn truncate_for_model(text: &str, budget: usize) -> (String, bool) {
+pub(crate) fn truncate_for_model(text: &str, budget: usize) -> (String, bool) {
     if text.len() <= budget {
         return (text.to_string(), false);
     }

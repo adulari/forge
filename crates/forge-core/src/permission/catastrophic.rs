@@ -233,6 +233,10 @@ fn inline_rmtree(bin: &str, args: &[String]) -> Option<String> {
     })
 }
 
+pub(crate) fn inline_code_deletes_home(code: &str) -> Option<String> {
+    inline_rmtree("python", &[code.to_string()])
+}
+
 fn targets(args: &[String]) -> Vec<&str> {
     let mut out = Vec::new();
     let mut end_of_options = false;

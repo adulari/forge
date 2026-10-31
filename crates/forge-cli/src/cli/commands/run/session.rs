@@ -466,6 +466,9 @@ pub(crate) async fn build_session_with_self_mcp(
     if let Some(shell_tool) = sandboxed_shell_tool_in(&config, &workspace_root) {
         tools.register(Box::new(shell_tool));
     }
+    if config.harness.eval_kernel {
+        register_eval_kernel(&mut tools, &config, &workspace_root);
+    }
     let mut lattice_update_rx = None;
     if let Some(lat) = &lattice {
         tools.register(Box::new(forge_tools::LatticeTool::new(Arc::clone(lat))));

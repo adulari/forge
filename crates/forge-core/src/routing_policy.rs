@@ -319,6 +319,11 @@ impl Session {
         if crate::codemode::guidance_advertised(specs) && !forge_provider::is_cli_bridge(model) {
             preamble.insert(1, Message::system(crate::codemode::GUIDANCE));
         }
+        if specs.iter().any(|s| s.name == forge_tools::PYTHON_TOOL)
+            && !forge_provider::is_cli_bridge(model)
+        {
+            preamble.insert(1, Message::system(crate::eval_kernel::GUIDANCE));
+        }
         // The pinned session context follows the stable prefix, so the provider can cache that
         // prefix on its own and only the block behind it moves when its content does.
         preamble.extend(self.pinned_context_message(Some(model)));

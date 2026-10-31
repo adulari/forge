@@ -38,6 +38,7 @@ pub mod evidence;
 pub mod fs_write;
 pub mod harness;
 mod job_object;
+pub mod kernel;
 mod lattice_tool;
 mod open_pr;
 mod proxy;
@@ -72,6 +73,9 @@ pub use core_tools::{
 pub use device::{DeviceLogsTool, DeviceTool};
 pub use evidence::scope_session;
 pub use harness::set_harness;
+pub use kernel::PYTHON_TOOL;
+#[cfg(unix)]
+pub use kernel::{discover_python, PythonTool};
 pub use lattice_tool::LatticeTool;
 pub use open_pr::{
     create_pr_in, set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn,

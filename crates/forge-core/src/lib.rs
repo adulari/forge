@@ -95,6 +95,7 @@ mod droid_loop;
 pub mod duel;
 mod empty_reply;
 mod error_report;
+mod eval_kernel;
 pub mod evidence_capture;
 mod exact_effort;
 mod failure_verdict;
@@ -1100,6 +1101,7 @@ impl TaskScope {
                 | "notebook_edit"
                 | "apply_patch"
                 | "shell"
+                | forge_tools::PYTHON_TOOL
                 | "spawn_agents"
                 | "send_to_agent"
                 | "run_workflow"
@@ -1364,7 +1366,8 @@ fn classify_tool_failure(result: &str) -> Option<ErrorCategory> {
     let lower = result.to_ascii_lowercase();
     let is_failure = lower.starts_with("error:")
         || lower.starts_with("permission denied")
-        || shell_command_did_fail(result);
+        || shell_command_did_fail(result)
+        || eval_kernel::cell_failed(result);
     if !is_failure {
         return None;
     }
@@ -2455,7 +2458,12 @@ impl Session {
         // the approve→Auto-edit→build flow non-recursive (the build turn can't re-propose a plan).
         if self.mode == PermissionMode::Plan {
             specs.push(present_plan_spec());
-            specs.retain(|s| !matches!(s.name.as_str(), "append_file" | "multi_edit"));
+            specs.retain(|s| {
+                !matches!(
+                    s.name.as_str(),
+                    "append_file" | "multi_edit" | forge_tools::PYTHON_TOOL
+                )
+            });
             for spec in specs.iter_mut().filter(|s| s.name == "shell") {
                 spec.description.push_str(permission::PLAN_SHELL_NOTE);
             }
@@ -5119,6 +5127,9 @@ mod tests {
 
     #[path = "security_floor.rs"]
     mod security_floor_tests;
+
+    #[path = "eval_kernel.rs"]
+    mod eval_kernel_tests;
 
     #[path = "user_shell.rs"]
     mod user_shell_tests;

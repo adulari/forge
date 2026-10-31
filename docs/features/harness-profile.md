@@ -105,6 +105,7 @@ A flag that is on wins over `harness_profile = "minimal"` (the built-in default 
 | `append_only_prefix` | The task-list snapshot leaves the pinned session context block (which sits in front of the whole transcript, so a changed list rewrote the cached prefix on the first request of the next turn) and is appended to the transcript as a `[task list snapshot]` note, only when the list differs from the newest snapshot the transcript holds. Re-sent after a compaction. |
 | `cache_monitor` | Warns on the first request that breaks the provider prompt cache, with the cause: tools added or removed, or which already-sent message changed. Off, only two unexplained rewrites in a row warn. Deliberate rewrites (compaction, floor moves, rewinds) never warn. |
 | `compaction_summary_cap` | Caps a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k, and tells the summarizer the size. A smaller trigger window already gets a smaller share. |
+| `eval_kernel` | Advertises a `python` tool: a persistent per-session Python kernel (variables, imports and loaded data survive between calls). Not a loop-stop behaviour, so `harness_profile = "minimal"` does not affect it. See [eval-kernel.md](eval-kernel.md). |
 
 ```toml
 [harness]
@@ -117,6 +118,7 @@ wait_job = true
 append_only_prefix = true
 cache_monitor = true
 compaction_summary_cap = true
+eval_kernel = true
 ```
 
 Already covered without a flag: the progress ledger nudges at the third identical call-and-result and stops at the fifth (`repeat_interrupt` moves the stop to the seventh); `stop_retries` is the three-empty-turns stop.

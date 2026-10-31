@@ -179,7 +179,9 @@ fn decide_in_with(
     // 1. Built-in safety floor — unoverridable, even by `bypass` or a project `allow`. The
     //    structural checks catch what the literal globs cannot: every spelling of a recursive
     //    home/root delete, and privilege escalation (handed to the user, see `denial_note`).
-    if is_shell_tool(tool_name) && denial_note(tool_name, args).is_some() {
+    if (is_shell_tool(tool_name) || tool_name == forge_tools::PYTHON_TOOL)
+        && denial_note(tool_name, args).is_some()
+    {
         return Deny;
     }
     if is_shell_tool(tool_name)
@@ -255,6 +257,9 @@ fn decide_in_with(
 /// privileged command (with the hand-it-to-the-user instruction) or a catastrophic delete. `None`
 /// for anything else, including calls refused by ordinary rules.
 pub fn denial_note(tool_name: &str, args: &Value) -> Option<String> {
+    if tool_name == forge_tools::PYTHON_TOOL {
+        return python_denial_note(args);
+    }
     if !is_shell_tool(tool_name) {
         return None;
     }
@@ -266,6 +271,31 @@ pub fn denial_note(tool_name: &str, args: &Value) -> Option<String> {
         format!(
             "refused by Forge's safety floor in every temper: this command {why}. Do not retry it \
              in another form; if the user really wants this, they must run it themselves."
+        )
+    })
+}
+
+/// The floor for a `python` cell: the `!`/`%pip` magic lines get the shell checks, and the whole
+/// cell is scanned for an inline recursive delete of the home directory. String literals are not
+/// scanned, so `open('/etc/passwd')` and `df['su']` stay allowed; a dynamically built privileged
+/// call is stopped by the kernel's PATH shim instead.
+fn python_denial_note(args: &Value) -> Option<String> {
+    let code = crate::eval_kernel::cell_code(args)?;
+    for line in crate::eval_kernel::magic_lines(code) {
+        if let Some(binary) = catastrophic::privilege_escalation(&line) {
+            return Some(catastrophic::handoff_note(&binary, line.trim()));
+        }
+        if let Some(why) = catastrophic::catastrophic_shell(&line) {
+            return Some(format!(
+                "refused by Forge's safety floor in every temper: this command {why}. Do not retry it \
+                 in another form; if the user really wants this, they must run it themselves."
+            ));
+        }
+    }
+    catastrophic::inline_code_deletes_home(code).map(|why| {
+        format!(
+            "refused by Forge's safety floor in every temper: this cell {why}. Do not retry it in \
+             another form; if the user really wants this, they must run it themselves."
         )
     })
 }

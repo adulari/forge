@@ -5,7 +5,7 @@
 import { headEllipsis } from "../components/review/pathTruncate";
 import { tildify } from "./pathDisplay";
 import { scriptCalls, scriptHeadline, scriptSource, scriptVerb } from "./scriptCalls";
-import { bareToolName, displayPath, field, headline } from "./toolGroups";
+import { bareToolName, displayPath, field, headline, pythonCode } from "./toolGroups";
 import { parseArgs, summarizeToolArgs } from "./toolRows";
 
 const VERBS: Record<string, string> = {
@@ -29,6 +29,7 @@ const VERBS: Record<string, string> = {
   dispatch_sessions: "Agents",
   update_tasks: "Tasks",
   run_code: "Script",
+  python: "Python",
 };
 
 const PATH_TOOLS = new Set(["read_file", "write_file", "edit_file", "multi_edit", "append_file", "list_dir", "notebook_edit"]);
@@ -98,6 +99,10 @@ export function readableArgs(name: string | null, args: string): ArgSection[] {
     if (s.commands.length > 0) sections.push({ label: "commands", text: s.commands.map((c) => `$ ${tildify(c)}`).join("\n") });
     if (source) sections.push({ label: "script", text: source });
     return sections;
+  }
+  if (tool === "python") {
+    const cell = pythonCode(args);
+    if (cell) return [{ label: "code", text: cell }];
   }
   const parsed = parseArgs(args);
   if (!parsed) return args.trim() ? [{ label: "arguments", text: args.trim() }] : [];
