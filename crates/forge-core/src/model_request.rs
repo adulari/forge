@@ -136,7 +136,6 @@ pub(super) async fn request_provider_response(
     pinned_rl_waited: &mut std::time::Duration,
     pinned_outage_attempts: &mut u32,
     pinned_outage_waited: &mut std::time::Duration,
-    pinned_outage_warned_halfway: &mut bool,
     pinned_outage_last_error: &mut Option<String>,
     step: usize,
 ) -> Result<(u64, forge_provider::ModelResponse), CoreError> {
@@ -562,26 +561,17 @@ pub(super) async fn request_provider_response(
                         {
                             *pinned_outage_attempts = attempt;
                             *pinned_outage_waited += delay + spent;
-                            if e.is_overloaded() {
-                                throttle_recovery::announce_overload(
-                                    session,
-                                    active_model,
-                                    &e,
+                            throttle_recovery::announce_outage_wait(
+                                session,
+                                active_model,
+                                &e,
+                                throttle_recovery::OutageWait {
                                     delay,
                                     attempt,
-                                );
-                            } else if !*pinned_outage_warned_halfway
-                                && pinned_outage_waited.as_secs_f64() >= budget.as_secs_f64() * 0.5
-                            {
-                                // One-shot warning the first time cumulative wait crosses 50%
-                                // of the budget; every retry still surfaces via ModelSearch.
-                                *pinned_outage_warned_halfway = true;
-                                throttle_recovery::announce_unreachable(
-                                    session,
-                                    active_model,
-                                    budget.saturating_sub(*pinned_outage_waited),
-                                );
-                            }
+                                    waited: *pinned_outage_waited,
+                                    budget,
+                                },
+                            );
                             session.presenter.emit(PresenterEvent::ModelSearch {
                                 model: active_model.clone(),
                                 retrying: true,

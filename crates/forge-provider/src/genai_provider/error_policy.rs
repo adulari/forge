@@ -519,6 +519,17 @@ pub(super) fn classify_status(
     if let Some(kind) = typed_error {
         return bedrock_error::classify(&kind, message, retry_after.filter(|_| !exhausted));
     }
+    if !(401..=403).contains(&code)
+        && (is_gateway_route_failure(body) || is_gateway_route_failure(&message))
+    {
+        return gateway_route_error(
+            code,
+            body,
+            &message,
+            provider_message.as_deref(),
+            retry_after,
+        );
+    }
     // A permanent incapability (no tool support / unaffordable) regardless of status code: 402
     // is always "can't afford", and 400/404 bodies often carry "tool calling not supported".
     if code == 402
@@ -559,70 +570,6 @@ pub(super) fn classify_status(
     }
 }
 
-/// Why a 5xx is the provider shedding load rather than failing: 503/529, a `Retry-After`, a body
-/// that says `retryable: true`, or `overloaded`/`busy`/`capacity` in its type/code/category.
-/// Returns the short name to show (`gateway_overloaded`, `overloaded_error`, or `overloaded`).
-/// A plain `500 Internal server error` is none of these and stays [`ProviderError::Unavailable`],
-/// which keeps the identical-fast-error rejection heuristic for models a provider does not serve.
-fn overload_reason(
-    code: u16,
-    body: &str,
-    message: &str,
-    retry_after: Option<std::time::Duration>,
-) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(body).ok();
-    let error = value.as_ref().map(|v| v.get("error").unwrap_or(v));
-    let field = |obj: Option<&serde_json::Value>, key: &str| {
-        obj.and_then(|o| o.get(key))
-            .and_then(|v| v.as_str())
-            .map(str::to_string)
-    };
-    let details = error.and_then(|e| e.get("details"));
-    let names: Vec<String> = [
-        field(details, "category"),
-        field(error, "code"),
-        field(error, "type"),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    let marked = |n: &str| {
-        let l = n.to_ascii_lowercase();
-        ["overload", "busy", "capacity"]
-            .iter()
-            .any(|k| l.contains(k))
-    };
-    let retryable = details
-        .and_then(|d| d.get("retryable"))
-        .or_else(|| error.and_then(|e| e.get("retryable")))
-        .and_then(|v| v.as_bool())
-        == Some(true);
-    let named = names.iter().find(|n| marked(n)).cloned();
-    let prose = marked(message) && message.to_ascii_lowercase().contains("overload");
-    if matches!(code, 503 | 529) || retry_after.is_some() || retryable || named.is_some() || prose {
-        return Some(
-            named
-                .or_else(|| names.first().cloned())
-                .unwrap_or_else(|| "overloaded".to_string()),
-        );
-    }
-    None
-}
-
-/// The provider's own sentence without the per-request `(request id: …)` tail, which differs on
-/// every attempt and has nothing to act on.
-fn overload_message(message: &str) -> String {
-    let first = message.lines().next().unwrap_or(message);
-    let cut = first.find("(request id").map_or(first, |i| &first[..i]);
-    let cut = cut.trim();
-    if cut.chars().count() > 300 {
-        let head: String = cut.chars().take(297).collect();
-        format!("{head}…")
-    } else {
-        cut.to_string()
-    }
-}
-
 /// Bedrock answers `ResourceNotFoundException: Inference Profile ARN not found` now and then for a
 /// cross-region profile that exists and served the previous call — a routing blip, not a missing
 /// model. Read as a dead model id it failed the whole turn on `global.moonshotai.kimi-k3` after a
@@ -657,6 +604,9 @@ pub(super) fn classify_text(text: &str, message: String) -> ProviderError {
     let message = short(&message);
     if bedrock_profile_blip(text) {
         return ProviderError::Unavailable(message);
+    }
+    if is_gateway_route_failure(text) {
+        return gateway_route_error(503, text, &message, None, retry_after);
     }
     // Permanent incapability first — a streamed "tool calling is not supported" / "402 requires
     // more credits" must NOT be mistaken for a transient dropped stream (the misclassification
