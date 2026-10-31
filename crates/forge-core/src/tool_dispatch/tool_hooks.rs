@@ -104,7 +104,7 @@ impl Session {
         } else if let Some(note) = self.floor_denial(&call.name, args) {
             (note, Some(false))
         } else if let Some(rule) = permission::denying_rule(&call.name, args, &self.rules) {
-            (permission::rule_denial(&call.name, rule), None)
+            (permission::rule_denial(&call.name, rule, args), None)
         } else {
             let (text, _, _) = denial::result(&call.name, self.mode, user_declined, attended);
             // Only a person saying no is not automatic: a policy refusal or a prompt no one

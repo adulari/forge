@@ -393,6 +393,13 @@ mod tests {
             "X=rm; $X -rf ~",
             "$(echo rm) -rf ~",
             "`echo rm` -rf ~",
+            "if true; then rm -rf ~; fi",
+            "for d in x; do rm -rf /etc; done",
+            "while true; do nice -n 5 rm -rf ~; done",
+            "true && nice -n 5 rm -rf /usr",
+            "! rm -rf ~",
+            "env -u FOO rm -rf /",
+            "ionice -c 3 rm -rf ~/",
         ] {
             assert!(catastrophic_shell(cmd).is_some(), "not caught: {cmd}");
         }

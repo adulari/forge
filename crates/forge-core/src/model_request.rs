@@ -465,14 +465,7 @@ pub(super) async fn request_provider_response(
                         };
                         let attempt = *pinned_rl_attempts + 1;
                         let compacting = throttles.observe(&e);
-                        // Cheap jitter without a rand dependency: sub-second wall-clock
-                        // nanos.
-                        let jitter = f64::from(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.subsec_nanos())
-                                .unwrap_or(0),
-                        ) / 1e9;
+                        let jitter = wall_clock_jitter();
                         let delay = pinned_backoff_delay(attempt, retry_after, jitter);
                         let budget = std::time::Duration::from_secs(PINNED_RL_TOTAL_WAIT_SECS);
                         if attempt <= PINNED_RL_MAX_ATTEMPTS && *pinned_rl_waited + delay <= budget
@@ -536,52 +529,56 @@ pub(super) async fn request_provider_response(
                         // `500 Internal server error` in 0.4s for a model served on a different
                         // endpoint, and a pinned turn sat in "recovering provider" for 6m47s).
                         // Surface the real text and fail the turn instead of burning the budget.
+                        let overloaded = e.is_overloaded();
                         let message = e.to_string();
                         let fast = attempt_started.elapsed() <= DETERMINISTIC_REJECTION_WINDOW;
-                        let repeated =
-                            pinned_outage_last_error.as_deref() == Some(message.as_str());
-                        *pinned_outage_last_error = fast.then(|| message.clone());
+                        let repeated = !overloaded
+                            && pinned_outage_last_error.as_deref() == Some(message.as_str());
+                        *pinned_outage_last_error = (fast && !overloaded).then(|| message.clone());
                         // One fast refusal of a pin no catalog lists is already the answer.
                         let unverified = session.unverified_models.contains(active_model);
-                        let rejected = fast && (repeated || unverified);
+                        let rejected = !overloaded && fast && (repeated || unverified);
                         let reject_advance = rejected && !chain.as_slice().is_empty();
                         if rejected && !reject_advance {
                             return Err(rejected_model_error(active_model, &e, repeated, attended));
                         }
                         let attempt = *pinned_outage_attempts + 1;
-                        // Cheap jitter without a rand dependency: sub-second wall-clock
-                        // nanos.
-                        let jitter = f64::from(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.subsec_nanos())
-                                .unwrap_or(0),
-                        ) / 1e9;
-                        // No server Retry-After for an outage — always the blind schedule.
-                        let delay = pinned_backoff_delay(attempt, None, jitter);
+                        let jitter = wall_clock_jitter();
+                        let delay = if overloaded {
+                            throttle_recovery::overload_delay(attempt, e.retry_after(), jitter)
+                        } else {
+                            pinned_backoff_delay(attempt, None, jitter)
+                        };
+                        // A busy gateway can take seconds to say so: that time is spent budget.
+                        let spent = attempt_started.elapsed() * u32::from(overloaded);
                         let budget = std::time::Duration::from_secs(
                             session.config.mesh.pin_outage_wait_secs,
                         );
-                        if !reject_advance && *pinned_outage_waited + delay <= budget {
+                        if !reject_advance
+                            && (!overloaded || attempt <= throttle_recovery::OVERLOAD_MAX_ATTEMPTS)
+                            && *pinned_outage_waited + delay + spent <= budget
+                        {
                             *pinned_outage_attempts = attempt;
-                            *pinned_outage_waited += delay;
-                            // One-shot warning the first time cumulative wait crosses 50%
-                            // of the budget: frequent enough that the user knows this is
-                            // still going, rare enough not to spam the scrollback across
-                            // many 60s-capped retries. Every retry still surfaces via the
-                            // status-bar ModelSearch event below, no scrollback spam.
-                            if !*pinned_outage_warned_halfway
+                            *pinned_outage_waited += delay + spent;
+                            if e.is_overloaded() {
+                                throttle_recovery::announce_overload(
+                                    session,
+                                    active_model,
+                                    &e,
+                                    delay,
+                                    attempt,
+                                );
+                            } else if !*pinned_outage_warned_halfway
                                 && pinned_outage_waited.as_secs_f64() >= budget.as_secs_f64() * 0.5
                             {
+                                // One-shot warning the first time cumulative wait crosses 50%
+                                // of the budget; every retry still surfaces via ModelSearch.
                                 *pinned_outage_warned_halfway = true;
-                                let remaining = budget.saturating_sub(*pinned_outage_waited);
-                                session.presenter.emit(PresenterEvent::Warning(format!(
-                                    "{active_model}: provider unreachable — retrying \
-                                 pinned model for up to {}s more (a pin never \
-                                 switches models; `/model` to unpin, or set \
-                                 `mesh.pin_failover = true` to allow mesh fallback)",
-                                    remaining.as_secs().max(1)
-                                )));
+                                throttle_recovery::announce_unreachable(
+                                    session,
+                                    active_model,
+                                    budget.saturating_sub(*pinned_outage_waited),
+                                );
                             }
                             session.presenter.emit(PresenterEvent::ModelSearch {
                                 model: active_model.clone(),
@@ -602,9 +599,10 @@ pub(super) async fn request_provider_response(
                             *pinned_outage_last_error = None;
                         } else {
                             session.presenter.emit(PresenterEvent::Warning(format!(
-                                "{active_model}: still unreachable after \
+                                "{active_model}: still {} after \
                              {pinned_outage_attempts} backoff retries — failing the turn \
-                             (pinned model; cross-model failover disabled). `/model a,b` pins a SET and fails over WITHIN it, `/model` alone unpins, or `mesh.pin_failover = true` allows full mesh fallback"
+                             (pinned model; cross-model failover disabled). `/model a,b` pins a SET and fails over WITHIN it, `/model` alone unpins, or `mesh.pin_failover = true` allows full mesh fallback",
+                                if e.is_overloaded() { "busy" } else { "unreachable" }
                             )));
                             return Err(e.into());
                         }
