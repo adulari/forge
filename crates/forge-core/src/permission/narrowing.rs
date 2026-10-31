@@ -57,8 +57,7 @@ pub(super) fn glob_hits(rule: &PermissionRule, pattern: &str, text: &str) -> boo
         return false;
     }
     if pattern == ROOT_WILDCARD_DELETE {
-        return super::catastrophic::catastrophic_shell(&text).is_some()
-            || risky_absolute_delete(&text);
+        return super::catastrophic::catastrophic_shell(&text).is_some();
     }
     if ROOT_WILDCARD_DELETE_PS.contains(&pattern) {
         return text.split_whitespace().any(|w| w == "/*");
@@ -210,92 +209,6 @@ fn only_scratch_deletes(line: &str) -> bool {
     saw_delete
 }
 
-/// Directories nobody scripts a delete inside: system trees, other users' homes' parents, the
-/// shared temp roots themselves. Deleting a named project path under `/home`, `/opt`, `/srv` or
-/// `/var/lib` is ordinary work and is not on this list.
-const PROTECTED_ROOTS: [&str; 22] = [
-    "/bin",
-    "/boot",
-    "/dev",
-    "/etc",
-    "/lib",
-    "/lib32",
-    "/lib64",
-    "/proc",
-    "/root",
-    "/sbin",
-    "/sys",
-    "/usr",
-    "/System",
-    "/Library",
-    "/Applications",
-    "/Users",
-    "/home",
-    "/var",
-    "/opt",
-    "/srv",
-    "/mnt",
-    "/media",
-];
-
-/// `/`, `/tmp` and the system trees themselves or anything below the system trees.
-fn is_protected_path(clean: &str) -> bool {
-    if matches!(clean, "" | "/" | "/tmp" | "/var/tmp") {
-        return true;
-    }
-    PROTECTED_ROOTS.iter().any(|root| {
-        clean == *root
-            || (clean.starts_with(&format!("{root}/"))
-                && !matches!(
-                    *root,
-                    "/home" | "/Users" | "/var" | "/opt" | "/srv" | "/mnt" | "/media"
-                ))
-    })
-}
-
-/// Whether an `rm`/`rmdir` operand reaches somewhere an absolute-path delete must not: a `..`
-/// escape, a protected path, or a variable or wildcard that sits directly under one.
-fn is_risky_operand(operand: &str) -> bool {
-    if !operand.starts_with('/') {
-        return false;
-    }
-    if operand.split('/').any(|c| c == "..") {
-        return true;
-    }
-    let clean = lexical_clean(operand);
-    let fixed: Vec<&str> = clean
-        .split('/')
-        .take_while(|c| !c.contains(['$', '`', '*', '?', '[', '{']))
-        .collect();
-    let prefix = fixed.join("/");
-    let unresolved = fixed.len() < clean.split('/').count();
-    if unresolved {
-        return is_protected_path(&prefix);
-    }
-    if is_protected_path(&clean) {
-        return true;
-    }
-    std::fs::canonicalize(&clean).is_ok_and(|real| is_protected_path(&real.to_string_lossy()))
-}
-
-/// Whether the line has an `rm`/`rmdir` aimed at a risky absolute path, after the scratch
-/// exemption (`/tmp/build-*`) that [`only_scratch_deletes`] grants.
-fn risky_absolute_delete(line: &str) -> bool {
-    let (segments, _) = effective_commands(line);
-    segments.iter().any(|segment| {
-        let words = split_words(segment);
-        let Some((bin, rest)) = strip_wrappers(&words).and_then(|w| w.split_first()) else {
-            return false;
-        };
-        if !matches!(bin.rsplit('/').next().unwrap_or(bin), "rm" | "rmdir") {
-            return false;
-        }
-        rest.iter()
-            .filter(|w| !w.starts_with('-'))
-            .any(|o| is_risky_operand(o) && !is_scratch_operand(o))
-    })
-}
-
 /// A batched `read_file` with the entries a deny rule refuses taken out.
 pub struct DeniedPaths {
     /// The call's arguments with only the readable entries left.
@@ -395,13 +308,15 @@ mod tests {
         )
     }
 
+    /// A shell call in a session whose workspace is `/app`, as in the benchmark container.
     fn shell(command: &str) -> PermissionDecision {
-        decide(
+        crate::permission::decide_in(
             PermissionMode::Bypass,
             SideEffect::Shell,
             "shell",
             &json!({ "command": command }),
             &rules(),
+            Some(std::path::Path::new("/app")),
         )
     }
 
@@ -537,6 +452,16 @@ mod tests {
             "rm -rf /etc/cron.d/y",
             "rm -rf /var",
             "rm -rf /home",
+            "rm -rf /home/someone/project/build",
+            "rm -rf /home/floris/Documents",
+            "rm -rf /home/floris/.config",
+            "rm -rf ~/Documents",
+            "rm -rf ~/.config",
+            "rm -rf /opt/app/cache",
+            "rm -rf /var/lib/app/cache && mkdir /var/lib/app/cache",
+            "rm -rf /mnt/work/target",
+            "rm -rf ../elsewhere",
+            "rm -rf /app/../home/u",
         ] {
             assert_eq!(shell(command), Deny, "{command}");
         }
@@ -657,16 +582,11 @@ mod tests {
             "rm -rf /app/__pycache__ /app/.pytest_cache && python -m pytest",
             "cd /app && rm -rf /app/build; make",
             "rm -rf /app/a\nrm -rf /app/b",
-            "rm -rf /workspace/out | tee log",
+            "rm -rf /app/out | tee log",
             "rm -rf /var/tmp/build-1 && mkdir /var/tmp/build-1",
             "rm -rf /tmp/scratch && make",
-            "rm -rf /home/someone/project/build",
-            "rm -rf /opt/app/cache",
-            "rm -rf /var/lib/app/cache && mkdir /var/lib/app/cache",
-            "rm -rf /mnt/work/target",
-            "rm -rf ~/projects/old && mkdir ~/projects/old",
-            "rm -rf ~/.cache/pip && pip install x",
-            "rm -rf /home/user/proj/target && cargo build",
+            "rm -rf /app/a/../b && make",
+            "rm -rf build dist",
             "grep 'rm -rf /' script.sh",
             "dd if=/dev/zero of=/dev/null count=1",
             "dd of=/dev/null if=/dev/urandom count=1",

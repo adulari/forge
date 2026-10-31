@@ -117,8 +117,19 @@ impl Session {
     /// The safety floor's model-facing refusal (privileged command or catastrophic delete), with a
     /// warning so the user sees why. `None` for any other denial.
     pub(super) fn floor_denial(&mut self, tool: &str, args: &serde_json::Value) -> Option<String> {
-        let note = permission::denial_note(tool, args)?;
         let command = forge_types::shell_command_text(args).unwrap_or_default();
+        if permission::is_shell_tool(tool) && permission::denial_note(tool, args).is_none() {
+            let workspace = self.workspace_binding.read().ok().map(|g| g.clone());
+            let reason = permission::out_of_bounds_delete(&command, workspace.as_deref())?;
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "refused `{command}`: {reason}"
+            )));
+            return Some(format!(
+                "permission denied by policy: {reason}. Delete only inside the workspace or a \
+                 temp directory; do not try to reach the same path another way."
+            ));
+        }
+        let note = permission::denial_note(tool, args)?;
         let why = if permission::privilege_escalation(&command).is_some() {
             "it needs root and Forge never runs it — run it yourself in a terminal if you want it"
         } else {
