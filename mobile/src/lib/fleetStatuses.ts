@@ -1,7 +1,8 @@
 // How reachable each paired server is, read off its fleet poll. Pure so the rule is tested.
 import type { SessionRow } from "./api";
+import type { HostBadge } from "./hostPresence";
 
-export type ServerReachability = "pending" | "reachable" | "unreachable";
+export type ServerReachability = "pending" | "reachable" | "unreachable" | "disabled";
 
 export interface ServerFleetStatus {
   id: string;
@@ -9,6 +10,9 @@ export interface ServerFleetStatus {
   reachability: ServerReachability;
   waiting: number;
   waitingIds: string[];
+  /** When this device last got an answer from the host; filled in by the hook that owns presence. */
+  lastSeenMs?: number;
+  badge?: HostBadge;
 }
 
 interface FleetQueryState {

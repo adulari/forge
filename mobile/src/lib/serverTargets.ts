@@ -11,6 +11,8 @@ export interface StoredServer {
   customName?: boolean;
   /** `sha256:<hex>` of the TLS leaf the pairing link pinned; absent for trusted-CA hosts. */
   fingerprint?: string;
+  /** Switched off by the user: not polled, left out of the Fleet, kept paired so it can be re-enabled. */
+  disabled?: boolean;
 }
 
 export interface ServerIdentity {

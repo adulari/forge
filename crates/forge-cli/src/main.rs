@@ -16,8 +16,8 @@ pub(crate) use cli::args::mcp::{McpSyncTarget, McpTransportArg};
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
 pub(crate) use cli::args::{
     AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ExportScope, FailOnSeverity,
-    GitCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat, PluginCmd, ProviderCmd,
-    QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd, VoiceOp,
+    GitCmd, HostCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat, PluginCmd,
+    ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd, VoiceOp,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;
@@ -79,8 +79,10 @@ mod doctor_health;
 mod doctor_providers;
 mod first_run;
 mod fleet_peers;
+mod host_add;
 mod host_caps;
 mod host_lock;
+mod hosts;
 mod image_input;
 pub(crate) mod live_observer;
 mod local;
@@ -113,6 +115,7 @@ mod serve_git;
 #[cfg(test)]
 mod serve_going_away;
 mod serve_history;
+mod serve_hosts;
 mod serve_keybindings;
 mod serve_lifecycle;
 mod serve_media;

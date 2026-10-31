@@ -23,6 +23,7 @@ import { useToast } from "../components/ds/ToastHost";
 import { ConfirmTargetCard } from "../components/pairing/ConfirmTargetCard";
 import { InstallHint } from "../components/pairing/InstallHint";
 import { NearbyHosts } from "../components/pairing/NearbyHosts";
+import { AddMachineSheet } from "../components/pairing/AddMachineSheet";
 import { OtherWaysSheet, type ManualPrefill } from "../components/pairing/OtherWaysSheet";
 import { QRScan } from "../components/pairing/QRScan";
 import { useAnywhere, useAnywhereHosts } from "../lib/anywhere/store";
@@ -118,6 +119,7 @@ export default function ConnectScreen() {
   const canClose = router.canGoBack();
 
   const [otherOpen, setOtherOpen] = useState(false);
+  const [addMachineOpen, setAddMachineOpen] = useState(false);
   const [prefill, setPrefill] = useState<ManualPrefill | null>(null);
   const [confirm, setConfirm] = useState<{ candidate: string; target: ConnectTarget } | null>(null);
   const [scanEnabled, setScanEnabled] = useState(false);
@@ -411,6 +413,20 @@ export default function ConnectScreen() {
       <OtherWaysSheet visible={otherOpen} onClose={() => setOtherOpen(false)} onSubmit={requestConnect} prefill={prefill} />
 
       <InstallHint />
+
+      {servers.length > 0 ? (
+        <View style={[styles.qrWrap, !isCompact && styles.qrWrapWide]}>
+          <Button
+            label="Add a machine over SSH"
+            variant="ghost"
+            onPress={() => setAddMachineOpen(true)}
+            disabled={busy}
+            fullWidth
+            accessibilityLabel="Add a machine over SSH"
+          />
+          <AddMachineSheet visible={addMachineOpen} onClose={() => setAddMachineOpen(false)} />
+        </View>
+      ) : null}
 
       {testState !== "idle" && testState !== "testing" && testState !== "ok" ? (
         <View style={[styles.qrWrap, !isCompact && styles.qrWrapWide]}>

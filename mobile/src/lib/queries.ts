@@ -392,7 +392,7 @@ function useRoutedModelCatalogSync(sessions: SessionRow[] | undefined) {
 }
 
 /** Per-server fleet probes for the Settings server switcher. */
-export function useServerFleets(servers: { id: string; baseUrl: string }[]) {
+export function useServerFleets(servers: { id: string; baseUrl: string; disabled?: boolean }[]) {
   const isFocused = useIsFocused();
   return useQueries({
     queries: servers.map((server) => ({
@@ -401,6 +401,7 @@ export function useServerFleets(servers: { id: string; baseUrl: string }[]) {
       // the relay that was two encrypted round trips per tick for one answer.
       queryKey: ["sessions", server.baseUrl] as const,
       queryFn: () => getSessions(server.baseUrl),
+      enabled: !server.disabled,
       refetchInterval: isFocused
         ? (query: { state: { error: unknown } }) =>
             query.state.error ? SERVER_FLEET_BACKOFF_MS : SERVER_FLEET_POLL_MS

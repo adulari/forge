@@ -2,9 +2,19 @@
 // waiting count). The Fleet screen and the desktop sidebar render this same component, and the
 // desktop title-bar chip opens the same choices as a menu. Hidden with a single server, where
 // there is nothing to choose.
-import React from "react";
+import React, { useEffect, useMemo } from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
+import {
+  enabledServers,
+  forgetRemoved,
+  HOST_BADGE_LABEL,
+  hostBadge,
+  markSeen,
+  markSelected,
+  pickWarmServer,
+  usePresence,
+} from "../../lib/hostPresence";
 import { fleetStatuses, type ServerFleetStatus, type ServerReachability } from "../../lib/fleetStatuses";
 import { useServerFleets } from "../../lib/queries";
 import { useFleetScope } from "../../lib/useScopedFleet";
@@ -16,8 +26,44 @@ export { fleetStatuses, type ServerFleetStatus, type ServerReachability } from "
 
 /** Per-server reachability + waiting count, from the same shared per-server fleet poll. */
 export function useServerFleetStatuses(): ServerFleetStatus[] {
-  const { servers } = useFleetScope();
-  return fleetStatuses(servers, useServerFleets(servers));
+  const { servers, activeServerId } = useFleetScope();
+  const enabled = useMemo(() => enabledServers(servers), [servers]);
+  const presence = usePresence();
+  const polled = fleetStatuses(enabled, useServerFleets(enabled));
+  const reachableKey = polled.filter((status) => status.reachability === "reachable").map((status) => status.id).join(",");
+
+  useEffect(() => {
+    if (activeServerId) markSelected(activeServerId);
+  }, [activeServerId]);
+  useEffect(() => {
+    for (const id of reachableKey ? reachableKey.split(",") : []) markSeen(id);
+  }, [reachableKey]);
+  useEffect(() => {
+    forgetRemoved(servers);
+  }, [servers]);
+
+  const warmId = pickWarmServer(enabled, activeServerId, presence.recent)?.id ?? null;
+  const byId = new Map(polled.map((status) => [status.id, status]));
+  return servers.map((server) => {
+    const status: ServerFleetStatus = byId.get(server.id) ?? {
+      id: server.id,
+      name: server.name,
+      reachability: "disabled",
+      waiting: 0,
+      waitingIds: [],
+    };
+    return {
+      ...status,
+      lastSeenMs: presence.lastSeen[server.id],
+      badge: hostBadge({
+        id: server.id,
+        activeId: activeServerId,
+        warmId,
+        disabled: Boolean(server.disabled),
+        reachable: status.reachability === "reachable" || status.reachability === "pending",
+      }),
+    };
+  });
 }
 
 function Pill({
@@ -76,7 +122,13 @@ export function ServerScopePills({ layout = "scroll" }: { layout?: "scroll" | "w
   // A daemon paired twice (direct + relay) lists the same sessions twice; "All" shows them once.
   const totalWaiting = new Set(statuses.flatMap((status) => status.waitingIds)).size;
   const dotColor = (reachability: ServerReachability) =>
-    reachability === "pending" ? tokens.warn : reachability === "reachable" ? tokens.success : tokens.danger;
+    reachability === "pending"
+      ? tokens.warn
+      : reachability === "reachable"
+        ? tokens.success
+        : reachability === "disabled"
+          ? tokens.ink4
+          : tokens.danger;
 
   const pills = (
     <>
@@ -88,13 +140,13 @@ export function ServerScopePills({ layout = "scroll" }: { layout?: "scroll" | "w
         count={totalWaiting}
         compact={compact}
       />
-      {statuses.map((status) => (
+      {statuses.filter((status) => status.reachability !== "disabled").map((status) => (
         <Pill
           key={status.id}
           label={status.name}
           selected={!showAll && status.id === activeServerId}
           onPress={() => selectServer(status.id)}
-          accessibilityLabel={`${status.name}, ${status.reachability === "unreachable" ? "unreachable" : "reachable"}, ${status.waiting} waiting`}
+          accessibilityLabel={`${status.name}, ${status.badge ? HOST_BADGE_LABEL[status.badge].toLowerCase() : status.reachability}, ${status.waiting} waiting`}
           dotColor={dotColor(status.reachability)}
           count={status.waiting}
           compact={compact}

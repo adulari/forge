@@ -60,6 +60,8 @@ pub use crate::stash_args::StashOp;
 /// (which owns the `Session`) executes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandAction {
+    /// `/host` lists machines added with `forge host add`; `/host remove NAME` forgets one.
+    Host(String),
     Help,
     /// Open the `/status` inspector: every fact the header and status line can drop.
     Status,
@@ -502,6 +504,7 @@ pub fn parse_command(line: &str) -> CommandAction {
             CommandAction::Remote { mode }
         }
         "anywhere" | "aw" => CommandAction::Anywhere,
+        "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),
@@ -1065,6 +1068,10 @@ mod tests {
     fn parses_anywhere_management_command() {
         assert_eq!(parse_command("/anywhere"), CommandAction::Anywhere);
         assert_eq!(parse_command("/aw"), CommandAction::Anywhere);
+        assert_eq!(
+            parse_command("/host remove box"),
+            CommandAction::Host("remove box".into())
+        );
         assert_eq!(command_category("anywhere"), "Integrations");
     }
 

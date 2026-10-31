@@ -9,7 +9,9 @@ pub fn command_category(name: &str) -> &'static str {
         "model" | "models" | "mode" | "effort" | "subagents" | "agents" | "thinking" | "mesh"
         | "usage" => "Model & usage",
         "assay" | "lattice" | "pr" | "commit" | "diff" => "Review & ship",
-        "mcp" | "remote" | "anywhere" | "self-mcp" | "voice" | "image" | "claude" => "Integrations",
+        "mcp" | "remote" | "anywhere" | "host" | "self-mcp" | "voice" | "image" | "claude" => {
+            "Integrations"
+        }
         "config" | "theme" | "statusline" | "keys" | "help" | "init" | "remember" | "memories"
         | "permissions" | "add-dir" | "doctor" | "skills" => "Settings & help",
         "copy" | "quit" => "Utilities",

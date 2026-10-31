@@ -241,7 +241,10 @@ pub(crate) use anywhere::AnywhereCmd;
 pub(crate) mod claude_compat;
 #[path = "args/host.rs"]
 pub(crate) mod host;
+#[path = "args/hosts.rs"]
+pub(crate) mod hosts;
 pub(crate) use claude_compat::ClaudeCompat;
+pub(crate) use hosts::HostCmd;
 #[path = "args/session_flags.rs"]
 pub(crate) mod session_flags;
 pub(crate) use session_flags::SessionFlags;
@@ -403,6 +406,11 @@ pub(crate) enum Command {
         mock: bool,
         #[command(subcommand)]
         cmd: Option<mcp::serve::ServeCmd>,
+    },
+    /// Add other machines to your fleet over SSH: install, start the service, pair.
+    Host {
+        #[command(subcommand)]
+        cmd: HostCmd,
     },
     /// Securely reach Forge through the optional managed Anywhere companion.
     Anywhere {

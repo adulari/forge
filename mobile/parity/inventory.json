@@ -783,7 +783,7 @@
     "file": "mobile/src/components/fleet/OfflineHosts.tsx",
     "platform": "desktop",
     "reason": "Certificate-changed check runs only in the Tauri shell, which owns pinning.",
-    "category": "behavior"
+    "category": "capability"
   },
   {
     "file": "mobile/src/components/pairing/ConfirmTargetCard.tsx",
