@@ -16,6 +16,7 @@ use async_trait::async_trait;
 use forge_types::{new_id, Message, Role, ToolCall, Usage};
 use serde_json::{json, Value};
 
+use crate::mock_advisor;
 use crate::mock_goal;
 use crate::mock_long;
 use crate::mock_soak;
@@ -80,6 +81,9 @@ impl Provider for MockProvider {
         tools: &[ToolSpec],
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
+        if mock_advisor::is_advisor_review(messages) {
+            return Ok(resp(&mock_advisor::reply(messages), vec![], 120, 40));
+        }
         if mock_goal::is_goal_evaluation(messages) {
             return Ok(resp(&mock_goal::verdict(messages), vec![], 120, 40));
         }

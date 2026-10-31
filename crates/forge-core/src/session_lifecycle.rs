@@ -301,6 +301,7 @@ impl Session {
             gauge_model: None,
             spend: Default::default(),
             turn_unfinished_tasks: Vec::new(),
+            advisor_reviewed: false,
             turn_budget_refused: false,
             expect_code_change: false,
             cli_bridge_notice_shown: false,

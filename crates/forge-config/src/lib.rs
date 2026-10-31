@@ -13,6 +13,7 @@ use forge_types::{
 use serde::{Deserialize, Serialize};
 
 mod adaptive_effort;
+pub mod advisor;
 mod agent_builtins;
 pub mod agents;
 pub mod browser;
@@ -1585,6 +1586,9 @@ pub struct HarnessConfig {
     /// and move the progress ledger's cycle stop two repeats later.
     #[serde(default)]
     pub repeat_interrupt: bool,
+    /// Second-model review at DONE (docs/features/advisor.md).
+    #[serde(default)]
+    pub advisor: advisor::AdvisorConfig,
 }
 
 impl Default for HarnessConfig {
@@ -1599,6 +1603,7 @@ impl Default for HarnessConfig {
             stop_retries: false,
             thinking_loop_breaker: false,
             repeat_interrupt: false,
+            advisor: advisor::AdvisorConfig::default(),
         }
     }
 }

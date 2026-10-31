@@ -278,6 +278,9 @@ pub fn setting_group_and_label(path: &str) -> (String, String) {
         "harness.stop_retries" => Some(("Behaviour", "Stop retries")),
         "harness.thinking_loop_breaker" => Some(("Behaviour", "Thinking-loop breaker")),
         "harness.repeat_interrupt" => Some(("Behaviour", "Repeat-call interrupt")),
+        "harness.advisor.enabled" => Some(("Behaviour", "Advisor review")),
+        "harness.advisor.model" => Some(("Behaviour", "Advisor model")),
+        "harness.advisor.timeout_secs" => Some(("Behaviour", "Advisor timeout")),
         _ => None,
     };
     if let Some((g, l)) = curated {
@@ -530,6 +533,9 @@ pub fn setting_help(path: &str) -> Option<&'static str> {
         "harness.stop_retries" => "Continue up to 3 times when a reply announces a next step but makes no tool call, and retry empty or text-only tool-call replies up to 3 times before benching. A user-pinned model is never benched for one empty reply. Wins over harness_profile = minimal. Default off.",
         "harness.thinking_loop_breaker" => "When consecutive tool-free replies keep restating the same plan, inject 'Act, don't re-plan: make the next tool call.' Wins over harness_profile = minimal. Default off.",
         "harness.repeat_interrupt" => "After 5 identical consecutive tool calls with identical results, tell the model not to repeat that call and to change approach; the progress ledger's cycle stop moves two repeats later. Wins over harness_profile = minimal. Default off.",
+        "harness.advisor.enabled" => "Before a turn that changed something finishes, a second model reads the work once and can send it back once with up to 4 notes. Skipped for CLI bridges and subscription models. Default off.",
+        "harness.advisor.model" => "Model that reviews. Empty uses the model driving the turn. A Claude Sonnet-class model is the recommended setting; small models truncated on large transcripts in the replay.",
+        "harness.advisor.timeout_secs" => "Seconds before an advisor call is abandoned and the turn finishes as it would have (default 120).",
         _ => return None,
     })
 }

@@ -108,3 +108,6 @@ stop_retries = true
 thinking_loop_breaker = true
 repeat_interrupt = true
 ```
+
+A fifth, separate switch, `[harness.advisor]`, adds a second-model review at DONE; see
+[advisor.md](advisor.md).
