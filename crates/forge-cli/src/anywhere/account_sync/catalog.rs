@@ -361,7 +361,7 @@ fn mcp(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
     let mut out = Vec::new();
     for server in user_mcp().servers {
         let label = format!("mcp: {}", server.name);
-        if let Some(reason) = embedded_secret(&server) {
+        if let Some(reason) = super::inline_secret::embedded_secret(&server) {
             skips.push(Skip { label, reason });
             continue;
         }
@@ -377,29 +377,6 @@ fn mcp(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
         }
     }
     out
-}
-
-/// A definition that carries a credential inline would leak it through a channel that is only
-/// consented to for definitions, so it stays local.
-fn embedded_secret(server: &forge_config::mcp::McpServerConfig) -> Option<String> {
-    use forge_config::mcp::McpTransport;
-    let reason = "holds a credential inline; move it to the keyring (`forge mcp`)".to_string();
-    match &server.transport {
-        McpTransport::Stdio { args, env, .. } => {
-            let inline_env = env.iter().any(|(k, v)| {
-                forge_config::looks_secret(k) && !v.is_empty() && !v.starts_with("${")
-            });
-            (inline_env || args.iter().any(|a| forge_config::embeds_credentials(a)))
-                .then_some(reason)
-        }
-        McpTransport::Http { url, headers } | McpTransport::Sse { url, headers } => {
-            let inline = headers.iter().any(|(k, v)| {
-                (forge_config::looks_secret(k) || k.eq_ignore_ascii_case("authorization"))
-                    && !v.starts_with("${")
-            });
-            (inline || forge_config::embeds_credentials(url)).then_some(reason)
-        }
-    }
 }
 
 fn instructions(skips: &mut Vec<Skip>) -> Vec<LocalItem> {
