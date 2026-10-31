@@ -64,8 +64,29 @@ pub(crate) async fn announce_backoff(
     }
 }
 
+/// Most retries a pinned turn spends on an overloaded provider, whatever the budget says: a
+/// gateway answering `Retry-After: 1` would otherwise allow hundreds of attempts.
+pub(crate) const OVERLOAD_MAX_ATTEMPTS: u32 = 40;
+const OVERLOAD_MIN_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+const OVERLOAD_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long to wait before retrying an overloaded provider: its `Retry-After` clamped to
+/// 1s..=120s (`0` or a huge value is the server's problem, not a schedule), else the blind
+/// schedule.
+pub(crate) fn overload_delay(
+    attempt: u32,
+    retry_after: Option<std::time::Duration>,
+    jitter: f64,
+) -> std::time::Duration {
+    match retry_after {
+        Some(ra) => ra.clamp(OVERLOAD_MIN_WAIT, OVERLOAD_MAX_WAIT),
+        None => crate::pinned_backoff_delay(attempt, None, jitter),
+    }
+}
+
 /// "provider busy (503 gateway_overloaded), retrying in 5s" for a pinned turn waiting out an
-/// overloaded provider; the provider's whole answer goes to the log.
+/// overloaded provider. Shown on the first retry and every fifth after it; the status line
+/// carries the rest. The provider's whole answer goes to the log.
 pub(crate) fn announce_overload(
     session: &mut Session,
     active_model: &str,
@@ -77,10 +98,55 @@ pub(crate) fn announce_overload(
         return;
     };
     tracing::warn!(model = %active_model, attempt, error = %err, "pinned model provider busy");
+    if attempt != 1 && !attempt.is_multiple_of(5) {
+        return;
+    }
     session.presenter.emit(PresenterEvent::Warning(format!(
         "{active_model}: provider busy ({status} {reason}), retrying in {}s (attempt {attempt})",
         delay.as_secs().max(1)
     )));
+}
+
+/// The one-shot halfway warning for a pinned turn still waiting out an unreachable provider.
+pub(crate) fn announce_unreachable(
+    session: &mut Session,
+    active_model: &str,
+    remaining: std::time::Duration,
+) {
+    session.presenter.emit(PresenterEvent::Warning(format!(
+        "{active_model}: provider unreachable — retrying pinned model for up to {}s more (a pin \
+         never switches models; `/model` to unpin, or set `mesh.pin_failover = true` to allow \
+         mesh fallback)",
+        remaining.as_secs().max(1)
+    )));
+}
+
+#[cfg(test)]
+mod overload_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_after_is_clamped_to_a_sane_range() {
+        let d = |ra: Option<u64>| overload_delay(1, ra.map(Duration::from_secs), 0.5);
+        assert_eq!(d(Some(0)), Duration::from_secs(1));
+        assert_eq!(d(Some(1)), Duration::from_secs(1));
+        assert_eq!(d(Some(30)), Duration::from_secs(30));
+        assert_eq!(d(Some(86_400)), Duration::from_secs(120));
+        assert!(
+            d(None) >= Duration::from_secs(3),
+            "blind schedule when none"
+        );
+    }
+
+    #[test]
+    fn the_attempt_cap_bounds_the_worst_case_regardless_of_budget() {
+        let worst = Duration::from_secs(1) * OVERLOAD_MAX_ATTEMPTS;
+        assert!(
+            worst <= Duration::from_secs(120),
+            "{worst:?} of floor-rate retries"
+        );
+    }
 }
 
 /// The provider's reason for a failure, short enough for a status line: `Bedrock: Too many tokens,

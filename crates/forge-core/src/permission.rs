@@ -183,8 +183,9 @@ fn decide_in_with(
         return Deny;
     }
     if is_shell_tool(tool_name)
-        && forge_types::shell_command_text(args)
-            .is_some_and(|cmd| out_of_bounds_delete(&cmd, workspace).is_some())
+        && forge_types::shell_command_text(args).is_some_and(|cmd| {
+            out_of_bounds_delete(&cmd, workspace, args.get("cwd").and_then(Value::as_str)).is_some()
+        })
     {
         return Deny;
     }

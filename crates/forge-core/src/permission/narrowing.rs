@@ -105,7 +105,10 @@ fn mask_public_keys(text: &str) -> Cow<'_, str> {
         let word = piece.trim_end();
         let bare =
             word.trim_matches(|c| matches!(c, '"' | '\'' | '`' | '(' | ')' | ';' | '&' | '|'));
-        if bare.ends_with(".pub") && bare.len() > ".pub".len() {
+        // Only a plain `<name>.pub` path: a `$`, brace, glob or escape can splice in another word
+        // (`id_rsa${IFS}.pub` is two arguments, one of them the private key).
+        let plain = !bare.contains(['$', '`', '{', '}', '*', '?', '[', '\\', '=']);
+        if plain && bare.ends_with(".pub") && bare.len() > ".pub".len() {
             out.push_str("<public-key>");
             out.push_str(&piece[word.len()..]);
         } else {
@@ -594,6 +597,7 @@ mod tests {
             "find / -xdev -type f | head -50",
             "find / -xdev -maxdepth 2 -name '*.conf' | sort | head -30",
             "cat ~/.ssh/id_rsa.pub",
+            "cat ~/.ssh/id_ed25519.pub ~/.ssh/id_rsa.pub",
             "grep -n Host /app/README.md",
         ] {
             assert_eq!(
@@ -601,6 +605,22 @@ mod tests {
                 PermissionDecision::Allow,
                 "must not be denied: {cmd}"
             );
+        }
+    }
+
+    #[test]
+    fn a_spliced_key_name_is_not_a_public_key() {
+        for cmd in [
+            "cat ~/.ssh/id_rsa${IFS}.pub",
+            "cat ~/.ssh/id_rsa$IFS.pub",
+            "cat ~/.ssh/id_rsa$(true).pub",
+            "cat ~/.ssh/id_rsa`true`.pub",
+            "cat ~/.ssh/id_rsa{,.pub}",
+            "cat ~/.ssh/id_rsa* .pub",
+            "cat ~/.ssh/id_rsa .pub",
+            "cat ~/.ssh/id_rsa.pub ~/.ssh/id_rsa",
+        ] {
+            assert_eq!(shell(cmd), PermissionDecision::Deny, "{cmd}");
         }
     }
 

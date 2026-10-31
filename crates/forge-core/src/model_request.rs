@@ -531,8 +531,6 @@ pub(super) async fn request_provider_response(
                         // `500 Internal server error` in 0.4s for a model served on a different
                         // endpoint, and a pinned turn sat in "recovering provider" for 6m47s).
                         // Surface the real text and fail the turn instead of burning the budget.
-                        // A BUSY provider (503/529, Retry-After, `retryable`, `*overloaded*`) is
-                        // the opposite of refusing: it never counts toward a rejection.
                         let overloaded = e.is_overloaded();
                         let message = e.to_string();
                         let fast = attempt_started.elapsed() <= DETERMINISTIC_REJECTION_WINDOW;
@@ -548,18 +546,22 @@ pub(super) async fn request_provider_response(
                         }
                         let attempt = *pinned_outage_attempts + 1;
                         let jitter = wall_clock_jitter();
-                        let delay = pinned_backoff_delay(
-                            attempt,
-                            e.retry_after()
-                                .map(|d| d.max(std::time::Duration::from_millis(10))),
-                            jitter,
-                        );
+                        let delay = if overloaded {
+                            throttle_recovery::overload_delay(attempt, e.retry_after(), jitter)
+                        } else {
+                            pinned_backoff_delay(attempt, None, jitter)
+                        };
+                        // A busy gateway can take seconds to say so: that time is spent budget.
+                        let spent = attempt_started.elapsed() * u32::from(overloaded);
                         let budget = std::time::Duration::from_secs(
                             session.config.mesh.pin_outage_wait_secs,
                         );
-                        if !reject_advance && *pinned_outage_waited + delay <= budget {
+                        if !reject_advance
+                            && (!overloaded || attempt <= throttle_recovery::OVERLOAD_MAX_ATTEMPTS)
+                            && *pinned_outage_waited + delay + spent <= budget
+                        {
                             *pinned_outage_attempts = attempt;
-                            *pinned_outage_waited += delay;
+                            *pinned_outage_waited += delay + spent;
                             if e.is_overloaded() {
                                 throttle_recovery::announce_overload(
                                     session,
@@ -574,14 +576,11 @@ pub(super) async fn request_provider_response(
                                 // One-shot warning the first time cumulative wait crosses 50%
                                 // of the budget; every retry still surfaces via ModelSearch.
                                 *pinned_outage_warned_halfway = true;
-                                let remaining = budget.saturating_sub(*pinned_outage_waited);
-                                session.presenter.emit(PresenterEvent::Warning(format!(
-                                    "{active_model}: provider unreachable — retrying \
-                                 pinned model for up to {}s more (a pin never \
-                                 switches models; `/model` to unpin, or set \
-                                 `mesh.pin_failover = true` to allow mesh fallback)",
-                                    remaining.as_secs().max(1)
-                                )));
+                                throttle_recovery::announce_unreachable(
+                                    session,
+                                    active_model,
+                                    budget.saturating_sub(*pinned_outage_waited),
+                                );
                             }
                             session.presenter.emit(PresenterEvent::ModelSearch {
                                 model: active_model.clone(),
