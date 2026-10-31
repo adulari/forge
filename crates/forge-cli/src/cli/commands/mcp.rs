@@ -14,10 +14,16 @@ pub(crate) async fn mcp_cmd(cmd: Option<McpCmd>) -> Result<()> {
         Some(McpCmd::Control { action }) => {
             return match action {
                 None => crate::mcp_control::serve().await,
-                Some(ControlCmd::List) => Ok(crate::mcp_control::list()),
+                Some(ControlCmd::List) => {
+                    crate::mcp_control::list();
+                    Ok(())
+                }
                 Some(ControlCmd::Enable { tool }) => crate::mcp_control::set(&tool, true),
                 Some(ControlCmd::Disable { tool }) => crate::mcp_control::set(&tool, false),
-                Some(ControlCmd::Log { limit }) => Ok(crate::mcp_control::log(limit)),
+                Some(ControlCmd::Log { limit }) => {
+                    crate::mcp_control::log(limit);
+                    Ok(())
+                }
             };
         }
         Some(McpCmd::Import { path }) => return mcp_import(path),

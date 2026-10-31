@@ -485,7 +485,7 @@ impl Drop for AbortOnDrop {
     }
 }
 
-pub(crate) use crate::serve_revoke::{run_until_revoked, upgrade_until_revoked};
+pub(crate) use crate::serve_revoke::upgrade_until_revoked;
 
 pub(crate) use crate::serve_input_gate::InputGate;
 

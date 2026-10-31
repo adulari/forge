@@ -425,6 +425,48 @@ pub(crate) async fn expand(prompt: &str, env: &Env<'_>) -> Expansion {
     out
 }
 
+/// Expand the mentions of a submitted prompt for a live session: notes land in the transcript,
+/// `@browser` screenshots become pending vision input, and the digests come back as guidance
+/// blocks to ride the turn next to the `@path` file blocks.
+pub(crate) async fn apply(
+    prompt: &str,
+    workspace: &Path,
+    session: &Arc<tokio::sync::Mutex<forge_core::Session>>,
+    app: &mut forge_tui::App,
+) -> Vec<String> {
+    if parse(prompt).is_empty() {
+        return Vec::new();
+    }
+    let (store, self_id) = {
+        let s = session.lock().await;
+        (s.store.clone(), s.id().to_string())
+    };
+    let env = Env {
+        store: &store,
+        self_id: &self_id,
+        workspace,
+        terminals: crate::serve_control::daemon_state().map(|s| s.terminals.clone()),
+    };
+    let expansion = expand(prompt, &env).await;
+    for note in &expansion.notes {
+        app.note(&format!("@ {note}"));
+    }
+    for path in &expansion.images {
+        match crate::image_input::load_image_file(&path.to_string_lossy()) {
+            Ok((attachment, _)) => {
+                let mut s = session.lock().await;
+                let mut pending = s.take_pending_images();
+                if !pending.contains(&attachment) {
+                    pending.push(attachment);
+                }
+                s.attach_images(pending);
+            }
+            Err(error) => app.note(&format!("@ browser screenshot not attached: {error}")),
+        }
+    }
+    expansion.blocks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -551,46 +593,4 @@ mod tests {
             .any(|n| n.contains("no browser screenshot")));
         assert!(out.images.is_empty());
     }
-}
-
-/// Expand the mentions of a submitted prompt for a live session: notes land in the transcript,
-/// `@browser` screenshots become pending vision input, and the digests come back as guidance
-/// blocks to ride the turn next to the `@path` file blocks.
-pub(crate) async fn apply(
-    prompt: &str,
-    workspace: &Path,
-    session: &Arc<tokio::sync::Mutex<forge_core::Session>>,
-    app: &mut forge_tui::App,
-) -> Vec<String> {
-    if parse(prompt).is_empty() {
-        return Vec::new();
-    }
-    let (store, self_id) = {
-        let s = session.lock().await;
-        (s.store.clone(), s.id().to_string())
-    };
-    let env = Env {
-        store: &store,
-        self_id: &self_id,
-        workspace,
-        terminals: crate::serve_control::daemon_state().map(|s| s.terminals.clone()),
-    };
-    let expansion = expand(prompt, &env).await;
-    for note in &expansion.notes {
-        app.note(&format!("@ {note}"));
-    }
-    for path in &expansion.images {
-        match crate::image_input::load_image_file(&path.to_string_lossy()) {
-            Ok((attachment, _)) => {
-                let mut s = session.lock().await;
-                let mut pending = s.take_pending_images();
-                if !pending.contains(&attachment) {
-                    pending.push(attachment);
-                }
-                s.attach_images(pending);
-            }
-            Err(error) => app.note(&format!("@ browser screenshot not attached: {error}")),
-        }
-    }
-    expansion.blocks
 }
