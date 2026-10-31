@@ -27,6 +27,10 @@ use sha2::{Digest as _, Sha256};
 use crate::{AnywhereCmd, ShareExpiry};
 
 pub(crate) mod account_sync;
+
+/// Set by the relay connector on every request it replays against the local daemon, which would
+/// otherwise see them as the owner. Handlers that return secrets check it and withhold them.
+pub(crate) const RELAY_REQUEST_HEADER: &str = "x-forge-via-relay";
 mod approval_key;
 mod connector;
 mod display;

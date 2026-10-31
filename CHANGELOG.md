@@ -6,8 +6,14 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **`GET /api/mcp` no longer hands out the secrets embedded in MCP servers' commands and URLs.** The listing returned each server's raw `args` and `url`, so a View-scope client or the phone reading over Anywhere could see a token passed as `--access-token sbp_...`, a key in a URL path or `?api_key=`, or `user:pass@` credentials. It now masks tokens in arguments, `KEY=value` pairs, URL credentials, query values and secret-looking path segments (`redacted: true` in each row). Only a direct connection that holds the provider-management scope still gets the full values, and requests replayed by the Anywhere connector are always masked.
+
 ### Fixed
 
+- **`forge mcp sync` merges into your Claude Code and Codex entries instead of replacing them.** It used to overwrite a whole entry, which turned a working literal token into a `${VAR}` reference to a variable that might not be exported, dropped the auth header of imported HTTP servers, and wiped keys Forge does not manage (`startup_timeout_sec`, `enabled_tools`, comments). Now unmanaged keys stay, a literal credential already in the target is never replaced by a reference, and extra secret variables are added as references only when missing. Tools you switched off carry over to Codex as `disabled_tools`; Claude Code has no per-server filter, so sync prints a warning instead. The rewrite also keeps the file's permissions (a 0600 `config.toml` no longer becomes 0644) and writes through symlinks.
+- **A server switched off for one session now stays off on claude/codex subscription sessions and after a restart.** The chip only filtered the daemon's own MCP manager, so the bridge's `forge mcp-serve` child still connected every server, and the choice was forgotten when the session was restored. It is now saved with the session and the bridge child applies it.
 - **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
 
 ### Added

@@ -1541,6 +1541,7 @@ async fn dispatch_http_inner(
             outgoing = outgoing.header(name, value);
         }
     }
+    outgoing = outgoing.header(super::RELAY_REQUEST_HEADER, "1");
     let response = outgoing.send().await.context("call local Forge daemon")?;
     let status = response.status().as_u16();
     let headers = response

@@ -184,7 +184,7 @@ pub(super) async fn reload_mcp() -> Response {
     for server in config.servers.iter().filter(|s| !s.enabled) {
         forget(&server.name);
     }
-    mcp_page().await
+    super::serve_mcp::mcp_listing(true).await
 }
 
 #[derive(serde::Deserialize)]
@@ -287,7 +287,7 @@ pub(super) async fn edit_mcp_server(Json(request): Json<EditMcpServerRequest>) -
     .await;
     forget(&name);
     match result {
-        Ok(Ok(())) => mcp_page().await,
+        Ok(Ok(())) => super::serve_mcp::mcp_listing(true).await,
         Ok(Err(message)) => err_response(axum::http::StatusCode::NOT_FOUND, &message),
         Err(_) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -315,7 +315,7 @@ pub(super) async fn delete_mcp_server(Json(request): Json<NameRequest>) -> Respo
     .await;
     forget(&name);
     match result {
-        Ok(Ok(())) => mcp_page().await,
+        Ok(Ok(())) => super::serve_mcp::mcp_listing(true).await,
         Ok(Err(message)) => err_response(axum::http::StatusCode::NOT_FOUND, &message),
         Err(_) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -348,7 +348,7 @@ pub(super) async fn update_mcp_builtin(Json(request): Json<BuiltinRequest>) -> R
     })
     .await;
     match result {
-        Ok(Ok(())) => mcp_page().await,
+        Ok(Ok(())) => super::serve_mcp::mcp_listing(true).await,
         Ok(Err(message)) => err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &message),
         Err(_) => err_response(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,

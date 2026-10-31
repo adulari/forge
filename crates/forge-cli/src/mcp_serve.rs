@@ -878,6 +878,13 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
     // The store every bridge tool writes through (`update_tasks`, memory, subagents): the SAME
     // global store the parent uses, so the parent's post-turn reload reads what this child wrote.
     let tasks_store = Arc::new(crate::open_store()?);
+    if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
+        crate::cli::commands::run::session_mcp_off::apply_persisted(
+            &mut config.mcp,
+            tasks_store.db_path(),
+            &session_id,
+        );
+    }
     let subagents = LazySubagents::new(&config, depth, Arc::clone(&tasks_store));
     clock.mark("mcp-serve: store");
     // External project MCP servers (dual-graph/token-counter/helm/…) are ON on the bridge by

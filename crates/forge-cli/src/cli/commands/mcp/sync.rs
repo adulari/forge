@@ -44,6 +44,9 @@ pub(crate) fn mcp_sync(targets: &[McpSyncTarget], dry_run: bool) -> Result<()> {
             report.updated.len(),
             report.unchanged.len()
         );
+        for warning in &report.warnings {
+            println!("{}: warning: {warning}", target.label());
+        }
     }
     Ok(())
 }
