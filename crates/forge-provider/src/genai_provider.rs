@@ -954,8 +954,10 @@ fn short(s: &str) -> String {
 /// the *streaming* path Forge uses, genai only carries a string, so we scan it. Messages are
 /// shortened (`short`) so a multi-line JSON body never reaches the UI.
 mod error_policy;
+mod gateway_route;
 pub use error_policy::falls_back_to_local_ollama;
 use error_policy::*;
+use gateway_route::*;
 mod bedrock_error;
 
 /// Whether a failed embedding call fails the same way on every retry in this process: a rejection

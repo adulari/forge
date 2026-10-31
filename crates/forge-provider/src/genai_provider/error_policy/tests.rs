@@ -202,3 +202,130 @@ fn a_plain_500_stays_a_candidate_for_the_rejection_heuristic() {
         );
     }
 }
+
+/// Texts captured from the Terminal-Bench run through ModelGateway (2026-10-31): the 503 that
+/// ended pinned turns as "not available on this account", and its 502 sibling that already
+/// retried. Plus the generic gateway phrasings the same fix covers.
+#[test]
+fn gateway_routing_failures_are_transient_never_a_dead_model() {
+    let no_route_body = r#"{"error":{"message":"No provider route is available. The gateway could not find an available provider route for this model and request. Try again shortly, select another model or contact support. (request id: 2026abc)","type":"new_api_error","code":"model_not_available"}}"#;
+    let cases: &[(u16, &str, &str, &str)] = &[
+        (503, no_route_body, "HTTP error", "model_not_available"),
+        (404, no_route_body, "HTTP error", "provider route"),
+        (
+            502,
+            r#"{"error":{"message":"Every provider route failed. The gateway tried every available provider route for this model, and each one returned an error. Retry shortly or choose another model.","details":{"category":"provider_routes_exhausted"}}}"#,
+            "HTTP error",
+            "provider_routes_exhausted",
+        ),
+        (
+            503,
+            "503 No provider route",
+            "503 No provider route",
+            "no provider route",
+        ),
+        (
+            504,
+            "upstream unavailable",
+            "upstream unavailable",
+            "upstream unavailable",
+        ),
+        (502, "", "provider unavailable", "provider unavailable"),
+        (
+            503,
+            "no healthy upstream",
+            "no healthy upstream",
+            "no healthy upstream",
+        ),
+        (
+            503,
+            "",
+            "No available provider for model",
+            "no available provider",
+        ),
+    ];
+    for (status, body, message, _) in cases {
+        let e = classify_status(*status, (*message).into(), body, None);
+        let ProviderError::Overloaded { reason, .. } = &e else {
+            panic!("{status} {body} {message} -> {e:?}");
+        };
+        assert!(!reason.is_empty());
+        assert!(!e.is_permanent(), "{status} {body}");
+    }
+    let ProviderError::Overloaded { status, reason, .. } =
+        classify_status(503, "HTTP error".into(), no_route_body, None)
+    else {
+        unreachable!()
+    };
+    assert_eq!((status, reason.as_str()), (503, "no provider route"));
+}
+
+#[test]
+fn a_streamed_gateway_routing_failure_is_busy_too() {
+    for text in [
+        "API Error: 503 No provider route",
+        "stream error: no provider route is available",
+        "503 provider unavailable",
+    ] {
+        let e = classify_text(text, text.into());
+        assert!(e.is_overloaded(), "{text} -> {e:?}");
+    }
+}
+
+#[test]
+fn the_model_owners_refusal_and_auth_and_billing_stay_permanent() {
+    let cases: &[(u16, &str)] = &[
+        (
+            404,
+            r#"{"error":{"message":"The model `x` does not exist or you do not have access to it.","code":"model_not_found"}}"#,
+        ),
+        (
+            400,
+            r#"{"error":{"message":"The requested model is not available on this account.","code":"model_not_available"}}"#,
+        ),
+        (
+            401,
+            r#"{"error":{"message":"Invalid API key. No provider route for anonymous callers."}}"#,
+        ),
+        (
+            402,
+            r#"{"error":{"message":"Insufficient balance; provider route disabled"}}"#,
+        ),
+    ];
+    for (status, body) in cases {
+        let e = classify_status(*status, "HTTP error".into(), body, None);
+        assert!(e.is_permanent(), "{status} {body} -> {e:?}");
+    }
+}
+
+/// new-api (the gateway behind several resellers) answers a mistyped or disabled model with
+/// `503 No available channel for model X under group default (distributor)` and code
+/// `model_not_found`. That is the model owner's permanent refusal: a route phrase must not turn
+/// it into a ten-minute wait.
+#[test]
+fn a_new_api_model_not_found_stays_permanent_whatever_status_carries_it() {
+    let body = r#"{"error":{"message":"No available channel for model gpt-9 under group default (distributor)","type":"new_api_error","code":"model_not_found"}}"#;
+    for status in [503, 400, 404] {
+        let e = classify_status(status, "HTTP error".into(), body, None);
+        assert!(
+            matches!(e, ProviderError::NoModelAccess(_)),
+            "{status} -> {e:?}"
+        );
+    }
+    let no_provider =
+        r#"{"error":{"message":"No available provider for model gpt-9","code":"model_not_found"}}"#;
+    let e = classify_status(503, "HTTP error".into(), no_provider, None);
+    assert!(matches!(e, ProviderError::NoModelAccess(_)), "{e:?}");
+    let streamed = classify_text(body, body.into());
+    assert!(
+        matches!(streamed, ProviderError::NoModelAccess(_)),
+        "{streamed:?}"
+    );
+}
+
+#[test]
+fn a_route_phrase_with_a_model_code_is_transient_when_the_gateway_says_try_again() {
+    let body = r#"{"error":{"message":"Provider unavailable for this model, try again shortly","code":"model_not_available"}}"#;
+    let e = classify_status(503, "HTTP error".into(), body, None);
+    assert!(e.is_overloaded(), "{e:?}");
+}

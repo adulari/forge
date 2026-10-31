@@ -13321,6 +13321,37 @@ mod tests {
         calls: std::sync::atomic::AtomicUsize,
         fail_first: usize,
         retry_after: Option<std::time::Duration>,
+        error: fn(Option<std::time::Duration>) -> forge_provider::ProviderError,
+    }
+    fn gateway_overloaded(
+        retry_after: Option<std::time::Duration>,
+    ) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Overloaded {
+            status: 503,
+            reason: "gateway_overloaded".into(),
+            message: "Gateway is temporarily busy.".into(),
+            retry_after,
+        }
+    }
+    fn no_provider_route(
+        retry_after: Option<std::time::Duration>,
+    ) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Overloaded {
+            status: 503,
+            reason: "no provider route".into(),
+            message: "No provider route is available. The gateway could not find an available provider route for this model and request. Try again shortly".into(),
+            retry_after,
+        }
+    }
+    fn stalled_stream(_: Option<std::time::Duration>) -> forge_provider::ProviderError {
+        // A real stall takes the whole watchdog window, so two never look like an instant
+        // identical rejection; vary the text to stand in for that.
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        forge_provider::ProviderError::Unavailable(format!(
+            "no response from the model — no data for {}s",
+            120 + n
+        ))
     }
     #[async_trait::async_trait]
     impl Provider for OverloadedThenOkProvider {
@@ -13333,12 +13364,7 @@ mod tests {
         ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
             let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if n < self.fail_first {
-                return Err(forge_provider::ProviderError::Overloaded {
-                    status: 503,
-                    reason: "gateway_overloaded".into(),
-                    message: "Gateway is temporarily busy.".into(),
-                    retry_after: self.retry_after,
-                });
+                return Err((self.error)(self.retry_after));
             }
             on_event(StreamEvent::Text(model.into()));
             Ok(forge_provider::ModelResponse {
@@ -13362,10 +13388,32 @@ mod tests {
         Vec<PresenterEvent>,
         std::time::Duration,
     ) {
+        overload_run_with(
+            gateway_overloaded,
+            fail_first,
+            retry_after_ms,
+            budget_secs,
+            attended,
+        )
+        .await
+    }
+
+    async fn overload_run_with(
+        error: fn(Option<std::time::Duration>) -> forge_provider::ProviderError,
+        fail_first: usize,
+        retry_after_ms: u64,
+        budget_secs: u64,
+        attended: bool,
+    ) -> (
+        Result<String, CoreError>,
+        Vec<PresenterEvent>,
+        std::time::Duration,
+    ) {
         let provider = Arc::new(OverloadedThenOkProvider {
             calls: std::sync::atomic::AtomicUsize::new(0),
             fail_first,
             retry_after: Some(std::time::Duration::from_millis(retry_after_ms)),
+            error,
         });
         let router = Arc::new(PinnedRouter {
             model: "pin::model".into(),
@@ -13405,6 +13453,69 @@ mod tests {
                 "never described as a rejection"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn repeated_no_provider_route_is_waited_out_and_announced() {
+        // Terminal-Bench on ModelGateway: `503 No provider route` ended 17 of 63 trials on the
+        // first answer as "model not available on this account".
+        for attended in [true, false] {
+            let (result, events, _) =
+                overload_run_with(no_provider_route, 4, 3000, 600, attended).await;
+            assert_eq!(result.unwrap(), "pin::model", "attended={attended}");
+            let warnings: Vec<&String> = events
+                .iter()
+                .filter_map(|e| match e {
+                    PresenterEvent::Warning(w) if w.contains("no provider route") => Some(w),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                warnings.len(),
+                4,
+                "every wait of 3s or more is announced: {warnings:?}"
+            );
+            assert!(
+                warnings[2].contains(
+                    "provider busy (503 no provider route), retrying in 3s \
+                     (attempt 3, 9s of 10m budget used)"
+                ),
+                "{}",
+                warnings[2]
+            );
+            assert!(!warnings.iter().any(|w| w.contains("isn't available")));
+        }
+    }
+
+    #[tokio::test]
+    async fn exhausted_route_budget_fails_with_the_real_gateway_text() {
+        let (result, _, _) = overload_run_with(no_provider_route, 100, 600, 1, false).await;
+        let text = result.unwrap_err().to_string();
+        assert!(
+            text.contains("provider busy (503 no provider route)")
+                && text.contains("No provider route is available"),
+            "{text}"
+        );
+        assert!(!text.contains("isn't available"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_provider_announces_every_wait_not_just_the_halfway_point() {
+        let (result, events, _) = overload_run_with(stalled_stream, 2, 0, 600, false).await;
+        assert!(result.is_ok());
+        let first = events
+            .iter()
+            .find_map(|e| match e {
+                PresenterEvent::Warning(w) if w.contains("unreachable") => Some(w.clone()),
+                _ => None,
+            })
+            .expect("the first wait is announced");
+        assert!(
+            first.contains("provider unreachable (no response from the model — no data for 12")
+                && first.contains("(attempt 1, ")
+                && first.contains("s of 10m budget used)"),
+            "{first}"
+        );
     }
 
     #[tokio::test]
