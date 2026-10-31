@@ -7,6 +7,23 @@ impl Session {
     /// Allow or withhold delegation for this thread (`/delegation on|off`).
     pub fn set_delegation_allowed(&mut self, allowed: bool) {
         self.delegation_off = !allowed;
+        crate::delegation_flag::set(&self.id, self.delegation_off);
+    }
+
+    /// The refusal for a delegation tool called while this thread has delegation off. The specs
+    /// are hidden, but a transcript can still show the model earlier calls to copy.
+    pub(crate) fn delegation_refusal(&self, tool: &str) -> Option<String> {
+        const GATED: &[&str] = &[
+            "send_to_agent",
+            "steer_subagent",
+            "run_workflow",
+            "wait_for_subagents",
+        ];
+        (self.delegation_off && GATED.contains(&tool)).then(|| {
+            "delegation is switched off for this thread by the user; do the work yourself with \
+             your own tools"
+                .to_string()
+        })
     }
 
     /// Whether this thread may delegate to subagents.

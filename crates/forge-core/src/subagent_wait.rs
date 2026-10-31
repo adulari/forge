@@ -202,6 +202,17 @@ impl Session {
             }
         };
 
+        // Finished and already handed over before this wait began: not a new finisher, so a
+        // `mode: "any"` loop over the same list blocks for the rest instead of re-reading them.
+        let already: Vec<String> = children
+            .iter()
+            .filter(|c| {
+                ids.contains(&c.child_id)
+                    && c.status.is_finished()
+                    && !undelivered.contains(&c.child_id)
+            })
+            .map(|c| c.child_id.clone())
+            .collect();
         let started = Instant::now();
         let (snapshot, timed_out) = loop {
             let now = self.store.list_detached_children(&self.id)?;
@@ -210,8 +221,12 @@ impl Session {
                 .filter(|c| ids.contains(&c.child_id))
                 .collect();
             let finished = snapshot.iter().filter(|c| c.status.is_finished()).count();
+            let fresh = snapshot
+                .iter()
+                .filter(|c| c.status.is_finished() && !already.contains(&c.child_id))
+                .count();
             let done = if any {
-                finished > 0
+                fresh > 0 || finished == snapshot.len()
             } else {
                 finished == snapshot.len()
             };
@@ -229,7 +244,15 @@ impl Session {
         for c in snapshot.iter().filter(|c| c.status.is_finished()) {
             self.store.mark_detached_delivered(&c.child_id)?;
         }
-        let result = format_wait(&snapshot, max_chars, timed_out.then_some(timeout));
+        let shown: Vec<DetachedChild> = if any && snapshot.iter().any(|c| !c.status.is_finished()) {
+            snapshot
+                .into_iter()
+                .filter(|c| !already.contains(&c.child_id))
+                .collect()
+        } else {
+            snapshot
+        };
+        let result = format_wait(&shown, max_chars, timed_out.then_some(timeout));
         self.store
             .record_tool_call(msg_id, &call.name, &args_json, &result, "allowed", "ok")?;
         Ok(result)
@@ -273,7 +296,7 @@ impl Session {
         let (child_id, name) = (child.child_id.clone(), child.name.clone());
         if child.status == DetachedChildStatus::Running {
             // Stop the live turn; the child's session keeps every message it already persisted.
-            self.detached_registry.abort(&child_id);
+            self.detached_registry.abort_and_wait(&child_id).await;
             self.store.cancel_detached_child(&child_id)?;
         }
         self.store.mark_detached_delivered(&child_id)?;
@@ -281,7 +304,16 @@ impl Session {
             "New instruction from the parent agent (it replaces whatever you were doing; keep \
              what you already learned): {message}"
         );
-        let outcome = self.follow_up_child(&child_id, &name, &steer, true).await?;
+        // A failed resume is the tool's answer, not a reason to end the parent's turn.
+        let outcome = match self.follow_up_child(&child_id, &name, &steer, true).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return fail(
+                    format!("error: could not steer '{name}': {error}"),
+                    &self.store,
+                );
+            }
+        };
         let result = format!("[{name} ({})] {}", short(&child_id), outcome.final_text);
         self.store.record_tool_call(
             msg_id,

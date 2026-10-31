@@ -141,11 +141,12 @@ pub async fn manager_with_echo(config: &McpConfig) -> McpManager {
             let _ = server.waiting().await;
         }
     });
+    let mgr = McpManager::empty(config);
     let client = ForgeClientHandler::passive("test")
+        .with_owner(mgr.id)
         .serve(client_io)
         .await
         .expect("client connects");
-    let mgr = McpManager::empty(config);
     mgr.add_established(
         "test",
         "stdio",

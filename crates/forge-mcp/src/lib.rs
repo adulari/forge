@@ -316,6 +316,8 @@ pub struct McpManager {
     /// are connected once for every manager, instead of once per manager. `None` keeps every
     /// connection private (the CLI's single session, tests).
     pool: Option<Arc<McpPool>>,
+    /// Identity of this manager's connections for elicitation routing (see [`elicit`]).
+    id: u64,
 }
 
 impl McpManager {
@@ -331,6 +333,7 @@ impl McpManager {
             connect_done,
             reconnect_locks: Mutex::new(HashMap::new()),
             pool: None,
+            id: elicit::new_owner_id(),
         }
     }
 
@@ -366,6 +369,7 @@ impl McpManager {
             roots: self.roots.clone(),
             sampling: self.sampling.clone(),
             conns: pool::CatalogLink::Manager(Arc::downgrade(&self.conns)),
+            owner: Some(self.id),
         }
     }
 
@@ -921,7 +925,7 @@ impl McpManager {
             tokio::select! {
                 result = &mut call => break Some(result),
                 () = tokio::time::sleep(self.call_timeout) => {
-                    if !elicit::user_is_answering() {
+                    if !elicit::user_is_answering(self.id, &server) {
                         break None;
                     }
                 }

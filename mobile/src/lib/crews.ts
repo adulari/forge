@@ -23,6 +23,8 @@ export interface Crew {
   name: string;
   description: string;
   members: CrewMember[];
+  /** "user" crews are editable; "project" crews live in the repo and are read-only. */
+  scope: "user" | "project";
   editable: boolean;
 }
 
@@ -43,11 +45,31 @@ export interface CrewErrors {
 export const emptyMember = (): CrewMember => ({ role: "", tier: null, effort: null, no_edits: false, brief: "" });
 export const emptyCrewDraft = (): CrewDraft => ({ name: "", description: "", members: [emptyMember()] });
 
+// The daemon accepts hand-written spellings ("Complex", effort "max" = xhigh); normalise them so
+// the controls show the value and a save keeps it.
+const normTier = (t?: string | null): string | null => (t && t.trim() ? t.trim().toLowerCase() : null);
+const normEffort = (e?: string | null): string | null => {
+  const v = e && e.trim() ? e.trim().toLowerCase() : null;
+  return v === "max" ? "xhigh" : v;
+};
+
 export const draftFromCrew = (c: Crew): CrewDraft => ({
   name: c.name,
   description: c.description,
-  members: c.members.map((m) => ({ ...m, tier: m.tier ?? null, effort: m.effort ?? null })),
+  members: c.members.map((m) => ({ ...m, tier: normTier(m.tier), effort: normEffort(m.effort) })),
 });
+
+export const isProjectCrew = (c: Crew): boolean => c.scope === "project";
+
+export function duplicateNameError(name: string, existing: readonly Crew[] | undefined): string | undefined {
+  const n = name.trim();
+  return n && existing?.some((c) => c.name === n) ? `A crew named ${n} already exists.` : undefined;
+}
+
+export function isNameConflict(err: unknown): boolean {
+  const status = (err as { status?: number } | null)?.status;
+  return status === 409 || (err instanceof Error && /already exists/i.test(err.message));
+}
 
 export function validateCrew(d: CrewDraft): CrewErrors {
   const errors: CrewErrors = { member: {} };
@@ -71,14 +93,15 @@ export function crewHasErrors(e: CrewErrors): boolean {
 }
 
 /** Request body for PUT /api/crews: optional tier/effort omitted when unset, text trimmed. */
-export function serializeCrew(d: CrewDraft) {
+export function serializeCrew(d: CrewDraft, opts: { createOnly?: boolean } = {}) {
   return {
+    ...(opts.createOnly ? { create_only: true } : {}),
     name: d.name.trim(),
     description: d.description.trim(),
     members: d.members.map((m) => ({
       role: m.role.trim(),
-      ...(m.tier && (CREW_TIERS as readonly string[]).includes(m.tier) ? { tier: m.tier } : {}),
-      ...(m.effort && (CREW_EFFORTS as readonly string[]).includes(m.effort) ? { effort: m.effort } : {}),
+      ...(m.tier?.trim() ? { tier: m.tier.trim() } : {}),
+      ...(m.effort?.trim() ? { effort: m.effort.trim() } : {}),
       no_edits: m.no_edits,
       brief: m.brief.trim(),
     })),

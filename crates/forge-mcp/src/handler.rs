@@ -57,6 +57,8 @@ pub struct ForgeClientHandler {
     /// refresh the live tool catalog in place. `Weak` so the handler never keeps the manager (or
     /// pooled server) alive.
     conns: CatalogLink,
+    /// Which manager's connection this is (`None` when pooled); keys elicitation routing.
+    owner: Option<u64>,
 }
 
 impl ForgeClientHandler {
@@ -65,13 +67,21 @@ impl ForgeClientHandler {
         roots: Vec<Root>,
         sampling: Option<Arc<dyn SamplingHandler>>,
         conns: CatalogLink,
+        owner: Option<u64>,
     ) -> Self {
         Self {
             server_name,
             roots,
             sampling,
             conns,
+            owner,
         }
+    }
+
+    /// Tie this connection to the manager `owner`, for tests that build the client by hand.
+    pub(crate) fn with_owner(mut self, owner: u64) -> Self {
+        self.owner = Some(owner);
+        self
     }
 
     /// A handler with no host hooks (no sampling, no roots, no catalog link) — used by the
@@ -82,6 +92,7 @@ impl ForgeClientHandler {
             roots: Vec::new(),
             sampling: None,
             conns: CatalogLink::None,
+            owner: None,
         }
     }
 }
@@ -137,18 +148,20 @@ impl ClientHandler for ForgeClientHandler {
             }
             _ => return Ok(ElicitResult::new(ElicitationAction::Decline)),
         };
-        Ok(match route(&self.server_name, message, prompt).await {
-            ElicitReply::Accept(values) => {
-                let result = ElicitResult::new(ElicitationAction::Accept);
-                if values.is_empty() {
-                    result
-                } else {
-                    result.with_content(serde_json::Value::Object(values))
+        Ok(
+            match route(self.owner, &self.server_name, message, prompt).await {
+                ElicitReply::Accept(values) => {
+                    let result = ElicitResult::new(ElicitationAction::Accept);
+                    if values.is_empty() {
+                        result
+                    } else {
+                        result.with_content(serde_json::Value::Object(values))
+                    }
                 }
-            }
-            ElicitReply::Decline => ElicitResult::new(ElicitationAction::Decline),
-            ElicitReply::Cancel => ElicitResult::new(ElicitationAction::Cancel),
-        })
+                ElicitReply::Decline => ElicitResult::new(ElicitationAction::Decline),
+                ElicitReply::Cancel => ElicitResult::new(ElicitationAction::Cancel),
+            },
+        )
     }
 
     async fn list_roots(

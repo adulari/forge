@@ -260,9 +260,23 @@ pub(super) fn interrupt_running(
 }
 
 impl ForgeMcp {
+    /// The subagent support to advertise: none while the parent thread has delegation off.
+    pub(super) fn visible_subagents(&self) -> Option<&LazySubagents> {
+        self.subagents
+            .as_ref()
+            .filter(|_| !forge_core::delegation_flag::is_off_from_env())
+    }
+
     /// The built subagent support, or the tool error for `tool` when subagents are unavailable
     /// here or could not be set up.
     async fn subagent_support(&self, tool: &str) -> Result<&SubagentSupport, CallToolResult> {
+        // `/delegation off` in the parent session withholds every delegation tool here too.
+        if forge_core::delegation_flag::is_off_from_env() {
+            return Err(CallToolResult::error(vec![ContentBlock::text(
+                "delegation is switched off for this thread by the user; do the work yourself \
+                 with your own tools",
+            )]));
+        }
         let Some(lazy) = &self.subagents else {
             return Err(CallToolResult::error(vec![ContentBlock::text(format!(
                 "{tool} is not available here"

@@ -116,7 +116,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
     setCommitted(yes ? "allow" : "deny");
     if (yes) haptics.allow();
     else haptics.deny();
-    const input = allowInput(yes, promptSeq, note);
+    const input = allowInput(yes, promptSeq, note, noteOpen);
     if (!send(input)) {
       if (onQueueAnswer) {
         onQueueAnswer(input);
@@ -186,13 +186,14 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
               maxLength={500}
               autoFocus
               disabled={locked}
-              returnKeyType="send"
-              onSubmitEditing={() => respond(false)}
+              returnKeyType="done"
+              blurOnSubmit
               accessibilityLabel="Reason for the model"
               testID="permission-note"
               containerStyle={styles.noteField}
             />
           ) : null}
+          {noteOpen ? <Text style={[typeScale.sub, { color: tokens.ink3 }, styles.noteHint]}>Sent with Allow or Deny</Text> : null}
           {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
           <View style={styles.actionsRow}>
             <View style={styles.actions}>
@@ -214,7 +215,10 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
               />
             </View>
             <Pressable
-              onPress={() => setNoteOpen((open) => !open)}
+              onPress={() => {
+                if (noteOpen) setNote("");
+                setNoteOpen((open) => !open);
+              }}
               disabled={locked}
               accessibilityRole="button"
               accessibilityState={{ expanded: noteOpen }}
@@ -247,7 +251,8 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
   },
   diffSlot: { marginBottom: space.space12 },
-  noteField: { marginBottom: space.space12 },
+  noteField: { marginBottom: space.space4 },
+  noteHint: { marginBottom: space.space12 },
   actionsRow: { flexDirection: "row", alignItems: "center", gap: space.space12 },
   actions: { flex: 1, flexDirection: "row", gap: space.space8 },
   allowBtn: { flex: 1.4 },

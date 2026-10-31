@@ -65,6 +65,11 @@ struct ClientSnapshot {
     question: Option<String>,
     #[serde(default)]
     question_options: Vec<SnapOption>,
+    /// The whole pending form, kept raw: only each question's `secret` flag is read here.
+    #[serde(default)]
+    question_form: Option<Vec<serde_json::Value>>,
+    #[serde(default)]
+    question_index: usize,
     #[serde(default)]
     prompt_seq: u64,
     #[serde(default)]
@@ -75,6 +80,16 @@ struct ClientSnapshot {
     revision: Option<u64>,
     #[serde(default)]
     closed: bool,
+}
+
+/// Whether the question being asked wants a secret (an MCP server's token or password).
+fn question_is_secret(snap: &ClientSnapshot) -> bool {
+    snap.question_form
+        .as_ref()
+        .and_then(|form| form.get(snap.question_index))
+        .and_then(|q| q.get("secret"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// What the session is currently blocked on — drives how the next typed line is interpreted.
@@ -500,10 +515,19 @@ impl Renderer {
                 for (i, opt) in snap.question_options.iter().enumerate() {
                     println!("    {}. {}", i + 1, opt.label);
                 }
-                println!("  answer by typing a number or free text\n");
+                if question_is_secret(snap) {
+                    println!("  this answer is a secret: answer it in the Forge terminal or app, not here\n");
+                } else {
+                    println!("  answer by typing a number or free text\n");
+                }
                 self.shown_prompt_seq = Some(snap.prompt_seq);
             }
-            *pending = Pending::Question(snap.prompt_seq);
+            // A typed line here would be echoed into the terminal's scrollback.
+            *pending = if question_is_secret(snap) {
+                Pending::None
+            } else {
+                Pending::Question(snap.prompt_seq)
+            };
         } else {
             self.shown_prompt_seq = None;
             *pending = Pending::None;

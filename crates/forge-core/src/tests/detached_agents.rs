@@ -380,3 +380,67 @@ async fn delegation_off_withholds_spawn_agents_for_the_thread() {
     session.set_delegation_allowed(true);
     assert!(session.delegation_allowed());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_any_with_an_explicit_list_blocks_for_a_new_finisher() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _events) = session_with(dir.path(), Arc::new(SilentProvider));
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "fan out", None)
+        .unwrap();
+    two_silent_children(&mut session, &msg_id).await;
+    session
+        .invoke_tool(
+            &msg_id,
+            &tool_call("cancel_subagent", serde_json::json!({ "agent": "explore" })),
+        )
+        .await
+        .unwrap();
+    let list =
+        serde_json::json!({ "agents": ["explore", "plan"], "mode": "any", "timeout_secs": 1 });
+    // First wait hands over the cancelled child.
+    let first = session
+        .invoke_tool(&msg_id, &tool_call("wait_for_subagents", list.clone()))
+        .await
+        .unwrap();
+    assert!(first.contains("[explore ("), "{first}");
+    // Looping on the same list must not re-read it: it waits for `plan` and times out.
+    let second = session
+        .invoke_tool(&msg_id, &tool_call("wait_for_subagents", list))
+        .await
+        .unwrap();
+    assert!(second.contains("timed out after 1s"), "{second}");
+    assert!(!second.contains("[explore ("), "{second}");
+    assert!(second.contains("Still running: plan ("), "{second}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delegation_off_refuses_every_companion_tool_not_just_spawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut session, _events) = session_with(dir.path(), Arc::new(MockProvider));
+    let msg_id = session
+        .store
+        .add_message(session.id(), 0, Role::User, "go", None)
+        .unwrap();
+    session.set_delegation_allowed(false);
+    for (tool, args) in [
+        (
+            "send_to_agent",
+            serde_json::json!({"agent": "x", "message": "y"}),
+        ),
+        (
+            "steer_subagent",
+            serde_json::json!({"agent": "x", "message": "y"}),
+        ),
+        ("run_workflow", serde_json::json!({"script": "1"})),
+        ("wait_for_subagents", serde_json::json!({})),
+    ] {
+        let out = session
+            .invoke_tool(&msg_id, &tool_call(tool, args))
+            .await
+            .unwrap();
+        assert!(out.contains("delegation is switched off"), "{tool}: {out}");
+    }
+    session.set_delegation_allowed(true);
+}

@@ -14,6 +14,7 @@
 //! strings for secrets, and a URL step.
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use forge_types::{Answer, QChoice, Question};
 use parking_lot::Mutex;
@@ -407,46 +408,67 @@ fn coerce(field: &ElicitField, answer: &Answer) -> Result<Option<Value>, String>
     }
 }
 
+/// What a person is doing for one scope: how many questions are waiting, and when the last was
+/// answered. Per scope, so one session's unanswered question never suspends another's timeout.
+#[derive(Default)]
+struct ScopeState {
+    waiting: AtomicU64,
+    last_answered: Mutex<Option<std::time::Instant>>,
+}
+
 struct Scope {
     id: u64,
-    /// `None` covers every server; otherwise only requests from this server.
-    server: Option<String>,
+    /// The manager (one session's MCP connections) that opened the scope.
+    owner: u64,
+    server: String,
     tx: mpsc::UnboundedSender<ElicitRequest>,
+    state: Arc<ScopeState>,
 }
 
 static SCOPES: Mutex<Vec<Scope>> = Mutex::new(Vec::new());
-/// Requests waiting on a person right now, and when the last one was answered.
-static WAITING: AtomicU64 = AtomicU64::new(0);
-static LAST_ANSWERED: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
+static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
 
 /// How long after an answer a tool call is still given the benefit of its own timeout.
 const ANSWER_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Whether a person is, or just was, answering a server's question. A tool call's timeout must
-/// not fire while the call is parked on that person: the time they take is not the server's.
-pub(crate) fn user_is_answering() -> bool {
-    WAITING.load(Ordering::Relaxed) > 0
-        || LAST_ANSWERED
-            .lock()
-            .is_some_and(|at| at.elapsed() < ANSWER_GRACE)
+/// A fresh identity for one manager's connections.
+pub(crate) fn new_owner_id() -> u64 {
+    NEXT_OWNER.fetch_add(1, Ordering::Relaxed)
 }
 
-struct WaitingGuard;
+/// Whether a person is, or just was, answering a question `server` asked during a call that
+/// `owner` made. That call's timeout must not fire while it is parked on the person: the time
+/// they take is not the server's. Nobody else's call is affected.
+pub(crate) fn user_is_answering(owner: u64, server: &str) -> bool {
+    SCOPES
+        .lock()
+        .iter()
+        .filter(|s| s.owner == owner && s.server == server)
+        .any(|s| {
+            s.state.waiting.load(Ordering::Relaxed) > 0
+                || s.state
+                    .last_answered
+                    .lock()
+                    .is_some_and(|at| at.elapsed() < ANSWER_GRACE)
+        })
+}
+
+struct WaitingGuard(Arc<ScopeState>);
 
 impl WaitingGuard {
-    fn new() -> Self {
-        WAITING.fetch_add(1, Ordering::Relaxed);
-        Self
+    fn new(state: Arc<ScopeState>) -> Self {
+        state.waiting.fetch_add(1, Ordering::Relaxed);
+        Self(state)
     }
 }
 
 impl Drop for WaitingGuard {
     fn drop(&mut self) {
-        WAITING.fetch_sub(1, Ordering::Relaxed);
-        *LAST_ANSWERED.lock() = Some(std::time::Instant::now());
+        self.0.waiting.fetch_sub(1, Ordering::Relaxed);
+        *self.0.last_answered.lock() = Some(std::time::Instant::now());
     }
 }
-static NEXT_SCOPE: AtomicU64 = AtomicU64::new(1);
 
 /// Keeps a scope open; dropping it closes the scope.
 pub struct ElicitScope(u64);
@@ -457,22 +479,49 @@ impl Drop for ElicitScope {
     }
 }
 
-/// Start receiving elicitation requests for `server` (or every server with `None`) until the
-/// returned guard is dropped. The newest open scope that covers a server wins.
-pub fn open_scope(server: Option<&str>) -> (ElicitScope, mpsc::UnboundedReceiver<ElicitRequest>) {
+/// Start receiving elicitation requests that `server` sends during a call `owner` (a manager's
+/// [`new_owner_id`]) makes, until the returned guard is dropped. There is no catch-all scope: a
+/// request is delivered only to a scope for the connection that sent it.
+pub(crate) fn open_scope(
+    owner: u64,
+    server: &str,
+) -> (ElicitScope, mpsc::UnboundedReceiver<ElicitRequest>) {
     let (tx, rx) = mpsc::unbounded_channel();
     let id = NEXT_SCOPE.fetch_add(1, Ordering::Relaxed);
     SCOPES.lock().push(Scope {
         id,
-        server: server.map(str::to_string),
+        owner,
+        server: server.to_string(),
         tx,
+        state: Arc::default(),
     });
     (ElicitScope(id), rx)
 }
 
-/// Put a request to the host and wait for the user. Declines when no scope is open or the host
-/// went away.
-pub(crate) async fn route(server: &str, message: String, prompt: ElicitPrompt) -> ElicitReply {
+impl crate::McpManager {
+    /// Receive the elicitation requests `server` sends during calls this manager makes, until
+    /// the guard drops. Requests from any other connection never arrive here.
+    pub fn elicit_scope(
+        &self,
+        server: &str,
+    ) -> (
+        ElicitScope,
+        tokio::sync::mpsc::UnboundedReceiver<ElicitRequest>,
+    ) {
+        open_scope(self.id, server)
+    }
+}
+
+/// Put a request to the host and wait for the user. `owner` is the manager the sending
+/// connection belongs to, or `None` for a pooled connection shared by several managers: then the
+/// request goes to the one scope that covers the server, and is declined when more than one
+/// session could be the one that triggered it. Declines when no scope matches or the host left.
+pub(crate) async fn route(
+    owner: Option<u64>,
+    server: &str,
+    message: String,
+    prompt: ElicitPrompt,
+) -> ElicitReply {
     let (reply, answer) = oneshot::channel();
     let request = ElicitRequest {
         server: server.to_string(),
@@ -480,16 +529,22 @@ pub(crate) async fn route(server: &str, message: String, prompt: ElicitPrompt) -
         prompt,
         reply,
     };
-    let tx = SCOPES
-        .lock()
-        .iter()
-        .rev()
-        .find(|s| s.server.as_deref().is_none_or(|name| name == server))
-        .map(|s| s.tx.clone());
-    let Some(tx) = tx else {
+    let chosen = {
+        let scopes = SCOPES.lock();
+        let mut candidates = scopes
+            .iter()
+            .filter(|s| s.server == server && owner.is_none_or(|o| o == s.owner));
+        let newest = candidates.clone().next_back();
+        let ambiguous =
+            owner.is_none() && newest.is_some_and(|n| candidates.any(|s| s.owner != n.owner));
+        newest
+            .filter(|_| !ambiguous)
+            .map(|s| (s.tx.clone(), Arc::clone(&s.state)))
+    };
+    let Some((tx, state)) = chosen else {
         return ElicitReply::Decline;
     };
-    let _waiting = WaitingGuard::new();
+    let _waiting = WaitingGuard::new(state);
     if tx.send(request).is_err() {
         return ElicitReply::Decline;
     }
@@ -629,29 +684,63 @@ mod tests {
             .starts_with("'abc' is not a whole number."));
     }
 
+    fn url() -> ElicitPrompt {
+        ElicitPrompt::Url("https://x".into())
+    }
+
     #[tokio::test]
-    async fn requests_reach_the_newest_covering_scope_and_decline_without_one() {
+    async fn requests_reach_only_the_scope_of_the_connection_that_sent_them() {
+        let (a, b) = (new_owner_id(), new_owner_id());
         assert_eq!(
-            route("srv", "hi".into(), ElicitPrompt::Url("https://x".into())).await,
-            ElicitReply::Decline
+            route(Some(a), "srv", "hi".into(), url()).await,
+            ElicitReply::Decline,
+            "no scope open"
         );
-        let (_other, mut other_rx) = open_scope(Some("elsewhere"));
-        let (scope, mut rx) = open_scope(Some("srv"));
-        let task = tokio::spawn(route(
-            "srv",
-            "hi".into(),
-            ElicitPrompt::Url("https://x".into()),
-        ));
-        let req = rx.recv().await.unwrap();
+        let (_b_other, mut b_other_rx) = open_scope(b, "elsewhere");
+        let (scope_a, mut a_rx) = open_scope(a, "srv");
+        let (scope_b, mut b_rx) = open_scope(b, "srv");
+
+        // A private connection of manager A reaches A's scope even though B's is newer.
+        let task = tokio::spawn(route(Some(a), "srv", "hi".into(), url()));
+        let req = a_rx.recv().await.unwrap();
         assert_eq!(req.message, "hi");
-        assert!(other_rx.try_recv().is_err());
+        assert!(b_rx.try_recv().is_err() && b_other_rx.try_recv().is_err());
         req.reply.send(ElicitReply::Cancel).unwrap();
         assert_eq!(task.await.unwrap(), ElicitReply::Cancel);
-        drop(scope);
+
+        // A pooled connection (owner unknown) shared by two sessions is ambiguous: declined,
+        // and neither session sees the form.
         assert_eq!(
-            route("srv", "hi".into(), ElicitPrompt::Url("https://x".into())).await,
+            route(None, "srv", "hi".into(), url()).await,
             ElicitReply::Decline
         );
+        assert!(a_rx.try_recv().is_err() && b_rx.try_recv().is_err());
+
+        // With only one session covering the server there is no ambiguity.
+        drop(scope_a);
+        let task = tokio::spawn(route(None, "srv", "hi".into(), url()));
+        let req = b_rx.recv().await.unwrap();
+        req.reply.send(ElicitReply::Decline).unwrap();
+        assert_eq!(task.await.unwrap(), ElicitReply::Decline);
+        drop(scope_b);
+    }
+
+    #[tokio::test]
+    async fn a_pending_question_only_suspends_the_timeout_of_its_own_call() {
+        let (a, b) = (new_owner_id(), new_owner_id());
+        let (_sa, mut a_rx) = open_scope(a, "srv");
+        let (_sb, _b_rx) = open_scope(b, "srv");
+        assert!(!user_is_answering(a, "srv"));
+        let task = tokio::spawn(route(Some(a), "srv", "hi".into(), url()));
+        let req = a_rx.recv().await.unwrap();
+        assert!(user_is_answering(a, "srv"));
+        assert!(
+            !user_is_answering(b, "srv"),
+            "another session's call is unaffected"
+        );
+        assert!(!user_is_answering(a, "other"));
+        req.reply.send(ElicitReply::Decline).unwrap();
+        task.await.unwrap();
     }
 
     #[tokio::test]
@@ -659,7 +748,7 @@ mod tests {
         let mgr = std::sync::Arc::new(
             crate::testsupport::manager_with_echo(&forge_config::McpConfig::default()).await,
         );
-        let (_scope, mut rx) = open_scope(Some("test"));
+        let (_scope, mut rx) = mgr.elicit_scope("test");
         let call = {
             let mgr = std::sync::Arc::clone(&mgr);
             tokio::spawn(async move { mgr.call("test__ask", &json!({})).await })

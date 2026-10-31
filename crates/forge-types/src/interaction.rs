@@ -410,6 +410,13 @@ pub trait Presenter: Send {
     fn is_attended(&self) -> bool {
         true
     }
+    /// Whether a person reads and answers forms on this surface. An MCP server's elicitation
+    /// (a confirmation, a token, a login link) is put to the user only where this is `true`;
+    /// everywhere else, including surfaces whose `ask` auto-picks the first option, it is
+    /// declined rather than answered on someone's behalf.
+    fn can_answer_elicitation(&self) -> bool {
+        false
+    }
     fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
         None
     }

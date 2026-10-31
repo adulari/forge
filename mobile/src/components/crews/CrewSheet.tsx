@@ -9,6 +9,9 @@ import {
   CREW_TIERS,
   crewHasErrors,
   draftFromCrew,
+  duplicateNameError,
+  isNameConflict,
+  isProjectCrew,
   emptyCrewDraft,
   emptyMember,
   serializeCrew,
@@ -17,7 +20,7 @@ import {
   type CrewDraft,
   type CrewMember,
 } from "../../lib/crews";
-import { useDeleteCrew, useSaveCrew } from "../../lib/queries";
+import { useCrews, useDeleteCrew, useSaveCrew } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
@@ -40,6 +43,7 @@ export function CrewSheet({ visible, crew, onClose }: { visible: boolean; crew: 
   const tokens = useTokens();
   const save = useSaveCrew();
   const remove = useDeleteCrew();
+  const existing = useCrews().data;
   const [draft, setDraft] = useState<CrewDraft>(emptyCrewDraft);
   const [tried, setTried] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -57,6 +61,8 @@ export function CrewSheet({ visible, crew, onClose }: { visible: boolean; crew: 
   }, [visible, crew]);
 
   const errors = useMemo(() => validateCrew(draft), [draft]);
+  const conflict = isNew && save.isError && isNameConflict(save.error);
+  const nameError = isNew ? duplicateNameError(draft.name, existing) ?? (conflict ? errorText(save.error, "") : undefined) : undefined;
   const shown = tried ? errors : { member: {} };
 
   const patchMember = (i: number, patch: Partial<CrewMember>) =>
@@ -64,12 +70,12 @@ export function CrewSheet({ visible, crew, onClose }: { visible: boolean; crew: 
 
   const submit = () => {
     setTried(true);
-    if (crewHasErrors(errors)) return;
-    save.mutate(serializeCrew(draft), { onSuccess: onClose });
+    if (crewHasErrors(errors) || nameError) return;
+    save.mutate(serializeCrew(draft, { createOnly: isNew }), { onSuccess: onClose });
   };
 
   const title = isNew ? "New crew" : readOnly ? crew.name : `Edit ${crew.name}`;
-  const serverError = save.isError ? errorText(save.error, "Could not save crew") : remove.isError ? errorText(remove.error, "Could not delete crew") : null;
+  const serverError = save.isError && !conflict ? errorText(save.error, "Could not save crew") : remove.isError ? errorText(remove.error, "Could not delete crew") : null;
 
   return (
     <Sheet visible={visible} onClose={onClose} accessibilityLabel={title} snapPoints={[0.9]}>
@@ -79,7 +85,9 @@ export function CrewSheet({ visible, crew, onClose }: { visible: boolean; crew: 
         </Text>
         <Text style={[type.sub, { color: tokens.ink3 }]}>
           {readOnly
-            ? "Project crew: defined in this project's .forge/crews folder, so it is read-only here."
+            ? crew != null && isProjectCrew(crew)
+              ? "Project crew: defined in this project's .forge/crews folder, so it is read-only here."
+              : "This crew is read-only here."
             : "A crew is a named roster of subagents. Mention it as @crew:name in a prompt to have the model delegate to it."}
         </Text>
 
@@ -92,7 +100,7 @@ export function CrewSheet({ visible, crew, onClose }: { visible: boolean; crew: 
           disabled={readOnly || !isNew}
           clearable={false}
           placeholder="review-team"
-          error={shown.name}
+          error={shown.name ?? nameError}
           accessibilityLabel="Crew name"
           testID="crew-name"
         />

@@ -32,6 +32,12 @@ struct PutCrew {
     #[serde(default)]
     description: String,
     members: Vec<CrewMember>,
+    /// Refuse (409) when a crew of this name already exists in any layer, so "New crew" can
+    /// never overwrite one or save a name a nearer project crew would shadow.
+    #[serde(default)]
+    create_only: bool,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -39,7 +45,9 @@ struct CrewRow {
     name: String,
     description: String,
     members: Vec<CrewMember>,
-    /// `false` for a crew that lives in a project directory: shown, not editable here.
+    /// `"user"` (the user's own crew directories) or `"project"` (a checked-in `.forge/crews`).
+    scope: &'static str,
+    /// `false` for a project crew: shown, not editable here.
     editable: bool,
 }
 
@@ -55,16 +63,18 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
     )
 }
 
-fn row(crew: Crew, user_dir: Option<&PathBuf>) -> CrewRow {
-    let editable = match (crew.path.as_ref().and_then(|p| p.parent()), user_dir) {
-        (Some(dir), Some(user)) => dir == user.as_path(),
-        _ => false,
-    };
+fn row(crew: Crew, user_dirs: &[PathBuf]) -> CrewRow {
+    let user = crew
+        .path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .is_some_and(|dir| user_dirs.iter().any(|u| u.as_path() == dir));
     CrewRow {
         name: crew.name,
         description: crew.description,
         members: crew.members,
-        editable,
+        scope: if user { "user" } else { "project" },
+        editable: user,
     }
 }
 
@@ -73,10 +83,10 @@ async fn list_crews(State(_): State<Arc<DaemonState>>, Query(q): Query<CwdQuery>
         .cwd
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-    let user_dir = crews::user_crews_dir();
+    let user_dirs = crews::user_crews_dirs();
     let crews = crews::load_crews(&root)
         .into_iter()
-        .map(|c| row(c, user_dir.as_ref()))
+        .map(|c| row(c, &user_dirs))
         .collect();
     json_response(&CrewList { crews })
 }
@@ -88,6 +98,19 @@ async fn put_crew(State(_): State<Arc<DaemonState>>, Json(body): Json<PutCrew>) 
             "no config directory",
         );
     };
+    if body.create_only {
+        let root = body
+            .cwd
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        if crews::load_crews(&root).iter().any(|c| c.name == body.name) {
+            return err_response(
+                axum::http::StatusCode::CONFLICT,
+                "a crew with that name already exists",
+            );
+        }
+    }
     let crew = Crew {
         name: body.name,
         description: body.description.trim().to_string(),
@@ -107,9 +130,17 @@ async fn delete_crew(State(_): State<Arc<DaemonState>>, Query(q): Query<DeleteQu
             "no config directory",
         );
     };
-    match crews::delete_crew_in(&dir, &q.name) {
-        Ok(true) => json_response(&serde_json::json!({ "ok": true })),
-        Ok(false) => err_response(axum::http::StatusCode::NOT_FOUND, "no such crew"),
-        Err(e) => err_response(axum::http::StatusCode::BAD_REQUEST, &e),
+    // A crew may sit in more than one user directory; deleting it removes every user copy.
+    let mut removed = false;
+    for dir in crews::user_crews_dirs().iter().chain(std::iter::once(&dir)) {
+        match crews::delete_crew_in(dir, &q.name) {
+            Ok(found) => removed |= found,
+            Err(e) => return err_response(axum::http::StatusCode::BAD_REQUEST, &e),
+        }
+    }
+    if removed {
+        json_response(&serde_json::json!({ "ok": true }))
+    } else {
+        err_response(axum::http::StatusCode::NOT_FOUND, "no such crew")
     }
 }

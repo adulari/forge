@@ -9,7 +9,9 @@ use forge_types::{Answer, QChoice, Question};
 
 use super::*;
 
-/// The server a call targets, so a request from another server is not shown under this call.
+/// The one server a call can legitimately make ask the user something: the target of an
+/// `mcp_call` or a direct `server__tool` call. Resource reads, prompt fetches and the local
+/// catalog meta-tools have none, so elicitations during them are declined.
 fn target_server(name: &str, args: &serde_json::Value) -> Option<String> {
     let qualified = if name == forge_mcp::MCP_CALL {
         ["name", "qualified_name", "tool"]
@@ -33,11 +35,12 @@ impl Session {
         name: &str,
         args: &serde_json::Value,
     ) -> forge_mcp::McpCallOutcome {
-        if !self.presenter.is_attended() {
+        let Some(server) = target_server(name, args)
+            .filter(|_| self.presenter.is_attended() && self.presenter.can_answer_elicitation())
+        else {
             return mcp.call(name, args).await;
-        }
-        let (scope, mut requests) =
-            forge_mcp::elicit::open_scope(target_server(name, args).as_deref());
+        };
+        let (scope, mut requests) = mcp.elicit_scope(&server);
         let call = mcp.call(name, args);
         tokio::pin!(call);
         let outcome = loop {
@@ -60,9 +63,17 @@ impl Session {
                 let mut reply = ElicitReply::Decline;
                 for _ in 0..MAX_REASKS {
                     let mut questions = form.questions(&errors);
-                    if let Some(first) = questions.first_mut() {
-                        first.text =
-                            format!("{}: {}\n{}", request.server, request.message, first.text);
+                    // Every question names the asking server in a label the server cannot
+                    // control, so a later field never reads as Forge's own question.
+                    for (i, q) in questions.iter_mut().enumerate() {
+                        q.text = if i == 0 {
+                            format!(
+                                "MCP server {} asks: {}\n{}",
+                                request.server, request.message, q.text
+                            )
+                        } else {
+                            format!("MCP server {} asks: {}", request.server, q.text)
+                        };
                     }
                     let answers = self.presenter.ask_form(&questions);
                     if answers.iter().all(Answer::is_empty) {

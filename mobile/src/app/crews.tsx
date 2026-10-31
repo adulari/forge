@@ -13,7 +13,7 @@ import { PageHeader } from "../components/ds/PageHeader";
 import { Screen } from "../components/ds/Screen";
 import { SearchField } from "../components/ds/SearchField";
 import { Skeleton } from "../components/ds/Skeleton";
-import type { Crew } from "../lib/crews";
+import { isProjectCrew, type Crew } from "../lib/crews";
 import { useCrews } from "../lib/queries";
 import { usePullRefresh } from "../lib/usePullRefresh";
 import { useTokens } from "../theme/ThemeProvider";
@@ -39,18 +39,18 @@ export function CrewRowItem({ crew, onPress, showSeparator }: { crew: Crew; onPr
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={`${crew.name}, ${count}${crew.editable ? "" : ", project crew"}`}
+      accessibilityLabel={`${crew.name}, ${count}${isProjectCrew(crew) ? ", project crew" : ""}`}
       style={[styles.row, showSeparator ? { borderBottomColor: tokens.hairline, borderBottomWidth: StyleSheet.hairlineWidth } : null]}
     >
       <View style={styles.rowTop}>
         <Text style={[styles.name, { color: tokens.ink }]} numberOfLines={1}>
           {crew.name}
         </Text>
-        {crew.editable ? null : (
+        {isProjectCrew(crew) ? (
           <View style={[styles.tag, { borderColor: tokens.border }]}>
             <Text style={[styles.tagText, { color: tokens.ink3 }]}>project crew</Text>
           </View>
-        )}
+        ) : null}
         <Text style={[type.monoMeta, { color: tokens.ink4 }]}>{count}</Text>
       </View>
       {crew.description ? (

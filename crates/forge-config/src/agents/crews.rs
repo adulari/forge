@@ -137,6 +137,16 @@ fn layer_dirs(project_root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+/// Every directory that holds the user's own crews (not a project's), lowest precedence first.
+pub fn user_crews_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = crate::home_dir() {
+        dirs.push(home.join(".forge/crews"));
+    }
+    dirs.extend(user_crews_dir());
+    dirs
+}
+
 /// The directory a saved crew is written to: the user's config directory.
 pub fn user_crews_dir() -> Option<PathBuf> {
     crate::config_dir().map(|c| c.join("crews"))

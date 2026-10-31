@@ -148,6 +148,10 @@ impl Presenter for ChannelPresenter {
         self.confirm_reply(tool, side_effect).outcome
     }
 
+    fn can_answer_elicitation(&self) -> bool {
+        true
+    }
+
     fn confirm_reply(&mut self, tool: &str, side_effect: SideEffect) -> crate::ConfirmReply {
         let (reply, answer) = std::sync::mpsc::channel();
         if self

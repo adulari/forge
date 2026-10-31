@@ -124,6 +124,7 @@ pub mod bridge_progress;
 mod child_ask;
 pub mod context_report;
 mod crew_guidance;
+pub mod delegation_flag;
 mod file_restore;
 mod instructions;
 pub mod job_wake;
@@ -5013,6 +5014,8 @@ mod tests {
 
     #[path = "detached_agents.rs"]
     mod detached_agents_tests;
+    #[path = "mcp_elicitation.rs"]
+    mod mcp_elicitation_tests;
     #[path = "placeholder_args.rs"]
     mod placeholder_args_tests;
 
