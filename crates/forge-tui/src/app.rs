@@ -394,6 +394,8 @@ pub struct App {
     pub config_editor: crate::config_editor::ConfigEditor,
     /// The `/anywhere` menu (account, account sync, devices), while open.
     pub anywhere_menu: crate::anywhere_menu::AnywhereMenu,
+    /// Wheel speed, cursor shape, verbosity and the QR overlay (`app/polish.rs`).
+    pub polish: polish::PolishState,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.
@@ -942,6 +944,12 @@ pub enum KeyKind {
     OpenCommandCenter,
     /// Open the keybind configurator overlay.
     OpenKeybindConfig,
+    /// Suspend Forge to the shell (SIGTSTP); `fg` brings it back with the screen restored.
+    Suspend,
+    /// Step the transcript verbosity Quiet / Default / Everything.
+    VerbosityCycle,
+    /// A leader or sequence key was consumed (or timed out): nothing to do but repaint.
+    Pending,
     /// Open the model picker overlay.
     ModelPicker,
     /// Cycle effort level (low→medium→high→max).
@@ -1200,6 +1208,9 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::ToggleReasoning
         | KeyKind::OpenCommandCenter
         | KeyKind::OpenKeybindConfig
+        | KeyKind::Suspend
+        | KeyKind::VerbosityCycle
+        | KeyKind::Pending
         | KeyKind::ModelPicker
         | KeyKind::EffortCycle
         | KeyKind::TemperCycle
@@ -2796,6 +2807,9 @@ impl App {
     /// around the note. It is printed right after that segment instead.
     pub fn note(&mut self, text: &str) {
         let (kind, body) = lines::notice::classify(text, NoticeKind::Info);
+        if self.polish.verbosity == Verbosity::Quiet && kind == NoticeKind::Info {
+            return;
+        }
         if self.streaming_active && !self.streaming.is_empty() {
             self.transcript_ui.deferred_notices.push((kind, body));
             return;
@@ -3559,6 +3573,8 @@ mod group_body;
 mod group_flow;
 mod group_rows;
 mod lines;
+mod polish;
+pub use polish::{CursorShape, Verbosity};
 mod state;
 mod transcript_find;
 mod transcript_flow;

@@ -394,9 +394,11 @@ pub(crate) async fn toggle_remote(
                 );
             }
             app.note(&format!("  connect: {}", rc.url.url));
-            if let Some(qr) = remote::qr_lines(&rc.url.url) {
-                app.print_lines(qr);
-            }
+            app.open_qr_overlay(
+                "Remote control",
+                &rc.url.url,
+                matches!(exposure, remote::Exposure::Local),
+            );
             *remote = Some(rc);
         }
         Err(e) => {

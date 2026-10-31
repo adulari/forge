@@ -443,6 +443,12 @@ pub(crate) async fn run_chat_tui(
     app.fullscreen = fullscreen;
     app.queue_visible = true;
     app.fold_tool_groups = tui_config.tui.fold_tool_groups;
+    app.apply_tui_prefs(&tui_config.tui);
+    for (action, text) in tui_config.keybinds.invalid_sequences() {
+        app.note(&format!(
+            "⚠ key sequence `{action}`: `{text}` can never fire — it needs two or more steps, a first step with Ctrl or Alt, and a leader for <leader>"
+        ));
+    }
     app.transcript_follow = true;
     // Wire statusline config from the loaded config.
     app.statusline_config = tui_config.statusline.clone();
@@ -1144,6 +1150,15 @@ pub(crate) async fn run_chat_tui(
                 tui.redraw();
                 continue;
             }
+            if matches!(ev, forge_tui::InputEvent::Key(KeyKind::Pending)) {
+                dirty = true;
+                continue;
+            }
+            if matches!(ev, forge_tui::InputEvent::Key(KeyKind::Suspend)) {
+                tui.suspend();
+                dirty = true;
+                continue;
+            }
 
             if observer.is_some() {
                 match ev {
@@ -1154,21 +1169,21 @@ pub(crate) async fn run_chat_tui(
                         }
                     }
                     forge_tui::InputEvent::Scroll { up } => {
-                        const STEP: usize = 3;
-                        if app.output_view_scroll(up, STEP) {
+                        let step = app.scroll_step();
+                        if app.output_view_scroll(up, step) {
                             // The full-output viewer took the wheel.
                         } else if app.viewer.is_some() {
                             let key = if up { KeyKind::Up } else { KeyKind::Down };
-                            for _ in 0..STEP {
+                            for _ in 0..step {
                                 app.viewer_key(key);
                             }
                         } else if app.fullscreen {
                             if up {
-                                app.transcript_scroll_up(STEP);
+                                app.transcript_scroll_up(step);
                             } else {
                                 let body = tui.height().saturating_sub(8).max(1);
                                 let (_, max_scroll) = app.transcript_metrics(tui.width(), body);
-                                app.transcript_scroll_down(STEP, max_scroll);
+                                app.transcript_scroll_down(step, max_scroll);
                             }
                         }
                     }
@@ -1244,13 +1259,13 @@ pub(crate) async fn run_chat_tui(
                     // Mouse wheel: the mesh inspector overlay first (it captures all input while
                     // open, same as its ↑/↓ key handling below), else the activity viewer
                     // (full-screen), else the main transcript. A few rows per notch feels natural.
-                    const STEP: usize = 3;
-                    if app.child_view_scroll(up, STEP) {
+                    let step = app.scroll_step();
+                    if app.child_view_scroll(up, step) {
                         // The subagent session view took the wheel.
                     } else if app.workflow.open {
                         let key = if up { KeyKind::Up } else { KeyKind::Down };
                         if app.workflow.zoom.is_some() {
-                            for _ in 0..STEP {
+                            for _ in 0..step {
                                 workflow_zoom_key(&mut app, key);
                             }
                         } else {
@@ -1258,7 +1273,7 @@ pub(crate) async fn run_chat_tui(
                         }
                     } else if app.mesh_overlay.open {
                         let max = app.mesh_overlay.candidates.len().saturating_sub(1);
-                        for _ in 0..STEP {
+                        for _ in 0..step {
                             if up {
                                 app.mesh_overlay.cursor = app.mesh_overlay.cursor.saturating_sub(1);
                             } else {
@@ -1289,20 +1304,20 @@ pub(crate) async fn run_chat_tui(
                         } else {
                             app.picker.move_down();
                         }
-                    } else if app.output_view_scroll(up, STEP) {
+                    } else if app.output_view_scroll(up, step) {
                         // The full-output viewer took the wheel.
                     } else if app.viewer.is_some() {
                         let key = if up { KeyKind::Up } else { KeyKind::Down };
-                        for _ in 0..STEP {
+                        for _ in 0..step {
                             app.viewer_key(key);
                         }
                     } else if app.fullscreen {
                         if up {
-                            app.transcript_scroll_up(STEP);
+                            app.transcript_scroll_up(step);
                         } else {
                             let body = tui.height().saturating_sub(8).max(1);
                             let (_, max_scroll) = app.transcript_metrics(tui.width(), body);
-                            app.transcript_scroll_down(STEP, max_scroll);
+                            app.transcript_scroll_down(step, max_scroll);
                         }
                     }
                     continue;
@@ -1601,6 +1616,12 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
 
+            // The connect-link QR overlay owns every key while it is up.
+            if app.qr_overlay_key(key) {
+                dirty = true;
+                continue;
+            }
+
             // The `/anywhere` menu owns every key while open; side effects go through its driver.
             if app.anywhere_menu.open {
                 anywhere_driver.key(&mut app, &mut tui, key)?;
@@ -1764,6 +1785,7 @@ pub(crate) async fn run_chat_tui(
                 || app.btw_open()
                 || app.usage_overlay.open
                 || app.anywhere_menu.open
+                || app.polish.qr.is_some()
                 || app.status_open
                 || app.mesh_overlay.open
                 || app.at_picker.open
@@ -1784,6 +1806,11 @@ pub(crate) async fn run_chat_tui(
                 }
 
                 // Global action keys — work in all states (busy and idle).
+                if matches!(key, KeyKind::VerbosityCycle) {
+                    app.cycle_verbosity();
+                    dirty = true;
+                    continue;
+                }
                 if matches!(key, KeyKind::ToggleReasoning) {
                     app.show_thinking = !app.show_thinking;
                     let state = if app.show_thinking { "on" } else { "off" };

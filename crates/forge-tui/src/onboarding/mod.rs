@@ -9,7 +9,7 @@ mod links;
 mod models;
 mod pages;
 mod plumbing;
-mod qr;
+pub(crate) mod qr;
 mod screen;
 mod text;
 mod view;

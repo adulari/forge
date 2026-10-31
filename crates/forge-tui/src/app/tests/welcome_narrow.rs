@@ -23,8 +23,10 @@ fn rows(app: &App, width: u16, height: u16) -> Vec<String> {
         .collect()
 }
 
+/// The wordmark is a picture that changes size with the width, not wording that can be cut.
 fn words(rows: &[String]) -> BTreeSet<String> {
     rows.iter()
+        .filter(|r| !r.contains('█'))
         .flat_map(|r| r.split_whitespace())
         .map(str::to_string)
         .collect()

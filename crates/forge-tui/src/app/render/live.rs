@@ -232,6 +232,7 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     };
     popups::render_command_center(frame, modal_region, app);
     crate::anywhere_menu::render_anywhere_menu(frame, app, modal_region);
+    crate::qr_overlay::render_qr_overlay(frame, app, modal_region, full);
     // The inspector sits between the header and the composer; inline, where the live region is
     // short, it takes the composer's rows too (the composer has nothing to say while it is open).
     let status_modal = if app.fullscreen {

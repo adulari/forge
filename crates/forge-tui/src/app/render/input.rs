@@ -122,12 +122,30 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
     }
     // Cursor appearance: a solid brand block when focused, suppressed on the blink "off" frame,
     // and a dim hollow (underline) when the terminal window has lost focus.
+    use crate::app::CursorShape;
+    let shape = app.polish.cursor;
     let cursor_style = if app.unfocused {
         styles::muted().add_modifier(Modifier::UNDERLINED)
     } else if app.cursor_hidden {
         Style::default()
     } else {
-        styles::cursor()
+        match shape {
+            CursorShape::Block => styles::cursor(),
+            CursorShape::Underline => {
+                styles::brand().add_modifier(Modifier::UNDERLINED | Modifier::BOLD)
+            }
+            CursorShape::Bar => styles::brand().add_modifier(Modifier::BOLD),
+        }
+    };
+    // A bar has no cell to fill, so past the last character it is a thin glyph of its own.
+    let blank_cell = if shape == CursorShape::Bar && !app.unfocused && !app.cursor_hidden {
+        if crate::theme::glyphs::g().unicode {
+            "\u{258F}"
+        } else {
+            "|"
+        }
+    } else {
+        " "
     };
     let rows = wrap_rows(&app.input, text_width(area.width));
     let tokens = token_styles(&app.input);
@@ -172,7 +190,7 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
         }
         flush(&mut spans, &mut run, run_style);
         if row.last && cursor == row.end {
-            spans.push(Span::styled(" ", cursor_style));
+            spans.push(Span::styled(blank_cell, cursor_style));
         }
         text_lines.push(TextLine::from(spans));
     }
@@ -182,16 +200,19 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                 format!("{} ", crate::theme::glyphs::g().prompt),
                 styles::brand().bold(),
             ),
-            Span::styled(" ", cursor_style),
+            Span::styled(blank_cell, cursor_style),
         ]));
     }
 
     // Ghost text on an empty prompt: the predicted next prompt (Tab accepts it), otherwise what
     // the prompt does right now. It never affects sizing or cursor math.
     let inner = block.inner(area);
-    if app.input.is_empty() && app.prompt.is_none() {
+    let bare_bang = app.input == "!";
+    if (app.input.is_empty() || bare_bang) && app.prompt.is_none() {
         let ellipsis = crate::theme::glyphs::g().ellipsis;
-        let ghost = if let Some(ghost) = crate::app::child_view::composer_ghost(app) {
+        let ghost = if bare_bang {
+            format!("e.g. {}", app.shell_example())
+        } else if let Some(ghost) = crate::app::child_view::composer_ghost(app) {
             ghost
         } else if app.busy {
             format!("queue a follow-up{ellipsis}")
@@ -205,11 +226,18 @@ pub(crate) fn render_input(frame: &mut Frame, area: Rect, app: &App) {
                         (inner.width as usize)
                             .saturating_sub(first.spans.iter().map(|s| s.content.width()).sum())
                     });
-                    let full = format!("Message Forge{ellipsis}  ! runs a shell command");
+                    let base = format!("Message Forge{ellipsis}");
+                    let with_example = format!("{base} e.g. \"{}\"", app.prompt_example());
+                    let full = format!("{with_example}  ! runs a shell command");
+                    let with_shell = format!("{base}  ! runs a shell command");
                     if full.width() <= room {
                         full
+                    } else if with_shell.width() <= room {
+                        with_shell
+                    } else if with_example.width() <= room {
+                        with_example
                     } else {
-                        format!("Message Forge{ellipsis}")
+                        base
                     }
                 }
             }
