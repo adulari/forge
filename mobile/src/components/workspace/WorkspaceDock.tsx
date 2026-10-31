@@ -16,6 +16,7 @@ import {
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -596,7 +597,7 @@ export function lineRange(text: string, line: number): { start: number; end: num
  * on a phone the platform scrolls a controlled selection into view itself. */
 function revealLine(input: TextInput | null, range: { start: number; end: number }, line: number, focus = true) {
   const node = input as unknown as { scrollTop?: number; focus?: () => void; setSelectionRange?: (a: number, b: number) => void } | null;
-  if (!node || typeof node.scrollTop !== "number") return;
+  if (Platform.OS !== "web" || !node || typeof node.scrollTop !== "number") return;
   node.scrollTop = Math.max(0, (line - 4) * EDITOR_LINE_HEIGHT);
   if (focus) node.focus?.();
   node.setSelectionRange?.(range.start, range.end);

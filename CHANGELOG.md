@@ -8,6 +8,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Fixed
 
+- **Find in the terminal no longer crashes the phone app.** React Native 0.86 elements expose `getBoundingClientRect` and `getScrollableNode` returns a number on native, so the web scroll path ran on iOS and Android and threw; it is now web-only. Opening a file at a line no longer raises the phone keyboard, and the perf fixture no longer calls desktop-only APIs on a phone.
 - **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
 
 ### Added
