@@ -250,6 +250,23 @@ fn json_object(raw: &str) -> Option<serde_json::Value> {
     serde_json::from_str(raw.get(start..=end)?).ok()
 }
 
+/// The slot a judge's label names: a single letter, optionally written as `Candidate B`. Anything
+/// else is rejected rather than read by its first character, which turned `Candidate B` into C.
+fn label_slot(label: &str, n: usize) -> Option<usize> {
+    let trimmed = label.trim();
+    let word = match trimmed.get(..9) {
+        Some(head) if head.eq_ignore_ascii_case("candidate") => trimmed[9..].trim(),
+        _ => trimmed,
+    };
+    let mut chars = word.chars();
+    let letter = chars.next()?.to_ascii_uppercase();
+    if chars.next().is_some() || !letter.is_ascii_uppercase() {
+        return None;
+    }
+    let slot = (letter as usize) - ('A' as usize);
+    (slot < n).then_some(slot)
+}
+
 /// Turn the judge's reply into a full ranking. Labels the judge skipped are appended last with a
 /// zero score so every candidate has a row; an unknown label or an empty ranking is an error.
 pub(crate) fn parse_verdict(
@@ -266,10 +283,7 @@ pub(crate) fn parse_verdict(
         let slot = entry
             .get("label")
             .and_then(|l| l.as_str())
-            .and_then(|l| l.trim().chars().next())
-            .map(|c| c.to_ascii_uppercase())
-            .and_then(|c| (c as usize).checked_sub('A' as usize))
-            .filter(|s| *s < order.len())
+            .and_then(|l| label_slot(l, order.len()))
             .ok_or("the judge ranked an unknown candidate")?;
         let index = order[slot];
         if ranking.iter().any(|j| j.index == index) {
@@ -332,6 +346,7 @@ fn auto_model(ctx: &AgentCtx, fallback: &str) -> String {
 /// no cheap model has a key.
 pub async fn judge(
     ctx: &AgentCtx,
+    parent_id: &str,
     task: &str,
     candidates: &[DuelCandidate],
     choice: &JudgeChoice,
@@ -364,6 +379,10 @@ pub async fn judge(
         .complete(&model, &messages, &[], &mut sink)
         .await
         .map_err(|e| format!("judge {model} failed: {}", e.reason()))?;
+    // Billed whether or not the reply parses, so it counts toward the session and budget caps.
+    let _ =
+        ctx.store
+            .record_side_call_usage_for(parent_id, "duel-judge", Some(&model), &reply.usage);
     let (ranking, rationale) = parse_verdict(&reply.content, &order)?;
     Ok(JudgeVerdict {
         judge_model: model.clone(),
@@ -472,6 +491,19 @@ mod tests {
     }
 
     #[test]
+    fn candidate_prefixed_labels_map_to_their_letter() {
+        let raw = "{\"ranking\":[{\"label\":\"Candidate B\",\"score\":9},{\"label\":\"candidate c\",\"score\":5},{\"label\":\"A\",\"score\":1}]}";
+        let (ranking, _) = parse_verdict(raw, &[0, 1, 2]).unwrap();
+        assert_eq!(
+            ranking.iter().map(|j| j.index).collect::<Vec<_>>(),
+            vec![1, 2, 0]
+        );
+        assert!(parse_verdict("{\"ranking\":[{\"label\":\"Candidates\"}]}", &[0, 1]).is_err());
+        assert!(parse_verdict("{\"ranking\":[{\"label\":\"BC\"}]}", &[0, 1, 2]).is_err());
+        assert!(parse_verdict("{\"ranking\":[{\"label\":\"C\"}]}", &[0, 1]).is_err());
+    }
+
+    #[test]
     fn duplicate_labels_count_once() {
         let raw = "{\"ranking\":[{\"label\":\"A\",\"score\":7},{\"label\":\"A\",\"score\":1}]}";
         let (ranking, _) = parse_verdict(raw, &[0, 1]).unwrap();
@@ -494,5 +526,92 @@ mod tests {
         };
         assert_eq!(v.winner(), Some(1));
         assert_eq!(v.judgement_for(0).map(|j| j.rank), Some(2));
+    }
+
+    struct Scripted(&'static str);
+    #[async_trait::async_trait]
+    impl forge_provider::Provider for Scripted {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[forge_types::Message],
+            _tools: &[forge_provider::ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
+                reasoning_items: Vec::new(),
+                content: self.0.to_string(),
+                tool_calls: vec![],
+                usage: forge_types::Usage {
+                    input_tokens: 1234,
+                    output_tokens: 56,
+                    ..forge_types::Usage::default()
+                },
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    struct OneModel;
+    #[async_trait::async_trait]
+    impl forge_mesh::Router for OneModel {
+        async fn route(
+            &self,
+            _p: &str,
+            _i: bool,
+            _b: forge_mesh::BudgetState,
+            _h: &forge_types::ModelHealth,
+            _q: &forge_types::SubscriptionQuota,
+            _e: Option<forge_types::EffortLevel>,
+            _pc: &forge_types::ProjectContext,
+        ) -> forge_mesh::RoutingDecision {
+            unreachable!("the judge never routes")
+        }
+    }
+
+    #[tokio::test]
+    async fn judge_spend_lands_on_the_parent_session() {
+        let config = forge_config::Config::default();
+        let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let parent = store.create_session("/tmp", "Default").unwrap();
+        let ctx = AgentCtx {
+            provider: std::sync::Arc::new(Scripted(
+                "{\"ranking\":[{\"label\":\"A\",\"score\":5},{\"label\":\"B\",\"score\":4}]}",
+            )),
+            router: std::sync::Arc::new(OneModel),
+            store: store.clone(),
+            pricing: forge_mesh::pricing::Pricing::from_config(&config),
+            config,
+            mode: forge_types::PermissionMode::default(),
+            rules: Vec::new(),
+            depth: 0,
+            max_depth: 1,
+            agents: std::sync::Arc::new(std::collections::HashMap::new()),
+            worktree_root: None,
+            repo_root: std::path::PathBuf::from("/nonexistent"),
+            effective_pin: None,
+            inherit_pin: true,
+            asker: None,
+        };
+        let cands = vec![cand("a", Some(true)), cand("b", Some(true))];
+        let v = judge(
+            &ctx,
+            &parent,
+            "t",
+            &cands,
+            &JudgeChoice::Model("m::j".into()),
+            "m::x",
+        )
+        .await
+        .unwrap();
+        assert_eq!(v.ranking.len(), 2);
+        let rows = store.session_usage_by_model(&parent).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].model.as_deref(), Some("m::j"));
+        assert_eq!(
+            (rows[0].usage.input_tokens, rows[0].usage.output_tokens),
+            (1234, 56)
+        );
     }
 }

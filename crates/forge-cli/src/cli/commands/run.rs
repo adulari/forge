@@ -733,6 +733,7 @@ pub(crate) async fn run_chat_tui(
     // the user picks a winner (merge) or cancels (Esc discards every candidate).
     let pending_duel: Arc<std::sync::Mutex<PendingDuel>> = Arc::new(std::sync::Mutex::new(None));
     let mut duel_state: PendingDuel = None;
+    let pending_pr: PrSlot = Arc::new(std::sync::Mutex::new(None));
     // Lens filter set by `/assay --only`/`--skip`; consumed when the AssayChoice picker resolves.
     let mut assay_lenses: Vec<forge_types::FindingCategory> = Vec::new();
     // Scope set by `/assay --diff/--branch/--since/<path>`; consumed when picker resolves.
@@ -2858,15 +2859,27 @@ pub(crate) async fn run_chat_tui(
                                 // (won only for the winner) so future routing in this repo softly
                                 // favors it, then drop every guard (removes every worktree+branch —
                                 // the winner's diff is already applied, so its branch isn't needed).
-                                let open_pr = app.picker.last_alt;
-                                resolve_duel_pick(
-                                    &mut app,
-                                    &mut duel_state,
-                                    &session_workspace,
-                                    &row.id,
-                                    open_pr,
-                                )
-                                .await;
+                                if app.picker.last_alt {
+                                    turn_gen += 1;
+                                    turn_handle = start_duel_pr(
+                                        &mut app,
+                                        &mut duel_state,
+                                        &session_workspace,
+                                        &done_tx,
+                                        turn_gen,
+                                        &mut busy,
+                                        &mut busy_since,
+                                        &row.id,
+                                        Arc::clone(&pending_pr),
+                                    );
+                                } else {
+                                    resolve_duel_pick(
+                                        &mut app,
+                                        &mut duel_state,
+                                        &session_workspace,
+                                        &row.id,
+                                    );
+                                }
                             } else if kind == forge_tui::PickerKind::Sessions
                                 && row.id.starts_with("observe:")
                             {
@@ -4651,6 +4664,7 @@ pub(crate) async fn run_chat_tui(
                 if let Some(result) = finished_duel {
                     open_duel_picker(&mut app, &mut duel_state, result);
                 }
+                finish_duel_pr(&mut app, &mut duel_state, &pending_pr);
                 // `/loop`: if this was a loop turn, decide whether to run another iteration —
                 // sentinel/iteration-cap policy, then (only on genuine completion) quality gates,
                 // then the token/wall-clock budget.

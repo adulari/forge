@@ -422,15 +422,27 @@ impl DriverState {
             }
             self.app.copy_candidates.clear();
         } else if kind == forge_tui::PickerKind::Duel {
-            let open_pr = self.app.picker.last_alt;
-            resolve_duel_pick(
-                &mut self.app,
-                &mut self.duel_state,
-                std::path::Path::new(&self.cwd),
-                &row.id,
-                open_pr,
-            )
-            .await;
+            if self.app.picker.last_alt {
+                self.turn_gen += 1;
+                self.turn_handle = start_duel_pr(
+                    &mut self.app,
+                    &mut self.duel_state,
+                    std::path::Path::new(&self.cwd),
+                    &self.done_tx,
+                    self.turn_gen,
+                    &mut self.busy,
+                    &mut self.busy_since,
+                    &row.id,
+                    Arc::clone(&self.pending_pr),
+                );
+            } else {
+                resolve_duel_pick(
+                    &mut self.app,
+                    &mut self.duel_state,
+                    std::path::Path::new(&self.cwd),
+                    &row.id,
+                );
+            }
         } else if kind == forge_tui::PickerKind::Sessions && row.id.starts_with("observe:") {
             self.app
                 .note("⚠ observing a live MCP session isn't available from the daemon page");
@@ -469,6 +481,7 @@ impl DriverState {
         if let Some(result) = finished_duel {
             open_duel_picker(&mut self.app, &mut self.duel_state, result);
         }
+        finish_duel_pr(&mut self.app, &mut self.duel_state, &self.pending_pr);
         if let Some(mut ls) = self.loop_state.take() {
             if ls.gen == g {
                 let last = {

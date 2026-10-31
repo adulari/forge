@@ -70,6 +70,10 @@ pub struct DuelReport {
     pub verdict: Option<JudgeVerdict>,
     /// Why a requested judge pass produced no verdict.
     pub judge_error: Option<String>,
+    /// The branch and commit the worktrees were forked from. A PR is based on this branch, so it
+    /// carries only the candidate's changes and never the parent branch's own commits.
+    pub base_branch: Option<String>,
+    pub fork_point: Option<String>,
 }
 
 impl DuelReport {
@@ -325,10 +329,25 @@ pub async fn run(
     }
 
     let candidates: Vec<DuelCandidate> = slots.into_iter().flatten().collect();
+    let git_line = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&ctx.repo_root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|l| !l.is_empty())
+    };
+    let base_branch = git_line(&["symbolic-ref", "--short", "-q", "HEAD"]);
+    let fork_point = git_line(&["rev-parse", "HEAD"]);
     let (verdict, judge_error) = match &spec.judge {
         Some(choice) => {
             let fallback = candidates.first().map_or("", |c| c.model.as_str());
-            match crate::duel_judge::judge(ctx, task, &candidates, choice, fallback).await {
+            match crate::duel_judge::judge(ctx, parent_id, task, &candidates, choice, fallback)
+                .await
+            {
                 Ok(v) => (Some(v), None),
                 Err(e) => (None, Some(e)),
             }
@@ -341,6 +360,8 @@ pub async fn run(
             candidates,
             verdict,
             judge_error,
+            base_branch,
+            fork_point,
         },
         guards,
     ))
@@ -412,11 +433,61 @@ pub async fn open_winner_pr(
         .find(|g| g.branch() == branch)
         .ok_or("that candidate's worktree is gone")?;
     let (title, body) = winner_pr_text(report, index);
+    let base = pr_base(
+        guard.repo_root(),
+        report.base_branch.as_deref(),
+        report.fork_point.as_deref(),
+    )?;
     forge_tools::create_pr_in(
         guard.path(),
-        &serde_json::json!({ "title": title, "body": body }),
+        &serde_json::json!({ "title": title, "body": body, "base": base }),
     )
     .await
+}
+
+/// The remote branch a duel PR should be based on. The candidates forked from `base_branch` at
+/// `fork_point`; if that point is not on the branch's upstream, pushing the candidate would also
+/// publish the parent branch's unpushed commits, so the PR is refused instead.
+pub fn pr_base(
+    repo_root: &Path,
+    base_branch: Option<&str>,
+    fork_point: Option<&str>,
+) -> Result<String, String> {
+    let git = |args: &[&str]| -> Result<String, String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(args)
+            .output()
+            .map_err(|e| format!("git failed: {e}"))?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    };
+    let base = base_branch
+        .ok_or("the duel started on a detached HEAD, so there is no branch to base a PR on")?;
+    let fork = fork_point.ok_or("the duel did not record where it forked from")?;
+    let upstream = git(&[
+        "rev-parse",
+        "--abbrev-ref",
+        "--symbolic-full-name",
+        &format!("{base}@{{upstream}}"),
+    ])
+    .map_err(|_| {
+        format!("`{base}` has no upstream; push it first so the PR carries only the candidate's changes")
+    })?;
+    let unpushed = git(&["rev-list", "--count", &format!("{upstream}..{fork}")])?;
+    if unpushed != "0" {
+        return Err(format!(
+            "`{base}` has {unpushed} commit(s) that are not on {upstream}; push it first so the PR carries only the candidate's changes"
+        ));
+    }
+    upstream
+        .split_once('/')
+        .map(|(_, branch)| branch.to_string())
+        .ok_or_else(|| format!("cannot read the branch name from `{upstream}`"))
 }
 
 /// Parse `git diff --shortstat` output into `(files_changed, added, removed)`. Any field the
@@ -528,7 +599,98 @@ mod tests {
                 cost_usd: 0.0,
             }),
             judge_error: None,
+            base_branch: Some("feat-x".into()),
+            fork_point: Some("abc".into()),
         }
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    #[test]
+    fn pr_base_refuses_a_parent_branch_with_unpushed_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git_in(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                remote.to_str().unwrap(),
+            ],
+        );
+        git_in(&work, &["init", "-q", "-b", "main"]);
+        git_in(
+            &work,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        std::fs::write(work.join("a"), "1").unwrap();
+        git_in(&work, &["add", "a"]);
+        git_in(&work, &["commit", "-q", "-m", "one"]);
+        git_in(&work, &["push", "-q", "-u", "origin", "main"]);
+        git_in(&work, &["switch", "-q", "-c", "feat-x"]);
+        std::fs::write(work.join("b"), "2").unwrap();
+        git_in(&work, &["add", "b"]);
+        git_in(&work, &["commit", "-q", "-m", "unrelated work"]);
+        let fork = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&work)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let fork = fork.trim();
+
+        let no_upstream = pr_base(&work, Some("feat-x"), Some(fork)).unwrap_err();
+        assert!(no_upstream.contains("no upstream"), "{no_upstream}");
+        git_in(&work, &["push", "-q", "-u", "origin", "feat-x"]);
+        assert_eq!(
+            pr_base(&work, Some("feat-x"), Some(fork)).unwrap(),
+            "feat-x"
+        );
+
+        std::fs::write(work.join("c"), "3").unwrap();
+        git_in(&work, &["add", "c"]);
+        git_in(&work, &["commit", "-q", "-m", "local only"]);
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&work)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        let err = pr_base(&work, Some("feat-x"), Some(head.trim())).unwrap_err();
+        assert!(err.contains("1 commit(s)"), "{err}");
+        assert!(pr_base(&work, None, Some(fork))
+            .unwrap_err()
+            .contains("detached"));
     }
 
     #[test]

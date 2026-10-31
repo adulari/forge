@@ -33,13 +33,13 @@ export interface JudgeNote {
 
 const JUDGE_FIELD = /^judge #(\d+) (\d+(?:\.\d+)?)\/10: ?([\s\S]*)$/;
 
-/** Peels the `judge #N S/10: critique` field off a row's ` · `-separated detail, wherever it sits. */
+/** Peels the daemon's leading `judge #N S/10: critique` field off a row's ` · `-separated detail.
+ * Only the first part counts: candidate text sits after it, so a summary can never pose as one. */
 export function splitJudgeField(parts: string[]): { parts: string[]; judge?: JudgeNote } {
-  const at = parts.findIndex((part) => JUDGE_FIELD.test(part.trim()));
-  if (at < 0) return { parts };
-  const match = JUDGE_FIELD.exec(parts[at].trim()) as RegExpExecArray;
+  const match = parts.length > 0 ? JUDGE_FIELD.exec(parts[0].trim()) : null;
+  if (!match) return { parts };
   return {
-    parts: parts.filter((_, i) => i !== at),
+    parts: parts.slice(1),
     judge: { rank: Number(match[1]), score: Number(match[2]), critique: match[3].trim() },
   };
 }
@@ -71,18 +71,19 @@ export function parseRowLabel(label: string): { model: string; crowned: boolean 
 const DETAIL_DIFF_RE = /(\d+)\s+files?\s+\+(\d+)\s+-(\d+)/;
 
 export function panesFromOverlay(overlay: Overlay): DuelPane[] {
+  const judged = parseDuelHeading(overlay.title).judgeModel != null;
   return overlay.rows.map((row, index) => {
     const { model, crowned } = parseRowLabel(row.label);
-    const { parts, judge } = splitJudgeField(row.detail.split(" · "));
+    const split = splitJudgeField(row.detail.split(" · "));
+    // A judge field only means something when the heading carries a verdict.
+    const parts = split.parts;
+    const judge = judged ? split.judge : undefined;
     const diffMatch = DETAIL_DIFF_RE.exec(parts[0] ?? "");
     const diffstat = diffMatch
       ? { files: Number(diffMatch[1]), added: Number(diffMatch[2]), removed: Number(diffMatch[3]) }
       : undefined;
-    const tests = parts.some((p) => /tests\s*✓/.test(p))
-      ? true
-      : parts.some((p) => /tests\s*✗/.test(p))
-        ? false
-        : null;
+    const badge = parts[1] ?? "";
+    const tests = /^tests\s*✓/.test(badge) ? true : /^tests\s*✗/.test(badge) ? false : null;
     const latency = Number((parts.find((p) => /^\s*[\d.]+s$/.test(p)) ?? "0s").replace(/s\s*$/, "")) || 0;
     const cost = Number((parts.find((p) => /^\s*\$/.test(p)) ?? "$0").replace(/[^0-9.]/g, "")) || 0;
     const summary = parts.slice(4).join(" · ").trim();
@@ -96,7 +97,7 @@ export function panesFromOverlay(overlay: Overlay): DuelPane[] {
       diffstat,
       tests,
       judge,
-      crowned: crowned || judge?.rank === 1,
+      crowned: judged && crowned,
     } satisfies DuelPane;
   });
 }
