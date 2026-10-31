@@ -7,13 +7,13 @@ use super::*;
 use forge_config::HarnessProfile;
 
 /// Replays `(content, tool_calls)`, repeating the last entry once the script runs out.
-struct Script {
-    steps: Vec<(String, Vec<forge_types::ToolCall>)>,
-    calls: Arc<std::sync::atomic::AtomicUsize>,
+pub(super) struct Script {
+    pub(super) steps: Vec<(String, Vec<forge_types::ToolCall>)>,
+    pub(super) calls: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Script {
-    fn new(steps: Vec<(String, Vec<forge_types::ToolCall>)>) -> Self {
+    pub(super) fn new(steps: Vec<(String, Vec<forge_types::ToolCall>)>) -> Self {
         Self {
             steps,
             calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
@@ -48,7 +48,7 @@ impl Provider for Script {
     }
 }
 
-fn call(name: &str, args: serde_json::Value) -> forge_types::ToolCall {
+pub(super) fn call(name: &str, args: serde_json::Value) -> forge_types::ToolCall {
     forge_types::ToolCall {
         id: forge_types::new_id(),
         name: name.into(),
@@ -56,11 +56,11 @@ fn call(name: &str, args: serde_json::Value) -> forge_types::ToolCall {
     }
 }
 
-fn say(text: &str) -> (String, Vec<forge_types::ToolCall>) {
+pub(super) fn say(text: &str) -> (String, Vec<forge_types::ToolCall>) {
     (text.to_string(), Vec::new())
 }
 
-fn config(profile: HarnessProfile) -> Config {
+pub(super) fn config(profile: HarnessProfile) -> Config {
     let mut config = Config {
         permission_mode: PermissionMode::Bypass,
         ..Config::default()
@@ -75,13 +75,13 @@ fn config(profile: HarnessProfile) -> Config {
     config
 }
 
-struct Run {
-    session: Session,
-    events: Arc<Mutex<Vec<PresenterEvent>>>,
+pub(super) struct Run {
+    pub(super) session: Session,
+    pub(super) events: Arc<Mutex<Vec<PresenterEvent>>>,
 }
 
 impl Run {
-    fn new(provider: Arc<dyn Provider>, config: Config, root: &std::path::Path) -> Self {
+    pub(super) fn new(provider: Arc<dyn Provider>, config: Config, root: &std::path::Path) -> Self {
         Self::routed(provider, config, root, "direct::scripted", vec![])
     }
 
@@ -113,7 +113,7 @@ impl Run {
         Self { session, events }
     }
 
-    fn warnings(&self, needle: &str) -> usize {
+    pub(super) fn warnings(&self, needle: &str) -> usize {
         self.events
             .lock()
             .unwrap()
@@ -577,7 +577,7 @@ async fn an_empty_reply_right_after_the_nudge_goes_to_the_honest_failure_path() 
     );
 }
 
-fn harness_config(
+pub(super) fn harness_config(
     profile: HarnessProfile,
     edit: impl FnOnce(&mut forge_config::HarnessConfig),
 ) -> Config {
@@ -586,7 +586,7 @@ fn harness_config(
     cfg
 }
 
-fn transcript_hits(run: &Run, needle: &str) -> usize {
+pub(super) fn transcript_hits(run: &Run, needle: &str) -> usize {
     run.session
         .transcript
         .iter()

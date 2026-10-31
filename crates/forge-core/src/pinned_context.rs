@@ -191,7 +191,12 @@ impl Session {
         if let Some(plan) = &self.pinned.plan {
             sections.push(format!("## Plan\n{plan}"));
         }
-        if let Some(tasks) = &self.pinned.tasks {
+        if let Some(tasks) = self
+            .pinned
+            .tasks
+            .as_ref()
+            .filter(|_| !self.config.harness.append_only_prefix)
+        {
             sections.push(format!(
                 "## Task list (as of the start of this turn; an update_tasks result later in the \
                  conversation is newer)\n{tasks}"

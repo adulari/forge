@@ -179,7 +179,8 @@ impl Session {
         )
         .await;
         let trigger = self.effective_compaction_trigger(model);
-        let budget = CompactionBudget::for_trigger(trigger, self.pinned_tokens());
+        let budget = CompactionBudget::for_trigger(trigger, self.pinned_tokens())
+            .with_summary_cap(self.summary_cap());
         tracing::debug!(?budget, auto, "compaction budget");
         let tail_budget = usize::try_from(self.estimated_transcript_tokens() / 4)
             .unwrap_or(usize::MAX)
@@ -304,6 +305,9 @@ impl Session {
     /// read or edit that touches them delivers them again.
     async fn rehydrate_after_compaction(&mut self, budget: &CompactionBudget) {
         self.refresh_pinned_tasks();
+        if let Err(error) = self.push_task_snapshot_if_changed() {
+            tracing::warn!(%error, "could not record the task list after compaction");
+        }
         self.instruction_scope = Default::default();
         let query = self.recall_query(&self.latest_user_request());
         self.recall_pinned_memories(&query).await;

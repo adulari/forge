@@ -62,6 +62,7 @@ pub(crate) struct CacheInstrument {
     staged: Option<(String, WireFingerprint)>,
     pending: Option<RewriteReason>,
     rewrite_streak: u32,
+    break_detail: Option<String>,
 }
 
 impl CacheInstrument {
@@ -98,6 +99,11 @@ impl CacheInstrument {
         self.pending = Some(RewriteReason::HistoryRewrite);
     }
 
+    /// The cause of the break the last [`Self::finish`] labelled, once.
+    pub(crate) fn take_break_detail(&mut self) -> Option<String> {
+        self.break_detail.take()
+    }
+
     /// Label the call `model` just answered. Returns the row's attribution and, on the second
     /// unexplained rewrite in a row, a warning to show.
     pub(crate) fn finish(
@@ -125,6 +131,9 @@ impl CacheInstrument {
             .map(|previous| current.reuse_against(previous));
         let switched = self.last_model.as_deref().is_some_and(|last| last != model);
         let label = classify(reuse, switched, self.pending.take(), &current, usage);
+        self.break_detail = reuse
+            .zip(self.previous.get(&staged_model))
+            .and_then(|(reuse, previous)| break_cause(&label, reuse, &current, previous));
         let prefix = UsagePrefix {
             reused_msgs: Some(reuse.map_or(0, |r| r.reused) as u32),
             total_msgs: Some(current.len() as u32),
@@ -149,6 +158,45 @@ impl CacheInstrument {
         self.last_model = Some(staged_model);
         (Some(prefix), warning)
     }
+}
+
+/// Why a request broke the cache, for a label that blames the harness: which tools came or went,
+/// or which already-sent message changed.
+fn break_cause(
+    label: &str,
+    reuse: PrefixReuse,
+    current: &WireFingerprint,
+    previous: &WireFingerprint,
+) -> Option<String> {
+    if label == "tools_changed" {
+        let (added, removed) = current.tool_name_diff(previous);
+        let list = |verb: &str, names: Vec<String>| {
+            (!names.is_empty()).then(|| format!("{verb} {}", names.join(", ")))
+        };
+        let parts: Vec<String> = [list("added", added), list("removed", removed)]
+            .into_iter()
+            .flatten()
+            .collect();
+        return Some(if parts.is_empty() {
+            "a tool's description or schema changed".to_string()
+        } else {
+            format!("the tool list changed ({})", parts.join("; "))
+        });
+    }
+    if label.starts_with("harness_rewrite") {
+        let kind = current.kind_at(reuse.reused);
+        let what = match kind {
+            "system" => "a system message (system prompt, environment or pinned session context)",
+            "tool" => "a tool result",
+            "reminder" => "a system reminder",
+            other => other,
+        };
+        return Some(format!(
+            "message {} of the previous request ({what}) changed, so everything behind it was re-billed",
+            reuse.reused
+        ));
+    }
+    None
 }
 
 /// The label for one request. Pure, so every branch is testable without a session.
@@ -206,8 +254,13 @@ impl Session {
             Some(model),
             prefix.as_ref(),
         )?;
+        let cause = self.cache.take_break_detail();
         if let Some(warning) = warning {
             self.presenter.emit(PresenterEvent::Warning(warning));
+        } else if let Some(cause) = cause.filter(|_| self.config.harness.cache_monitor) {
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "prompt cache broken on {model}: {cause}"
+            )));
         }
         Ok(())
     }

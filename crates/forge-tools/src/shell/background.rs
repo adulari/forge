@@ -493,7 +493,14 @@ fn record_exit(dir: &Path, pid: u32, code: i64) -> bool {
     true
 }
 
-fn take_stopping(pid: u32) -> bool {
+/// Mark `pid` as one whose exit the caller reports itself, so the exit sink stays quiet.
+pub(super) fn note_waiting(pid: u32) {
+    if let Ok(mut stopping) = STOPPING.lock() {
+        stopping.push(pid);
+    }
+}
+
+pub(super) fn take_stopping(pid: u32) -> bool {
     STOPPING.lock().is_ok_and(|mut stopping| {
         let before = stopping.len();
         stopping.retain(|p| *p != pid);
@@ -716,6 +723,16 @@ impl Tool for ShellJobTool {
                     job.status(),
                     job.log.display()
                 ))
+            }
+            "wait" => {
+                let id = id()?;
+                let secs = args
+                    .get("timeout_secs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(super::job_wait::DEFAULT_WAIT_SECS);
+                super::job_wait::wait_for_job(workspace, &cwd, id, secs)
+                    .await
+                    .map_err(ToolError::Failed)
             }
             "stop" => {
                 let id = id()?;

@@ -260,8 +260,8 @@ pub(super) async fn request_provider_response(
             };
             let fut =
                 provider.complete_with(active_model, &sent, specs, &completion_opts, &mut sink);
-            let base_idle = stream_idle;
-            let stream_idle = crate::effective_stream_idle(&**provider, active_model, stream_idle);
+            let base_idle = crate::droid_loop::silence_window_in(&session.config, stream_idle);
+            let stream_idle = crate::effective_stream_idle(&**provider, active_model, base_idle);
             // CLI bridges own a longer idle budget (process spawn, MCP boot, `--resume` load), so
             // the first-event deadline must not undercut it.
             let first_event = if stream_idle > base_idle {
@@ -405,8 +405,7 @@ pub(super) async fn request_provider_response(
                 // a dropped stream) gets a short same-model retry. An `Unavailable`
                 // response is already a shared health signal: bench it and immediately
                 // advance the fallback chain instead of delaying every concurrent turn.
-                if *transient_retries < MAX_TRANSIENT_RETRIES
-                    && should_retry_same_model_transient(active_model, &e)
+                if session.same_model_retry_due(active_model, &e, *transient_retries)
                     && !e.is_permanent()
                     && !e.is_rate_limited()
                     && !e.is_context_overflow()

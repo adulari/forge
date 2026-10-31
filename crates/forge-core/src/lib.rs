@@ -91,6 +91,7 @@ pub(crate) mod context_pipeline;
 pub mod deferred_tools;
 mod detached_subagents;
 pub mod dispatch;
+mod droid_loop;
 pub mod duel;
 mod empty_reply;
 mod error_report;
@@ -2343,6 +2344,9 @@ impl Session {
                 schema: t.schema(),
             })
             .collect();
+        if self.config.harness.wait_job {
+            specs.iter_mut().for_each(droid_loop::advertise_job_wait);
+        }
         // Advertise the subagent virtual tool to the top-level model (RFC
         // subagent-orchestration). Children may receive it separately only when the explicitly
         // configured recursion depth allows another generation.
@@ -4777,10 +4781,7 @@ where
                     } else {
                         "stream stalled"
                     };
-                    return Err(forge_provider::ProviderError::Unavailable(format!(
-                        "{what} — no data for {}s",
-                        effective_idle.as_secs()
-                    )));
+                    return Err(crate::droid_loop::stall_error(what, effective_idle.as_secs()));
                 }
             }
         }
@@ -5131,6 +5132,9 @@ mod tests {
 
     #[path = "harness_profile.rs"]
     mod harness_profile_tests;
+
+    #[path = "droid_loop.rs"]
+    mod droid_loop_tests;
 
     #[path = "goal_evaluator.rs"]
     mod goal_evaluator_tests;

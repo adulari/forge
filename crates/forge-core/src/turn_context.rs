@@ -61,6 +61,27 @@ impl Session {
         )
     }
 
+    /// `[harness] append_only_prefix`: the task list the pinned block used to carry, appended to the
+    /// transcript instead, only when it differs from the newest snapshot the transcript holds. A
+    /// list that changed between turns then adds a few tokens at the end of the prompt instead of
+    /// rewriting the block in front of the whole conversation. Returns the note's text when one was
+    /// appended.
+    pub(crate) fn push_task_snapshot_if_changed(&mut self) -> Result<Option<String>, CoreError> {
+        use crate::droid_loop::TASK_SNAPSHOT_PREFIX;
+        if !self.config.harness.append_only_prefix || self.tasks.is_empty() {
+            return Ok(None);
+        }
+        let note = format!(
+            "{TASK_SNAPSHOT_PREFIX}{}",
+            crate::pinned_context::render_task_list(&self.tasks)
+        );
+        if self.newest_system_with(TASK_SNAPSHOT_PREFIX) == Some(note.as_str()) {
+            return Ok(None);
+        }
+        self.push_note(forge_types::MessageKind::Normal, note.clone())?;
+        Ok(Some(note))
+    }
+
     /// Tell the model its git branch when the transcript does not already say it. The branch used
     /// to sit in the `<env>` preamble, where a switch rewrote the very first message of every later
     /// request — a full cache miss for one line of information.

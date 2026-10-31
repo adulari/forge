@@ -100,6 +100,11 @@ A flag that is on wins over `harness_profile = "minimal"` (the built-in default 
 | `stop_retries` | An announced-but-undone final reply is continued up to 3 times ("Call the next concrete tool now"); empty replies get 3 corrective retries before the bench/failover path; a tool call written as text gets 3 re-issue requests. A single empty reply never benches a model. |
 | `thinking_loop_breaker` | When consecutive tool-free replies restate an earlier one (stall_guard opening similarity), injects "Act, don't re-plan: make the next tool call." at most twice per stretch. |
 | `repeat_interrupt` | After 5 identical calls with identical results, names the call and says not to repeat it; the progress ledger's cycle stop moves from 5 to 7 repeats so the model gets two steps to react. Repeats with new results (polling) never count. |
+| `stream_silence_retry` | Factory Droid's stream-silence watchdog. The stream idle window is raised to at least 240s and a stalled stream (no event of any kind for that long, reasoning deltas and keepalives included) is retried on the same model up to twice before the normal failover path. Off, a stall fails over at once on the 180s window. |
+| `wait_job` | `shell_job` gains `action: "wait"` with `timeout_secs` (default 60, max 600): blocks until the job exits and returns the exit code and the last 30 log lines, or says it is still running. The job-wake notice for an exit the wait reported is suppressed. Only the advertised spec changes with the flag, so the tool list is byte-identical when off. |
+| `append_only_prefix` | The task-list snapshot leaves the pinned session context block (which sits in front of the whole transcript, so a changed list rewrote the cached prefix on the first request of the next turn) and is appended to the transcript as a `[task list snapshot]` note, only when the list differs from the newest snapshot the transcript holds. Re-sent after a compaction. |
+| `cache_monitor` | Warns on the first request that breaks the provider prompt cache, with the cause: tools added or removed, or which already-sent message changed. Off, only two unexplained rewrites in a row warn. Deliberate rewrites (compaction, floor moves, rewinds) never warn. |
+| `compaction_summary_cap` | Caps a compaction summary at 16k tokens (Factory Droid's budget) instead of 20k, and tells the summarizer the size. A smaller trigger window already gets a smaller share. |
 
 ```toml
 [harness]
@@ -107,4 +112,11 @@ completion_contract = true
 stop_retries = true
 thinking_loop_breaker = true
 repeat_interrupt = true
+stream_silence_retry = true
+wait_job = true
+append_only_prefix = true
+cache_monitor = true
+compaction_summary_cap = true
 ```
+
+Already covered without a flag: the progress ledger nudges at the third identical call-and-result and stops at the fifth (`repeat_interrupt` moves the stop to the seventh); `stop_retries` is the three-empty-turns stop.

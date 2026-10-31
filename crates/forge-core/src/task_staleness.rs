@@ -356,7 +356,22 @@ impl crate::Session {
             )?;
         }
         self.refresh_pinned_tasks();
+        if let Some(snapshot) = self.push_task_snapshot_if_changed()? {
+            pack.push(
+                crate::context_pack::ContextSource::Tasks,
+                "task list snapshot (appended, not pinned)",
+                &snapshot,
+            );
+        }
         if let Some(note) = carried_list_note(&self.tasks) {
+            let note = if self.config.harness.append_only_prefix {
+                note.replace(
+                    "as shown in the session context",
+                    "as in the latest task list snapshot",
+                )
+            } else {
+                note
+            };
             self.inject_context(
                 pack,
                 crate::context_pack::ContextSource::Tasks,

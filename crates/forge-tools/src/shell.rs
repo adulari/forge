@@ -39,6 +39,7 @@ use tokio::process::{Child, Command};
 use crate::sandbox::{self, SandboxPolicy};
 use crate::{Tool, ToolError};
 mod background;
+mod job_wait;
 mod poll;
 mod wait;
 pub use background::{scope_job_exit_sink, JobExit, JobExitSink};
@@ -1520,5 +1521,85 @@ mod tests {
             !after.contains("running"),
             "stop must be visible in status: {after}"
         );
+    }
+
+    async fn start_job(dir: &std::path::Path, command: &str) -> u32 {
+        let shell = ShellTool::with_policy_in_workspace(SandboxPolicy::default(), dir);
+        let started = shell
+            .run(&json!({ "command": command, "background": true }))
+            .await
+            .unwrap();
+        started
+            .split("job ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|id| id.parse().ok())
+            .unwrap_or_else(|| panic!("no job id in: {started}"))
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn wait_returns_the_exit_code_and_log_tail_when_the_job_ends_in_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = start_job(dir.path(), "echo building; sleep 1; echo built; exit 3").await;
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        let started = std::time::Instant::now();
+        let out = jobs
+            .run(&json!({ "action": "wait", "id": pid, "timeout_secs": 20 }))
+            .await
+            .unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "{out}"
+        );
+        assert!(out.contains("exited 3"), "{out}");
+        assert!(out.contains("built"), "{out}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn wait_gives_up_at_the_timeout_and_leaves_the_job_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = start_job(dir.path(), "echo up; sleep 30").await;
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        let out = jobs
+            .run(&json!({ "action": "wait", "id": pid, "timeout_secs": 1 }))
+            .await
+            .unwrap();
+        assert!(out.contains("still running"), "{out}");
+        assert!(out.contains("up"), "{out}");
+        let status = jobs
+            .run(&json!({ "action": "status", "id": pid }))
+            .await
+            .unwrap();
+        assert!(status.contains("running"), "{status}");
+        jobs.run(&json!({ "action": "stop", "id": pid }))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_on_an_unknown_job_is_an_error_and_an_already_ended_job_answers_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let jobs = ShellJobTool::in_workspace(dir.path());
+        assert!(jobs
+            .run(&json!({ "action": "wait", "id": 4_000_000 }))
+            .await
+            .is_err());
+        #[cfg(unix)]
+        {
+            let pid = start_job(dir.path(), "echo quick").await;
+            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+            let started = std::time::Instant::now();
+            let out = jobs
+                .run(&json!({ "action": "wait", "id": pid }))
+                .await
+                .unwrap();
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(3),
+                "{out}"
+            );
+            assert!(out.contains("exited 0") && out.contains("quick"), "{out}");
+        }
     }
 }
