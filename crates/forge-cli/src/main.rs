@@ -115,6 +115,7 @@ mod serve_git;
 #[cfg(test)]
 mod serve_going_away;
 mod serve_history;
+mod serve_import;
 mod serve_keybindings;
 mod serve_lifecycle;
 mod serve_media;

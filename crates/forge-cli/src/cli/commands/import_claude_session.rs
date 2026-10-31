@@ -102,7 +102,7 @@ fn pin_for(model: Option<&str>, transcript_model: Option<&str>) -> Option<String
     })
 }
 
-fn clean_title(raw: &str) -> Option<String> {
+pub(crate) fn clean_title(raw: &str) -> Option<String> {
     let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let t: String = one_line.chars().take(TITLE_MAX_CHARS).collect();
     Some(t).filter(|t| !t.is_empty())

@@ -348,6 +348,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/run",
     },
     Command {
+        name: "import",
+        desc: "import Claude Code and Codex conversations from this computer",
+        usage: "/import",
+    },
+    Command {
         name: "self-mcp",
         desc: "toggle self-MCP mode: a sub-Forge MCP agent this session can call as tools",
         usage: "/self-mcp [enable|disable]",

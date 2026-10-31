@@ -400,6 +400,8 @@ pub struct App {
     pub polish: polish::PolishState,
     /// The `/run` overlay (project actions and listening ports); also feeds the status badge.
     pub run_menu: crate::run_menu::RunMenu,
+    /// The `/import` picker for Claude Code and Codex conversations, while open.
+    pub import_menu: crate::import_menu::ImportMenu,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.

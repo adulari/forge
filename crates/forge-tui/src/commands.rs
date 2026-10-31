@@ -159,6 +159,8 @@ pub enum CommandAction {
     Notes,
     /// Open the project actions and ports overlay (`/run`).
     Run,
+    /// Pick Claude Code and Codex conversations from this computer and import them (`/import`).
+    Import,
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Open the latest tool call's complete output in the full-output viewer (`/output`).
@@ -508,6 +510,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "anywhere" | "aw" => CommandAction::Anywhere,
         "notes" | "todo" | "todos" => CommandAction::Notes,
         "run" | "actions" | "ports" => CommandAction::Run,
+        "import" => CommandAction::Import,
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),

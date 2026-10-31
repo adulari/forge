@@ -90,6 +90,7 @@ mod anywhere_menu;
 mod dispatch;
 mod fork_cmd;
 mod heartbeat_cmd;
+mod import_menu;
 mod mesh_overlay;
 mod model_switch;
 mod notes_menu;
@@ -780,6 +781,7 @@ pub(crate) async fn run_chat_tui(
     let mut anywhere_driver = anywhere_menu::AnywhereMenuDriver::new(mock);
     let mut notes_driver = notes_menu::NotesMenuDriver::new();
     let mut run_menu_driver = run_menu::RunMenuDriver::new();
+    let mut import_driver = import_menu::ImportMenuDriver::new();
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
     // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
     // rendering-facing `VoiceOverlay`. See `apply_voice_start`/`start_voice_transcribe`.
@@ -1645,6 +1647,11 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
                 continue;
             }
+            if app.import_menu.open {
+                import_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
 
             // `/notes` owns every key while open, same as the menu above.
             if app.notes_overlay.open {
@@ -1819,6 +1826,7 @@ pub(crate) async fn run_chat_tui(
                 || app.notes_overlay.open
                 || app.polish.qr.is_some()
                 || app.run_menu.open
+                || app.import_menu.open
                 || app.status_open
                 || app.mesh_overlay.open
                 || app.at_picker.open
@@ -5090,6 +5098,9 @@ pub(crate) async fn run_chat_tui(
             dirty = true;
         }
         if notes_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if import_driver.tick(&mut app) {
             dirty = true;
         }
         if app.usage_overlay.open {

@@ -661,13 +661,17 @@ fn result_text(content: &Value) -> String {
 /// every call that never got a result a placeholder one, so the stored history is a valid
 /// call/result round-trip.
 #[derive(Default)]
-struct Normalizer {
+pub(crate) struct Normalizer {
     open: Vec<(String, bool)>,
-    stats: ImportStats,
+    pub(crate) stats: ImportStats,
 }
 
 impl Normalizer {
-    fn push(&mut self, m: Imported, emit: &mut impl FnMut(Imported) -> Result<()>) -> Result<()> {
+    pub(crate) fn push(
+        &mut self,
+        m: Imported,
+        emit: &mut impl FnMut(Imported) -> Result<()>,
+    ) -> Result<()> {
         match m.role {
             Role::Tool => {
                 let id = m.tool_call_id.as_deref().unwrap_or_default();
@@ -710,7 +714,7 @@ impl Normalizer {
         Ok(())
     }
 
-    fn finish(&mut self, emit: &mut impl FnMut(Imported) -> Result<()>) -> Result<()> {
+    pub(crate) fn finish(&mut self, emit: &mut impl FnMut(Imported) -> Result<()>) -> Result<()> {
         self.close_open(emit)
     }
 }

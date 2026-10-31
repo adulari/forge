@@ -40,6 +40,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Anywhere
         | CommandAction::Notes
         | CommandAction::Run
+        | CommandAction::Import
         | CommandAction::GoalControl(
             GoalControl::Pause | GoalControl::Clear | GoalControl::Status | GoalControl::Edit(_),
         )
