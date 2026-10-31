@@ -219,6 +219,20 @@ pub(crate) async fn send_from(
     mode: MessageMode,
     text: &str,
 ) -> Result<SendReceipt, String> {
+    send_from_scoped(store, registry, sender, address, mode, text, false).await
+}
+
+/// `local_only` keeps resolution and delivery to this machine's sessions, for callers that were
+/// paired to this host alone.
+pub(crate) async fn send_from_scoped(
+    store: &Arc<Store>,
+    registry: &SessionRegistry,
+    sender: &Sender,
+    address: &str,
+    mode: MessageMode,
+    text: &str,
+    local_only: bool,
+) -> Result<SendReceipt, String> {
     let text = text.trim();
     if text.is_empty() {
         return Err("message must not be empty".into());
@@ -234,7 +248,7 @@ pub(crate) async fn send_from(
     let mut peers = peers_of(&local);
     let mut resolved = resolve_target(&peers, address).cloned();
     let mut hosts_seen = false;
-    if matches!(resolved, Err(ResolveError::NotFound)) {
+    if matches!(resolved, Err(ResolveError::NotFound)) && !local_only {
         if let Some(remote) = remote_hosts(registry) {
             for host in remote.list().await {
                 hosts_seen = true;
@@ -681,11 +695,13 @@ pub(crate) struct PeersQuery {
 /// registry of their own (the CLI bridge, a terminal session).
 pub(crate) async fn peers_sessions(
     State(state): State<Arc<DaemonState>>,
+    axum::Extension(auth): axum::Extension<crate::serve_clients::ClientAuth>,
     Query(q): Query<PeersQuery>,
 ) -> Response {
     let filter = ListFilter {
         cwd: q.cwd.filter(|c| !c.trim().is_empty()),
-        local_only: q.local_only,
+        // A client paired to this host sees this host's sessions, not the account's other machines.
+        local_only: q.local_only || !auth.is_owner(),
     };
     json_response(&list_all(&state.store, &state.registry, q.self_id.as_deref(), &filter).await)
 }
@@ -708,6 +724,7 @@ pub(crate) struct PeerMessageReq {
 /// daemon-hosted session, so a rename shows up in its next message.
 pub(crate) async fn peers_message(
     State(state): State<Arc<DaemonState>>,
+    axum::Extension(auth): axum::Extension<crate::serve_clients::ClientAuth>,
     axum::Json(req): axum::Json<PeerMessageReq>,
 ) -> Response {
     if state.registry.is_draining() {
@@ -746,13 +763,14 @@ pub(crate) async fn peers_message(
             }
         }
     };
-    match send_from(
+    match send_from_scoped(
         &state.store,
         &state.registry,
         &sender,
         &req.target,
         mode,
         &req.text,
+        !auth.is_owner(),
     )
     .await
     {

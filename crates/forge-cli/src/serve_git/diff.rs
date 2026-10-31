@@ -113,6 +113,15 @@ pub(super) fn parse_unified_diff_window(
 /// Render an untracked file as an all-additions diff. `git diff` cannot produce one without
 /// `--no-index` (which is not portable across the daemon's target platforms), so the content is
 /// read directly — bounded by [`MAX_UNTRACKED_BYTES`] and by [`MAX_DIFF_LINES`].
+/// An untracked entry can be a symlink, or sit under one, that points anywhere on the host;
+/// only files that resolve inside the repository are read.
+fn stays_inside(root: &Path, full: &Path) -> bool {
+    match (std::fs::canonicalize(root), std::fs::canonicalize(full)) {
+        (Ok(root), Ok(full)) => full.starts_with(root),
+        _ => false,
+    }
+}
+
 pub(super) fn untracked_diff(
     root: &Path,
     rel: &str,
@@ -121,8 +130,8 @@ pub(super) fn untracked_diff(
 ) -> Result<GitDiffFile, String> {
     let limit = limit.min(MAX_DIFF_LINES);
     let full = root.join(rel);
-    let meta = std::fs::metadata(&full).map_err(|e| e.to_string())?;
-    if !meta.is_file() {
+    let meta = std::fs::symlink_metadata(&full).map_err(|e| e.to_string())?;
+    if !meta.is_file() || !stays_inside(root, &full) {
         return Err("not a regular file".to_string());
     }
     let mut file = GitDiffFile {
@@ -190,8 +199,8 @@ pub(super) fn untracked_counts(
     budget: &mut u64,
 ) -> Option<(usize, usize, bool)> {
     let full = root.join(rel);
-    let meta = std::fs::metadata(&full).ok()?;
-    if !meta.is_file() {
+    let meta = std::fs::symlink_metadata(&full).ok()?;
+    if !meta.is_file() || !stays_inside(root, &full) {
         return None;
     }
     if meta.len() > MAX_UNTRACKED_BYTES {
@@ -227,4 +236,24 @@ pub(super) fn staged_rename_source(root: &Path, new_path: &str) -> Option<String
         }
     }
     None
+}
+
+#[cfg(all(test, unix))]
+mod symlink_tests {
+    use super::*;
+
+    #[test]
+    fn untracked_symlinks_are_never_followed() {
+        let base = std::env::temp_dir().join(format!("forge-diff-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(base.join("secret.txt"), "top secret\n").unwrap();
+        std::os::unix::fs::symlink(base.join("secret.txt"), repo.join("creds.txt")).unwrap();
+        std::fs::write(repo.join("plain.txt"), "hello\n").unwrap();
+        assert!(untracked_diff(&repo, "creds.txt", 0, 100).is_err());
+        assert!(untracked_counts(&repo, "creds.txt", &mut 1_000_000).is_none());
+        assert!(untracked_diff(&repo, "plain.txt", 0, 100).is_ok());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

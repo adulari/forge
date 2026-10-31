@@ -577,6 +577,7 @@ pub(crate) async fn terminal_list(
 
 pub(crate) async fn terminal_ws(
     State(state): State<Arc<DaemonState>>,
+    axum::Extension(auth): axum::Extension<crate::serve_clients::ClientAuth>,
     Query(params): Query<TerminalQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -635,7 +636,9 @@ pub(crate) async fn terminal_ws(
     };
     let registry = state.terminals.clone();
     let going_away = state.registry.signals.going_away_rx();
-    ws.on_upgrade(move |socket| attach_terminal(socket, terminal, registry, key, going_away))
+    crate::serve_access::upgrade_until_revoked(ws, auth, move |socket| {
+        attach_terminal(socket, terminal, registry, key, going_away)
+    })
 }
 
 struct TerminalClientGuard(Arc<TerminalHandle>);

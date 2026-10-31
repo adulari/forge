@@ -197,6 +197,20 @@ impl ClientRegistry {
         forge_config::config_dir().map(|d| d.join(CLIENTS_FILE))
     }
 
+    /// A file next to the clients file, so state that belongs to paired clients lives with them.
+    pub(crate) fn sibling_path(&self, name: &str) -> Option<PathBuf> {
+        self.path
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|d| d.join(name))
+    }
+
+    pub(crate) fn active_ids(&self) -> std::collections::HashSet<String> {
+        let mut inner = self.lock();
+        self.refresh(&mut inner, true);
+        inner.clients.iter().map(|c| c.id.clone()).collect()
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }

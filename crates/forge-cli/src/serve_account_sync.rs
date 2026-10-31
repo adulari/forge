@@ -49,6 +49,14 @@ pub(crate) fn keys_toggle_refused() -> Response {
     )
 }
 
+pub(crate) fn direct_only_refused() -> Response {
+    err_response_coded(
+        StatusCode::FORBIDDEN,
+        "direct_only",
+        "This setting can only be changed on the machine itself",
+    )
+}
+
 #[derive(Deserialize)]
 struct UpdateBody {
     category: String,
