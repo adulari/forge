@@ -223,7 +223,7 @@ fn console_script() -> &'static str {
       size += entry.text.length + 32;
       batch.push(entry);
     }
-    // A hidden iframe, never location.href: assigning the top location would cancel the page's own
+    // A hidden iframe, not a top-frame navigation: that would cancel the page's own
     // pending navigation or form submit. The native handler cancels this load and reads the URL.
     const frame = document.createElement("iframe");
     frame.style.display = "none";
@@ -696,7 +696,14 @@ mod tests {
     #[test]
     fn console_script_never_navigates_the_top_frame() {
         let script = console_script();
-        assert!(!script.contains("location.href"));
+        for top_frame in [
+            "location.href",
+            "location.assign",
+            "location.replace",
+            "window.location",
+        ] {
+            assert!(!script.contains(top_frame), "{top_frame}");
+        }
         assert!(script.contains("createElement(\"iframe\")"));
         assert!(script.contains("pagehide"));
     }
