@@ -411,14 +411,7 @@ impl Session {
                         break;
                     }
                 } else if self.inject_steers(&resp.content)
-                    || (
-                        // A tool call written as text has its own repair note, and a bridge
-                        // re-run has the cost ceiling and anti-spiral checks below; a generic
-                        // "act now" nudge would pre-empt both and add re-drives they never count.
-                        !forge_provider::is_cli_bridge(&active_model)
-                            && !forge_provider::looks_like_unexecuted_tool_call(&resp.content)
-                            && self.thinking_loop_nudge(&resp.content, &mut thinking_loop)
-                    )
+                    || self.thinking_loop_nudge(&resp.content, &mut thinking_loop, &active_model)
                 {
                     // The user queued a prompt while this response was being produced. Rather than
                     // ending the turn and starting a new one, continue with it now — the model

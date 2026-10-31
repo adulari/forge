@@ -82,8 +82,21 @@ impl crate::Session {
 
     /// `[harness] thinking_loop_breaker`: push the interrupt when `text` restates an earlier
     /// tool-free reply of this stretch. Returns `true` when the turn should continue.
-    pub(crate) fn thinking_loop_nudge(&mut self, text: &str, tracker: &mut ThinkingLoop) -> bool {
-        if !self.config.harness.thinking_loop_breaker || !tracker.repeats(text) {
+    ///
+    /// Left alone for a tool call written as text (it has its own repair note) and for CLI-bridge
+    /// turns (their cost ceiling and anti-spiral checks decide whether to re-drive): a generic
+    /// "act now" nudge would pre-empt both and add re-drives they never count.
+    pub(crate) fn thinking_loop_nudge(
+        &mut self,
+        text: &str,
+        tracker: &mut ThinkingLoop,
+        model: &str,
+    ) -> bool {
+        if !self.config.harness.thinking_loop_breaker
+            || forge_provider::is_cli_bridge(model)
+            || forge_provider::looks_like_unexecuted_tool_call(text)
+            || !tracker.repeats(text)
+        {
             return false;
         }
         self.presenter.emit(crate::PresenterEvent::Warning(

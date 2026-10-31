@@ -6,7 +6,7 @@ use super::*;
 /// damaged. The surrounding message stays readable either way — losing one row's call list must
 /// not make a whole transcript unloadable — but corruption is reported instead of silently
 /// presenting the turn as call-free.
-fn parse_tool_calls_with_diagnostic(
+pub(crate) fn parse_tool_calls_with_diagnostic(
     session_id: &str,
     seq: Option<i64>,
     raw: Option<&str>,
@@ -44,7 +44,7 @@ fn parse_provider_items(
     }
 }
 
-fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> Role {
+pub(crate) fn parse_role_with_diagnostic(session_id: &str, seq: Option<i64>, raw: &str) -> Role {
     match Role::parse(raw) {
         Some(role) => role,
         None => {
@@ -189,49 +189,6 @@ impl Store {
     /// conversation any more — `uncompact_session_store` keeps them removed for the same reason).
     pub fn load_messages_uncompacted(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         self.load_messages_where(session_id, "(active = 1 OR compacted = 1)")
-    }
-
-    /// The newest `limit` messages that can name a file the session deliberately referenced: what
-    /// the user typed, and the arguments of the assistant's tool calls. Tool output, assistant
-    /// prose, harness notes and anything a fetched page said are left out, and a user body is cut
-    /// to 64 KiB, so a long session costs a bounded read. Oldest first.
-    pub fn load_path_evidence_tail(
-        &self,
-        session_id: &str,
-        limit: usize,
-    ) -> Result<Vec<StoredMessage>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT role, CASE WHEN role = 'user' THEN substr(content, 1, 65536) ELSE '' END,
-                    tool_calls_json
-             FROM message
-             WHERE session_id = ?1 AND (active = 1 OR compacted = 1) AND COALESCE(nudge, 0) = 0
-               AND (role = 'user'
-                    OR (role = 'assistant' AND tool_calls_json IS NOT NULL
-                        AND tool_calls_json NOT IN ('', '[]')))
-             ORDER BY seq DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map((session_id, limit as i64), |row| {
-            let role: String = row.get(0)?;
-            let tool_calls_json: Option<String> = row.get(2)?;
-            Ok(StoredMessage {
-                role: parse_role_with_diagnostic(session_id, None, &role),
-                content: row.get(1)?,
-                model: None,
-                tool_calls: parse_tool_calls_with_diagnostic(
-                    session_id,
-                    None,
-                    tool_calls_json.as_deref(),
-                ),
-                tool_call_id: None,
-                visibility: Visibility::Llm,
-                provider_items: None,
-                kind: forge_types::MessageKind::Normal,
-            })
-        })?;
-        let mut messages = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        messages.reverse();
-        Ok(messages)
     }
 
     /// The active messages at or after `from_seq`, in turn order, without the compaction summary
