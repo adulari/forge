@@ -728,6 +728,10 @@ sentence the apps toast; terminals whose shell has exited do not count. And when
 down, every attached terminal socket (like the session and fleet sockets) is closed with code
 `1001` and the reason `host restarting`, after running turns have finished.
 
+A terminal socket belongs to the paired client that opened it. Revoking that client (or rotating
+its token) closes its open terminal sockets at once instead of letting them run until the client
+disconnects; the shell itself keeps running for the remaining clients and the owner.
+
 ## 2g'. The model catalog is the daemon's, not the last terminal's
 
 `GET /api/models` used to project one thing: the on-disk discovery cache

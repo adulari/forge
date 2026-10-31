@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../lib/platform", () => ({ isWeb: false }));
-
 import { parsePayload } from "./sessionDrag";
+
+vi.mock("../../lib/platform", () => ({ isWeb: false }));
 
 describe("drag payloads", () => {
   it("carries a pane by its stable slot id", () => {
