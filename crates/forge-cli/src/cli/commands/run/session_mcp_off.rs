@@ -79,6 +79,12 @@ pub(crate) fn inherited(resume: Option<&str>) -> Vec<String> {
 
 /// Drop the servers the owning bridge session switched off. The `forge mcp-serve` child builds its
 /// own MCP manager from the config file, so it reads the same sidecar by session id.
+pub(crate) fn apply_bridge(mcp: &mut forge_config::McpConfig, store: &forge_store::Store) {
+    if let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) {
+        apply_persisted(mcp, store.db_path(), &session_id);
+    }
+}
+
 pub(crate) fn apply_persisted(
     mcp: &mut forge_config::McpConfig,
     db: Option<&Path>,
