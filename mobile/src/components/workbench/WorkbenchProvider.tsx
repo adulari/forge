@@ -16,6 +16,7 @@ import {
   cycleFocus,
   focusPane,
   initialLayout,
+  openFromPane,
   withSecondary,
   migrateLegacySplit,
   openInFocused,
@@ -45,7 +46,7 @@ import {
   type WorkbenchSurfaceInput,
 } from "./model";
 
-export type OpenMode = "focused" | "new" | { pane: number };
+export type OpenMode = "focused" | "new" | { pane: number; tap?: boolean };
 
 export interface WorkbenchController {
   state: WorkbenchState;
@@ -256,6 +257,10 @@ export function WorkbenchProvider({ children }: { children: React.ReactNode }) {
     const { layout: current, primaryId: primary } = latest.current;
     if (mode === "new") {
       dispatchLayout({ type: "set", layout: openInNewPane(current, primary, id) });
+      return;
+    }
+    if (typeof mode === "object" && mode.tap) {
+      dispatchLayout({ type: "set", layout: openFromPane(current, primary, mode.pane, id) });
       return;
     }
     const result =

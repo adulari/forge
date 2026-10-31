@@ -10,7 +10,7 @@ describe("pane navigation", () => {
   it("a secondary pane opens a session in itself and never routes pane 0", () => {
     const workbench = { openSession: vi.fn(), focusPane: vi.fn(), openSurface: vi.fn() };
     secondaryPaneNav(workbench, 2).openSession("child");
-    expect(workbench.openSession).toHaveBeenCalledWith("child", { pane: 2 });
+    expect(workbench.openSession).toHaveBeenCalledWith("child", { pane: 2, tap: true });
     expect(routed.openSession).not.toHaveBeenCalled();
     expect(routed.push).not.toHaveBeenCalled();
   });

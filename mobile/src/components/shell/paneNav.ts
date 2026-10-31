@@ -24,7 +24,7 @@ export function usePaneNav(): PaneNav {
 }
 
 interface PaneNavWorkbench {
-  openSession(id: string, mode: { pane: number }): void;
+  openSession(id: string, mode: { pane: number; tap: true }): void;
   focusPane(index: number): void;
   openSurface(input: WorkbenchSurfaceInput): void;
 }
@@ -32,7 +32,7 @@ interface PaneNavWorkbench {
 /** The nav for secondary pane `index`: sessions open in that pane, agents in the dock it focuses. */
 export function secondaryPaneNav(workbench: PaneNavWorkbench, index: number): PaneNav {
   return {
-    openSession: (id) => workbench.openSession(id, { pane: index }),
+    openSession: (id) => workbench.openSession(id, { pane: index, tap: true }),
     openAgents: () => {
       workbench.focusPane(index);
       workbench.openSurface({ kind: "agents" });

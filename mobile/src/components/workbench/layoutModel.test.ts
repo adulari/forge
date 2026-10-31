@@ -30,6 +30,7 @@ import {
   withSecondary,
   indexOfSlotId,
   nextPaneSize,
+  openFromPane,
   secondaryRenderOrder,
   type PaneLayoutState,
 } from "./layoutModel";
@@ -346,5 +347,33 @@ describe("zero-size guard", () => {
     expect(nextPaneSize(real, 1400, 800)).toBe(real);
     expect(nextPaneSize(real, 1000, 800)).toEqual({ width: 1000, height: 800 });
     expect(nextPaneSize(null, 1000, 800)).toEqual({ width: 1000, height: 800 });
+  });
+});
+
+describe("openFromPane (a tap inside a secondary pane)", () => {
+  it("focuses pane 0 when the session is the primary, leaving every pane as it was", () => {
+    const state = { ...layoutWith(["parent", "other"]), focus: 1 };
+    const next = openFromPane(state, "child", 1, "child");
+    expect(next.secondary).toEqual(["parent", "other"]);
+    expect(next.focus).toBe(0);
+  });
+
+  it("focuses the pane that already shows the session instead of moving it", () => {
+    const state = { ...layoutWith(["parent", "child"]), focus: 1 };
+    const next = openFromPane(state, "main", 1, "child");
+    expect(next.secondary).toEqual(["parent", "child"]);
+    expect(next.focus).toBe(2);
+  });
+
+  it("replaces only this pane's session when the session is not open anywhere", () => {
+    const state = layoutWith(["parent", "other"]);
+    const next = openFromPane(state, "main", 1, "fresh");
+    expect(next.secondary).toEqual(["fresh", "other"]);
+    expect(next.focus).toBe(1);
+    expect(next.slotIds).toEqual(state.slotIds);
+  });
+
+  it("drop semantics are unchanged: openInPane still moves an open session", () => {
+    expect(openInPane(layoutWith(["parent", "child"]), "main", 1, "child").state.secondary).toEqual(["child", null]);
   });
 });

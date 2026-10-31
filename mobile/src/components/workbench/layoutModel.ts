@@ -230,6 +230,23 @@ export function openInNewPane(state: PaneLayoutState, primary: string | null, id
   return { ...setSlot(state, last, id), focus: last };
 }
 
+/**
+ * A tap on a session link inside secondary pane `index` (an agent row, the subagent strip, Fork).
+ * Unlike a drop it never moves or duplicates anything: a session already on screen just takes
+ * focus, and only an unopened one replaces this pane's session.
+ */
+export function openFromPane(
+  state: PaneLayoutState,
+  primary: string | null,
+  index: number,
+  id: string,
+): PaneLayoutState {
+  if (id === primary) return focusPane(state, 0);
+  const existing = state.secondary.indexOf(id);
+  if (existing >= 0) return focusPane(state, existing + 1);
+  return { ...setSlot(state, index, id), focus: index };
+}
+
 /** Drop `id` onto pane `index`. Dropping on pane 0 changes the route. */
 export function openInPane(
   state: PaneLayoutState,

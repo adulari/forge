@@ -235,7 +235,7 @@ function PrimaryPaneHeader({ sessionId, actions }: { sessionId: string; actions:
 // Secondary panes
 // ---------------------------------------------------------------------------
 
-function SecondaryPaneBody({ sessionId, actions }: { sessionId: string; actions: PaneActions }) {
+function SecondaryPaneBody({ sessionId, actions, visible }: { sessionId: string; actions: PaneActions; visible: boolean }) {
   const { snapshot, send } = useSessionCtx();
   const row = useSessionRow(sessionId);
   const pending = snapshot?.permission_prompt != null || snapshot?.question != null;
@@ -260,8 +260,9 @@ function SecondaryPaneBody({ sessionId, actions }: { sessionId: string; actions:
         <SessionChat />
       </View>
       {/* The session shell's own OverlayHost only reads pane 0's socket, so a picker a secondary
-          pane asks for (model chip, /model) would never appear without one here. */}
-      <OverlayHost />
+          pane asks for (model chip, /model) would never appear without one here. Only a pane on
+          screen gets one: a hidden pane's overlay is a full-window modal for an unseen session. */}
+      {visible ? <OverlayHost /> : null}
     </>
   );
 }
@@ -325,7 +326,7 @@ function PanePicker({ index, actions }: { index: number; actions: PaneActions })
   );
 }
 
-function SecondaryPane({ sessionId, index, actions }: { sessionId: string | null; index: number; actions: PaneActions }) {
+function SecondaryPane({ sessionId, index, actions, visible }: { sessionId: string | null; index: number; actions: PaneActions; visible: boolean }) {
   const { openSession, focusPane, openSurface } = useWorkbench();
   const nav = useMemo(
     () => secondaryPaneNav({ openSession, focusPane, openSurface }, index),
@@ -337,7 +338,7 @@ function SecondaryPane({ sessionId, index, actions }: { sessionId: string | null
     // instead of handing a live provider a different id.
     <SessionProvider key={sessionId} sessionId={sessionId}>
       <PaneNavContext.Provider value={nav}>
-        <SecondaryPaneBody sessionId={sessionId} actions={actions} />
+        <SecondaryPaneBody sessionId={sessionId} actions={actions} visible={visible} />
       </PaneNavContext.Provider>
     </SessionProvider>
   );
@@ -555,7 +556,7 @@ export function PaneGrid({ primary }: PaneGridProps) {
                 style={[styles.pane, rectStyle(rect), { borderLeftColor: tokens.border }]}
                 onStartShouldSetResponderCapture={focusOn(index)}
               >
-                <SecondaryPane sessionId={slot} index={index} actions={actionsFor(index)} />
+                <SecondaryPane sessionId={slot} index={index} actions={actionsFor(index)} visible={rect != null} />
                 {dragging != null && dragging.kind !== "tab" && rect && !(dragging.kind === "pane" && dragging.slot === slotId) ? (
                   <DropZone label={dropLabel} accepts={acceptsOn(index)} onDrop={dropOn(index)} style={styles.paneDrop} />
                 ) : null}
