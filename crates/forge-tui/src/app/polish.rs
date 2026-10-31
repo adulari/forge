@@ -54,7 +54,7 @@ impl Verbosity {
 
     fn blurb(self) -> &'static str {
         match self {
-            Self::Quiet => "reasoning hidden, tool runs folded, notices trimmed",
+            Self::Quiet => "reasoning hidden, tool runs folded, passing hints left out",
             Self::Default => "reasoning hidden, tool runs folded",
             Self::Everything => "reasoning shown, every tool run open",
         }
@@ -132,6 +132,14 @@ impl App {
     /// The command suggested after a bare `!`.
     pub(crate) fn shell_example(&self) -> &'static str {
         SHELL_EXAMPLES[(self.polish.seed + self.main_log.len()) % SHELL_EXAMPLES.len()]
+    }
+
+    /// A hint nobody asked for (as opposed to the reply to something typed). Quiet leaves it out;
+    /// every command result and warning still goes through [`App::note`].
+    pub fn ambient_note(&mut self, text: &str) {
+        if self.polish.verbosity != Verbosity::Quiet {
+            self.note(text);
+        }
     }
 
     /// Step Quiet, Default, Everything and apply it to what the transcript shows.

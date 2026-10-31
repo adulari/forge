@@ -51,6 +51,9 @@ pub(crate) fn apply_overlay_input(
     op: RemoteOverlayOp,
 ) -> Vec<forge_tui::KeyKind> {
     use forge_tui::KeyKind as K;
+    // A phone driving an overlay has already scanned the code; leaving it up would eat the
+    // synthesized Enter meant for the picker.
+    app.polish.qr = None;
     match op {
         RemoteOverlayOp::Cancel => {
             if any_remote_modal_open(app) {
@@ -406,4 +409,22 @@ pub(crate) async fn toggle_remote(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod qr_overlay_tests {
+    use super::*;
+
+    #[test]
+    fn a_remote_overlay_verb_closes_the_qr_so_its_enter_reaches_the_picker() {
+        let mut app = forge_tui::App::default();
+        app.open_qr_overlay("Remote control", "https://x.test/a", false);
+        let keys = apply_overlay_input(&mut app, RemoteOverlayOp::Nav(1));
+        assert!(app.polish.qr.is_none());
+        assert!(
+            !app.qr_overlay_key(forge_tui::KeyKind::Enter),
+            "the QR no longer claims keys"
+        );
+        assert!(keys.len() <= 1);
+    }
 }

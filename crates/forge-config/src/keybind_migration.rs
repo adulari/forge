@@ -28,9 +28,47 @@ pub(crate) fn move_compact_off_ctrl_l(keybinds: &mut KeybindsConfig) {
     }
 }
 
+/// `undo` used to own Ctrl+Z; that chord is now `suspend`. A config that still says
+/// `undo = Ctrl+Z` (saved while it was the default) would collide, so undo moves to Alt+Z. A user
+/// who rebound `suspend` elsewhere keeps Ctrl+Z for undo.
+pub(crate) fn move_undo_off_ctrl_z(keybinds: &mut KeybindsConfig) {
+    let ctrl_z = KeyCombo {
+        key: "z".to_string(),
+        ctrl: true,
+        alt: false,
+        shift: false,
+    };
+    if keybinds.binds.get("undo") == Some(&ctrl_z) && keybinds.binds.get("suspend") == Some(&ctrl_z)
+    {
+        keybinds.binds.insert(
+            "undo".to_string(),
+            KeyCombo {
+                ctrl: false,
+                alt: true,
+                ..ctrl_z
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_ctrl_z_undo_yields_to_suspend() {
+        let ctrl_z = KeyCombo::parse("ctrl+z");
+        let mut kb = KeybindsConfig::default();
+        kb.binds.insert("undo".into(), ctrl_z.clone());
+        move_undo_off_ctrl_z(&mut kb);
+        assert_eq!(kb.binds["undo"], KeyCombo::parse("alt+z"));
+        assert_eq!(kb.binds["suspend"], ctrl_z);
+        let mut kept = KeybindsConfig::default();
+        kept.binds.insert("undo".into(), ctrl_z.clone());
+        kept.binds.insert("suspend".into(), KeyCombo::unbound());
+        move_undo_off_ctrl_z(&mut kept);
+        assert_eq!(kept.binds["undo"], ctrl_z);
+    }
 
     fn combo(ctrl: bool, alt: bool) -> KeyCombo {
         KeyCombo {

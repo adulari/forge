@@ -292,8 +292,32 @@ impl KeybindsConfig {
             })
             .collect::<Option<_>>()?;
         let first = steps.first()?;
-        let guarded = first.ctrl || first.alt || first.key.len() > 1;
-        (steps.len() >= 2 && guarded && !first.is_unbound()).then_some(steps)
+        (steps.len() >= 2 && Self::safe_first_step(first)).then_some(steps)
+    }
+
+    /// Whether `combo` can start a sequence without stealing ordinary typing or editing: a
+    /// function key, or a Ctrl/Alt chord that the composer does not already use. Esc, Enter,
+    /// Space, arrows and bare letters are never allowed.
+    pub fn safe_first_step(combo: &KeyCombo) -> bool {
+        const CTRL_EDITING: &str = "acdejuwy";
+        const ALT_EDITING: &str = "bfy";
+        if combo.is_unbound() {
+            return false;
+        }
+        let is_function = combo.key.len() > 1
+            && combo.key.starts_with('f')
+            && combo.key[1..].chars().all(|c| c.is_ascii_digit());
+        if is_function {
+            return true;
+        }
+        let single = combo.key.chars().count() == 1;
+        let letter = combo.key.chars().next().unwrap_or(' ');
+        (combo.ctrl || combo.alt)
+            && !(single && combo.ctrl && !combo.alt && CTRL_EDITING.contains(letter))
+            && !(single && combo.alt && !combo.ctrl && ALT_EDITING.contains(letter))
+            && combo.key != "esc"
+            && combo.key != "enter"
+            && combo.key != "backspace"
     }
 
     /// Every working key sequence: the leader's built-in follow-ups (while a leader is set) plus
@@ -301,7 +325,7 @@ impl KeybindsConfig {
     /// built-in follow-up; `"none"` removes it.
     pub fn effective_sequences(&self) -> Vec<KeySequence> {
         let mut out = Vec::new();
-        if let Some(leader) = &self.leader {
+        if let Some(leader) = self.leader.as_ref().filter(|l| Self::safe_first_step(l)) {
             for (key, action) in LEADER_FOLLOW_UPS {
                 if !self.sequences.contains_key(action) {
                     out.push(KeySequence {
@@ -324,13 +348,22 @@ impl KeybindsConfig {
 
     /// `(action, text)` of sequences that can never fire, for a startup note.
     pub fn invalid_sequences(&self) -> Vec<(String, String)> {
-        self.sequences
-            .iter()
-            .filter(|(_, text)| {
-                !text.trim().eq_ignore_ascii_case(UNBOUND_KEY)
-                    && self.parse_sequence(text).is_none()
-            })
-            .map(|(a, t)| (a.clone(), t.clone()))
+        let bad_leader = self
+            .leader
+            .as_ref()
+            .filter(|l| !Self::safe_first_step(l))
+            .map(|l| ("leader".to_string(), format!("{l:?}")));
+        bad_leader
+            .into_iter()
+            .chain(
+                self.sequences
+                    .iter()
+                    .filter(|(_, text)| {
+                        !text.trim().eq_ignore_ascii_case(UNBOUND_KEY)
+                            && self.parse_sequence(text).is_none()
+                    })
+                    .map(|(a, t)| (a.clone(), t.clone())),
+            )
             .collect()
     }
 
@@ -378,6 +411,7 @@ pub(crate) fn migrate_legacy_keybinds(keybinds: &mut KeybindsConfig) {
         );
     }
     crate::keybind_migration::move_compact_off_ctrl_l(keybinds);
+    crate::keybind_migration::move_undo_off_ctrl_z(keybinds);
 }
 
 /// Normalize a freshly loaded keymap: legacy migration first, then the preset.
@@ -392,6 +426,27 @@ fn user_config_doc() -> Result<(PathBuf, toml_edit::DocumentMut), ConfigError> {
     let path = dir.join("config.toml");
     let doc = toml_write::load_doc(&path)?;
     Ok((path, doc))
+}
+
+/// Drop a saved bind so the action falls back to its default (or preset) chord again. A no-op
+/// when nothing is saved for it.
+pub fn remove_keybind(action: &str) -> Result<(), ConfigError> {
+    let (path, mut doc) = user_config_doc()?;
+    if remove_bind_from(&mut doc, action) {
+        toml_write::save_doc(&path, &doc)?;
+    }
+    Ok(())
+}
+
+fn remove_bind_from(doc: &mut toml_edit::DocumentMut, action: &str) -> bool {
+    let saved = doc
+        .get("keybinds")
+        .and_then(|k| k.get("binds"))
+        .is_some_and(|b| b.get(action).is_some());
+    if saved {
+        toml_write::remove_dotted(doc, &format!("keybinds.binds.{action}"));
+    }
+    saved
 }
 
 /// Persist a single keybind to `[keybinds.binds]` in the user config TOML, preserving all other keys.
@@ -581,6 +636,37 @@ mod tests {
         assert_eq!(find("reload"), None, "one step is not a sequence");
         let bad: Vec<_> = kb.invalid_sequences().into_iter().map(|(a, _)| a).collect();
         assert_eq!(bad, vec!["reload".to_string(), "stash".to_string()]);
+    }
+
+    #[test]
+    fn a_leader_or_first_step_that_would_eat_typing_is_refused() {
+        for leader in ["space", "esc", "enter", "a", "ctrl+a", "ctrl+d", "alt+b"] {
+            let kb = load(&format!("[keybinds]\nleader = \"{leader}\"\n"));
+            assert!(kb.effective_sequences().is_empty(), "{leader}");
+            assert_eq!(kb.invalid_sequences().len(), 1, "{leader}");
+        }
+        let kb =
+            load("[keybinds.sequences]\nhelp = \"esc h\"\nundo = \"enter x\"\nreload = \"f5 r\"\n");
+        let ok: Vec<_> = kb
+            .effective_sequences()
+            .into_iter()
+            .map(|s| s.action)
+            .collect();
+        assert_eq!(ok, vec!["reload".to_string()]);
+        assert_eq!(kb.invalid_sequences().len(), 2);
+    }
+
+    #[test]
+    fn remove_keybind_deletes_only_the_saved_entry() {
+        let mut doc: toml_edit::DocumentMut =
+            "[keybinds.binds]\nsuspend = { key = \"none\" }\nhelp = { key = \"h\", ctrl = true }\n"
+                .parse()
+                .unwrap();
+        assert!(remove_bind_from(&mut doc, "suspend"));
+        assert!(!remove_bind_from(&mut doc, "never_saved"));
+        let text = doc.to_string();
+        assert!(!text.contains("suspend"), "{text}");
+        assert!(text.contains("help"), "{text}");
     }
 
     #[test]

@@ -1829,6 +1829,8 @@ pub(crate) async fn run_chat_tui(
                         for (action, combo) in &app.keybinds.binds {
                             if defaults.binds.get(action.as_str()) != Some(combo) {
                                 let _ = forge_config::write_keybind(action, combo);
+                            } else {
+                                let _ = forge_config::remove_keybind(action);
                             }
                         }
                         tui.keybinds = app.keybinds.clone();

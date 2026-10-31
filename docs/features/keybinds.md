@@ -52,7 +52,7 @@ Overrides **deep-merge** over the built-in defaults — writing one bind never u
 | `next_tool_group` | Alt-↓ | Full-screen: focus the next tool group (same keys as above) |
 | `undo` | Alt-Z | Undo last file write (`/undo`). Was Ctrl-Z until v2.27, which is now the terminal's suspend chord |
 | `suspend` | Ctrl-Z | Suspend Forge to the shell; `fg` returns with the screen restored (Unix) |
-| `verbosity_cycle` | Alt-V | Cycle the transcript between quiet (reasoning hidden, tool runs folded, informational notices trimmed), default and everything (reasoning shown, every tool run open) |
+| `verbosity_cycle` | Alt-V | Cycle the transcript between quiet (reasoning hidden, tool runs folded, passing hints left out), default and everything (reasoning shown, every tool run open) |
 | `compact` | Alt-L | Compact/summarize conversation (`/compact`). Was Ctrl-L until v2.21: a config that still binds it to Ctrl-L is moved to Alt-L on load while `redraw` keeps Ctrl-L |
 | `redraw` | Ctrl-L | Repaint the screen, as in a shell or Claude Code (session and transcript untouched) |
 | `model_picker` | Alt-M | Open model picker overlay |
@@ -140,8 +140,9 @@ Esc cancels, an unknown key is swallowed and ends the sequence, and the window c
 with the default leader, stash moves from Ctrl+X to Ctrl+X then `x`.
 
 **Sequences.** `[keybinds.sequences]` maps an action to two or more space-separated steps;
-`<leader>` stands for the leader key. The first step must carry Ctrl or Alt (or be a function key),
-so ordinary typing is never swallowed. A sequence for an action replaces that action's built-in
+`<leader>` stands for the leader key. The first step must be a function key or a Ctrl/Alt chord the prompt does not already use
+(Ctrl+A/C/D/E/J/U/W/Y, Alt+B/F/Y), so typing, Enter and Esc are never swallowed; the leader
+follows the same rule. A sequence for an action replaces that action's built-in
 follow-up; `"none"` drops it.
 
 ```toml

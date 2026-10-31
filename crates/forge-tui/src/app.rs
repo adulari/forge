@@ -2807,9 +2807,6 @@ impl App {
     /// around the note. It is printed right after that segment instead.
     pub fn note(&mut self, text: &str) {
         let (kind, body) = lines::notice::classify(text, NoticeKind::Info);
-        if self.polish.verbosity == Verbosity::Quiet && kind == NoticeKind::Info {
-            return;
-        }
         if self.streaming_active && !self.streaming.is_empty() {
             self.transcript_ui.deferred_notices.push((kind, body));
             return;

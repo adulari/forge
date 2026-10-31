@@ -76,8 +76,8 @@ pub use keybindings_file::{
     write_keybindings_file, KeybindingsFile,
 };
 pub use keybinds::{
-    default_leader, write_keybind, write_keybind_preset, KeyCombo, KeySequence, KeybindPreset,
-    KeybindsConfig, UNBOUND_KEY,
+    default_leader, remove_keybind, write_keybind, write_keybind_preset, KeyCombo, KeySequence,
+    KeybindPreset, KeybindsConfig, UNBOUND_KEY,
 };
 pub use lsp_diagnostics::LspDiagnosticsMode;
 pub use mcp::{

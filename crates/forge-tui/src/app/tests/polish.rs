@@ -72,18 +72,20 @@ fn the_bar_cursor_is_a_thin_glyph_past_the_text() {
 }
 
 #[test]
-fn quiet_drops_info_notices_but_not_warnings_and_default_restores_them() {
+fn quiet_leaves_out_passing_hints_but_never_command_results() {
     let mut app = app();
     app.set_verbosity(Verbosity::Quiet);
     app.drain_flush();
-    app.note("a routine note");
+    app.ambient_note("a passing hint");
+    app.note("context: 12% used");
     app.note("⚠ something is wrong");
     let text = flush_text(&mut app);
-    assert!(!text.contains("a routine note"), "{text}");
+    assert!(!text.contains("a passing hint"), "{text}");
+    assert!(text.contains("context: 12% used"), "{text}");
     assert!(text.contains("something is wrong"), "{text}");
     app.set_verbosity(Verbosity::Default);
-    app.note("a routine note");
-    assert!(flush_text(&mut app).contains("a routine note"));
+    app.ambient_note("a passing hint");
+    assert!(flush_text(&mut app).contains("a passing hint"));
 }
 
 #[test]
