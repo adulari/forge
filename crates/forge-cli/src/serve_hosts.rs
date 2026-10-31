@@ -4,6 +4,7 @@
 //!
 //! - `GET  {base}/api/hosts`                        machines added so far
 //! - `POST {base}/api/hosts/add`                    `{target, name?, lan?, pair?}` -> `{job_id}`
+//! - `GET  {base}/api/hosts/jobs`                   running jobs, so a closed sheet can re-attach
 //! - `GET  {base}/api/hosts/jobs/{id}`              progress lines, state, safety code
 //! - `POST {base}/api/hosts/jobs/{id}/approve`      `{approve: bool}`
 //! - `POST {base}/api/hosts/{name}/remove`          forget a machine
@@ -18,7 +19,7 @@ use std::time::Duration;
 
 use axum::extract::{Path as AxumPath, State};
 use axum::http::StatusCode;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -31,12 +32,14 @@ use crate::serve::{err_response, json_response, DaemonState};
 
 const MAX_LINES: usize = 300;
 const MAX_ACTIVE_JOBS: usize = 4;
-const APPROVAL_WAIT: Duration = Duration::from_secs(11 * 60);
+// Shorter than the service's 10 minute request expiry, so a forgotten sheet fails first.
+const APPROVAL_WAIT: Duration = Duration::from_secs(9 * 60);
 
 pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
     Router::new()
         .route(&format!("{base}/api/hosts"), get(list_hosts))
         .route(&format!("{base}/api/hosts/add"), post(start_add))
+        .route(&format!("{base}/api/hosts/jobs"), get(list_jobs))
         .route(&format!("{base}/api/hosts/jobs/{{id}}"), get(job_status))
         .route(
             &format!("{base}/api/hosts/jobs/{{id}}/approve"),
@@ -64,7 +67,10 @@ struct JobView {
     phase: JobPhase,
     step: String,
     lines: Vec<String>,
+    /// The code THIS machine computed for the waiting device: the one to compare.
     safety_code: Option<String>,
+    /// What the new machine printed for itself.
+    remote_safety_code: Option<String>,
     error: Option<String>,
     host: Option<hosts::HostRecord>,
 }
@@ -87,6 +93,10 @@ struct JobApprover {
 }
 
 impl Approver for JobApprover {
+    fn local_safety_code(&self, challenge: &str) -> anyhow::Result<String> {
+        LocalApprover { confirm: true }.local_safety_code(challenge)
+    }
+
     fn approve(&self, challenge: &str, safety_code: Option<&str>) -> anyhow::Result<bool> {
         {
             let mut view = self.job.view.lock().unwrap();
@@ -97,8 +107,11 @@ impl Approver for JobApprover {
             .decisions
             .recv_timeout(APPROVAL_WAIT)
             .unwrap_or_default();
+        // Whatever the answer, the job no longer waits on the person: a decline or a failed
+        // approve ends the job at once instead of leaving buttons that do nothing.
+        self.job.view.lock().unwrap().phase = JobPhase::Running;
+        self.job.decision.lock().unwrap().take();
         if allowed {
-            self.job.view.lock().unwrap().phase = JobPhase::Running;
             return LocalApprover { confirm: true }.approve(challenge, safety_code);
         }
         Ok(false)
@@ -147,6 +160,7 @@ async fn start_add(State(_): State<Arc<DaemonState>>, Json(request): Json<AddReq
             step: "Starting".into(),
             lines: Vec::new(),
             safety_code: None,
+            remote_safety_code: None,
             error: None,
             host: None,
         }),
@@ -170,7 +184,20 @@ async fn start_add(State(_): State<Arc<DaemonState>>, Json(request): Json<AddReq
             .values()
             .any(|j| active(j) && j.view.lock().unwrap().target == target)
         {
-            return err_response(StatusCode::CONFLICT, "that machine is already being added");
+            let existing_id = all
+                .values()
+                .find(|j| active(j) && j.view.lock().unwrap().target == target)
+                .map(|j| j.view.lock().unwrap().id.clone());
+            return (
+                StatusCode::CONFLICT,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                serde_json::json!({
+                    "error": "that machine is already being added",
+                    "job_id": existing_id,
+                })
+                .to_string(),
+            )
+                .into_response();
         }
         all.insert(id.clone(), job.clone());
     }
@@ -208,7 +235,7 @@ fn run_job(job: Arc<Job>, options: AddOptions, decisions: Receiver<bool>) {
                 }
                 view.lines.push(line);
             }
-            Event::AwaitingApproval { .. } => {}
+            Event::AwaitingApproval { remote_code, .. } => view.remote_safety_code = remote_code,
         }
     });
     let outcome = result.and_then(|o| hosts::upsert(o.record.clone()).map(|()| o));
@@ -229,6 +256,18 @@ fn run_job(job: Arc<Job>, options: AddOptions, decisions: Receiver<bool>) {
 
 fn find_job(id: &str) -> Option<Arc<Job>> {
     jobs().lock().unwrap().get(id).cloned()
+}
+
+async fn list_jobs() -> Response {
+    let mut running: Vec<JobView> = jobs()
+        .lock()
+        .unwrap()
+        .values()
+        .map(|job| job.view.lock().unwrap().clone())
+        .filter(|view| matches!(view.phase, JobPhase::Running | JobPhase::AwaitingApproval))
+        .collect();
+    running.sort_by(|a, b| a.id.cmp(&b.id));
+    json_response(&serde_json::json!({ "jobs": running }))
 }
 
 async fn job_status(AxumPath(id): AxumPath<String>) -> Response {
@@ -362,6 +401,7 @@ mod tests {
                 step: String::new(),
                 lines: vec![],
                 safety_code: None,
+                remote_safety_code: None,
                 error: None,
                 host: None,
             }),
@@ -389,5 +429,61 @@ mod tests {
         let (status, body) = call("GET", "/tok/api/hosts/jobs/j1", "").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("awaiting_approval"), "{body}");
+    }
+
+    fn running_job(id: &str, target: &str) -> Arc<Job> {
+        let job = Arc::new(Job {
+            view: Mutex::new(JobView {
+                id: id.into(),
+                target: target.into(),
+                phase: JobPhase::Running,
+                step: String::new(),
+                lines: vec![],
+                safety_code: None,
+                remote_safety_code: None,
+                error: None,
+                host: None,
+            }),
+            decision: Mutex::new(None),
+        });
+        jobs().lock().unwrap().insert(id.into(), job.clone());
+        job
+    }
+
+    #[tokio::test]
+    async fn a_closed_sheet_can_find_its_running_job_again() {
+        running_job("reattach-1", "reattach@host");
+        let (status, body) = call("GET", "/tok/api/hosts/jobs", "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("reattach-1"), "{body}");
+        let (status, body) = call(
+            "POST",
+            "/tok/api/hosts/add",
+            r#"{"target":"reattach@host"}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert!(
+            body.contains(r#""job_id":"reattach-1""#),
+            "the 409 names the job: {body}"
+        );
+    }
+
+    #[test]
+    fn a_decline_ends_the_wait_instead_of_leaving_dead_buttons() {
+        let job = running_job("decline-1", "decline@host");
+        let (tx, rx) = channel();
+        *job.decision.lock().unwrap() = Some(tx.clone());
+        tx.send(false).unwrap();
+        let approver = JobApprover {
+            job: job.clone(),
+            decisions: rx,
+        };
+        assert!(!approver.approve("c", Some("11-22")).unwrap());
+        assert_eq!(job.view.lock().unwrap().phase, JobPhase::Running);
+        assert!(
+            job.decision.lock().unwrap().is_none(),
+            "no sender left to accept a stale Approve"
+        );
     }
 }

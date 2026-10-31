@@ -2,7 +2,7 @@
 // (`forge.activeServerId`) via expo-secure-store (secureStore.web.ts shim on web). Exposes
 // `baseUrl` for api.ts/ws.ts/queries.ts (the ACTIVE server's baseUrl — same signature as the
 // single-server version, so those files need zero changes) and a probe to validate pairing.
-import { setServerDisabled } from "./hostPresence";
+import { canActivate, firstEnabledId, setServerDisabled } from "./hostPresence";
 import React, {
   createContext,
   useCallback,
@@ -257,7 +257,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const active = await getSecureItem(ACTIVE_SERVER_KEY);
         let nextActive = active;
         if (active === id) {
-          nextActive = next[0]?.id ?? null;
+          nextActive = firstEnabledId(next) ?? next[0]?.id ?? null;
           if (nextActive) await setSecureItem(ACTIVE_SERVER_KEY, nextActive);
           else await deleteSecureItem(ACTIVE_SERVER_KEY);
         }
@@ -270,7 +270,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const setActive = useCallback(
     (id: string) => {
-      if (!servers.some((s) => s.id === id)) return;
+      if (!canActivate(servers, id)) return;
       setActiveServerId(id);
       setSecureItem(ACTIVE_SERVER_KEY, id).catch(() => {
         // best-effort persistence; in-memory state already switched

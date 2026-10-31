@@ -13,6 +13,7 @@ import {
   markSeen,
   markSelected,
   pickWarmServer,
+  seenUpdates,
   usePresence,
 } from "../../lib/hostPresence";
 import { fleetStatuses, type ServerFleetStatus, type ServerReachability } from "../../lib/fleetStatuses";
@@ -29,15 +30,19 @@ export function useServerFleetStatuses(): ServerFleetStatus[] {
   const { servers, activeServerId } = useFleetScope();
   const enabled = useMemo(() => enabledServers(servers), [servers]);
   const presence = usePresence();
-  const polled = fleetStatuses(enabled, useServerFleets(enabled));
-  const reachableKey = polled.filter((status) => status.reachability === "reachable").map((status) => status.id).join(",");
+  const fleets = useServerFleets(enabled);
+  const polled = fleetStatuses(enabled, fleets);
+  const seenKey = seenUpdates(enabled, fleets).map((seen) => `${seen.id}:${seen.at}`).join(",");
 
   useEffect(() => {
     if (activeServerId) markSelected(activeServerId);
   }, [activeServerId]);
   useEffect(() => {
-    for (const id of reachableKey ? reachableKey.split(",") : []) markSeen(id);
-  }, [reachableKey]);
+    for (const seen of seenKey ? seenKey.split(",") : []) {
+      const cut = seen.lastIndexOf(":");
+      markSeen(seen.slice(0, cut), Number(seen.slice(cut + 1)));
+    }
+  }, [seenKey]);
   useEffect(() => {
     forgetRemoved(servers);
   }, [servers]);

@@ -34,6 +34,30 @@ export function enabledServers<T extends { disabled?: boolean }>(servers: readon
  * active one. Its fleet stays polled in a single-server scope so switching to it is instant and
  * its waiting count never goes stale.
  */
+/** One entry per host that answered its latest poll, stamped with when it answered. Keyed on the
+ * poll time rather than on who is reachable, so every successful poll refreshes last-seen. */
+export function seenUpdates(
+  servers: readonly { id: string }[],
+  fleets: readonly { isSuccess: boolean; dataUpdatedAt?: number }[],
+): { id: string; at: number }[] {
+  const seen: { id: string; at: number }[] = [];
+  servers.forEach((server, index) => {
+    const fleet = fleets[index];
+    if (fleet?.isSuccess && fleet.dataUpdatedAt) seen.push({ id: server.id, at: fleet.dataUpdatedAt });
+  });
+  return seen;
+}
+
+/** Only an enabled, known server can be made active. */
+export function canActivate(servers: readonly { id: string; disabled?: boolean }[], id: string): boolean {
+  return servers.some((server) => server.id === id && !server.disabled);
+}
+
+/** The server to fall back to when the active one goes away: never a disabled one. */
+export function firstEnabledId(servers: readonly { id: string; disabled?: boolean }[]): string | null {
+  return servers.find((server) => !server.disabled)?.id ?? null;
+}
+
 export function pickWarmServer<T extends { id: string; disabled?: boolean }>(
   servers: readonly T[],
   activeId: string | null,

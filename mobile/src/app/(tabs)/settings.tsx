@@ -630,8 +630,8 @@ export function SettingsScreen() {
             return (
               <DenseRow
                 key={server.id}
-                onPress={() => setActive(server.id)}
-                accessibilityLabel={server.name}
+                onPress={() => (server.disabled ? void setServerDisabled(server.id, false) : setActive(server.id))}
+                accessibilityLabel={server.disabled ? `${server.name}, disabled, tap to re-enable` : server.name}
                 hasInteractiveTrailing
                 leading={<View style={[styles.reachabilityDot, { backgroundColor: fleet.isLoading ? tokens.warn : reachable ? tokens.success : tokens.danger }]} />}
                 trailing={

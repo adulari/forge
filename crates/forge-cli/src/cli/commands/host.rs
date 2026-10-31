@@ -41,10 +41,13 @@ pub(crate) fn host_cmd(cmd: HostCmd) -> Result<()> {
                 &mut |event| match event {
                     Event::Step(text) => println!("==> {text}"),
                     Event::Remote(line) => println!("    {line}"),
-                    Event::AwaitingApproval { safety_code } => {
+                    Event::AwaitingApproval {
+                        safety_code,
+                        remote_code,
+                    } => {
                         println!("==> Approving the new device from this machine");
-                        if let Some(code) = safety_code {
-                            println!("    Compare safety code {code} with the one above.");
+                        if let (Some(local), Some(remote)) = (safety_code, remote_code) {
+                            println!("    This machine computed {local}; the new machine printed {remote}.");
                         }
                     }
                 },

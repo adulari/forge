@@ -14,6 +14,10 @@ export function startAddHost(
   return request(baseUrl, "/api/hosts/add", { method: "POST", body: JSON.stringify(body) });
 }
 
+export function listAddHostJobs(baseUrl: string): Promise<{ jobs: AddHostJob[] }> {
+  return request(baseUrl, "/api/hosts/jobs");
+}
+
 export function getAddHostJob(baseUrl: string, id: string): Promise<AddHostJob> {
   return request(baseUrl, `/api/hosts/jobs/${encodeURIComponent(id)}`);
 }

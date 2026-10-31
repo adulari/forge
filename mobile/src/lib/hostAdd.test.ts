@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { canAddMachineVia, hostAddCommand, isTerminalPhase, isValidHostTarget } from "./hostAddCore";
+import {
+  canAddMachineVia,
+  hostAddCommand,
+  isTerminalPhase,
+  isValidHostTarget,
+  jobToResume,
+  nextPollDelay,
+  type AddHostJob,
+} from "./hostAddCore";
 
 describe("isValidHostTarget", () => {
   it("accepts ssh-style targets and refuses anything ssh or a shell could misread", () => {
@@ -29,5 +37,30 @@ describe("phases and transport", () => {
   it("only direct daemons can run it", () => {
     expect(canAddMachineVia(undefined)).toBe(true);
     expect(canAddMachineVia("anywhere")).toBe(false);
+  });
+});
+
+describe("polling and re-attaching", () => {
+  it("backs off after failed polls instead of stopping", () => {
+    expect(nextPollDelay(0)).toBe(1500);
+    expect(nextPollDelay(1)).toBeGreaterThan(1500);
+    expect(nextPollDelay(50)).toBe(15_000);
+  });
+  const job = (id: string, target: string, phase: AddHostJob["phase"]): AddHostJob => ({
+    id,
+    target,
+    phase,
+    step: "",
+    lines: [],
+    safety_code: null,
+    remote_safety_code: null,
+    error: null,
+    host: null,
+  });
+  it("resumes the running job for the same target after the sheet was closed", () => {
+    const jobs = [job("a", "u@one", "done"), job("b", "u@two", "awaiting_approval")];
+    expect(jobToResume(jobs, "u@two")?.id).toBe("b");
+    expect(jobToResume(jobs, "u@one")).toBeNull();
+    expect(jobToResume(jobs)?.id).toBe("b");
   });
 });

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  canActivate,
+  firstEnabledId,
+  seenUpdates,
   EMPTY_PRESENCE,
   enabledServers,
   hostBadge,
@@ -84,5 +87,27 @@ describe("setServerDisabled", () => {
     expect(enabledServers(off).map((s) => s.id)).toEqual(["a"]);
     const on = setServerDisabled(off, "b", false);
     expect("disabled" in on[1]).toBe(false);
+  });
+});
+
+describe("seenUpdates", () => {
+  const servers = [{ id: "a" }, { id: "b" }];
+  it("changes with every successful poll, not only when the reachable set changes", () => {
+    const first = seenUpdates(servers, [{ isSuccess: true, dataUpdatedAt: 100 }, { isSuccess: false }]);
+    const later = seenUpdates(servers, [{ isSuccess: true, dataUpdatedAt: 160_000 }, { isSuccess: false }]);
+    expect(first).toEqual([{ id: "a", at: 100 }]);
+    expect(later).toEqual([{ id: "a", at: 160_000 }]);
+    expect(JSON.stringify(first)).not.toBe(JSON.stringify(later));
+  });
+});
+
+describe("disabled servers cannot become active", () => {
+  const list = [{ id: "a", disabled: true }, { id: "b" }];
+  it("blocks activation and skips them as a fallback", () => {
+    expect(canActivate(list, "a")).toBe(false);
+    expect(canActivate(list, "b")).toBe(true);
+    expect(canActivate(list, "zzz")).toBe(false);
+    expect(firstEnabledId(list)).toBe("b");
+    expect(firstEnabledId([{ id: "a", disabled: true }])).toBeNull();
   });
 });

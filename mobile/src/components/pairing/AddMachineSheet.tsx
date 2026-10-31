@@ -13,6 +13,9 @@ import {
   hostAddCommand,
   isTerminalPhase,
   isValidHostTarget,
+  jobToResume,
+  listAddHostJobs,
+  nextPollDelay,
   startAddHost,
   type AddHostJob,
 } from "../../lib/hostAdd";
@@ -26,7 +29,6 @@ import { Input } from "../ds/Input";
 import { Sheet } from "../ds/Sheet";
 import { useToast } from "../ds/ToastHost";
 
-const POLL_MS = 1500;
 
 function message(err: unknown): string {
   return err instanceof Error ? err.message : "something went wrong";
@@ -56,20 +58,42 @@ export function AddMachineSheet({ visible, onClose }: { visible: boolean; onClos
     if (!visible) reset();
   }, [visible, reset]);
 
+  // A sheet closed mid-install leaves its job running on the daemon: pick it back up on open.
+  useEffect(() => {
+    if (!visible || !baseUrl) return;
+    let cancelled = false;
+    void listAddHostJobs(baseUrl)
+      .then(({ jobs }) => {
+        const running = jobToResume(jobs);
+        if (!cancelled && running) setJobId((current) => current ?? running.id);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [visible, baseUrl]);
+
   useEffect(() => {
     if (!jobId || !baseUrl) return;
     let cancelled = false;
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
       try {
         const next = await getAddHostJob(baseUrl, jobId);
         if (cancelled) return;
+        failures = 0;
+        setError(null);
         setJob(next);
-        if (!isTerminalPhase(next.phase)) timer = setTimeout(() => void tick(), POLL_MS);
+        if (!isTerminalPhase(next.phase)) timer = setTimeout(() => void tick(), nextPollDelay(0));
       } catch (err) {
-        if (!cancelled) setError(message(err));
+        if (cancelled) return;
+        // One dropped request must not freeze the sheet on a stale Approve button.
+        failures += 1;
+        setError(`${message(err)}; retrying`);
+        timer = setTimeout(() => void tick(), nextPollDelay(failures));
       }
     };
-    let timer: ReturnType<typeof setTimeout> | undefined;
     void tick();
     return () => {
       cancelled = true;
@@ -85,7 +109,12 @@ export function AddMachineSheet({ visible, onClose }: { visible: boolean; onClos
       const started = await startAddHost(baseUrl, { target: target.trim(), ...(name.trim() ? { name: name.trim() } : {}) });
       setJobId(started.job_id);
     } catch (err) {
-      setError(message(err));
+      // 409: the same machine is already being added (for example from a sheet that was closed).
+      const running = await listAddHostJobs(baseUrl)
+        .then(({ jobs }) => jobToResume(jobs, target.trim()))
+        .catch(() => null);
+      if (running) setJobId(running.id);
+      else setError(message(err));
     } finally {
       setBusy(false);
     }
@@ -184,7 +213,11 @@ export function AddMachineSheet({ visible, onClose }: { visible: boolean; onClos
               <View style={styles.group}>
                 <Banner
                   tone="warn"
-                  message={`Approve ${job.target} from this device only if its screen shows the same safety code${job.safety_code ? `: ${job.safety_code}` : "."}`}
+                  message={
+                    job.safety_code
+                      ? `This device computed the safety code ${job.safety_code}. Approve only if ${job.target} shows exactly the same code${job.remote_safety_code ? ` (it printed ${job.remote_safety_code})` : ""}.`
+                      : `Approve ${job.target} only if the safety code it shows matches the one this device computes.`
+                  }
                 />
                 <Button label="Approve" onPress={() => void answer(true)} fullWidth />
                 <Button label="Deny" variant="secondary" onPress={() => void answer(false)} fullWidth />

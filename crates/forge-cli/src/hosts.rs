@@ -35,42 +35,95 @@ fn read_at(path: &std::path::Path) -> Result<Vec<HostRecord>> {
 }
 
 fn write_at(path: &std::path::Path, hosts: &[HostRecord]) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, serde_json::to_vec_pretty(hosts)?)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Serialises read-modify-write of the registry within this process (the daemon can finish
+/// several add jobs at once).
+fn registry_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(crate) fn list() -> Result<Vec<HostRecord>> {
     read_at(&registry_path()?)
 }
 
-/// Insert or replace by name, keeping the original `added_ms` when the machine is re-added.
-pub(crate) fn upsert(mut record: HostRecord) -> Result<()> {
+/// A machine is identified by its ssh target, not by the name it shows under: two cloud images
+/// that both report the hostname `ubuntu` are two machines.
+pub(crate) fn upsert(record: HostRecord) -> Result<()> {
     let path = registry_path()?;
-    let mut hosts = read_at(&path)?;
-    if let Some(existing) = hosts.iter().position(|h| h.name == record.name) {
+    let _guard = registry_lock();
+    upsert_at(&path, record)
+}
+
+fn upsert_at(path: &std::path::Path, mut record: HostRecord) -> Result<()> {
+    let mut hosts = read_at(path)?;
+    if hosts
+        .iter()
+        .any(|h| h.name == record.name && h.target != record.target)
+    {
+        record.name = format!("{} ({})", record.name, record.target);
+    }
+    if let Some(existing) = hosts.iter().position(|h| h.target == record.target) {
         record.added_ms = hosts[existing].added_ms;
         hosts[existing] = record;
     } else {
         hosts.push(record);
     }
-    write_at(&path, &hosts)
+    write_at(path, &hosts)
 }
 
-pub(crate) fn remove(name: &str) -> Result<bool> {
+/// Forget a machine by its ssh target, or by its name when that is unambiguous.
+pub(crate) fn remove(key: &str) -> Result<bool> {
     let path = registry_path()?;
-    let mut hosts = read_at(&path)?;
-    let before = hosts.len();
-    hosts.retain(|h| h.name != name);
-    if hosts.len() == before {
-        return Ok(false);
-    }
-    write_at(&path, &hosts)?;
+    let _guard = registry_lock();
+    remove_at(&path, key)
+}
+
+fn remove_at(path: &std::path::Path, key: &str) -> Result<bool> {
+    let mut hosts = read_at(path)?;
+    let by_target = hosts.iter().position(|h| h.target == key);
+    let index = match by_target {
+        Some(index) => index,
+        None => {
+            let named: Vec<usize> = hosts
+                .iter()
+                .enumerate()
+                .filter(|(_, h)| h.name == key)
+                .map(|(i, _)| i)
+                .collect();
+            match named.as_slice() {
+                [] => return Ok(false),
+                [only] => *only,
+                _ => bail!("more than one machine is named {key}; use its ssh target"),
+            }
+        }
+    };
+    hosts.remove(index);
+    write_at(path, &hosts)?;
     Ok(true)
+}
+
+/// `/host remove <name>`: everything after the word `remove`, so names may contain spaces.
+pub(crate) fn remove_argument(arg: &str) -> Option<&str> {
+    let rest = arg.trim().strip_prefix("remove")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(rest.trim()).filter(|name| !name.is_empty())
 }
 
 /// `[user@]host` as ssh takes it. Anything ssh could read as an option, or a shell could read as
@@ -135,6 +188,44 @@ mod tests {
     #[test]
     fn quoting_survives_embedded_quotes() {
         assert_eq!(sh_quote("a'b"), "'a'\\''b'");
+    }
+
+    fn record(name: &str, target: &str) -> HostRecord {
+        HostRecord {
+            name: name.into(),
+            target: target.into(),
+            added_ms: 5,
+            paired: true,
+            version: String::new(),
+        }
+    }
+
+    #[test]
+    fn two_machines_with_the_same_hostname_stay_two_machines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("hosts.json");
+        upsert_at(&path, record("ubuntu", "u@10.0.0.5")).unwrap();
+        upsert_at(&path, record("ubuntu", "u@10.0.0.6")).unwrap();
+        let hosts = read_at(&path).unwrap();
+        assert_eq!(hosts.len(), 2);
+        assert_ne!(hosts[0].name, hosts[1].name);
+        let mut again = record("ubuntu", "u@10.0.0.5");
+        again.added_ms = 99;
+        upsert_at(&path, again).unwrap();
+        let hosts = read_at(&path).unwrap();
+        assert_eq!(hosts.len(), 2, "re-adding the same target replaces it");
+        assert_eq!(hosts[0].added_ms, 5, "and keeps the first added time");
+        assert!(remove_at(&path, "u@10.0.0.6").unwrap());
+        assert_eq!(read_at(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn host_remove_takes_names_with_spaces() {
+        assert_eq!(remove_argument("remove build box"), Some("build box"));
+        assert_eq!(remove_argument(" remove  x "), Some("x"));
+        assert_eq!(remove_argument("remove"), None);
+        assert_eq!(remove_argument("removex"), None);
+        assert_eq!(remove_argument(""), None);
     }
 
     #[test]

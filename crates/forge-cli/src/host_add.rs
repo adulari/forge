@@ -30,17 +30,29 @@ pub(crate) struct AddOptions {
 pub(crate) enum Event {
     Step(String),
     Remote(String),
-    AwaitingApproval { safety_code: Option<String> },
+    /// `safety_code` is what THIS machine computed; `remote_code` is what the new machine printed.
+    AwaitingApproval {
+        safety_code: Option<String>,
+        remote_code: Option<String>,
+    },
 }
 
 pub(crate) trait Remote {
     /// Run `script` under `sh` on the machine, feeding `stdin` when given, and call `on_line`
-    /// for each output line as it arrives. Returns the exit code.
-    fn run(&self, script: &str, stdin: Option<&[u8]>, on_line: &mut dyn FnMut(&str))
-        -> Result<i32>;
+    /// for each output line as it arrives; `on_line` returns false to stop early and the remote
+    /// command is killed. Returns the exit code.
+    fn run(
+        &self,
+        script: &str,
+        stdin: Option<&[u8]>,
+        on_line: &mut dyn FnMut(&str) -> bool,
+    ) -> Result<i32>;
 }
 
 pub(crate) trait Approver {
+    /// The safety code this machine computes for the waiting device, independent of anything
+    /// the new machine printed.
+    fn local_safety_code(&self, challenge: &str) -> Result<String>;
     /// Approve the waiting device. `Ok(false)` means the person declined.
     fn approve(&self, challenge: &str, safety_code: Option<&str>) -> Result<bool>;
 }
@@ -56,7 +68,7 @@ impl Remote for SshRemote {
         &self,
         script: &str,
         stdin: Option<&[u8]>,
-        on_line: &mut dyn FnMut(&str),
+        on_line: &mut dyn FnMut(&str) -> bool,
     ) -> Result<i32> {
         let mut cmd = Command::new(&self.ssh);
         cmd.args([
@@ -104,7 +116,10 @@ impl Remote for SshRemote {
             }
         });
         for line in rx {
-            on_line(&line);
+            if !on_line(&line) {
+                let _ = child.kill();
+                break;
+            }
         }
         let _ = out_thread.join();
         let _ = err_thread.join();
@@ -120,13 +135,37 @@ pub(crate) struct LocalApprover {
     pub(crate) confirm: bool,
 }
 
+fn local_forge() -> Result<std::path::PathBuf> {
+    match std::env::var_os("FORGE_HOST_FORGE_BIN") {
+        Some(path) => Ok(path.into()),
+        None => std::env::current_exe().context("locating the forge binary"),
+    }
+}
+
 impl Approver for LocalApprover {
+    fn local_safety_code(&self, challenge: &str) -> Result<String> {
+        let output = Command::new(local_forge()?)
+            .args(["anywhere", "safety-code", challenge])
+            .stdin(Stdio::null())
+            .output()
+            .context("running forge anywhere safety-code")?;
+        if !output.status.success() {
+            bail!(
+                "could not compute the safety code on this machine: {}",
+                String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .last()
+                    .unwrap_or("is this machine signed in to Forge Anywhere?")
+            );
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| parse_safety_code(line).map(str::to_string))
+            .ok_or_else(|| anyhow!("this machine did not report a safety code"))
+    }
+
     fn approve(&self, challenge: &str, _safety_code: Option<&str>) -> Result<bool> {
-        let exe = match std::env::var_os("FORGE_HOST_FORGE_BIN") {
-            Some(path) => path.into(),
-            None => std::env::current_exe().context("locating the forge binary")?,
-        };
-        let mut cmd = Command::new(exe);
+        let mut cmd = Command::new(local_forge()?);
         cmd.args(["anywhere", "approve", challenge]);
         if self.confirm {
             cmd.stdin(Stdio::piped())
@@ -140,14 +179,17 @@ impl Approver for LocalApprover {
             }
         }
         let output = child.wait_with_output()?;
-        if !output.status.success() {
-            let text = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "approving the new device failed: {}",
-                text.lines().last().unwrap_or("see `forge anywhere status`")
-            );
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(crate::anywhere::APPROVAL_DENIED_EXIT) => Ok(false),
+            _ => {
+                let text = String::from_utf8_lossy(&output.stderr);
+                bail!(
+                    "approving the new device failed: {}",
+                    text.lines().last().unwrap_or("see `forge anywhere status`")
+                )
+            }
         }
-        Ok(true)
     }
 }
 
@@ -166,13 +208,23 @@ else echo FORGE_FETCH=none; fi"#
         .to_string()
 }
 
+const VERIFY_INSTALL: &str = r#"b="$HOME/.local/bin/forge"
+if [ ! -x "$b" ]; then echo "the installer finished but $b is missing" >&2; exit 1; fi
+"$b" --version >/dev/null 2>&1 || { echo "$b does not run on this machine" >&2; exit 1; }
+echo "FORGE_BIN=$b"
+"#;
+
 pub(crate) fn install_script(url: &str, fetch: &str) -> String {
     let get = if fetch == "wget" {
         format!("wget -qO- {}", sh_quote(url))
     } else {
         format!("curl -fsSL {}", sh_quote(url))
     };
-    format!("export FORGE_DESKTOP=0\n{get} | sh\necho \"FORGE_BIN=$HOME/.local/bin/forge\"\n")
+    format!("export FORGE_DESKTOP=0\n{get} | sh || exit 1\n{VERIFY_INSTALL}")
+}
+
+pub(crate) fn pushed_install_script() -> String {
+    format!("export FORGE_DESKTOP=0\nsh -s || exit 1\n{VERIFY_INSTALL}")
 }
 
 pub(crate) fn service_script(bin: &str, lan: bool, port: Option<u16>) -> String {
@@ -248,6 +300,7 @@ pub(crate) fn add_host(
         } else {
             tail.push(line.to_string());
         }
+        true
     })?;
     if code != 0 {
         bail!(
@@ -262,9 +315,10 @@ pub(crate) fn add_host(
         let code = match options.installer.as_deref() {
             Some(path) => {
                 let bytes = std::fs::read(path).with_context(|| format!("reading {path}"))?;
-                let script =
-                    "export FORGE_DESKTOP=0\nsh -s\necho \"FORGE_BIN=$HOME/.local/bin/forge\"\n";
-                remote.run(script, Some(&bytes), &mut |l| lines.push(l.to_string()))?
+                remote.run(&pushed_install_script(), Some(&bytes), &mut |l| {
+                    lines.push(l.to_string());
+                    true
+                })?
             }
             None => {
                 if fetch == "none" {
@@ -273,7 +327,10 @@ pub(crate) fn add_host(
                 remote.run(
                     &install_script(&options.install_url, &fetch),
                     None,
-                    &mut |l| lines.push(l.to_string()),
+                    &mut |l| {
+                        lines.push(l.to_string());
+                        true
+                    },
                 )?
             }
         };
@@ -298,6 +355,7 @@ pub(crate) fn add_host(
         &mut |l| {
             failed.push(l.to_string());
             progress(Event::Remote(l.to_string()));
+            true
         },
     )?;
     if code != 0 {
@@ -319,8 +377,8 @@ pub(crate) fn add_host(
         progress(Event::Step("Pairing to Forge Anywhere".into()));
         let mut challenge: Option<String> = None;
         let mut safety: Option<String> = None;
-        let mut approve_error: Option<anyhow::Error> = None;
-        let mut approved = false;
+        let mut failure: Option<anyhow::Error> = None;
+        let mut declined = false;
         let mut approval_started = false;
         let code = remote.run(
             &pair_script(&bin, options.name.as_deref()),
@@ -336,25 +394,47 @@ pub(crate) fn add_host(
                 // The safety code is printed after the challenge; approve once both are known.
                 let ready = challenge.is_some()
                     && (safety.is_some() || line.contains("Waiting for approval"));
-                if ready && !approval_started {
-                    approval_started = true;
-                    progress(Event::AwaitingApproval {
-                        safety_code: safety.clone(),
-                    });
-                    match approver
-                        .approve(challenge.as_deref().unwrap_or_default(), safety.as_deref())
-                    {
-                        Ok(true) => approved = true,
-                        Ok(false) => {}
-                        Err(e) => approve_error = Some(e),
+                if !ready || approval_started {
+                    return true;
+                }
+                approval_started = true;
+                let challenge = challenge.as_deref().unwrap_or_default();
+                // The code the person compares comes from THIS machine. The new machine's own
+                // claim is only cross-checked, never trusted as the comparison value.
+                let local = match approver.local_safety_code(challenge) {
+                    Ok(local) => local,
+                    Err(e) => {
+                        failure = Some(e);
+                        return false;
+                    }
+                };
+                if let Some(remote_code) = safety.as_deref().filter(|r| *r != local) {
+                    failure = Some(anyhow!(
+                        "the safety codes differ (this machine computed {local}, the new machine printed {remote_code}); not approving"
+                    ));
+                    return false;
+                }
+                progress(Event::AwaitingApproval {
+                    safety_code: Some(local.clone()),
+                    remote_code: safety.clone(),
+                });
+                match approver.approve(challenge, Some(&local)) {
+                    Ok(true) => true,
+                    Ok(false) => {
+                        declined = true;
+                        false
+                    }
+                    Err(e) => {
+                        failure = Some(e);
+                        false
                     }
                 }
             },
         )?;
-        if let Some(e) = approve_error {
+        if let Some(e) = failure {
             return Err(e);
         }
-        if approval_started && !approved {
+        if declined {
             bail!("approval was declined; {display} is installed but not paired");
         }
         if code != 0 {
@@ -390,6 +470,7 @@ mod tests {
         installed: bool,
         pair_lines: Vec<&'static str>,
         service_code: i32,
+        stopped: std::cell::Cell<bool>,
     }
 
     impl Remote for Fake {
@@ -397,13 +478,13 @@ mod tests {
             &self,
             script: &str,
             _stdin: Option<&[u8]>,
-            on_line: &mut dyn FnMut(&str),
+            on_line: &mut dyn FnMut(&str) -> bool,
         ) -> Result<i32> {
             self.calls.borrow_mut().push(script.to_string());
             if script.contains("FORGE_FETCH") {
-                on_line("FORGE_OS=Linux-x86_64");
-                on_line("FORGE_HOST=vm1");
-                on_line(&format!(
+                let _ = on_line("FORGE_OS=Linux-x86_64");
+                let _ = on_line("FORGE_HOST=vm1");
+                let _ = on_line(&format!(
                     "FORGE_BIN={}",
                     if self.installed {
                         "/h/.local/bin/forge"
@@ -411,20 +492,23 @@ mod tests {
                         ""
                     }
                 ));
-                on_line("FORGE_FETCH=curl");
+                let _ = on_line("FORGE_FETCH=curl");
                 return Ok(0);
             }
             if script.contains("| sh") {
-                on_line("downloading");
-                on_line("FORGE_BIN=/h/.local/bin/forge");
+                let _ = on_line("downloading");
+                let _ = on_line("FORGE_BIN=/h/.local/bin/forge");
                 return Ok(0);
             }
             if script.contains("service install") {
-                on_line("service installed");
+                let _ = on_line("service installed");
                 return Ok(self.service_code);
             }
             for l in &self.pair_lines {
-                on_line(l);
+                if !on_line(l) {
+                    self.stopped.set(true);
+                    return Ok(-1);
+                }
             }
             Ok(0)
         }
@@ -432,9 +516,43 @@ mod tests {
 
     struct Yes(RefCell<Vec<String>>);
     impl Approver for Yes {
+        fn local_safety_code(&self, _challenge: &str) -> Result<String> {
+            Ok("11-22".into())
+        }
         fn approve(&self, challenge: &str, _s: Option<&str>) -> Result<bool> {
             self.0.borrow_mut().push(challenge.to_string());
             Ok(true)
+        }
+    }
+
+    /// Computes `local` as its own safety code and answers `answer` to the approval.
+    struct Scripted {
+        local: &'static str,
+        answer: Result<bool, &'static str>,
+        approved_calls: std::cell::Cell<u32>,
+    }
+    impl Approver for Scripted {
+        fn local_safety_code(&self, _challenge: &str) -> Result<String> {
+            Ok(self.local.into())
+        }
+        fn approve(&self, _c: &str, _s: Option<&str>) -> Result<bool> {
+            self.approved_calls.set(self.approved_calls.get() + 1);
+            self.answer.map_err(|e| anyhow!(e))
+        }
+    }
+
+    fn pair_fake() -> Fake {
+        Fake {
+            calls: RefCell::new(vec![]),
+            installed: true,
+            pair_lines: vec![
+                "  forge anywhere approve 'CHAL1'",
+                "Safety code: 11-22",
+                "Waiting for approval",
+                "request expired later",
+            ],
+            service_code: 0,
+            stopped: Default::default(),
         }
     }
 
@@ -484,6 +602,7 @@ mod tests {
                     "Waiting for approval",
                 ],
                 service_code: 0,
+                stopped: Default::default(),
             };
             let approver = Yes(RefCell::new(vec![]));
             let mut events = Vec::new();
@@ -492,7 +611,8 @@ mod tests {
             assert_eq!(out.record.name, "vm one");
             assert_eq!(approver.0.borrow().as_slice(), ["CHAL1"]);
             assert!(events.contains(&Event::AwaitingApproval {
-                safety_code: Some("11-22".into())
+                safety_code: Some("11-22".into()),
+                remote_code: Some("11-22".into()),
             }));
             let calls = fake.calls.borrow();
             assert_eq!(calls.len(), 4, "probe, install, service, pair");
@@ -507,6 +627,7 @@ mod tests {
                 installed: true,
                 pair_lines: vec![],
                 service_code: 0,
+                stopped: Default::default(),
             };
             let mut o = options();
             o.pair = false;
@@ -524,6 +645,7 @@ mod tests {
                 installed: true,
                 pair_lines: vec![],
                 service_code: 3,
+                stopped: Default::default(),
             };
             let err = add_host(&options(), &fake, &Yes(RefCell::new(vec![])), &mut |_| {})
                 .err()
@@ -541,10 +663,74 @@ mod tests {
             installed: true,
             pair_lines: vec![],
             service_code: 0,
+            stopped: Default::default(),
         };
         let mut o = options();
         o.target = "-oProxyCommand=evil".into();
         assert!(add_host(&o, &fake, &Yes(RefCell::new(vec![])), &mut |_| {}).is_err());
         assert!(fake.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn the_code_to_compare_is_computed_here_and_a_mismatch_refuses_to_approve() {
+        let fake = pair_fake();
+        let approver = Scripted {
+            local: "99-99",
+            answer: Ok(true),
+            approved_calls: Default::default(),
+        };
+        let err = add_host(&options(), &fake, &approver, &mut |_| {})
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("99-99") && err.contains("11-22"), "{err}");
+        assert_eq!(approver.approved_calls.get(), 0, "never approved");
+        assert!(fake.stopped.get(), "the remote is cut off at once");
+    }
+
+    #[test]
+    fn a_decline_or_failed_approve_stops_waiting_for_the_remote() {
+        for answer in [Ok(false), Err("boom")] {
+            let fake = pair_fake();
+            let approver = Scripted {
+                local: "11-22",
+                answer,
+                approved_calls: Default::default(),
+            };
+            let err = add_host(&options(), &fake, &approver, &mut |_| {}).err();
+            assert!(err.is_some());
+            assert!(fake.stopped.get(), "the remote must not be waited on");
+        }
+    }
+
+    #[test]
+    fn the_install_script_fails_when_the_installer_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let curl = bin.join("curl");
+        std::fs::write(&curl, "#!/bin/sh\nexit 22\n").unwrap();
+        std::fs::set_permissions(&curl, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let run = |script: &str| {
+            Command::new("sh")
+                .arg("-c")
+                .arg(script)
+                .env("HOME", dir.path())
+                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+                .output()
+                .unwrap()
+        };
+        let out = run(&install_script("http://x/install.sh", "curl"));
+        assert!(
+            !out.status.success(),
+            "a failed download must fail the step"
+        );
+        assert!(!String::from_utf8_lossy(&out.stdout).contains("FORGE_BIN"));
+
+        // The installer "succeeds" but leaves no binary behind.
+        let out = run(VERIFY_INSTALL);
+        assert!(!out.status.success(), "a missing binary is an error");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("missing"));
     }
 }
