@@ -132,7 +132,7 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows" | "/prs" | "/remote-access";
+type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/hooks" | "/session-tree" | "/workflows" | "/prs" | "/notes" | "/remote-access";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
@@ -154,6 +154,7 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
   { key: "session-tree", label: "Session tree", href: "/session-tree" },
   { key: "workflows", label: "Workflows", href: "/workflows" },
   { key: "prs", label: "Pull requests", href: "/prs" },
+  { key: "notes", label: "Notes", href: "/notes" },
   { key: "remote-access", label: "Remote access", href: "/remote-access" },
 ];
 
@@ -683,7 +684,8 @@ export function SettingsScreen() {
           <NavListRow label="Hooks" meta={hooksCountLabel} onPress={() => router.push("/hooks")} />
           <NavListRow label="Session tree" onPress={() => router.push("/session-tree")} />
           <NavListRow label="Workflows" onPress={() => router.push("/workflows")} />
-          <NavListRow label="Pull requests" onPress={() => router.push("/prs")} showSeparator={false} />
+          <NavListRow label="Pull requests" onPress={() => router.push("/prs")} />
+          <NavListRow label="Notes" onPress={() => router.push("/notes")} showSeparator={false} />
         </View>
 
         <HostPowerSection />

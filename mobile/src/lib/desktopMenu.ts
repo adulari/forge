@@ -94,6 +94,7 @@ export type DesktopMenuId =
   | "view:browser-preview"
   | "view:gallery"
   | "view:actions"
+  | "view:notes"
   | "view:appearance:light"
   | "view:appearance:dark"
   | "view:appearance:system"
@@ -246,6 +247,7 @@ function runDefault(id: string): void {
     case "view:browser-preview":
     case "view:gallery":
     case "view:actions":
+    case "view:notes":
     case "view:tasks":
     case "view:agents":
     case "view:plan":

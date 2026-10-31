@@ -72,6 +72,7 @@ export function useWorkbenchCommands({ enabled, setSidebarCollapsed }: Workbench
   }));
   useDesktopMenuAction("view:gallery", toggle("gallery"));
   useDesktopMenuAction("view:actions", toggle("actions"));
+  useDesktopMenuAction("view:notes", toggle("notes"));
 
   useDesktopMenuAction("view:layout-focus", preset("focus", true));
   useDesktopMenuAction("view:layout-side-by-side", preset("side-by-side", false));

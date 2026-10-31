@@ -45,6 +45,7 @@ mod help;
 mod json_result;
 mod keybind_configurator;
 pub mod keybinds;
+pub mod notes_overlay;
 pub mod onboarding;
 mod overlays;
 mod peer_message;
