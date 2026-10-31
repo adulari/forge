@@ -3664,6 +3664,7 @@ pub fn append_allow_rule_in(
 
 // ----------------------------------------------------------------------------------------------
 mod editor;
+mod editor_harness;
 mod endpoint_check;
 mod provider_registry;
 mod provider_reload;

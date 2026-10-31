@@ -44,6 +44,7 @@ mod group;
 mod inline;
 mod job_wait;
 mod poll;
+mod proc_util;
 mod wait;
 pub use background::{scope_job_exit_sink, JobExit, JobExitSink};
 use poll::{run_poll, watched_jobs, PollJobs};
