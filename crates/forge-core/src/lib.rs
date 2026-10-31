@@ -10239,6 +10239,13 @@ mod tests {
         assert!(fitted.starts_with("line 0 "));
         assert!(fitted.ends_with(&"z".repeat(40)) && fitted.contains("line 4999 "));
         assert!(fitted.contains("/tmp/out.log") && fitted.contains("sed -n '"));
+        // A file holding a different (uncut) text than this copy gets no line range.
+        let other = tool_output::fit_for_model_of(body, Some("/tmp/out.log"), false);
+        assert!(other.contains("/tmp/out.log") && other.contains("grep it"));
+        assert!(
+            !other.contains("lines 1") && !other.contains("sed -n '1"),
+            "{other}"
+        );
         // Small results pass through untouched.
         assert_eq!(tool_output::fit_for_model("ok".into(), None), "ok");
     }
