@@ -5,7 +5,7 @@
 //! resume must first answer each dangling call.
 
 use forge_store::Store;
-use forge_types::Role;
+use forge_types::{Message, Role};
 
 use crate::CoreError;
 
@@ -76,4 +76,17 @@ mod tests {
             "idempotent"
         );
     }
+}
+
+/// A saved message as the provider-facing message it was.
+pub(super) fn replay_message(m: forge_store::StoredMessage) -> Message {
+    let visibility = m.visibility;
+    let mut msg = match m.role {
+        Role::System => Message::system(&m.content),
+        Role::User => Message::user(&m.content),
+        Role::Assistant => Message::assistant_tool_calls(&m.content, m.tool_calls),
+        Role::Tool => Message::tool_result(m.tool_call_id.as_deref().unwrap_or(""), m.content),
+    };
+    msg.visibility = visibility;
+    msg
 }

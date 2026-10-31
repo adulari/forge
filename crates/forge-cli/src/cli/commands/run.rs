@@ -91,6 +91,7 @@ mod anywhere_menu;
 mod dispatch;
 mod fork_cmd;
 mod heartbeat_cmd;
+mod host_menu;
 mod import_menu;
 mod mesh_overlay;
 mod model_switch;

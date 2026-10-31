@@ -78,26 +78,6 @@ pub(crate) enum AssayFormat {
     Sarif,
 }
 
-#[derive(Clone, Copy, ValueEnum, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum FailOnSeverity {
-    Low,
-    Medium,
-    High,
-    Critical,
-}
-
-impl FailOnSeverity {
-    pub(crate) fn matches(self, sev: forge_types::Severity) -> bool {
-        let sev_ord = match sev {
-            forge_types::Severity::Low => FailOnSeverity::Low,
-            forge_types::Severity::Medium => FailOnSeverity::Medium,
-            forge_types::Severity::High => FailOnSeverity::High,
-            forge_types::Severity::Critical => FailOnSeverity::Critical,
-        };
-        sev_ord >= self
-    }
-}
-
 #[path = "args/bench.rs"]
 pub(crate) mod bench_args;
 pub(crate) use bench_args::BenchCmd;
@@ -245,6 +225,9 @@ pub(crate) mod host;
 pub(crate) mod hosts;
 pub(crate) use claude_compat::ClaudeCompat;
 pub(crate) use hosts::HostCmd;
+#[path = "args/severity.rs"]
+pub(crate) mod severity;
+pub(crate) use severity::FailOnSeverity;
 #[path = "args/session_flags.rs"]
 pub(crate) mod session_flags;
 pub(crate) use session_flags::SessionFlags;

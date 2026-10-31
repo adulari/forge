@@ -254,7 +254,10 @@ impl TerminalHandle {
     }
 }
 
+mod guard;
 mod scrollback;
+
+use guard::TerminalClientGuard;
 
 #[derive(Default)]
 pub(crate) struct TerminalRegistry {
@@ -641,23 +644,6 @@ pub(crate) async fn terminal_ws(
     crate::serve_access::upgrade_until_revoked(ws, auth, move |socket| {
         attach_terminal(socket, terminal, registry, key, going_away)
     })
-}
-
-struct TerminalClientGuard(Arc<TerminalHandle>);
-
-impl TerminalClientGuard {
-    fn new(handle: Arc<TerminalHandle>) -> Self {
-        handle.clients.fetch_add(1, Ordering::AcqRel);
-        handle.touch();
-        Self(handle)
-    }
-}
-
-impl Drop for TerminalClientGuard {
-    fn drop(&mut self) {
-        self.0.clients.fetch_sub(1, Ordering::AcqRel);
-        self.0.touch();
-    }
 }
 
 async fn send_server_frame(socket: &mut WebSocket, frame: TerminalServerFrame) -> bool {
