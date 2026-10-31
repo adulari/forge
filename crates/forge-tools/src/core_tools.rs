@@ -346,9 +346,14 @@ impl Tool for ReadFileTool {
         let content = tokio::fs::read_to_string(path)
             .await
             .map_err(|e| io_with_path(e, path))?;
+        let tagged = crate::hashline_active();
         let out = if start_line.is_none() && end_line.is_none() {
             if content.len() <= READ_WHOLE_MAX_BYTES {
-                content
+                if tagged {
+                    hashline::render(&shown(path), &content, None)
+                } else {
+                    content
+                }
             } else {
                 let path = path.to_string();
                 return tokio::task::spawn_blocking(move || outline_read(&path, &content))
@@ -376,7 +381,11 @@ impl Tool for ReadFileTool {
             // Clamp start to `end` so an inverted range (start_line > end_line) yields an empty
             // slice instead of panicking `lines[7..3]` and crashing the whole turn on tool input.
             let start = start.min(end);
-            lines[start..end].join("\n")
+            if tagged {
+                hashline::render(&shown(path), &content, Some((start + 1, end)))
+            } else {
+                lines[start..end].join("\n")
+            }
         };
         Ok(cap_read(out))
     }
@@ -575,9 +584,13 @@ async fn read_many(paths: &[Value]) -> String {
         }
         match tokio::fs::read_to_string(path).await {
             Ok(content) => {
-                let content = match range {
-                    Some((start, end)) => slice_lines(&content, start, end),
-                    None => content,
+                let content = if crate::hashline_active() {
+                    hashline::render(&shown(path), &content, range)
+                } else {
+                    match range {
+                        Some((start, end)) => slice_lines(&content, start, end),
+                        None => content,
+                    }
                 };
                 let body = cap_bytes(content, BATCH_READ_PER_FILE_BYTES);
                 spent += body.len();
@@ -864,6 +877,9 @@ impl Tool for EditFileTool {
     }
     async fn run(&self, args: &Value) -> Result<String, ToolError> {
         let path = str_arg(args, "path")?;
+        if crate::hashline_active() && args.get("edits").is_some() {
+            return hashline::run(path, args).await;
+        }
         let old = str_arg(args, "old")?;
         let new = str_arg(args, "new")?;
         let replace_all = args
@@ -894,6 +910,9 @@ impl Tool for EditFileTool {
 
     async fn preview(&self, args: &Value) -> Option<FileDiff> {
         let path = str_arg(args, "path").ok()?;
+        if crate::hashline_active() && args.get("edits").is_some() {
+            return hashline::preview(path, args).await;
+        }
         let old = str_arg(args, "old").ok()?;
         let new = str_arg(args, "new").ok()?;
         let replace_all = args
@@ -915,6 +934,8 @@ impl Tool for EditFileTool {
         })
     }
 }
+
+pub(crate) mod hashline;
 
 mod edits;
 use edits::{apply_edit_mode, edit_snippet};

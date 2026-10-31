@@ -257,6 +257,7 @@ impl Session {
         if self.config.harness.completion_contract {
             base.push_str(crate::stop_guards::COMPLETION_CONTRACT);
         }
+        base.push_str(self.edit_mode_note());
         let mut msgs = vec![Message::system(base), Message::system(env)];
         // Headless code-change turns (bench swe) get the minimal-diff bias — per-request system
         // context, so it reaches direct AND bridge providers without touching the bridge preamble.
@@ -293,6 +294,7 @@ impl Session {
                     .content
                     .push_str(crate::stop_guards::COMPLETION_CONTRACT);
             }
+            preamble[0].content.push_str(self.edit_mode_note());
         }
         // Codemode guidance rides with the tool itself: present exactly when `run_code` is
         // advertised, static text so the cached prefix stays stable. A bridge is handed the

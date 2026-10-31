@@ -17,6 +17,16 @@ tokio::task_local! {
     // Extra allowed roots (config `tools.extra_roots`) the in-tool confinement net honors
     // alongside the workspace, so read_file/write_file reach them the same as the arg validators.
     pub(crate) static SESSION_EXTRA_ROOTS: Vec<std::path::PathBuf>;
+    // `[harness] edit_mode` for the running call, scoped by `WorkspaceTool` from the registry's
+    // setting. Unset (an unbound registry, a direct tool call) means `replace`.
+    pub(crate) static SESSION_EDIT_MODE: forge_config::EditMode;
+}
+
+/// True while a tool call runs in `edit_mode = "hashline"`.
+pub(crate) fn hashline_active() -> bool {
+    SESSION_EDIT_MODE
+        .try_with(|mode| mode.is_hashline())
+        .unwrap_or(false)
 }
 
 mod arg_shape;
@@ -52,6 +62,7 @@ pub(crate) mod test_state {
 
 pub use arg_shape::normalize_args;
 pub use browser::{set_attach_endpoint, set_browser_permissions, BrowserNetworkTool, BrowserTool};
+pub use core_tools::hashline::file_tag as hashline_file_tag;
 pub use core_tools::{
     AppendFileTool, ApplyPatchTool, DeleteFileTool, EditFileTool, MultiEditTool, NotebookEditTool,
     ReadFileTool, WriteFileTool,
@@ -139,6 +150,7 @@ pub struct ToolRegistry {
     tools: HashMap<String, Box<dyn Tool>>,
     workspace: Option<std::sync::Arc<std::sync::RwLock<std::path::PathBuf>>>,
     extra_roots: std::sync::Arc<std::sync::RwLock<Vec<std::path::PathBuf>>>,
+    edit_mode: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ToolRegistry {
@@ -155,6 +167,22 @@ impl ToolRegistry {
             .map_err(|_| ToolError::Failed("extra tool roots binding poisoned".to_string()))? =
             roots;
         Ok(())
+    }
+
+    /// Apply `[harness] edit_mode`. In hashline mode `read_file` tags lines, `edit_file` takes
+    /// line anchors, and `multi_edit` is withdrawn (the anchored `edit_file` already takes a
+    /// list). Needs a workspace-bound registry; an unbound one stays in replace mode.
+    pub fn set_edit_mode(&mut self, mode: forge_config::EditMode) {
+        use std::sync::atomic::Ordering;
+        if self.workspace.is_none() {
+            return;
+        }
+        self.edit_mode.store(mode.is_hashline(), Ordering::Relaxed);
+        if mode.is_hashline() {
+            self.remove("multi_edit");
+        } else if self.get("multi_edit").is_none() {
+            self.register(Box::new(MultiEditTool));
+        }
     }
 
     pub fn with_core_tools_in(workspace: &std::path::Path) -> Self {
@@ -180,6 +208,7 @@ impl ToolRegistry {
                         inner,
                         workspace: std::sync::Arc::clone(&binding),
                         extra_roots: std::sync::Arc::clone(&self.extra_roots),
+                        hashline: std::sync::Arc::clone(&self.edit_mode),
                     }) as Box<dyn Tool>,
                 )
             })
@@ -236,6 +265,7 @@ impl ToolRegistry {
                 inner: tool,
                 workspace: std::sync::Arc::clone(workspace),
                 extra_roots: std::sync::Arc::clone(&self.extra_roots),
+                hashline: std::sync::Arc::clone(&self.edit_mode),
             }) as Box<dyn Tool>
         } else {
             tool

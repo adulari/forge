@@ -102,6 +102,7 @@ pub mod fleet;
 pub(crate) mod git_hygiene;
 mod harness_notes;
 mod harness_profile;
+mod hashline_note;
 pub mod heartbeat;
 pub mod hooks;
 mod hooks_async;
@@ -5131,6 +5132,9 @@ mod tests {
 
     #[path = "harness_profile.rs"]
     mod harness_profile_tests;
+
+    #[path = "hashline_edit.rs"]
+    mod hashline_edit_tests;
 
     #[path = "goal_evaluator.rs"]
     mod goal_evaluator_tests;
