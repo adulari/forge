@@ -6,6 +6,19 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+<<<<<<< HEAD
+||||||| b4ef90a4
+### Fixed
+
+- **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
+
+=======
+### Fixed
+
+- **Find in the terminal no longer crashes the phone app.** React Native 0.86 elements expose `getBoundingClientRect` and `getScrollableNode` returns a number on native, so the web scroll path ran on iOS and Android and threw; it is now web-only. Opening a file at a line no longer raises the phone keyboard, and the perf fixture no longer calls desktop-only APIs on a phone.
+- **The long-session endurance test no longer fails on a busy CI runner.** Its wall-clock ceiling, meant to catch pathological slowness, rose from 90 s to 240 s after healthy runs took 108 s on the shared self-hosted runner.
+
+>>>>>>> origin/fix/native-crash-audit
 ### Added
 
 - **The browser preview and the file viewer got the tools of a small editor.** The preview dock remembers your last eight addresses (shown when you focus the address bar and on the empty page), names side-by-side preview tabs after the page they show, and has a Console toggle that lists `console.*` output and uncaught errors from the page with an error count on the button. After picking an element, one button types its selector into the session's running terminal without pressing Enter. In the web app the dock frames `localhost` servers in an iframe, with element picking and the console disabled and labelled "Element picking needs the desktop app". In Files, folders now open in place as a lazy tree (with Collapse all and a highlighted selection), single-click opens a file as an italic preview tab that the next click replaces until you edit or double-click it, a dot on the tab marks unsaved edits, and Mod+S saves. Each file has Edit, Code (line numbers and syntax colours, virtualized) and Preview views, markdown renders as a document, SVG renders from your live draft, PDFs show in a frame (new `GET /api/workspace/pdf`, 25 MB cap, `%PDF-` magic required), and Reveal in file tree jumps back to the file.

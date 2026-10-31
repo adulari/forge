@@ -2,7 +2,7 @@
 // highlighted, and stepping scrolls the active one into view. Closing the bar hands the keyboard
 // back to the shell.
 import { type MutableRefObject, useEffect, useMemo, useRef, useState } from "react";
-import { type ScrollView, type Text, type TextInput } from "react-native";
+import { Platform, type ScrollView, type Text, type TextInput } from "react-native";
 
 import { findController, useFindState } from "../../lib/find/findController";
 import { steppedIndex } from "../../lib/find/matching";
@@ -91,7 +91,9 @@ export function useTerminalFind({ buffer, scroll, input, sticky, lineHeight }: T
     if (!pane) return;
     const dom = (pane as unknown as { getScrollableNode?: () => HTMLElement }).getScrollableNode?.();
     const element = line as unknown as HTMLElement;
-    if (dom && typeof element.getBoundingClientRect === "function") {
+    // RN 0.86 elements also have getBoundingClientRect, and getScrollableNode returns a number on
+    // native, so feature detection alone would take the DOM path on a phone and throw.
+    if (Platform.OS === "web" && dom && typeof element.getBoundingClientRect === "function") {
       const box = element.getBoundingClientRect();
       const frame = dom.getBoundingClientRect();
       if (box.top >= frame.top + BAR_INSET && box.bottom <= frame.bottom - lineHeight) return;
