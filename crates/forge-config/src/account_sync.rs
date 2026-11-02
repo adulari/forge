@@ -189,6 +189,43 @@ pub fn read_sync_badge(now_ms: u64) -> Option<SyncBadge> {
     (now_ms.saturating_sub(badge.updated_at_ms) <= BADGE_STALE_MS).then_some(badge)
 }
 
+/// Why the upload worker last failed, written by `forge serve` so a separate `forge anywhere`
+/// process (status, doctor, the TUI menu) can report a blocked outbox instead of a clean zero.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SyncOutboxFailure {
+    pub since_ms: u64,
+    pub updated_at_ms: u64,
+    /// The service's machine-readable error code, e.g. `replay_detected`.
+    pub code: Option<String>,
+    pub message: String,
+    /// The journal row the strictly ordered drain is stuck on.
+    pub journal_id: Option<i64>,
+    pub attempts: u32,
+}
+
+fn outbox_path() -> Option<std::path::PathBuf> {
+    crate::data_dir().map(|dir| dir.join("anywhere").join("sync-outbox.json"))
+}
+
+pub fn write_outbox_failure(failure: &SyncOutboxFailure) {
+    if let (Some(path), Ok(json)) = (outbox_path(), serde_json::to_vec(failure)) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = crate::write_atomic(path, json);
+    }
+}
+
+pub fn clear_outbox_failure() {
+    if let Some(path) = outbox_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+pub fn read_outbox_failure() -> Option<SyncOutboxFailure> {
+    serde_json::from_slice(&std::fs::read(outbox_path()?).ok()?).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

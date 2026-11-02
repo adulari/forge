@@ -415,6 +415,33 @@ fn sync_section(doc: &mut Doc, m: &AnywhereMenu, data: &AnywhereSnapshot) {
             ),
         ]);
     }
+    if let Some(reason) = &data.outbox_blocked {
+        doc.push(vec![
+            Span::raw("  "),
+            Span::styled(
+                trunc(
+                    &format!(
+                        "{} Upload blocked: {} waiting ({reason})",
+                        g().fail,
+                        data.outbox_pending
+                    ),
+                    doc.width.saturating_sub(2),
+                ),
+                styles::err(),
+            ),
+        ]);
+    } else if data.outbox_pending > 0 {
+        doc.push(vec![
+            Span::raw("  "),
+            Span::styled(
+                trunc(
+                    &format!("{} waiting to upload", data.outbox_pending),
+                    doc.width.saturating_sub(2),
+                ),
+                styles::muted(),
+            ),
+        ]);
+    }
     if let Some(error) = &data.last_error {
         doc.push(vec![
             Span::raw("  "),

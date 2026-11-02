@@ -19,6 +19,7 @@ import {
   ageLabel,
   categoryStatusLine,
   classifyAccountSyncError,
+  outboxBannerMessage,
   syncHubMeta,
   syncPillModel,
   toggleLockReason,
@@ -99,6 +100,7 @@ export default function AnywhereSyncScreen() {
           {status?.signed_in && !status.anywhere_enabled ? (
             <Banner tone="neutral" message="Forge Anywhere is switched off on this machine, so nothing syncs until it is on." />
           ) : null}
+          {outboxBannerMessage(status) ? <Banner tone="danger" message={outboxBannerMessage(status) ?? ""} /> : null}
           {status?.last_error ? <Banner tone="warn" message={`Last sync problem: ${status.last_error}`} /> : null}
 
           {status ? (

@@ -68,6 +68,15 @@ pub(crate) fn view_of(
         worker_running: worker.is_some(),
         last_sync_at: status.last_sync_at,
         last_error: worker.flatten().or_else(|| status.last_error.clone()),
+        outbox_pending: status.outbox.pending,
+        outbox_blocked: status.outbox.blocked.then(|| {
+            status
+                .outbox
+                .code
+                .clone()
+                .or_else(|| status.outbox.error.clone())
+                .unwrap_or_else(|| "upload failing".into())
+        }),
         categories: status
             .categories
             .iter()
@@ -362,6 +371,8 @@ fn mock_snapshot() -> AnywhereSnapshot {
         worker_running: true,
         last_sync_at: Some(now - 130_000),
         last_error: None,
+        outbox_pending: 0,
+        outbox_blocked: None,
         categories,
         sign_ins: vec![SignInView {
             provider: "codex".into(),

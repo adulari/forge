@@ -439,3 +439,27 @@ fn ago_reads_naturally() {
     assert_eq!(render::ago(NOW, NOW - 7_300_000), "2h ago");
     assert_eq!(render::ago(NOW, NOW - 200_000_000), "2d ago");
 }
+
+#[test]
+fn a_blocked_outbox_shows_the_backlog_and_the_service_code() {
+    let mut snapshot = signed_in(busy_categories());
+    snapshot.outbox_pending = 226;
+    snapshot.outbox_blocked = Some("replay_detected".into());
+    let m = menu(Some(snapshot), Devices::Unavailable("offline".into()));
+    for t in both("outbox-blocked", &m) {
+        assert!(t.contains("Upload blocked"), "{t}");
+        assert!(t.contains("226"));
+        assert!(t.contains("replay_detected"));
+    }
+}
+
+#[test]
+fn a_moving_outbox_only_reports_its_backlog() {
+    let mut snapshot = signed_in(busy_categories());
+    snapshot.outbox_pending = 3;
+    let m = menu(Some(snapshot), Devices::Unavailable("offline".into()));
+    for t in both("outbox-waiting", &m) {
+        assert!(t.contains("3 waiting to upload"), "{t}");
+        assert!(!t.contains("Upload blocked"));
+    }
+}

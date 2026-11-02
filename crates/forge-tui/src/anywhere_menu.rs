@@ -88,6 +88,10 @@ pub struct AnywhereSnapshot {
     pub worker_running: bool,
     pub last_sync_at: Option<i64>,
     pub last_error: Option<String>,
+    /// Journal rows waiting to upload, across every record kind.
+    pub outbox_pending: usize,
+    /// Why the drain is stuck (the service's error code or message); `None` when it is moving.
+    pub outbox_blocked: Option<String>,
     pub categories: Vec<CategoryView>,
     pub sign_ins: Vec<SignInView>,
     pub missing_tools: Vec<MissingToolView>,

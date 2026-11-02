@@ -90,6 +90,9 @@ pub(crate) fn print_status(status: &AccountSyncStatus) {
         println!("Account sync: not signed in to Forge Anywhere");
         return;
     }
+    if let Some(line) = status.outbox.line() {
+        println!("  {line}");
+    }
     for category in &status.categories {
         let state = if category.enabled { "on " } else { "off" };
         let waiting = match category.remote_only {
@@ -116,6 +119,14 @@ pub(crate) fn print_status(status: &AccountSyncStatus) {
     }
     if let Some(error) = &status.last_error {
         println!("  last error: {error}");
+    }
+    if let Some(error) = status
+        .outbox
+        .error
+        .as_ref()
+        .filter(|_| status.outbox.blocked)
+    {
+        println!("  upload error: {error}");
     }
 }
 
