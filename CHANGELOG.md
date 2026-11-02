@@ -8,7 +8,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Security
 
-- **Cleared RUSTSEC-2026-0433 and RUSTSEC-2026-0429 without ignoring them.** `pulldown-cmark` moves to 0.13.6 (quadratic wikilink parsing), `self_update` to 1.3.3 and the desktop app's `zip` direct dependency to 9.x (the symlink-entry abort in `ZipArchive::extract`), and the desktop's `tauri-plugin-updater` to 2.14.1 so zip 4 leaves the lockfile. The old zip 8 / zip 4 advisory ignores in `deny.toml` and the security workflows are removed.
+- **Cleared RUSTSEC-2026-0433 and RUSTSEC-2026-0429 where a fix exists.** `pulldown-cmark` moves to 0.13.6 (quadratic wikilink parsing), `self_update` to 1.3.3 (so the CLI's `zip` is 9.x) and the desktop app's own `zip` dependency to 9.x, removing the zip 8 advisory ignores from `deny.toml` and the security workflow. The desktop lockfile keeps zip 4 only as `tauri-plugin-updater` 2.10.1's dependency, with a documented audit ignore, because that crate must match the pinned JS plugin.
 
 ### Fixed
 
