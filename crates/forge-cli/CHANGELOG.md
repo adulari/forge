@@ -10,6 +10,8 @@ All notable changes to Forge are documented here. The format follows
 
 - **Cleared RUSTSEC-2026-0433 and RUSTSEC-2026-0429 where a fix exists.** `pulldown-cmark` moves to 0.13.6 (quadratic wikilink parsing), `self_update` to 1.3.3 (so the CLI's `zip` is 9.x) and the desktop app's own `zip` dependency to 9.x, removing the zip 8 advisory ignores from `deny.toml` and the security workflow. The desktop lockfile keeps zip 4 only as `tauri-plugin-updater` 2.10.1's dependency, with a documented audit ignore, because that crate must match the pinned JS plugin.
 
+## [2.26.2] - 2026-11-02
+
 ### Fixed
 
 - **Long-lived sessions no longer fill with `catalog refreshed: +2 sambanova` / `-2 sambanova` lines.** A provider whose model listing intermittently omitted a few models made every hourly background refresh publish a "new" catalog, and each session announced the difference the moment it was adopted, so a session left idle for a day showed hundreds of lines (and the picker and routing flapped with it). Discovery now keeps a model that a healthy provider merely omitted until it has been missing from 5 consecutive listings spanning 6 hours (failed or empty listings never remove anything, and a genuinely dead model is still benched on its first failed call). Sessions adopt a refreshed catalog silently and say `models updated: +2 modelgateway` once, at the start of the next turn, for the net change since they last told you, so +2 then -2 says nothing, on the TUI, daemon, `forge run` and stream-json alike (`crates/forge-cli/src/cli/commands/models/discovery/recovery.rs`, `crates/forge-core/src/catalog_feed.rs`, docs/features/mesh-routing.md).
@@ -5551,7 +5553,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.2...HEAD
+[2.26.2]: https://github.com/Adulari/forge/compare/v2.26.1...v2.26.2
 [2.26.1]: https://github.com/Adulari/forge/compare/v2.26.0...v2.26.1
 [2.26.0]: https://github.com/Adulari/forge/compare/v2.25.2...v2.26.0
 [2.25.2]: https://github.com/Adulari/forge/compare/v2.25.1...v2.25.2
