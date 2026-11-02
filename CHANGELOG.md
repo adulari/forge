@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **Cleared RUSTSEC-2026-0433 and RUSTSEC-2026-0429 without ignoring them.** `pulldown-cmark` moves to 0.13.6 (quadratic wikilink parsing), `self_update` to 1.3.3 and the desktop app's `zip` direct dependency to 9.x (the symlink-entry abort in `ZipArchive::extract`), and the desktop's `tauri-plugin-updater` to 2.14.1 so zip 4 leaves the lockfile. The old zip 8 / zip 4 advisory ignores in `deny.toml` and the security workflows are removed.
+
 ### Fixed
 
 - **A blocked Forge Anywhere upload outbox now says so, and heals itself.** The sync client looked for the service's error `code` at the top of the response, but the service nests it under `error`, so a revision conflict was never recognised and the first conflicting row (a command, a skill) blocked every row behind it forever while the log only said "HTTP 409" and `forge anywhere sync` said "0 pending". The client now reads the real shape, and a rejected completion (`replay_detected`, or `upload_verification_failed` three times running) re-queues the row at the record's next revision with a fresh envelope and a ciphertext-bound idempotency key, so nothing is lost or uploaded twice. The error code shows in the daemon log, and `forge anywhere sync status`, `forge anywhere status`, `forge anywhere doctor`, the `/anywhere` terminal menu and the app's Sync page report the real backlog across every record kind with a blocked state.
