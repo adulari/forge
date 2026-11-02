@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.26.2] - 2026-11-02
+
 ### Fixed
 
 - **A blocked Forge Anywhere upload outbox now says so, and heals itself.** The sync client looked for the service's error `code` at the top of the response, but the service nests it under `error`, so a revision conflict was never recognised and the first conflicting row (a command, a skill) blocked every row behind it forever while the log only said "HTTP 409" and `forge anywhere sync` said "0 pending". The client now reads the real shape, and a rejected completion (`replay_detected`, or `upload_verification_failed` three times running) re-queues the row at the record's next revision with a fresh envelope and a ciphertext-bound idempotency key, so nothing is lost or uploaded twice. The error code shows in the daemon log, and `forge anywhere sync status`, `forge anywhere status`, `forge anywhere doctor`, the `/anywhere` terminal menu and the app's Sync page report the real backlog across every record kind with a blocked state.
@@ -5545,7 +5547,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.2...HEAD
+[2.26.2]: https://github.com/Adulari/forge/compare/v2.26.1...v2.26.2
 [2.26.1]: https://github.com/Adulari/forge/compare/v2.26.0...v2.26.1
 [2.26.0]: https://github.com/Adulari/forge/compare/v2.25.2...v2.26.0
 [2.25.2]: https://github.com/Adulari/forge/compare/v2.25.1...v2.25.2
