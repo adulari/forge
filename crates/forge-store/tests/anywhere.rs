@@ -1262,3 +1262,74 @@ fn deleting_a_synced_session_journals_a_tombstone() {
         pending.len()
     );
 }
+
+#[test]
+fn rejournal_carries_the_payload_to_the_next_revision_exactly_once() {
+    let store = Store::open_in_memory().expect("store");
+    store
+        .append_sync_journal(
+            "message",
+            "m1",
+            SyncJournalOperation::Upsert,
+            1,
+            4,
+            b"{\"k\":1}",
+        )
+        .expect("append");
+    let stuck = store.pending_sync_journal(1).expect("pending").remove(0);
+    store
+        .store_sync_upload_envelope(stuck.id, b"sealed", [7; 32])
+        .expect("cache envelope");
+    assert_eq!(store.sync_outbox_backlog().expect("backlog").pending, 1);
+
+    let outcome = store
+        .rejournal_sync_entry(stuck.id, 100)
+        .expect("rejournal");
+    let forge_store::RejournalOutcome::Rejournaled { new_id, revision } = outcome else {
+        panic!("expected a new row, got {outcome:?}");
+    };
+    assert_eq!(revision, 2);
+    let pending = store.pending_sync_journal(10).expect("pending");
+    assert_eq!(pending.len(), 1, "the retired row never uploads");
+    assert_eq!(pending[0].id, new_id);
+    assert_eq!(pending[0].payload, stuck.payload);
+    assert_eq!(pending[0].content_hash, stuck.content_hash);
+    assert!(pending[0].logical_clock > stuck.logical_clock);
+    assert!(store
+        .sync_upload_envelope(stuck.id)
+        .expect("envelope")
+        .is_none());
+    assert_eq!(
+        store.rejournal_sync_entry(stuck.id, 101).expect("again"),
+        forge_store::RejournalOutcome::Gone,
+        "a second recovery of the same row must not duplicate it"
+    );
+    assert_eq!(store.pending_sync_journal(10).expect("pending").len(), 1);
+}
+
+#[test]
+fn rejournal_only_retires_a_row_when_a_newer_revision_already_exists() {
+    let store = Store::open_in_memory().expect("store");
+    for revision in [1, 2] {
+        store
+            .append_sync_journal(
+                "message",
+                "m1",
+                SyncJournalOperation::Upsert,
+                revision,
+                revision,
+                b"{}",
+            )
+            .expect("append");
+    }
+    let first = store.pending_sync_journal(10).expect("pending").remove(0);
+    assert_eq!(
+        store
+            .rejournal_sync_entry(first.id, 100)
+            .expect("rejournal"),
+        forge_store::RejournalOutcome::Superseded
+    );
+    let pending = store.pending_sync_journal(10).expect("pending");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].revision, 2);
+}

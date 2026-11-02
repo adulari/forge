@@ -77,13 +77,23 @@ export function syncHubMeta(status: AccountSyncStatus | undefined, nowMs = Date.
   const on = status.categories.filter((category) => category.enabled);
   const conflicts = status.categories.reduce((sum, category) => sum + category.conflicts.length, 0);
   if (conflicts > 0) return `${conflicts} ${conflicts === 1 ? "conflict" : "conflicts"}`;
+  if (status.outbox?.blocked) return `Blocked · ${status.outbox.pending} waiting`;
   if (status.last_error && on.length > 0) return "Needs attention";
   if (on.length === 0) return "Off";
   return `${on.length} on · synced ${ageLabel(status.last_sync_at, nowMs)}`;
 }
 
+/** The blocked-outbox explanation for the Sync page, or null when uploads are moving. */
+export function outboxBannerMessage(status: AccountSyncStatus | undefined): string | null {
+  const outbox = status?.outbox;
+  if (!status?.signed_in || !outbox || !outbox.blocked) return null;
+  const why = outbox.code ?? outbox.error ?? "upload failing";
+  return `Uploads are blocked: ${outbox.pending} ${outbox.pending === 1 ? "change is" : "changes are"} waiting (${why}). Update Forge on this machine and run forge anywhere doctor.`;
+}
+
 export function syncNeedsAttention(status: AccountSyncStatus | undefined): boolean {
   if (!status || !status.signed_in) return false;
+  if (status.outbox?.blocked) return true;
   return status.categories.some((category) => category.conflicts.length > 0) || (status.last_error != null && status.categories.some((c) => c.enabled));
 }
 
@@ -108,6 +118,9 @@ export function syncPillModel(status: AccountSyncStatus | undefined, nowMs = Dat
   const conflicts = enabled.reduce((sum, category) => sum + category.conflicts.length, 0);
   const pending = enabled.reduce((sum, category) => sum + category.pending, 0);
   const synced = `Last sync ${ageLabel(status.last_sync_at, nowMs)}`;
+  if (status.outbox?.blocked) {
+    return { label: "Upload blocked", tone: "danger", description: outboxBannerMessage(status) ?? "Uploads are blocked" };
+  }
   if (status.last_error && enabled.length > 0) {
     return { label: "Sync error", tone: "danger", description: `Sync error: ${status.last_error}` };
   }
@@ -118,8 +131,9 @@ export function syncPillModel(status: AccountSyncStatus | undefined, nowMs = Dat
     return { label: "Sign in needed", tone: "warn", description: `Sign in to ${status.sign_ins.map((s) => s.label).join(", ")} on this machine` };
   }
   if (enabled.length === 0) return { label: "Sync off", tone: "muted", description: "Sync across machines is off on this machine" };
-  if (pending > 0) {
-    return { label: `${pending} pending`, tone: "neutral", description: `${pending} local changes waiting to sync. ${synced}` };
+  const queued = Math.max(pending, status.outbox?.pending ?? 0);
+  if (queued > 0) {
+    return { label: `${queued} pending`, tone: "neutral", description: `${queued} local changes waiting to sync. ${synced}` };
   }
   return { label: "Synced", tone: "success", description: `All enabled categories are in sync. ${synced}` };
 }

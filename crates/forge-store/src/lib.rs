@@ -66,6 +66,8 @@ mod spending_store;
 mod sync_files_store;
 mod sync_history_store;
 mod sync_journal;
+mod sync_outbox;
+pub use sync_outbox::{RejournalOutcome, SyncOutboxBacklog};
 mod sync_store;
 mod task_store;
 mod transcript_read_store;

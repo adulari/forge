@@ -8,10 +8,7 @@ use forge_store::{Store, SyncJournalEntry};
 const PORTABLE_KINDS: [&str; 4] = ["user_setting", "skill", "command", "agent"];
 
 pub(super) fn is_revision_conflict(body: &[u8]) -> bool {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("code").and_then(|c| c.as_str().map(str::to_owned)))
-        .is_some_and(|code| code == "sync_revision_conflict")
+    super::sync_recover::error_code(body).as_deref() == Some("sync_revision_conflict")
 }
 
 /// Retires the rejected journal row. When this device's record is still the stored winner for the

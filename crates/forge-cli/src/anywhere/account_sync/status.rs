@@ -53,8 +53,62 @@ pub(crate) struct MissingTool {
     pub hint: String,
 }
 
+/// The upload outbox as a whole: every journal row not yet acknowledged, not just the account-sync
+/// kinds, plus why the drain is stuck when it is.
+#[derive(Debug, Default, Serialize)]
+pub(crate) struct OutboxStatus {
+    pub pending: usize,
+    /// Epoch seconds the oldest waiting row was journaled.
+    pub oldest_at: Option<i64>,
+    /// Waiting rows and a recorded upload failure: nothing behind the oldest row can upload.
+    pub blocked: bool,
+    /// The service's error code for the failure, e.g. `replay_detected`.
+    pub code: Option<String>,
+    pub error: Option<String>,
+    pub blocked_since_ms: Option<u64>,
+    pub attempts: u32,
+}
+
+impl OutboxStatus {
+    pub(crate) fn from_parts(
+        backlog: forge_store::SyncOutboxBacklog,
+        failure: Option<forge_config::account_sync::SyncOutboxFailure>,
+    ) -> Self {
+        let blocked = backlog.pending > 0 && failure.is_some();
+        Self {
+            pending: backlog.pending,
+            oldest_at: backlog.oldest_created_at,
+            blocked,
+            code: failure.as_ref().and_then(|f| f.code.clone()),
+            error: failure.as_ref().map(|f| f.message.clone()),
+            blocked_since_ms: failure.as_ref().map(|f| f.since_ms),
+            attempts: failure.map_or(0, |f| f.attempts),
+        }
+    }
+
+    /// One line for the CLI and the TUI card, or `None` when there is nothing to say.
+    pub(crate) fn line(&self) -> Option<String> {
+        if self.blocked {
+            let why = match (&self.code, &self.error) {
+                (Some(code), _) => code.clone(),
+                (None, Some(error)) => error.clone(),
+                (None, None) => "upload failing".into(),
+            };
+            Some(format!(
+                "Upload outbox BLOCKED: {} waiting, oldest row cannot upload ({why})",
+                self.pending
+            ))
+        } else if self.pending > 0 {
+            Some(format!("Upload outbox: {} waiting", self.pending))
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct AccountSyncStatus {
+    pub outbox: OutboxStatus,
     pub signed_in: bool,
     pub anywhere_enabled: bool,
     pub last_sync_at: Option<i64>,
@@ -161,6 +215,10 @@ pub(crate) fn status_snapshot(store: &Store) -> Result<AccountSyncStatus> {
         });
     }
     Ok(AccountSyncStatus {
+        outbox: OutboxStatus::from_parts(
+            store.sync_outbox_backlog()?,
+            forge_config::account_sync::read_outbox_failure(),
+        ),
         signed_in,
         anywhere_enabled: config.anywhere.enabled,
         last_sync_at: newest,
@@ -247,6 +305,7 @@ pub(crate) fn status_fixture() -> AccountSyncStatus {
         reason: "needs `npx`, not installed here".into(),
     });
     AccountSyncStatus {
+        outbox: OutboxStatus::default(),
         signed_in: true,
         anywhere_enabled: true,
         last_sync_at: None,
@@ -258,5 +317,53 @@ pub(crate) fn status_fixture() -> AccountSyncStatus {
             command: "forge auth codex-oauth".into(),
         }],
         missing_tools: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod outbox_tests {
+    use super::*;
+    use forge_config::account_sync::SyncOutboxFailure;
+    use forge_store::SyncOutboxBacklog;
+
+    fn failure(code: Option<&str>) -> SyncOutboxFailure {
+        SyncOutboxFailure {
+            since_ms: 1,
+            updated_at_ms: 2,
+            code: code.map(str::to_owned),
+            message: "boom".into(),
+            journal_id: Some(7),
+            attempts: 3,
+        }
+    }
+
+    #[test]
+    fn a_backlog_with_a_failure_is_blocked_and_names_the_code() {
+        let backlog = SyncOutboxBacklog {
+            pending: 226,
+            oldest_created_at: Some(5),
+            oldest_id: Some(7),
+        };
+        let status = OutboxStatus::from_parts(backlog, Some(failure(Some("replay_detected"))));
+        assert!(status.blocked);
+        let line = status.line().expect("a blocked outbox is reported");
+        assert!(
+            line.contains("BLOCKED") && line.contains("226") && line.contains("replay_detected")
+        );
+    }
+
+    #[test]
+    fn a_failure_without_a_backlog_is_not_blocked_and_a_backlog_alone_is_just_waiting() {
+        let empty = OutboxStatus::from_parts(SyncOutboxBacklog::default(), Some(failure(None)));
+        assert!(!empty.blocked && empty.line().is_none());
+        let waiting = OutboxStatus::from_parts(
+            SyncOutboxBacklog {
+                pending: 4,
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(!waiting.blocked);
+        assert_eq!(waiting.line().as_deref(), Some("Upload outbox: 4 waiting"));
     }
 }

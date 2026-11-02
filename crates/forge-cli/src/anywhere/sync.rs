@@ -99,7 +99,12 @@ pub(super) fn spawn() -> tokio::task::JoinHandle<()> {
         let mut last_error = String::new();
         loop {
             super::account_sync::wait_for_sync_request(wait_before_next).await;
-            let outcome = upload_batch().await.map_err(|error| format!("{error:#}"));
+            let result = upload_batch().await;
+            let outcome = result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}"));
+            super::sync_recover::record_outcome(&outcome, result.as_ref().err(), now_ms());
             if let Some(line) = sync_report(&last_error, outcome.as_ref().err(), retry_delay) {
                 eprintln!("{line}");
             }
@@ -464,7 +469,10 @@ async fn upload_entry(
     let reserve = http
         .post(format!("{service_url}/v1/sync/uploads"))
         .bearer_auth(access_token)
-        .header("Idempotency-Key", sync_idempotency_key("start", entry))
+        .header(
+            "Idempotency-Key",
+            sync_idempotency_key("start", entry, &prepared.ciphertext_sha256),
+        )
         .json(&StartUploadRequest {
             record_kind: &entry.record_kind,
             stable_id: &entry.stable_id,
@@ -494,7 +502,11 @@ async fn upload_entry(
                 return Ok(());
             }
         }
-        bail!(super::service_error(reqwest::StatusCode::CONFLICT, &body));
+        return Err(super::sync_recover::rejected(
+            reqwest::StatusCode::CONFLICT,
+            &body,
+            entry.id,
+        ));
     }
     let start: StartUploadResponse = super::decode_response(reserve)
         .await
@@ -517,19 +529,56 @@ async fn upload_entry(
             .context("upload encrypted sync object")?
             .error_for_status()
             .context("R2 rejected encrypted sync upload")?;
-        let _: CompleteUploadResponse = send_json(
-            http.post(format!(
+        let complete = http
+            .post(format!(
                 "{service_url}/v1/sync/uploads/{}/complete",
                 start.upload_id
             ))
             .bearer_auth(access_token)
-            .header("Idempotency-Key", sync_idempotency_key("complete", entry)),
-        )
-        .await
-        .context("complete encrypted sync upload")?;
+            .header(
+                "Idempotency-Key",
+                sync_idempotency_key("complete", entry, &prepared.ciphertext_sha256),
+            )
+            .send()
+            .await
+            .context("complete encrypted sync upload")?;
+        if complete.status() == reqwest::StatusCode::CONFLICT {
+            let body = complete.bytes().await.unwrap_or_default();
+            return handle_complete_conflict(store, entry, &body);
+        }
+        let _: CompleteUploadResponse = super::decode_response(complete)
+            .await
+            .context("complete encrypted sync upload")?;
     }
+    super::sync_recover::forget_strikes(entry.id);
     store.mark_sync_journal_uploaded(&[entry.id], (now_ms() / 1_000) as i64)?;
     Ok(())
+}
+
+/// A 409 on completion is either a sequence the service already accepted (`replay_detected`), which
+/// no retry of this envelope can ever clear, or a stored object that does not match the reservation
+/// (`upload_verification_failed`), which re-sending the same bytes normally repairs. Whatever the
+/// code, the row can never succeed as it is once it is exhausted, so it is re-journaled at the
+/// record's next revision (a new sequence, a new ciphertext, a new key) instead of retried forever.
+fn handle_complete_conflict(store: &Store, entry: &SyncJournalEntry, body: &[u8]) -> Result<()> {
+    use super::sync_recover as recover;
+    let code = recover::error_code(body);
+    let exhausted = match code.as_deref() {
+        Some("replay_detected") => true,
+        Some("upload_verification_failed") => {
+            recover::verification_retries_exhausted(recover::verification_strike(entry.id))
+        }
+        _ => false,
+    };
+    if let (true, Some(code)) = (exhausted, code.as_deref()) {
+        recover::rejournal(store, entry, code, (now_ms() / 1_000) as i64)?;
+        return Ok(());
+    }
+    Err(recover::rejected(
+        reqwest::StatusCode::CONFLICT,
+        body,
+        entry.id,
+    ))
 }
 
 fn prepare_envelope(
@@ -678,10 +727,19 @@ fn record_kind(kind: &str) -> Result<SyncRecordKind> {
     })
 }
 
-fn sync_idempotency_key(scope: &str, entry: &SyncJournalEntry) -> String {
+/// Tied to the ciphertext, so a re-sealed envelope can never be answered with an older reservation
+/// made under the same record and revision.
+fn sync_idempotency_key(
+    scope: &str,
+    entry: &SyncJournalEntry,
+    ciphertext_sha256: &[u8; 32],
+) -> String {
     let input = format!(
-        "{scope}:{}:{}:{}",
-        entry.record_kind, entry.stable_id, entry.revision
+        "{scope}:{}:{}:{}:{}",
+        entry.record_kind,
+        entry.stable_id,
+        entry.revision,
+        hex::encode(ciphertext_sha256)
     );
     hex::encode(Sha256::digest(input.as_bytes()))
 }
@@ -898,6 +956,9 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod outbox_tests;
 
 #[cfg(test)]
 mod sync_report_tests {

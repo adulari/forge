@@ -1099,7 +1099,23 @@ export interface AccountSyncMissingTool {
   hint: string;
 }
 
+export interface AccountSyncOutbox {
+  /** Journal rows waiting to upload, across every record kind. */
+  pending: number;
+  /** Epoch seconds the oldest waiting row was journaled. */
+  oldest_at: number | null;
+  /** Rows are waiting and the upload worker is failing: nothing behind the oldest row uploads. */
+  blocked: boolean;
+  /** The service's error code, e.g. `replay_detected`. */
+  code: string | null;
+  error: string | null;
+  blocked_since_ms: number | null;
+  attempts: number;
+}
+
 export interface AccountSyncStatus {
+  /** Absent from daemons that predate the outbox report. */
+  outbox?: AccountSyncOutbox;
   signed_in: boolean;
   anywhere_enabled: boolean;
   last_sync_at: number | null;

@@ -43,6 +43,7 @@ pub(crate) mod push;
 mod share;
 mod sync;
 mod sync_conflict;
+mod sync_recover;
 pub(crate) mod tui_menu;
 
 pub(crate) fn spawn_connector(local_base_url: String) -> tokio::task::JoinHandle<()> {
@@ -1374,6 +1375,9 @@ async fn status() -> Result<()> {
             ""
         }
     );
+    if let Some(line) = sync_recover::outbox_line(&forge_store) {
+        println!("{line}");
+    }
     println!(
         "Connector link: {}",
         link_status_text(current_link_health()?)
@@ -1469,6 +1473,22 @@ async fn doctor() -> Result<()> {
     // clue why — "connector: not configured" alone reads as "never set up", not "misspelled".
     for warning in forge_config::anywhere_config_warnings() {
         println!("  config: {warning}");
+    }
+    if config.anywhere.sync {
+        match crate::open_store()
+            .ok()
+            .and_then(|s| sync_recover::outbox_line(&s))
+        {
+            Some(line) => println!("  sync outbox: {line}"),
+            None => println!("  sync outbox: empty"),
+        }
+        if let Some(failure) = forge_config::account_sync::read_outbox_failure() {
+            println!(
+                "  sync outbox error: {} (since {})",
+                failure.code.as_deref().unwrap_or(&failure.message),
+                display_timestamp(&failure.since_ms.to_string())
+            );
+        }
     }
     let command_error = current_command_error()?;
     println!(
@@ -2162,23 +2182,13 @@ async fn require_empty_success(response: reqwest::Response) -> Result<()> {
 }
 
 fn service_error(status: StatusCode, body: &[u8]) -> String {
-    #[derive(Deserialize)]
-    struct ErrorBody {
-        code: Option<String>,
-        message: Option<String>,
-    }
-    let error = serde_json::from_slice::<ErrorBody>(body).ok();
-    let searchable = error
-        .as_ref()
-        .map(|error| {
-            format!(
-                "{} {}",
-                error.code.as_deref().unwrap_or_default(),
-                error.message.as_deref().unwrap_or_default()
-            )
-            .to_ascii_lowercase()
-        })
-        .unwrap_or_default();
+    let (code, message) = sync_recover::error_fields(body);
+    let searchable = format!(
+        "{} {}",
+        code.as_deref().unwrap_or_default(),
+        message.as_deref().unwrap_or_default()
+    )
+    .to_ascii_lowercase();
     if searchable.contains("entitlement_read_only") || searchable.contains("read-only") {
         "this account is read-only (subscription or trial ended) — existing data stays readable, but writes need an active plan; enrollment is not the problem".into()
     } else if searchable.contains("expired") || status == StatusCode::GONE {
@@ -2199,8 +2209,12 @@ fn service_error(status: StatusCode, body: &[u8]) -> String {
     } else if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
         "device enrollment is not authorized — run `forge anywhere setup`".into()
     } else {
+        let code = sync_recover::error_code(body)
+            .filter(|_| status == StatusCode::CONFLICT)
+            .map(|code| format!(", {code}"))
+            .unwrap_or_default();
         format!(
-            "Forge Anywhere could not complete the request (HTTP {}) — run `forge anywhere doctor`",
+            "Forge Anywhere could not complete the request (HTTP {}{code}) — run `forge anywhere doctor`",
             status.as_u16()
         )
     }
@@ -2649,6 +2663,23 @@ mod tests {
         assert!(!error.contains("invalid_request"));
         assert!(!error.contains("safe message"));
         assert!(!error.contains("do-not-log"));
+    }
+
+    #[test]
+    fn nested_service_error_bodies_are_understood() {
+        let read_only = br#"{"version":1,"error":{"code":"entitlement_read_only","message":"x"}}"#;
+        assert!(service_error(StatusCode::FORBIDDEN, read_only)
+            .starts_with("this account is read-only"));
+    }
+
+    #[test]
+    fn a_conflict_names_the_service_code_but_never_free_text() {
+        let known = br#"{"version":1,"error":{"code":"replay_detected","message":"m"}}"#;
+        assert!(service_error(StatusCode::CONFLICT, known).contains("HTTP 409, replay_detected"));
+        let hostile = br#"{"error":{"code":"x[31m evil","message":"m"}}"#;
+        let text = service_error(StatusCode::CONFLICT, hostile);
+        assert!(text.contains("HTTP 409)"), "{text}");
+        assert!(!text.contains("evil"));
     }
 
     #[test]

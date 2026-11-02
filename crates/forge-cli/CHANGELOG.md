@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A blocked Forge Anywhere upload outbox now says so, and heals itself.** The sync client looked for the service's error `code` at the top of the response, but the service nests it under `error`, so a revision conflict was never recognised and the first conflicting row (a command, a skill) blocked every row behind it forever while the log only said "HTTP 409" and `forge anywhere sync` said "0 pending". The client now reads the real shape, and a rejected completion (`replay_detected`, or `upload_verification_failed` three times running) re-queues the row at the record's next revision with a fresh envelope and a ciphertext-bound idempotency key, so nothing is lost or uploaded twice. The error code shows in the daemon log, and `forge anywhere sync status`, `forge anywhere status`, `forge anywhere doctor`, the `/anywhere` terminal menu and the app's Sync page report the real backlog across every record kind with a blocked state.
+
 ## [2.26.1] - 2026-10-31
 
 ### Added

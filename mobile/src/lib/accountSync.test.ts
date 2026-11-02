@@ -4,6 +4,7 @@ import {
   ageLabel,
   categoryStatusLine,
   classifyAccountSyncError,
+  outboxBannerMessage,
   syncHubMeta,
   syncNeedsAttention,
   syncPillModel,
@@ -106,5 +107,27 @@ describe("needsKeysConfirmation", () => {
     expect(needsKeysConfirmation(keys, true)).toBe(true);
     expect(needsKeysConfirmation(keys, false)).toBe(false);
     expect(needsKeysConfirmation(category(), true)).toBe(false);
+  });
+});
+
+describe("blocked upload outbox", () => {
+  const blocked = {
+    pending: 226, oldest_at: 1_793_391_912, blocked: true, code: "replay_detected",
+    error: "x", blocked_since_ms: NOW, attempts: 9,
+  };
+  it("shows the backlog and the service code instead of a clean zero", () => {
+    const s = status([category({ enabled: true })], { outbox: blocked });
+    expect(outboxBannerMessage(s)).toContain("226 changes are waiting (replay_detected)");
+    expect(syncNeedsAttention(s)).toBe(true);
+    expect(syncHubMeta(s, NOW)).toBe("Blocked · 226 waiting");
+    expect(syncPillModel(s, NOW)).toMatchObject({ label: "Upload blocked", tone: "danger" });
+  });
+  it("stays quiet for daemons without the report and for a moving outbox", () => {
+    expect(outboxBannerMessage(status([category({ enabled: true })]))).toBeNull();
+    expect(outboxBannerMessage(status([], { outbox: { ...blocked, blocked: false } }))).toBeNull();
+  });
+  it("counts the whole outbox as pending, not only category items", () => {
+    const s = status([category({ enabled: true })], { outbox: { ...blocked, blocked: false, pending: 4 } });
+    expect(syncPillModel(s, NOW)).toMatchObject({ label: "4 pending" });
   });
 });
