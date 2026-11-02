@@ -29,6 +29,13 @@ pub(super) const DISCOVERY_RETRY_STEADY_ROUNDS: usize = 3;
 /// failing. Past this they are dropped: a retired key must not advertise models for ever.
 const CARRY_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 
+/// A model the previous catalog held is dropped only after it has been absent from this many
+/// consecutive successful listings of its provider...
+pub(super) const MISS_LISTINGS_BEFORE_REMOVAL: u32 = 5;
+/// ...and for at least this long since its first absence. Rediscovery runs hourly in steady state
+/// but also in bursts (config edits, retry rounds), so the count alone could be spent in minutes.
+pub(super) const MISS_WINDOW_SECS: u64 = 6 * 60 * 60;
+
 fn is_cli_bridge(provider: &str) -> bool {
     forge_provider::CliKind::all()
         .into_iter()
@@ -172,6 +179,111 @@ pub(super) fn plan_carry(
     (added, clock)
 }
 
+/// Per-model absence record: consecutive listings that omitted it, and when the first one was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct Miss {
+    pub listings: u32,
+    pub first_epoch: u64,
+}
+
+/// Hysteresis for providers that DID answer. A listing endpoint intermittently omitting a few
+/// models (load-balanced backends, partial pages, rotating aliases) used to publish a "new"
+/// catalog each time, so the picker, routing and every session's transcript flapped. A model in
+/// the previous catalog that this listing omitted is kept until it has been missing for
+/// [`MISS_LISTINGS_BEFORE_REMOVAL`] consecutive listings spanning [`MISS_WINDOW_SECS`]. A model
+/// that reappears resets its record. Providers that returned nothing, or that failed (handled by
+/// [`plan_carry`]), are never judged here: only a provider that listed something can say a
+/// sibling model is gone. A model that is really dead is benched by the health path on its first
+/// failed call, independent of whether the catalog still lists it.
+pub(super) fn plan_hysteresis(
+    fresh: &[String],
+    cached: &[String],
+    failed: &[&str],
+    misses: &BTreeMap<String, Miss>,
+    now: u64,
+) -> (Vec<String>, BTreeMap<String, Miss>) {
+    let answered: HashSet<&str> = fresh
+        .iter()
+        .map(|m| forge_config::provider_of(m))
+        .filter(|p| !failed.contains(p))
+        .collect();
+    let present: HashSet<&str> = fresh.iter().map(String::as_str).collect();
+    let mut next = BTreeMap::new();
+    let mut kept = Vec::new();
+    for model in cached {
+        if present.contains(model.as_str()) || !answered.contains(forge_config::provider_of(model))
+        {
+            continue;
+        }
+        let prev = misses.get(model).copied().unwrap_or(Miss {
+            listings: 0,
+            first_epoch: now,
+        });
+        let miss = Miss {
+            listings: prev.listings.saturating_add(1),
+            first_epoch: prev.first_epoch,
+        };
+        let gone = miss.listings >= MISS_LISTINGS_BEFORE_REMOVAL
+            && now.saturating_sub(miss.first_epoch) >= MISS_WINDOW_SECS;
+        if !gone {
+            next.insert(model.clone(), miss);
+            kept.push(model.clone());
+        }
+    }
+    // Records for providers we could not judge this round carry over untouched.
+    for (model, miss) in misses {
+        if !answered.contains(forge_config::provider_of(model))
+            && cached.contains(model)
+            && !present.contains(model.as_str())
+        {
+            next.insert(model.clone(), *miss);
+        }
+    }
+    (kept, next)
+}
+
+fn miss_path() -> Option<std::path::PathBuf> {
+    forge_config::data_dir().map(|d| d.join("catalog-misses.json"))
+}
+
+/// Keep models a healthy provider's listing merely omitted this round (see [`plan_hysteresis`]).
+pub(super) fn retain_flapping_models(
+    models: &mut Vec<String>,
+    statuses: &[ProviderDiscoveryStatus],
+    disabled: &[String],
+) {
+    let failed: Vec<&str> = statuses
+        .iter()
+        .filter(|s| !matches!(s.kind, DiscoveryStatusKind::Discovered))
+        .map(|s| s.provider.as_str())
+        .collect();
+    let path = miss_path();
+    let misses: BTreeMap<String, Miss> = path
+        .as_ref()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let cached = super::load_cached_catalog_aged()
+        .map(|(catalog, _, _)| catalog.models().to_vec())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (mut kept, next) = plan_hysteresis(models, &cached, &failed, &misses, now);
+    kept.retain(|m| {
+        !forge_config::is_non_chat_model(m) && !forge_config::is_model_disabled(m, disabled)
+    });
+    if let Some(path) = path {
+        if next != misses {
+            if let Ok(json) = serde_json::to_vec(&next) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+    models.extend(kept);
+}
+
 fn carry_clock_path() -> Option<std::path::PathBuf> {
     forge_config::data_dir().map(|d| d.join("catalog-carry.json"))
 }
@@ -232,6 +344,108 @@ pub(super) fn carry_forward_unreachable(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One discovery round as `discover_catalog_with_status` sees it: fresh ids in, the catalog that
+    /// would be published (and the miss records to persist) out.
+    fn round(
+        fresh: &[&str],
+        previous: &[String],
+        misses: &BTreeMap<String, Miss>,
+        now: u64,
+    ) -> (Vec<String>, BTreeMap<String, Miss>) {
+        let mut models = ids(fresh);
+        let (kept, next) = plan_hysteresis(&models, previous, &[], misses, now);
+        models.extend(kept);
+        (models, next)
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn a_listing_that_flaps_never_changes_the_published_catalog() {
+        let full = ["sambanova::a", "sambanova::b", "inferhub::c", "inferhub::d"];
+        let mut published = ids(&full);
+        let mut misses = BTreeMap::new();
+        let mut now = 1_000_000;
+        let mut changes = 0;
+        for i in 0..100 {
+            now += 60;
+            // Every other round the provider omits two of its models.
+            let fresh: &[&str] = if i % 2 == 0 {
+                &["sambanova::a", "inferhub::c"]
+            } else {
+                &full
+            };
+            let (next, m) = round(fresh, &published, &misses, now);
+            if sorted(next.clone()) != sorted(published.clone()) {
+                changes += 1;
+            }
+            published = next;
+            misses = m;
+        }
+        assert_eq!(changes, 0);
+        assert_eq!(sorted(published), sorted(ids(&full)));
+    }
+
+    #[test]
+    fn a_model_really_gone_disappears_after_the_listings_and_the_window() {
+        let mut published = ids(&["groq::a", "groq::b"]);
+        let mut misses = BTreeMap::new();
+        let start = 1_000_000;
+        // Enough listings, but too fast: still kept.
+        for i in 0..(MISS_LISTINGS_BEFORE_REMOVAL * 3) {
+            let (next, m) = round(&["groq::a"], &published, &misses, start + u64::from(i));
+            published = next;
+            misses = m;
+        }
+        assert!(published.contains(&"groq::b".to_string()));
+        // Past the window, the next listing removes it and clears its record.
+        let (next, m) = round(&["groq::a"], &published, &misses, start + MISS_WINDOW_SECS);
+        assert_eq!(next, ids(&["groq::a"]));
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn a_model_that_reappears_restarts_its_count() {
+        let published = ids(&["groq::a", "groq::b"]);
+        let (_, m) = round(&["groq::a"], &published, &BTreeMap::new(), 100);
+        assert_eq!(m["groq::b"].listings, 1);
+        let (_, m) = round(&["groq::a", "groq::b"], &published, &m, 200);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn failed_or_empty_providers_are_never_judged() {
+        let cached = ids(&["groq::a", "groq::b", "mistral::x"]);
+        // groq failed (the carry logic owns it); mistral listed nothing at all.
+        let (kept, m) = plan_hysteresis(
+            &ids(&["gemini::g"]),
+            &cached,
+            &["groq"],
+            &BTreeMap::new(),
+            5,
+        );
+        assert!(kept.is_empty());
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn records_of_unjudged_providers_survive_a_round() {
+        let cached = ids(&["groq::a", "mistral::x"]);
+        let mut misses = BTreeMap::new();
+        misses.insert(
+            "mistral::x".to_string(),
+            Miss {
+                listings: 3,
+                first_epoch: 7,
+            },
+        );
+        let (_, m) = plan_hysteresis(&ids(&["groq::a"]), &cached, &[], &misses, 99);
+        assert_eq!(m.get("mistral::x").map(|x| x.listings), Some(3));
+    }
 
     fn status(provider: &str, kind: DiscoveryStatusKind) -> ProviderDiscoveryStatus {
         ProviderDiscoveryStatus {

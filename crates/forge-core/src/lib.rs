@@ -1592,6 +1592,10 @@ pub struct Session {
     /// session adopted (see `catalog_feed.rs`).
     catalog_feed: Option<forge_mesh::LiveCatalog>,
     catalog_feed_seen: Option<std::sync::Arc<ModelCatalog>>,
+    /// Model ids the user was last told about, and whether the adopted catalog has drifted from
+    /// them since (announced once, at the start of the next turn).
+    catalog_announced: Vec<String>,
+    catalog_unannounced: bool,
     /// The agent's task list (the `update_tasks` tool), rehydrated from the store on resume.
     tasks: Vec<forge_types::TodoItem>,
     /// A plan proposed this turn via `present_plan` (planning mode), awaiting interactive approval

@@ -12,8 +12,9 @@ mod recovery;
 use super::CATALOG_CACHE_MAX_AGE_SECS;
 use crate::*;
 use recovery::{
-    carry_forward_unreachable, discover_until_keyed_providers_answer, warn_unreachable,
-    DISCOVERY_RETRY_BACKOFF, DISCOVERY_RETRY_STEADY, DISCOVERY_RETRY_STEADY_ROUNDS,
+    carry_forward_unreachable, discover_until_keyed_providers_answer, retain_flapping_models,
+    warn_unreachable, DISCOVERY_RETRY_BACKOFF, DISCOVERY_RETRY_STEADY,
+    DISCOVERY_RETRY_STEADY_ROUNDS,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -619,6 +620,7 @@ pub(crate) async fn discover_catalog_with_status(
     // A provider we could not ask this round keeps the models it listed last time (bounded), so a
     // boot-time DNS gap does not shrink the catalog to the providers that happened to answer.
     carry_forward_unreachable(&mut models, &mut statuses, &config.mesh.disabled);
+    retain_flapping_models(&mut models, &statuses, &config.mesh.disabled);
     // Fetch + persist real per-model context windows (OpenRouter exposes `context_length`) so the
     // core can trim each turn to the routed model's window instead of overflowing it. Best-effort;
     // the family heuristic covers everything else.
