@@ -210,8 +210,13 @@ write, because the keyring has no change signal) and `catalog.json`. Then:
 
 Publishing goes to the shared `LiveCatalog` that routers already follow; sessions swap their
 picker/pin-check snapshot in `Session::sync_catalog_feed` through the session lock, so it lands
-at a turn boundary and never touches a pinned model, tier pin or turn in flight. It prints
-`catalog refreshed: +50 modelgateway` only when the model set changed. The `ReloadConfig`
+at a turn boundary and never touches a pinned model, tier pin or turn in flight. Adoption is
+silent; the next turn prints one `models updated: +50 modelgateway` line, only for the net change
+since the user was last told (a model that flapped out and back says nothing), and never while the
+session is idle. Discovery keeps a model a healthy provider's listing omitted until it has been
+missing from 5 consecutive listings spanning 6 hours (`MISS_LISTINGS_BEFORE_REMOVAL`,
+`MISS_WINDOW_SECS`; records in `catalog-misses.json`); failed or empty listings never remove
+models, and a dead model is still benched by the health path on its first failed call. The `ReloadConfig`
 keybind (Ctrl-R) triggers the same refresh immediately. The context-window/price sweep stamp is
 keyed on the model set **and** the provider set (`provider_set_fingerprint`), so a new provider
 or key is swept at once instead of after the one-hour gate. Not hot-reloaded: other `config.toml`

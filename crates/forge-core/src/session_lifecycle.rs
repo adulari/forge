@@ -225,6 +225,8 @@ impl Session {
             catalog: None,
             catalog_feed: None,
             catalog_feed_seen: None,
+            catalog_announced: Vec::new(),
+            catalog_unannounced: false,
             tasks,
             pending_plan: None,
             task_scope: None,

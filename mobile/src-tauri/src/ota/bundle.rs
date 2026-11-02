@@ -50,14 +50,20 @@ fn write_all(zip: &[u8], temp: &Path) -> Result<(), String> {
         let mut entry = archive
             .by_index(index)
             .map_err(|error| format!("read bundle entry: {error}"))?;
-        let relative = entry
-            .enclosed_name()
-            .ok_or_else(|| format!("bundle entry escapes the bundle: {}", entry.name()))?;
+        let relative = entry.enclosed_name().ok_or_else(|| {
+            format!(
+                "bundle entry escapes the bundle: {}",
+                entry.name().unwrap_or_default()
+            )
+        })?;
         if entry
             .unix_mode()
             .is_some_and(|mode| mode & 0o170000 == 0o120000)
         {
-            return Err(format!("bundle entry is a symlink: {}", entry.name()));
+            return Err(format!(
+                "bundle entry is a symlink: {}",
+                entry.name().unwrap_or_default()
+            ));
         }
         let destination = temp.join(&relative);
         if entry.is_dir() {
@@ -70,7 +76,7 @@ fn write_all(zip: &[u8], temp: &Path) -> Result<(), String> {
         let mut file =
             fs::File::create(&destination).map_err(|error| format!("create file: {error}"))?;
         let copied = io::copy(&mut (&mut entry).take(MAX_FILE_BYTES + 1), &mut file)
-            .map_err(|error| format!("unpack {}: {error}", entry.name()))?;
+            .map_err(|error| format!("unpack {}: {error}", entry.name().unwrap_or_default()))?;
         total += copied;
         if copied > MAX_FILE_BYTES || total > MAX_TOTAL_BYTES {
             return Err("bundle expands beyond the size limit".to_string());

@@ -35,6 +35,7 @@ impl Session {
         if IN_TURN.try_with(|_| ()).is_ok() {
             return Box::pin(self.run_turn_body(prompt, guidance, tier_override)).await;
         }
+        self.announce_catalog_changes();
         for text in crate::hooks_async::take(&self.id) {
             self.inject_hook_context(&text);
         }
