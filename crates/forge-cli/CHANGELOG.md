@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.26.3] - 2026-11-02
+
 ### Security
 
 - **Cleared RUSTSEC-2026-0433 and RUSTSEC-2026-0429 where a fix exists.** `pulldown-cmark` moves to 0.13.6 (quadratic wikilink parsing), `self_update` to 1.3.3 (so the CLI's `zip` is 9.x) and the desktop app's own `zip` dependency to 9.x, removing the zip 8 advisory ignores from `deny.toml` and the security workflow. The desktop lockfile keeps zip 4 only as `tauri-plugin-updater` 2.10.1's dependency, with a documented audit ignore, because that crate must match the pinned JS plugin.
@@ -5553,7 +5555,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.2...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.3...HEAD
+[2.26.3]: https://github.com/Adulari/forge/compare/v2.26.2...v2.26.3
 [2.26.2]: https://github.com/Adulari/forge/compare/v2.26.1...v2.26.2
 [2.26.1]: https://github.com/Adulari/forge/compare/v2.26.0...v2.26.1
 [2.26.0]: https://github.com/Adulari/forge/compare/v2.25.2...v2.26.0
