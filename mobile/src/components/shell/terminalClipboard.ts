@@ -1,3 +1,5 @@
+import { containsNode } from "../../lib/domTarget";
+
 // Web-only selection and clipboard helpers for the terminal. On native the OS owns selection and
 // copy, so every function degrades to "nothing selected".
 /** True where a DOM exists to select in and listen on: the browser and the desktop webview. */
@@ -12,7 +14,7 @@ export function selectedTextWithin(root: Node | null | undefined): string {
   const current = selection();
   if (!current || current.isCollapsed || !root) return "";
   const anchor = current.anchorNode;
-  if (!anchor || !root.contains(anchor)) return "";
+  if (!containsNode(root, anchor)) return "";
   return current.toString();
 }
 

@@ -23,6 +23,7 @@ Set it in any of these places; they all write the same setting:
 - Desktop and phone apps: Settings, "Error reports"
 - Onboarding (the onboarding step calls `forge_reporting::set_mode`)
 - `FORGE_NO_REPORTS=1` in the environment forces `off` whatever the config says. It also covers `forge serve`.
+- The desktop app also forces `off` when it is driven by tooling: an open WebKit inspector port (`WEBKIT_INSPECTOR_HTTP_SERVER` / `WEBKIT_INSPECTOR_SERVER`) or `navigator.webdriver`. Test harness and mock-daemon runs throw on purpose and must not reach the production reporter.
 
 ## What is reported, and what is not
 
