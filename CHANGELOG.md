@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Desktop: runs driven by tooling (an open WebKit inspector port, or WebDriver) no longer send error reports, which had filed auto-report issues from the off-screen test harness (#1729, #1732, #1735). `Node.contains` on non-Node event targets is guarded.
+
 ## [2.26.3] - 2026-11-02
 
 ### Security

@@ -171,6 +171,22 @@ describe("sending", () => {
     expect(mod.getReportingState().sent).toHaveLength(1);
   });
 
+  it("a WebDriver/inspector-driven run never reports, even in auto mode", async () => {
+    const mod = await import("./reporting");
+    mod.__resetReportingForTests();
+    const fetchMock = vi.fn(async () => ({ status: 202, headers: { get: () => null } }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubGlobal("navigator", { webdriver: true });
+    try {
+      expect(mod.effectiveMode()).toBe("off");
+      await mod.reportError("react_boundary", new Error("boom while rendering a.ts"), "react.error_boundary");
+      await mod.flushReports();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("off mode sends nothing and ask mode parks the report", async () => {
     const mod = await import("./reporting");
     mod.__resetReportingForTests();

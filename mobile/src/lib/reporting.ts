@@ -94,9 +94,14 @@ function truthy(value: string | undefined): boolean {
   return value != null && ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
 }
 
-/** `FORGE_NO_REPORTS=1` (build-time `EXPO_PUBLIC_FORGE_NO_REPORTS`, or the desktop process env). */
+/** `FORGE_NO_REPORTS=1` or a tooling-driven run (build-time `EXPO_PUBLIC_FORGE_NO_REPORTS`, or the desktop process env). */
 function forcedOff(): boolean {
-  return truthy(process.env.EXPO_PUBLIC_FORGE_NO_REPORTS) || envOverride.disabled === true;
+  return truthy(process.env.EXPO_PUBLIC_FORGE_NO_REPORTS) || envOverride.disabled === true || automated();
+}
+
+/** WebDriver-style automation sets `navigator.webdriver`; such runs break things on purpose. */
+function automated(): boolean {
+  return typeof navigator !== "undefined" && (navigator as { webdriver?: boolean }).webdriver === true;
 }
 
 export function reportingUrl(): string {

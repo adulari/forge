@@ -92,6 +92,7 @@ import { useActiveSessionId } from "../shell/activeSession";
 import { SchedulesPanel } from "../shell/SchedulesPanel";
 import { WhatsNewPanel } from "../shell/WhatsNewPanel";
 import { CategoryChips, KeyHint, MoreOption, PaletteOption } from "./PaletteRows";
+import { closestElement } from "../../lib/domTarget";
 import { optionDomId, PALETTE_LISTBOX_ID, type PaletteItem, type PaletteMode } from "./paletteTypes";
 import { usePaletteSearch } from "./usePaletteSearch";
 import { usePaletteSources } from "./usePaletteSources";
@@ -397,7 +398,7 @@ export function CommandPalette({ visible, mode = "default", onClose }: CommandPa
       const target = e.target as HTMLElement | null;
       // The autofocused SearchField is itself an <input> — without this exemption `isEditing`
       // is true the instant the palette opens, and Arrow/Enter never reach the branches below.
-      const withinPalette = typeof target?.closest === "function" && target.closest("[data-palette-root]") != null;
+      const withinPalette = closestElement(target, "[data-palette-root]") != null;
       const isEditing =
         !withinPalette &&
         (target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable);

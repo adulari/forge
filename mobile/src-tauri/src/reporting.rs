@@ -17,13 +17,22 @@ fn data_dir() -> Option<PathBuf> {
 }
 
 fn env_disabled() -> bool {
-    matches!(
-        std::env::var("FORGE_NO_REPORTS")
-            .ok()
-            .as_deref()
-            .map(str::trim),
+    disabled_by(|key| std::env::var(key).ok())
+}
+
+/// Reports are off when the user said so, or when the process is being driven by tooling: an
+/// open WebKit inspector port is how the off-screen harness and mock-daemon runs attach, and
+/// those runs throw errors on purpose. Without this they reached the production reporter and
+/// filed issues (#1729, #1732, #1735).
+fn disabled_by(get: impl Fn(&str) -> Option<String>) -> bool {
+    let truthy = matches!(
+        get("FORGE_NO_REPORTS").as_deref().map(str::trim),
         Some("1" | "true" | "yes" | "on")
-    )
+    );
+    let inspected = ["WEBKIT_INSPECTOR_HTTP_SERVER", "WEBKIT_INSPECTOR_SERVER"]
+        .iter()
+        .any(|key| get(key).is_some_and(|v| !v.trim().is_empty()));
+    truthy || inspected
 }
 
 fn read_mode() -> String {
@@ -243,6 +252,30 @@ mod tests {
         assert!(out.contains("<url:api.example.com>"));
         assert!(!out.contains("pw@") && !out.contains("bob@"));
         assert!(!out.contains("sk-abc") && !out.contains("0123456789abcdef"));
+    }
+
+    #[test]
+    fn tooling_driven_runs_never_report() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        assert!(!disabled_by(env(&[])));
+        assert!(!disabled_by(env(&[("FORGE_NO_REPORTS", "0")])));
+        assert!(disabled_by(env(&[("FORGE_NO_REPORTS", " true ")])));
+        assert!(disabled_by(env(&[(
+            "WEBKIT_INSPECTOR_HTTP_SERVER",
+            "127.0.0.1:9222"
+        )])));
+        assert!(disabled_by(env(&[(
+            "WEBKIT_INSPECTOR_SERVER",
+            "127.0.0.1:9222"
+        )])));
+        assert!(!disabled_by(env(&[("WEBKIT_INSPECTOR_HTTP_SERVER", "  ")])));
     }
 
     #[test]
