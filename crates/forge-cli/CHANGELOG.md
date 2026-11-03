@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.26.4] - 2026-11-03
+
 ### Fixed
 
 - Desktop: runs driven by tooling (an open WebKit inspector port, or WebDriver) no longer send error reports, which had filed auto-report issues from the off-screen test harness (#1729, #1732, #1735). `Node.contains` on non-Node event targets is guarded.
@@ -5559,7 +5561,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.3...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.4...HEAD
+[2.26.4]: https://github.com/Adulari/forge/compare/v2.26.3...v2.26.4
 [2.26.3]: https://github.com/Adulari/forge/compare/v2.26.2...v2.26.3
 [2.26.2]: https://github.com/Adulari/forge/compare/v2.26.1...v2.26.2
 [2.26.1]: https://github.com/Adulari/forge/compare/v2.26.0...v2.26.1
