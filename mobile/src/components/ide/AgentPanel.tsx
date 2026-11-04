@@ -148,6 +148,7 @@ function Body({ sessionId }: { sessionId: string }) {
           temper={snapshot?.temper ?? null}
           onSend={handleSend}
           onInterrupt={handleInterrupt}
+          compact
         />
         </View>
       )}

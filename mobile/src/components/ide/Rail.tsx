@@ -1,5 +1,5 @@
 // Left rail: project, the agents on it, then Changes / Files / Git for the agent in view.
-import { ChevronDown } from "lucide-react-native";
+import { ChevronDown, Folder } from "lucide-react-native";
 import React, { useMemo, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 
@@ -47,6 +47,7 @@ function ProjectSwitcher() {
         accessibilityLabel={`Project ${project ?? "none"}${many ? ". Change project" : ""}`}
         style={({ hovered }: { hovered?: boolean; pressed: boolean }) => [styles.project, { backgroundColor: rowBackground(tokens, { hovered: hovered && many }) }]}
       >
+        <Folder size={13} strokeWidth={1.75} color={tokens.ink3} />
         <Text numberOfLines={1} style={[styles.projectName, { color: project ? tokens.ink : tokens.ink3 }]}>
           {project ?? "No project"}
         </Text>
@@ -106,8 +107,8 @@ export function Rail() {
 
 const styles = StyleSheet.create({
   root: { flex: 1, minHeight: 0 },
-  project: { height: 36, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: space.space12 },
-  projectName: { flexShrink: 1, fontFamily: sansFamilyFor(600), fontSize: 13, letterSpacing: -0.1 },
+  project: { height: 36, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12 },
+  projectName: { flex: 1, minWidth: 0, fontFamily: sansFamilyFor(600), fontSize: 13, letterSpacing: -0.1 },
   tabs: { height: 32, flexDirection: "row", alignItems: "stretch", paddingHorizontal: space.space8, borderTopWidth: StyleSheet.hairlineWidth, borderBottomWidth: StyleSheet.hairlineWidth, marginTop: space.space4 },
   tab: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: space.space8 },
   tabText: { fontFamily: sansFamilyFor(500), fontSize: 12 },
