@@ -1,11 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 
-const storage = vi.hoisted(() => ({
-  getItem: vi.fn(async () => null as string | null),
-  setItem: vi.fn(async () => undefined),
-}));
-vi.mock("@react-native-async-storage/async-storage", () => ({ default: storage }));
-
 import {
   IDE_AGENT_WIDTH,
   IDE_RAIL_WIDTH,
@@ -15,6 +9,12 @@ import {
   setIdeModeEnabled,
   setIdeRailWidth,
 } from "./ideModePrefs";
+
+const storage = vi.hoisted(() => ({
+  getItem: vi.fn(async () => null as string | null),
+  setItem: vi.fn(async () => undefined),
+}));
+vi.mock("@react-native-async-storage/async-storage", () => ({ default: storage }));
 
 describe("ideModePrefs", () => {
   it("defaults to off with the plan's pane widths", () => {
