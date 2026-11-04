@@ -28,6 +28,8 @@ export interface FileTreeProps {
   /** `null` when the connection cannot mutate the workspace (Forge Anywhere relay). */
   onRename: ((entry: WorkspaceEntry) => void) | null;
   onDelete: ((entry: WorkspaceEntry) => void) | null;
+  /** Paths an agent changed (IDE mode): their names take the info colour. */
+  changedPaths?: ReadonlySet<string>;
 }
 
 function TreeRow({
@@ -83,7 +85,10 @@ function TreeRow({
           ) : null}
         </View>
         <Icon size={15} strokeWidth={1.75} color={isDirectory ? tokens.accent : tokens.ink3} />
-        <Text style={[typeScale.body, styles.entryName, { color: tokens.ink }]} numberOfLines={1}>
+        <Text
+          style={[typeScale.body, styles.entryName, { color: props.changedPaths?.has(entry.path) ? tokens.info : tokens.ink }]}
+          numberOfLines={1}
+        >
           {entry.name}
         </Text>
         {entry.kind === "file" ? (

@@ -1,10 +1,11 @@
-export type FocusTag = "composerFocus" | "terminalFocus" | "sidebarFocus" | "editorFocus" | "hasSession";
+export type FocusTag = "composerFocus" | "terminalFocus" | "sidebarFocus" | "editorFocus" | "hasSession" | "ideReview";
 
 export const EXCLUSIVE_FOCUS_TAGS: readonly FocusTag[] = [
   "composerFocus",
   "terminalFocus",
   "sidebarFocus",
   "editorFocus",
+  "ideReview",
 ];
 
 export interface ParsedWhen {
@@ -48,6 +49,7 @@ const SCOPE_NOTES: Record<string, string> = {
   terminalFocus: "the terminal is focused",
   editorFocus: "the editor is focused",
   hasSession: "a session is open",
+  ideReview: "the IDE review workbench is focused",
 };
 
 export function describeWhen(when: string | undefined): string | null {

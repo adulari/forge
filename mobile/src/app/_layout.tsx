@@ -14,7 +14,7 @@ import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client
 import { useFonts } from "expo-font";
 import { DefaultTheme, Redirect, Stack, ThemeProvider as NavThemeProvider, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import React, { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import React, { Activity, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -47,9 +47,12 @@ import { IconRail } from "../components/shell/IconRail";
 import { QuickComposer } from "../components/shell/QuickComposer";
 import { Sidebar } from "../components/shell/Sidebar";
 import { useShellPrefs } from "../lib/shellPrefs";
+import { useIdeModePreferences } from "../lib/ideModePrefs";
 import { LayoutTip } from "../components/shell/LayoutTip";
 import { RAILLESS_ROUTES } from "../components/shell/railless";
 import { PaneGrid } from "../components/shell/SplitPanes";
+import { IdeShell } from "../components/ide/IdeShell";
+import { useIdeMode } from "../components/ide/useIdeMode";
 import { WorkbenchProvider, useWorkbench } from "../components/workbench/WorkbenchProvider";
 import { activeWorkbenchSurface } from "../components/workbench/model";
 import { useWorkbenchCommands } from "../components/workbench/useWorkbenchCommands";
@@ -217,7 +220,15 @@ function RootNavigator() {
   // Panes, docks and layout presets: shortcuts, menu items and the Layout menu all land here.
   // Guarded on `isExpanded` so the accelerators are inert on a compact window, where none of
   // this chrome renders.
-  useWorkbenchCommands({ enabled: isPaired && isExpanded, setSidebarCollapsed: applySidebarCollapsed });
+  const ide = useIdeMode();
+  useWorkbenchCommands({ enabled: isPaired && isExpanded, setSidebarCollapsed: applySidebarCollapsed, toggleIdeMode: ide.toggle });
+  // IDE mode renders beside the chat shell, never instead of it: both stay mounted in <Activity>
+  // so a switch is a display toggle that keeps scroll, open files and drafts. It mounts the first
+  // time it is shown, or ahead of time (hidden, effects paused) for someone who already uses it.
+  const idePrefs = useIdeModePreferences();
+  const [ideMounted, setIdeMounted] = useState(false);
+  const warmIde = ide.available && idePrefs.loaded && (idePrefs.enabled || idePrefs.coachSeen);
+  if ((ide.visible || warmIde) && !ideMounted) setIdeMounted(true);
 
   useEffect(() => {
     if (!isLoading) {
@@ -315,7 +326,8 @@ function RootNavigator() {
               dockOpen={usageDockOpen}
             />
           ) : null}
-          <View style={styles.shellRow}>
+          <Activity mode={ide.visible ? "hidden" : "visible"}>
+          <View style={ide.visible ? styles.hidden : styles.shellRow}>
             <MasterDetail master={rail} detail={detail} railWidth={railWidth} />
             <DockHost
               open={dockOpen && !railless}
@@ -329,6 +341,14 @@ function RootNavigator() {
               onClose={() => workbench.hidePlacement("right")}
             />
           </View>
+          </Activity>
+          {ideMounted ? (
+            <Activity mode={ide.visible ? "visible" : "hidden"}>
+              <View style={ide.visible ? styles.ideRow : styles.hidden}>
+                <IdeShell />
+              </View>
+            </Activity>
+          ) : null}
           <QuickComposer visible={quickComposerOpen} onClose={() => setQuickComposerOpen(false)} />
         </>
       ) : (
@@ -346,6 +366,8 @@ function RootNavigator() {
 
 const styles = StyleSheet.create({
   shellRow: { flex: 1, flexDirection: "row" },
+  ideRow: { flex: 1 },
+  hidden: { display: "none" },
   detailColumn: { flex: 1, minHeight: 0 },
 });
 

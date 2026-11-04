@@ -13,6 +13,8 @@ import { useAuth } from "../lib/auth";
 import { useShortcutLabel } from "../lib/shortcuts";
 import { useSessions } from "../lib/queries";
 import { usePalette } from "./overlay/CommandPalette";
+import { IdeModeControl } from "./ide/IdeModeControl";
+import { useIdeMode } from "./ide/useIdeMode";
 import { LayoutControl } from "./shell/LayoutMenu";
 import { useProviderPace, UsageRing } from "./shell/UsageRing";
 import { useTokens } from "../theme/ThemeProvider";
@@ -49,6 +51,7 @@ export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
   const waitingCount = (sessions ?? []).filter((s) => s.waiting).length;
   const activeServer = servers.find((server) => server.id === activeServerId);
   const { combinedPct } = useProviderPace();
+  const ide = useIdeMode();
 
   const isActive = (href: string) => isTopBarTabActive(href, pathname);
 
@@ -99,7 +102,8 @@ export function WebTopBar({ onToggleDock, dockOpen }: WebTopBarProps) {
           <UsageRing pct={combinedPct} size={15} />
         </Pressable>
       ) : null}
-      <LayoutControl />
+      <IdeModeControl />
+      {ide.visible ? null : <LayoutControl />}
       <Pressable
         onPress={() => palette.open("default")}
         accessibilityRole="button"

@@ -19,6 +19,10 @@ export function currentFocusTags(active: Element | null = typeof document === "u
   const tags = new Set<string>(published);
   const zone = active?.closest?.("[data-focus-zone]")?.getAttribute("data-focus-zone");
   const tag = zone ? ZONE_TAGS[zone] : undefined;
-  if (tag) tags.add(tag);
+  if (tag) {
+    tags.add(tag);
+    // Typing in the composer or terminal is not reviewing: the bare review keys stand down.
+    tags.delete("ideReview");
+  }
   return tags;
 }

@@ -12,6 +12,7 @@ import { publishFocusTag } from "../../lib/shortcuts/focusContext";
 import { useDesktopMenuAction, type DesktopMenuId } from "../../lib/desktopMenu";
 import type { PresetName } from "./layoutModel";
 import type { WorkbenchSurfaceKind } from "./model";
+import { requestIdeTerminalToggle } from "../ide/ideEvents";
 import { useOpenActionOutput } from "../ports/useOpenActionOutput";
 import { useWorkbench } from "./WorkbenchProvider";
 
@@ -19,6 +20,8 @@ export interface WorkbenchCommandOptions {
   enabled: boolean;
   /** Sidebar state lives in the root layout (MasterDetail sizes its rail from it). */
   setSidebarCollapsed: (collapsed: boolean) => void;
+  /** Switches Chat <-> IDE mode (the shortcut, the View menu and the palette all land here). */
+  toggleIdeMode: () => void;
 }
 
 function useCommand(action: AppShortcutAction, menu: DesktopMenuId, run: () => void): void {
@@ -26,7 +29,7 @@ function useCommand(action: AppShortcutAction, menu: DesktopMenuId, run: () => v
   useDesktopMenuAction(menu, run);
 }
 
-export function useWorkbenchCommands({ enabled, setSidebarCollapsed }: WorkbenchCommandOptions): void {
+export function useWorkbenchCommands({ enabled, setSidebarCollapsed, toggleIdeMode }: WorkbenchCommandOptions): void {
   const workbench = useWorkbench();
   const guard = (fn: () => void) => () => {
     if (enabled) fn();
@@ -54,7 +57,11 @@ export function useWorkbenchCommands({ enabled, setSidebarCollapsed }: Workbench
   useCommand("workbench.paneNext", "view:pane-next", guard(() => workbench.cycleFocus(1)));
   useCommand("workbench.panePrev", "view:pane-prev", guard(() => workbench.cycleFocus(-1)));
 
-  useCommand("workbench.terminal", "view:terminal", toggle("terminal"));
+  // In IDE mode the terminal lives in the workbench's own bottom panel.
+  useCommand("workbench.terminal", "view:terminal", guard(() => {
+    if (!requestIdeTerminalToggle()) workbench.toggleSurface({ kind: "terminal" });
+  }));
+  useCommand("ide.toggle", "view:ide-mode", guard(toggleIdeMode));
   useCommand("workbench.gitReview", "view:git-review", toggle("git"));
   useCommand("workbench.tasks", "view:tasks", toggle("tasks"));
   useCommand("workbench.agents", "view:agents", toggle("agents"));
