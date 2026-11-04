@@ -63,6 +63,7 @@ import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
 import { MemorySheet } from "../../../components/session/MemorySheet";
 
 
+import { JobsSheet } from "../../../components/session/JobsSheet";
 import { LatticeSheet } from "../../../components/session/LatticeSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { useAnywhere } from "../../../lib/anywhere/store";
@@ -178,6 +179,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
 
 
   const [latticeVisible, setLatticeVisible] = useState(false);
+  const [jobsVisible, setJobsVisible] = useState(false);
   const [lifecycleVisible, setLifecycleVisible] = useState(false);
   const [worktreeVisible, setWorktreeVisible] = useState(false);
 
@@ -399,6 +401,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const onPorts = useCallback(() => setPortsVisible(true), []);
   const onMemory = useCallback(() => setMemoryVisible(true), []);
   const onLattice = useCallback(() => setLatticeVisible(true), []);
+  const onJobs = useCallback(() => setJobsVisible(true), []);
   const onManageLifecycle = useCallback(() => setLifecycleVisible(true), []);
   const onToggleFiles = useCallback(() => {
     if (activeRightSurface?.kind === "files") workbench.hidePlacement("right");
@@ -499,6 +502,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             prChip={<PrChip sessionId={sessionId} onPress={onPullRequest} />}
             onMemory={onMemory}
             onLattice={onLattice}
+            onJobs={onJobs}
             onManageLifecycle={onManageLifecycle}
             onToggleFiles={onToggleFiles}
             onTogglePreview={onTogglePreview}
@@ -579,6 +583,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
 
 
         <OnFirstOpen visible={latticeVisible}><LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
+        <OnFirstOpen visible={jobsVisible}><JobsSheet visible={jobsVisible} onClose={() => setJobsVisible(false)} sessionId={sessionId} /></OnFirstOpen>
         <OnFirstOpen visible={portsVisible}><PortsSheet visible={portsVisible} onClose={() => setPortsVisible(false)} sessionId={sessionId} /></OnFirstOpen>
         <OnFirstOpen visible={lifecycleVisible}><SessionLifecycleSheet
           target={{

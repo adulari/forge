@@ -16,8 +16,11 @@ import { type DiffCell, middleTruncate, toSplitRows, toUnifiedRows } from "./dif
 import { languageForPath } from "./diffHighlight";
 import { type DiffReviewCallbacks, SplitBody, UnifiedBody } from "./diffLines";
 import { FileTypeIcon } from "./FileTypeIcon";
-import { type GitDiffFile } from "../../lib/api";
-import { useGitDiff } from "../../lib/queries";
+import { type GitDiffFile, type GitDiffHunk } from "../../lib/api";
+import { useGitDiff, useGitHunk } from "../../lib/queries";
+import { buildHunkPatch, classifyHunkError, hunkActionDone, hunkActionsFor, type HunkActionSpec } from "./hunkActions";
+import { ConfirmDialog } from "../ds/ConfirmDialog";
+import { useToast } from "../ds/ToastHost";
 import {
   buildReviewLineSelection,
   reviewDiffRevision,
@@ -73,6 +76,8 @@ export interface GitDiffCardProps {
   /** Reports the card's changed lines (and where each sits in the unified body) once loaded, for
    * the pane's Find. */
   onLines?: (key: string, lines: DiffFindLine[]) => void;
+  /** Stage / unstage / revert controls are hidden (Forge Anywhere keeps the dock read-only). */
+  readOnly?: boolean;
 }
 
 export interface DiffFindLine {
@@ -92,8 +97,12 @@ export const GitDiffCard = React.memo(function GitDiffCard({
   ignoreWhitespace,
   width,
   onLines,
+  readOnly = false,
 }: GitDiffCardProps) {
   const tokens = useTokens();
+  const toast = useToast();
+  const hunkMutation = useGitHunk();
+  const [pendingRevert, setPendingRevert] = useState<GitDiffHunk | null>(null);
   const [context, setContext] = useState(0);
   const [exhausted, setExhausted] = useState(false);
   const [anchor, setAnchor] = useState<{ side: ReviewCommentSide; lineNo: number } | null>(null);
@@ -172,6 +181,57 @@ export const GitDiffCard = React.memo(function GitDiffCard({
       setLineSelection(buildReviewLineSelection(side, availableLines[side], next.lineNo, cell.lineNo));
     },
   };
+  const hunkSpecs = file ? hunkActionsFor(entry.bucket, file, readOnly) : [];
+  const runHunk = async (spec: HunkActionSpec, hunk: GitDiffHunk) => {
+    if (!file) return;
+    try {
+      await hunkMutation.mutateAsync({
+        session: sessionId,
+        path: file.path,
+        hunk_header: hunk.header,
+        patch: buildHunkPatch(file, hunk),
+        action: spec.action,
+      });
+      toast.show(hunkActionDone(spec.action), { tone: "neutral" });
+    } catch (error) {
+      toast.show(classifyHunkError(error).message, { tone: "danger" });
+    }
+  };
+  const onHunkAction = (spec: HunkActionSpec, hunk: GitDiffHunk) => {
+    if (spec.destructive) setPendingRevert(hunk);
+    else void runHunk(spec, hunk);
+  };
+  const hunkActions =
+    file && hunkSpecs.length > 0
+      ? (header: string) => {
+          const hunk = file.hunks.find((candidate) => candidate.header === header);
+          if (!hunk) return null;
+          return (
+            <View style={styles.hunkActions}>
+              {hunkSpecs.map((spec) => (
+                <Pressable
+                  key={spec.action}
+                  onPress={() => onHunkAction(spec, hunk)}
+                  disabled={hunkMutation.isPending}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${spec.label} hunk ${header}`}
+                  hitSlop={6}
+                  style={[styles.hunkAction, { borderColor: tokens.border, borderRadius: radii.radius4 }]}
+                >
+                  <Text
+                    style={[
+                      typeScale.monoMeta,
+                      { color: spec.destructive ? tokens.danger : hunkMutation.isPending ? tokens.ink4 : tokens.accent },
+                    ]}
+                  >
+                    {spec.label.toLowerCase()}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          );
+        }
+      : undefined;
   const clearSelection = () => {
     setAnchor(null);
     setLineSelection(null);
@@ -261,9 +321,9 @@ export const GitDiffCard = React.memo(function GitDiffCard({
             </View>
           ) : null}
           {mode === "split" ? (
-            <SplitBody hunkRows={splitRows} language={language} onExpand={expandContext} {...callbacks} />
+            <SplitBody hunkRows={splitRows} language={language} onExpand={expandContext} hunkActions={hunkActions} {...callbacks} />
           ) : (
-            <UnifiedBody rows={unifiedRows} language={language} onExpand={expandContext} {...callbacks} />
+            <UnifiedBody rows={unifiedRows} language={language} onExpand={expandContext} hunkActions={hunkActions} {...callbacks} />
           )}
           {file.skipped_lines > 0 ? (
             <Text style={[typeScale.monoMeta, styles.notice, { color: tokens.ink4 }]}>
@@ -321,6 +381,20 @@ export const GitDiffCard = React.memo(function GitDiffCard({
         )}
       </Pressable>
       {body}
+      <ConfirmDialog
+        visible={pendingRevert != null}
+        title="Revert this hunk?"
+        message="The lines of this hunk go back to what the index holds in the working tree. This cannot be undone."
+        confirmLabel="Revert"
+        destructive
+        loading={hunkMutation.isPending}
+        onConfirm={() => {
+          const hunk = pendingRevert;
+          setPendingRevert(null);
+          if (hunk) void runHunk({ action: "revert", label: "Revert", destructive: true }, hunk);
+        }}
+        onCancel={() => setPendingRevert(null)}
+      />
       {expanded ? (
         <ReviewCommentSheet
           visible={commentVisible && file != null}
@@ -351,6 +425,8 @@ const styles = StyleSheet.create({
   spacer: { flex: 1 },
   badge: { paddingHorizontal: 5, paddingVertical: 1, borderRadius: 3 },
   badgeText: { fontSize: 8.5, lineHeight: 12, fontFamily: monoFamily.regular, letterSpacing: 0.4 },
+  hunkActions: { flexDirection: "row", gap: 6, marginLeft: "auto" },
+  hunkAction: { borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: space.space8, paddingVertical: 2 },
   notice: { paddingHorizontal: space.space16, paddingVertical: space.space12 },
   selectionBar: {
     minHeight: 32,

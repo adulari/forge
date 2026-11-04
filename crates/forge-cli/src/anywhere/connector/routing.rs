@@ -48,6 +48,9 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::GitStatus => exact(Method::GET, "/api/git/status"),
         RouteId::GitBranches => exact(Method::GET, "/api/git/branches"),
         RouteId::GitDiff => exact(Method::GET, "/api/git/diff"),
+        RouteId::Blame => exact(Method::GET, "/api/blame"),
+        RouteId::ProjectChanges => exact(Method::GET, "/api/projects/changes"),
+        RouteId::GitHunk => exact(Method::POST, "/api/git/hunk"),
         RouteId::WorkspaceEntries => exact(Method::GET, "/api/workspace/entries"),
         RouteId::ReadWorkspaceFile => exact(Method::GET, "/api/workspace/file"),
         RouteId::WriteWorkspaceFile => exact(Method::PUT, "/api/workspace/file"),
@@ -60,12 +63,26 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::AccountSyncStatus => exact(Method::GET, "/api/anywhere/sync"),
         RouteId::AccountSyncUpdate => exact(Method::PUT, "/api/anywhere/sync"),
         RouteId::AccountSyncNow => exact(Method::POST, "/api/anywhere/sync/now"),
-        RouteId::SessionDiff | RouteId::SessionAgents => {
+        RouteId::SessionJobTail => {
+            if request.parameters.len() < 2 || request.parameters.len() > 3 {
+                bail!("job tail route requires a session id, a job id and an optional query");
+            }
+            let id = safe_path_segment(&request.parameters[0])?;
+            let job: u32 = request.parameters[1]
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid job id path parameter"))?;
+            Ok(RouteTarget {
+                method: Method::GET,
+                path: format!("/api/sessions/{id}/jobs/{job}/tail"),
+                query: query_parameter(&request.parameters, 2)?,
+            })
+        }
+        RouteId::SessionDiff | RouteId::SessionAgents | RouteId::SessionJobs => {
             let id = single_path_parameter(request)?;
-            let leaf = if request.route == RouteId::SessionDiff {
-                "diff"
-            } else {
-                "agents"
+            let leaf = match request.route {
+                RouteId::SessionDiff => "diff",
+                RouteId::SessionAgents => "agents",
+                _ => "jobs",
             };
             Ok(RouteTarget {
                 method: Method::GET,
@@ -261,9 +278,61 @@ mod tests {
         }
     }
 
+    /// Hunk actions are the one git write the bridge carries; the read routes stay read-only and
+    /// the hunk route accepts nothing but POST.
+    #[test]
+    fn only_the_hunk_route_writes_git_over_the_bridge() {
+        let hunk = request(RouteId::GitHunk, "POST", &[]);
+        assert!(validate_command_request(&hunk).is_ok());
+        for method in ["GET", "PUT", "PATCH", "DELETE"] {
+            assert!(validate_command_request(&request(RouteId::GitHunk, method, &[])).is_err());
+        }
+        for (route, parameters) in [
+            (RouteId::Blame, &[][..]),
+            (RouteId::ProjectChanges, &[][..]),
+            (RouteId::SessionJobs, &["s"][..]),
+        ] {
+            for method in ["POST", "PUT", "PATCH", "DELETE"] {
+                assert!(
+                    validate_command_request(&request(route, method, parameters)).is_err(),
+                    "{route:?} must refuse {method}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 17] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 22] = [
+            (
+                RouteId::Blame,
+                "GET",
+                &["?session=s1&path=src/a.rs"],
+                Method::GET,
+                "/api/blame",
+            ),
+            (
+                RouteId::ProjectChanges,
+                "GET",
+                &["?cwd=/home/me/proj"],
+                Method::GET,
+                "/api/projects/changes",
+            ),
+            (RouteId::GitHunk, "POST", &[], Method::POST, "/api/git/hunk"),
+            (
+                RouteId::SessionJobs,
+                "GET",
+                &["session_7"],
+                Method::GET,
+                "/api/sessions/session_7/jobs",
+            ),
+            (
+                RouteId::SessionJobTail,
+                "GET",
+                &["session_7", "4242", "?lines=50"],
+                Method::GET,
+                "/api/sessions/session_7/jobs/4242/tail",
+            ),
             (
                 RouteId::WorkspaceEntries,
                 "GET",
@@ -390,6 +459,9 @@ mod tests {
             );
         }
         assert!(route_target(&request(RouteId::SessionDiff, "GET", &["../x"])).is_err());
+        assert!(route_target(&request(RouteId::SessionJobTail, "GET", &["s", "../x"])).is_err());
+        assert!(route_target(&request(RouteId::SessionJobTail, "GET", &["s"])).is_err());
+        assert!(route_target(&request(RouteId::SessionJobs, "GET", &["a/b"])).is_err());
         assert!(route_target(&request(RouteId::PauseSchedule, "POST", &[])).is_err());
     }
 

@@ -155,8 +155,11 @@ export function ReviewableDiffLine({
 export function HunkHeader({
   header,
   onExpand,
+  actions,
 }: {
   header: string;
+  /** Per-hunk Stage / Revert controls, rendered at the header's trailing edge. */
+  actions?: React.ReactNode;
   /** Shows the "more context" control; omitted when the file cannot grow any further. */
   onExpand?: () => void;
 }) {
@@ -166,6 +169,7 @@ export function HunkHeader({
       <Text selectable style={[styles.lineText, styles.hunkText, { color: tokens.info }]} numberOfLines={1}>
         {header}
       </Text>
+      {actions}
       {onExpand ? (
         <Pressable
           onPress={onExpand}
@@ -192,16 +196,22 @@ export function SplitBody({
   hunkRows,
   language,
   onExpand,
+  hunkActions,
   isSelected,
   commentCount,
   onSelect,
-}: { hunkRows: SplitRow[]; language: string | null; onExpand?: () => void } & DiffReviewCallbacks) {
+}: {
+  hunkRows: SplitRow[];
+  language: string | null;
+  onExpand?: () => void;
+  hunkActions?: (header: string) => React.ReactNode;
+} & DiffReviewCallbacks) {
   const tokens = useTokens();
   return (
     <>
       {toBlocks(hunkRows).map((block) => (
         <View key={block.key}>
-          <HunkHeader header={block.header} onExpand={onExpand} />
+          <HunkHeader header={block.header} onExpand={onExpand} actions={hunkActions?.(block.header)} />
           <View style={styles.splitRow}>
             <ScrollView
               horizontal
@@ -280,17 +290,23 @@ export function UnifiedBody({
   rows,
   language,
   onExpand,
+  hunkActions,
   isSelected,
   commentCount,
   onSelect,
-}: { rows: UnifiedRow[]; language: string | null; onExpand?: () => void } & DiffReviewCallbacks) {
+}: {
+  rows: UnifiedRow[];
+  language: string | null;
+  onExpand?: () => void;
+  hunkActions?: (header: string) => React.ReactNode;
+} & DiffReviewCallbacks) {
   // One header and one horizontal scroller per hunk: a header inside the scroller would sit at
   // the far end of the longest line, with its expand control off-screen.
   return (
     <>
       {toUnifiedBlocks(rows).map((block) => (
         <View key={block.key}>
-          <HunkHeader header={block.header} onExpand={onExpand} />
+          <HunkHeader header={block.header} onExpand={onExpand} actions={hunkActions?.(block.header)} />
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.hscrollContent}>
             <View style={styles.columnBody}>
               {block.lines.map((row) => {

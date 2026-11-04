@@ -63,6 +63,24 @@ pub enum RouteId {
     SessionDiff,
     /// Every child agent of a session, from any turn (`GET /api/sessions/{id}/agents`).
     SessionAgents,
+    // The desktop IDE mode's reads (all `GET`, read-only): which turn wrote each line of a file,
+    // a session's background shell jobs and their log tails, and every live session's changed
+    // files on a project.
+    /// `GET /api/blame?session=&path=`.
+    Blame,
+    /// `GET /api/sessions/{id}/jobs`.
+    SessionJobs,
+    /// `GET /api/sessions/{id}/jobs/{job}/tail`. Two path parameters: the session id, the job id.
+    SessionJobTail,
+    /// `GET /api/projects/changes?cwd=`.
+    ProjectChanges,
+    /// Stage, unstage or revert ONE hunk of a file (`POST /api/git/hunk`). The only git write the
+    /// bridge carries. It is bridged because it can do no more than the already-bridged
+    /// `WriteWorkspaceFile` (rewrite lines of a file in the session's repository), the daemon
+    /// validates the patch to exactly the named path, and a replayed command is harmless: the hunk
+    /// no longer applies and the host answers 409. `stage`, `unstage`, `commit`, `switch` and the
+    /// remote operations stay unreachable.
+    GitHunk,
     // The Files tab. Reading and saving a file in the session's workspace is strictly less than
     // what the bridged terminal already allows, so the bridge carries it rather than leaving the
     // tab as a "connect directly" dead end on the transport phones actually use.

@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Routes for the desktop IDE mode: `POST /api/git/hunk` stages, unstages or reverts a single hunk (409 when the file moved on), `GET /api/blame` maps lines to the turn that wrote them, `GET /api/sessions/{id}/jobs` (+ `/{job}/tail`) exposes background shell jobs, and `GET /api/projects/changes` lists every live session's changed files with a content hash. The mobile and desktop review dock gains per-hunk Stage/Revert and a Background jobs sheet; the TUI diff overlay reverts a hunk with `x` then `y` (`crates/forge-cli/src/serve_git/{hunk,changes}.rs`, `serve_ide.rs`).
+
 ## [2.26.4] - 2026-11-03
 
 ### Fixed

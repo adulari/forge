@@ -46,6 +46,7 @@ export interface GitDiffPaneProps {
   focusRequest: GitDiffFocusRequest | null;
   ignoreWhitespace: boolean;
   onToggleWhitespace: () => void;
+  readOnly?: boolean;
 }
 
 function ToolbarToggle({
@@ -95,6 +96,7 @@ export function GitDiffPane({
   focusRequest,
   ignoreWhitespace,
   onToggleWhitespace,
+  readOnly = false,
 }: GitDiffPaneProps) {
   const tokens = useTokens();
   const [mode, setMode] = useState<DiffViewMode>("split");
@@ -266,6 +268,7 @@ export function GitDiffPane({
                 ignoreWhitespace={ignoreWhitespace}
                 width={width}
                 onLines={onLines}
+                readOnly={readOnly}
               />
             </View>
           ))}

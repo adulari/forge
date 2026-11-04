@@ -113,6 +113,11 @@ fn classification_maps_routes_to_scopes() {
     assert_eq!(scope(Method::POST, "/api/git/push"), "workspace-write");
     assert_eq!(scope(Method::POST, "/api/pr/merge"), "workspace-write");
     assert_eq!(scope(Method::GET, "/api/git/diff"), "view");
+    assert_eq!(scope(Method::POST, "/api/git/hunk"), "workspace-write");
+    assert_eq!(scope(Method::GET, "/api/blame"), "view");
+    assert_eq!(scope(Method::GET, "/api/projects/changes"), "view");
+    assert_eq!(scope(Method::GET, "/api/sessions/s1/jobs"), "view");
+    assert_eq!(scope(Method::GET, "/api/sessions/s1/jobs/4/tail"), "view");
     assert_eq!(scope(Method::GET, "/api/providers"), "manage-providers");
     assert_eq!(scope(Method::PUT, "/api/config"), "manage-providers");
     assert_eq!(scope(Method::GET, "/api/config"), "view");

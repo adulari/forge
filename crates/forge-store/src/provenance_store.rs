@@ -13,8 +13,9 @@ impl Store {
         let conn = self.lock()?;
         let pattern = escape_like_pattern(filename_suffix);
         let mut stmt = conn.prepare(
-            "SELECT tc.tool_name, tc.args_json, tc.path, m.session_id, s.cwd,
-                    COALESCE(m.model, r.chosen_model), m.seq, tc.created_at
+            "SELECT tc.tool_name, tc.args_json, tc.path, m.session_id,
+                    COALESCE(s.worktree_path, s.cwd),
+                    COALESCE(m.model, r.chosen_model), m.seq, tc.created_at, tc.id
              FROM tool_call tc
              JOIN message m ON m.id = tc.message_id
              JOIN session s ON s.id = m.session_id
@@ -35,6 +36,49 @@ impl Store {
                 model: row.get(5)?,
                 seq: row.get(6)?,
                 created_at: row.get(7)?,
+                tool_call_id: row.get(8)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Every successful `write_file`/`edit_file` made by one of `session_ids` at or after `since`
+    /// (unix seconds), oldest first. Arguments are not loaded: callers only need to know which
+    /// session touched which path.
+    pub fn session_edit_events(
+        &self,
+        session_ids: &[String],
+        since: i64,
+    ) -> Result<Vec<EditEvent>> {
+        if session_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.lock()?;
+        let marks = vec!["?"; session_ids.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT m.session_id, tc.path, COALESCE(s.worktree_path, s.cwd), tc.created_at
+             FROM tool_call tc
+             JOIN message m ON m.id = tc.message_id
+             JOIN session s ON s.id = m.session_id
+             WHERE tc.path IS NOT NULL
+               AND tc.tool_name IN ('write_file', 'edit_file')
+               AND tc.status = 'ok'
+               AND tc.created_at >= ?
+               AND m.session_id IN ({marks})
+             ORDER BY tc.created_at ASC"
+        ))?;
+        let params = std::iter::once(rusqlite::types::Value::Integer(since)).chain(
+            session_ids
+                .iter()
+                .map(|id| rusqlite::types::Value::Text(id.clone())),
+        );
+        let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(EditEvent {
+                session_id: row.get(0)?,
+                path: row.get(1)?,
+                base_dir: row.get(2)?,
+                created_at: row.get(3)?,
             })
         })?;
         rows.collect::<std::result::Result<Vec<_>, _>>()

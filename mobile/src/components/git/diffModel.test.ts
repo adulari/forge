@@ -108,3 +108,14 @@ describe("git review diff model", () => {
     expect(middleTruncate("crates/forge-cli/src/serve_git.rs", 20)).toBe("crates/fo…rve_git.rs");
   });
 });
+
+describe("no-newline markers", () => {
+  const cut = {
+    header: "@@ -1 +1 @@",
+    lines: ["-a", "\\ No newline at end of file", "+b", "\\ No newline at end of file"],
+  };
+  it("never become rows", () => {
+    expect(toUnifiedRows([cut]).filter((r) => r.kind === "line")).toHaveLength(2);
+    expect(toSplitRows([cut]).flatMap((r) => (r.kind === "pair" ? [r] : []))).toHaveLength(1);
+  });
+});

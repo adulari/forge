@@ -1729,3 +1729,90 @@ function parseTerminalServerFrame(value: string): TerminalServerFrame | null {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------
+// IDE mode routes (crates/forge-cli/src/serve_ide.rs, serve_git/{hunk,changes}.rs)
+// ---------------------------------------------------------------------------
+
+export type GitHunkAction = "stage" | "unstage" | "revert";
+/** `patch` is a single-file, single-hunk unified diff; `hunk_header` is its `@@` line. `revert`
+ * undoes the hunk in the working tree only; a staged hunk is `unstage`d first. */
+export interface GitHunkRequest {
+  session: string;
+  path: string;
+  hunk_header: string;
+  patch: string;
+  action: GitHunkAction;
+}
+export interface GitHunkResponse { ok: boolean; action: GitHunkAction; }
+/** 409 `stale_patch` means the file moved on: refetch the diff. 409 `session_busy` means a revert
+ * was refused mid-turn. */
+export function applyGitHunk(baseUrl: string, body: GitHunkRequest): Promise<GitHunkResponse> {
+  return request(baseUrl, "/api/git/hunk", { method: "POST", body: JSON.stringify(body) });
+}
+
+/** One line a recorded `write_file`/`edit_file` wrote. Lines nobody recorded are absent. */
+export interface BlameLine {
+  line: number;
+  session_id: string;
+  /** `seq` of the assistant message whose tool call wrote the line. */
+  turn: number;
+  model: string | null;
+  tool_call_id: string | null;
+  prompt_summary: string | null;
+  created_at: number | null;
+}
+export interface BlameResponse { path: string; line_count: number; lines: BlameLine[]; }
+export function getBlame(baseUrl: string, session: string, path: string): Promise<BlameResponse> {
+  return request(baseUrl, `/api/blame${qs({ session, path })}`);
+}
+
+export interface SessionJob {
+  id: number;
+  command: string;
+  running: boolean;
+  /** `running`, `exited N` or `gone`. */
+  status: string;
+  started_at: number;
+}
+export interface SessionJobsResponse { jobs: SessionJob[]; }
+export interface JobTailResponse { id: number; running: boolean; status: string; text: string; }
+export function getSessionJobs(baseUrl: string, session: string): Promise<SessionJobsResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(session)}/jobs`);
+}
+export function getJobTail(
+  baseUrl: string,
+  session: string,
+  job: number,
+  lines?: number,
+): Promise<JobTailResponse> {
+  return request(
+    baseUrl,
+    `/api/sessions/${encodeURIComponent(session)}/jobs/${job}/tail${qs({ lines })}`,
+  );
+}
+
+export interface ChangedFile {
+  path: string;
+  kind: "created" | "modified" | "deleted" | "renamed";
+  adds: number;
+  dels: number;
+  /** Changes whenever the file's current content does; drop "reviewed" marks on a new value. */
+  content_hash: string;
+}
+export interface SessionChanges {
+  /** A session id, or the synthetic group `"unattributed"`. */
+  session_id: string;
+  title: string;
+  branch: string;
+  worktree: string | null;
+  waiting: boolean;
+  busy: boolean;
+  files: ChangedFile[];
+  truncated: number;
+}
+export interface ProjectChangesResponse { cwd: string; sessions: SessionChanges[]; }
+export const UNATTRIBUTED_SESSION_ID = "unattributed";
+export function getProjectChanges(baseUrl: string, cwd: string): Promise<ProjectChangesResponse> {
+  return request(baseUrl, `/api/projects/changes${qs({ cwd })}`);
+}

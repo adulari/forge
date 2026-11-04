@@ -264,15 +264,20 @@ pub fn render_diff_overlay(frame: &mut Frame, app: &DiffOverlay) {
         height: full.height - 2,
         ..full
     };
-    let hint = styles::hint_row(&[
-        ("j/k", "scroll"),
-        ("]/[", "hunk"),
-        ("n/p", "file"),
-        ("v", "split"),
-        ("d", "source"),
-        ("m", "reviewed"),
-        ("Esc", "close"),
-    ]);
+    let hint = match (app.confirm_prompt(), &app.notice) {
+        (Some(prompt), _) => vec![Span::styled(prompt, styles::warn())],
+        (None, Some(notice)) => vec![Span::styled(notice.clone(), styles::faint())],
+        (None, None) => styles::hint_row(&[
+            ("j/k", "scroll"),
+            ("]/[", "hunk"),
+            ("n/p", "file"),
+            ("v", "split"),
+            ("d", "source"),
+            ("m", "reviewed"),
+            ("x", "revert hunk"),
+            ("Esc", "close"),
+        ]),
+    };
     frame.render_widget(
         Paragraph::new(Line::from(hint)),
         Rect {

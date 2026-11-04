@@ -28,6 +28,7 @@ pub(super) fn parse_unified_diff_window(
     let limit = limit.min(MAX_DIFF_LINES);
     let mut files: Vec<GitDiffFile> = Vec::new();
     let mut current: Option<GitDiffFile> = None;
+    let mut kept_previous = false;
     for line in raw.split('\n') {
         if line.starts_with("diff --git ") {
             if let Some(file) = current.take() {
@@ -85,15 +86,27 @@ pub(super) fn parse_unified_diff_window(
             Some(b'+') => file.adds += 1,
             Some(b'-') => file.dels += 1,
             Some(b' ') => {}
-            // `\ No newline at end of file` and the blank line git emits after a diff.
+            // `\ No newline at end of file` belongs to the line before it: kept (a hunk patch
+            // without it will not apply) but never counted, and only when that line was kept.
+            Some(b'\\') => {
+                if kept_previous {
+                    if let Some(hunk) = file.hunks.last_mut() {
+                        hunk.lines.push(line.to_string());
+                    }
+                }
+                continue;
+            }
+            // The blank line git emits after a diff.
             _ => continue,
         }
         let index = file.total_lines;
         file.total_lines += 1;
         if index < offset || index >= offset.saturating_add(limit) {
             file.skipped_lines += 1;
+            kept_previous = false;
             continue;
         }
+        kept_previous = true;
         if let Some(hunk) = file.hunks.last_mut() {
             hunk.lines.push(line.to_string());
         }

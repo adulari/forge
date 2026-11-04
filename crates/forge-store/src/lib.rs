@@ -1835,6 +1835,8 @@ pub struct ReplayEntry {
 /// possibly relative to `session_cwd`, which the caller resolves the same way the tool did.
 #[derive(Debug, Clone)]
 pub struct FileEditRow {
+    /// The `tool_call` row's id, so a client can point at the exact call that wrote a line.
+    pub tool_call_id: String,
     pub tool_name: String,
     pub args_json: String,
     pub path: String,
@@ -1842,6 +1844,18 @@ pub struct FileEditRow {
     pub session_cwd: String,
     pub model: Option<String>,
     pub seq: i64,
+    pub created_at: i64,
+}
+
+/// One successful `write_file`/`edit_file` call, without its (large) arguments: which session
+/// touched which path, and when. What the project change list attributes dirty files with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditEvent {
+    pub session_id: String,
+    /// Exactly what the model passed; resolve against `base_dir`.
+    pub path: String,
+    /// The session's working directory (its worktree when it has one) at call time.
+    pub base_dir: String,
     pub created_at: i64,
 }
 

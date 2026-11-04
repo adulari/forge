@@ -8,6 +8,7 @@
 //!   one file's unified-diff hunks
 //! - `POST /api/git/stage`   `{session, paths[]}`
 //! - `POST /api/git/unstage` `{session, paths[]}`
+//! - `POST /api/git/hunk`    `{session, path, hunk_header, patch, action: stage|unstage|revert}`
 //! - `POST /api/git/commit`  `{session, message}` → the new commit sha
 //! - `POST /api/git/commit-message` `{session, language?}` → a model-written message for the staged diff
 //! - `POST /api/git/{fetch,pull,push}` `{session, remote?}` (pull also `strategy`) → never forced
@@ -46,6 +47,11 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(&format!("{base}/api/git/diff"), get(git_diff))
         .route(&format!("{base}/api/git/stage"), post(git_stage))
         .route(&format!("{base}/api/git/unstage"), post(git_unstage))
+        .route(&format!("{base}/api/git/hunk"), post(hunk::git_hunk))
+        .route(
+            &format!("{base}/api/projects/changes"),
+            get(changes::project_changes),
+        )
         .route(&format!("{base}/api/git/commit"), post(git_commit))
         .route(
             &format!("{base}/api/git/commit-message"),
@@ -56,6 +62,7 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(&format!("{base}/api/git/push"), post(sync::git_push))
         .route(&format!("{base}/api/git/discard"), post(sync::git_discard))
         .merge(crate::serve_pr::routes(base))
+        .merge(crate::serve_ide::routes(base))
         .merge(crate::serve_actions::routes(base))
 }
 
@@ -71,10 +78,14 @@ pub(crate) fn parse_patch(raw: &str, drop_unchanged: bool) -> Vec<GitDiffFile> {
 }
 
 mod branches;
+pub(crate) mod changes;
 mod diff;
+pub(crate) mod hunk;
 mod message;
 mod status;
 mod sync;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod url;
 pub(crate) use branches::{git_branches, git_create_branch, git_switch_branch};
 use diff::{
@@ -379,12 +390,18 @@ fn repo_root_of(dir: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// [`repo_root_of`], or `dir` itself when it is not inside a git repository — for reads that need
+/// a confinement root but no git (blame).
+pub(crate) fn repo_root_or_dir(dir: &str) -> PathBuf {
+    repo_root_of(dir).unwrap_or_else(|_| PathBuf::from(dir))
+}
+
 /// Validate a client-supplied path as repo-relative and confined to the repository root.
 ///
 /// Rejects absolute paths, any `..` component, and leading `-` (which git would read as an option
 /// even after `--` in a few subcommands). Symlink escapes are not a concern here: git itself
 /// refuses to stage or diff through a symlink that leaves the work tree.
-fn repo_relative(raw: &str) -> Result<String, String> {
+pub(crate) fn repo_relative(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("empty path".to_string());
@@ -645,6 +662,37 @@ fn untracked_as_new_file_diffs(dir: &Path) -> String {
     out
 }
 
+/// A worktree's changes against its fork point (everything `GET /api/sessions/{id}/diff` shows).
+/// `Err` carries the message the route answers 400 with.
+pub(crate) fn worktree_diff(worktree: &str) -> Result<SessionDiffResponse, String> {
+    let Some((repo_root, branch)) = worktree_repo_and_branch(worktree) else {
+        return Err("worktree path is not a recognised forge worktree".to_string());
+    };
+    let base = git_stdout(&repo_root, &["merge-base", "HEAD", &branch])
+        .map_err(|e| format!("finding the fork point failed: {e}"))?;
+    let raw = String::from_utf8_lossy(&git_raw(
+        Path::new(worktree),
+        &[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--find-renames",
+            &base,
+            "--",
+        ],
+    )?)
+    .into_owned();
+    // `git diff` never lists untracked files, but the merge brings them in: add them as
+    // new-file diffs so the pre-merge view shows everything that will land.
+    let raw = raw + &untracked_as_new_file_diffs(Path::new(worktree));
+    Ok(SessionDiffResponse {
+        base,
+        branch,
+        worktree: worktree.to_string(),
+        files: parse_unified_diff(&raw),
+    })
+}
+
 pub(crate) async fn session_diff(
     State(state): State<Arc<DaemonState>>,
     AxumPath(id): AxumPath<String>,
@@ -658,39 +706,7 @@ pub(crate) async fn session_diff(
             "session has no worktree to diff",
         );
     };
-    let Some((repo_root, branch)) = worktree_repo_and_branch(&worktree) else {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            "worktree path is not a recognised forge worktree",
-        );
-    };
-    let result = tokio::task::spawn_blocking(move || -> Result<SessionDiffResponse, String> {
-        let base = git_stdout(&repo_root, &["merge-base", "HEAD", &branch])
-            .map_err(|e| format!("finding the fork point failed: {e}"))?;
-        let raw = String::from_utf8_lossy(&git_raw(
-            Path::new(&worktree),
-            &[
-                "-c",
-                "core.quotePath=false",
-                "diff",
-                "--find-renames",
-                &base,
-                "--",
-            ],
-        )?)
-        .into_owned();
-        // `git diff` never lists untracked files, but the merge brings them in: add them as
-        // new-file diffs so the pre-merge view shows everything that will land.
-        let raw = raw + &untracked_as_new_file_diffs(Path::new(&worktree));
-        Ok(SessionDiffResponse {
-            base,
-            branch,
-            worktree,
-            files: parse_unified_diff(&raw),
-        })
-    })
-    .await;
-    match result {
+    match tokio::task::spawn_blocking(move || worktree_diff(&worktree)).await {
         Ok(Ok(response)) => json_response(&response),
         Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
         Err(_) => err_response(

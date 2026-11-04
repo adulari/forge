@@ -6,8 +6,8 @@
 // the SAME line numbers as the unified view from the same hunk. Both modes derive from here.
 //
 // Input is `GitDiffHunk` verbatim from the daemon: each line keeps its gutter character as its
-// first byte, and the daemon already drops `\ No newline at end of file` markers, so a line's
-// first byte is only ever `+`, `-`, or a space.
+// first byte, and the daemon keeps `\ No newline at end of file` markers (a hunk patch needs them to
+// apply) and the row builders skip them, so a row's gutter is only ever `+`, `-`, or a space.
 import { type GitDiffHunk } from "../../lib/api";
 
 export type LineKind = "context" | "add" | "del";
@@ -209,6 +209,7 @@ export function toSplitRows(hunks: readonly GitDiffHunk[]): SplitRow[] {
     };
 
     for (const line of hunk.lines) {
+      if (line.startsWith("\\")) continue;
       const gutter = gutterOf(line);
       const text = line.slice(1);
       if (gutter === "-") {
@@ -245,6 +246,7 @@ export function toUnifiedRows(hunks: readonly GitDiffHunk[]): UnifiedRow[] {
     let oldNo = oldStart;
     let newNo = newStart;
     hunk.lines.forEach((line, lineIndex) => {
+      if (line.startsWith("\\")) return;
       const gutter = gutterOf(line);
       const text = line.slice(1);
       const key = `${hunkIndex}:l${lineIndex}`;

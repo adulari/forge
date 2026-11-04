@@ -21,19 +21,8 @@ pub(crate) fn blame_cmd(file: &str, line: Option<usize>, json: bool) -> Result<(
             .unwrap_or_else(|_| target.to_path_buf())
     });
 
-    // Narrow the store query with the plain file name (the one suffix guaranteed to survive
-    // regardless of which cwd a past session ran `write_file`/`edit_file` from); the precise
-    // per-row path resolution below is what actually decides "is this the same file".
-    let suffix = target.file_name().and_then(|n| n.to_str()).unwrap_or(file);
-    let candidates = store
-        .file_edits(suffix)
+    let attributions = blame::blame_file(&store, &target, &current)
         .with_context(|| format!("loading recorded edits for {file}"))?;
-    let edits: Vec<forge_store::FileEditRow> = blame::matching_edits(&target, &candidates)
-        .into_iter()
-        .cloned()
-        .collect();
-
-    let attributions = blame::attribute_lines(&current, &edits);
     let now = chrono::Utc::now().timestamp();
 
     if let Some(line_no) = line {

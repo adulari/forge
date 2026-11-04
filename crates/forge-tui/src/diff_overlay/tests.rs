@@ -199,3 +199,49 @@ fn end_reaches_the_last_line_on_a_narrow_split_terminal_with_a_note() {
         "a single hunk has nothing further to jump to"
     );
 }
+
+#[test]
+fn x_then_y_reverts_the_hunk_under_the_view_and_anything_else_cancels() {
+    let mut o = opened();
+    assert_eq!(o.key(KeyKind::Char('x')), DiffAction::None);
+    assert!(o.confirm_prompt().unwrap().contains("@@ -1,3 +1,3 @@"));
+    assert_eq!(
+        o.key(KeyKind::Char('y')),
+        DiffAction::RevertHunk {
+            path: "a.rs".to_string(),
+            header: "@@ -1,3 +1,3 @@".to_string()
+        }
+    );
+    assert!(o.confirm_prompt().is_none());
+
+    // The second hunk of the file once the view has scrolled to it.
+    o.key(KeyKind::Char(']'));
+    o.key(KeyKind::Char('x'));
+    assert!(o.confirm_prompt().unwrap().contains("@@ -20,2 +20,3 @@"));
+    assert_eq!(o.key(KeyKind::Char('n')), DiffAction::None, "n cancels");
+    assert!(o.confirm_prompt().is_none());
+    assert_eq!(o.notice.as_deref(), Some("revert cancelled"));
+    assert_eq!(
+        o.file_index(),
+        0,
+        "the cancelling key does not also navigate"
+    );
+}
+
+#[test]
+fn revert_is_refused_outside_the_working_tree_source() {
+    let mut o = DiffOverlay::default();
+    o.open_with(parse_unified(GIT));
+    assert_eq!(o.source_index(), TURN);
+    o.key(KeyKind::Char('x'));
+    assert!(o.confirm_prompt().is_none());
+    assert!(o.notice.is_some());
+}
+
+#[test]
+fn the_confirmation_replaces_the_key_hints() {
+    let mut o = opened();
+    assert!(draw(&o, 100, 12).contains("revert hunk"));
+    o.key(KeyKind::Char('x'));
+    assert!(draw(&o, 100, 12).contains("y/n"));
+}
