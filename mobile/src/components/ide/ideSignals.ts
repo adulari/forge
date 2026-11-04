@@ -84,11 +84,20 @@ export function revealLine(sessionId: string, path: string, line: number): void 
   revealStore.set({ sessionId, path, line, nonce: revealNonce });
 }
 let focusNonce = 0;
+let focusPending = false;
 const focusEditorStore = store<number>(0);
 export const useEditorFocusRequest = focusEditorStore.use;
+/** Ask for the editor to take keyboard focus, even if it has not mounted yet. */
 export function requestEditorFocus(): void {
   focusNonce += 1;
+  focusPending = true;
   focusEditorStore.set(focusNonce);
+}
+/** The editor calls this once it can focus; true means a request was waiting. */
+export function consumeEditorFocus(): boolean {
+  const pending = focusPending;
+  focusPending = false;
+  return pending;
 }
 
 // --- unsaved files ---

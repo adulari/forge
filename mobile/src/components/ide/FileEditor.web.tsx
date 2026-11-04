@@ -18,7 +18,7 @@ import { useToast } from "../ds/ToastHost";
 import { languageForPath } from "../git/diffHighlight";
 import { highlightLanguage } from "../workspace/fileKind";
 import { EDITOR_LINE_HEIGHT as LH, classifySaveError, externalChange, indentSelection, lineOfOffset, lineWindow, scrollTopFor } from "./editorModel";
-import { setFileDirty, useEditorFocusRequest, useReveal } from "./ideSignals";
+import { consumeEditorFocus, setFileDirty, useEditorFocusRequest, useReveal } from "./ideSignals";
 import { IdeTextButton } from "./ideUi";
 import { useLatest } from "./useLatest";
 
@@ -236,7 +236,7 @@ function Editor({
   }, [reveal?.nonce]);
   const focusRequest = useEditorFocusRequest();
   useEffect(() => {
-    if (focusRequest > 0) taRef.current?.focus();
+    if (focusRequest > 0 && consumeEditorFocus()) taRef.current?.focus();
   }, [focusRequest]);
 
   const visible = [];

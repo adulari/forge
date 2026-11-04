@@ -20,8 +20,8 @@ interface Step {
 
 const STEPS: readonly Step[] = [
   { place: "rail", title: "Start with Changes", body: "Files are ordered by what needs you first. Tick a file once you have looked at it." },
-  { place: "editor", title: "Review in the diff", body: "Mark a file reviewed, revert it, or send it back to the agent. Keys: j k to move, r to mark." },
-  { place: "agent", title: "Talk to the agent", body: "Ask for a change here. It sees the same files you do, and approvals show up above the box." },
+  { place: "editor", title: "Review in the diff", body: "Accept or revert each hunk, or comment on a line. Keys: j k move, a accept, x revert, c comment." },
+  { place: "agent", title: "Send it back", body: "Comments pile up as one review. Send review hands them to the agent together; approvals show up above the box." },
 ];
 
 export function CoachMarks({ railWidth, agentWidth }: { railWidth: number; agentWidth: number }) {
