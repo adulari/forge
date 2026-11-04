@@ -227,7 +227,14 @@ function RootNavigator() {
   // time it is shown, or ahead of time (hidden, effects paused) for someone who already uses it.
   const idePrefs = useIdeModePreferences();
   const [ideMounted, setIdeMounted] = useState(false);
-  const warmIde = ide.available && idePrefs.loaded && (idePrefs.enabled || idePrefs.coachSeen);
+  const [warmIde, setWarmIde] = useState(false);
+  useEffect(() => {
+    if (!ide.available || !idePrefs.loaded || warmIde) return;
+    // Someone who uses it gets it right away; everyone else after the first screen has settled,
+    // so the first switch is a display toggle too (a cold mount measured 110 ms, warm ~50 ms).
+    const timer = setTimeout(() => setWarmIde(true), idePrefs.enabled || idePrefs.coachSeen ? 0 : 3000);
+    return () => clearTimeout(timer);
+  }, [ide.available, idePrefs.loaded, idePrefs.enabled, idePrefs.coachSeen, warmIde]);
   if ((ide.visible || warmIde) && !ideMounted) setIdeMounted(true);
 
   useEffect(() => {

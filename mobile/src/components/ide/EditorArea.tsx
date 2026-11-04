@@ -166,17 +166,24 @@ function FileHeader({ tab, mode, onMode }: { tab: EditorTab; mode: DiffMode | "a
               }}
             />
             {activeRow ? (
-              <Button
-                label={reviewed ? "Reviewed" : "Mark reviewed"}
-                variant={reviewed ? "ghost" : "secondary"}
-                icon={reviewed ? <Check size={13} strokeWidth={2.25} color={tokens.ink2} /> : <ClipboardCheck size={13} strokeWidth={1.75} color={tokens.ink} />}
+              <Pressable
                 onPress={() => toggleReviewed(activeRow.sessionId, activeRow.path, activeRow.file.hash)}
-                style={styles.reviewButton}
-              />
+                accessibilityRole="button"
+                accessibilityLabel={reviewed ? "Reviewed. Mark not reviewed" : "Mark reviewed"}
+                style={({ hovered }: { hovered?: boolean; pressed: boolean }) => [
+                  styles.reviewButton,
+                  { borderColor: tokens.borderStrong, backgroundColor: rowBackground(tokens, { hovered, selected: reviewed }) },
+                ]}
+              >
+                {reviewed ? <Check size={12} strokeWidth={2.25} color={tokens.ink2} /> : <ClipboardCheck size={12} strokeWidth={1.75} color={tokens.ink} />}
+                <Text style={[styles.modeText, { color: reviewed ? tokens.ink2 : tokens.ink }]}>{reviewed ? "Reviewed" : "Mark reviewed"}</Text>
+              </Pressable>
             ) : null}
           </>
         ) : changedFile ? (
-          <Button label="View changes" variant="secondary" onPress={() => openChange(tab.sessionId, tab.path)} style={styles.reviewButton} />
+          <Pressable onPress={() => openChange(tab.sessionId, tab.path)} accessibilityRole="button" style={[styles.reviewButton, { borderColor: tokens.borderStrong }]}>
+            <Text style={[styles.modeText, { color: tokens.ink }]}>View changes</Text>
+          </Pressable>
         ) : null}
       </View>
       <ConfirmDialog
@@ -209,9 +216,15 @@ function EmptyEditor() {
       <EmptyState
         icon={ClipboardCheck}
         message={message}
-        action={first ? <Button label="Review first file" variant="secondary" onPress={() => openChange(first.sessionId, first.path)} /> : undefined}
+        action={
+          first ? (
+            <View style={styles.emptyAction}>
+              <Button label="Review first file" variant="secondary" onPress={() => openChange(first.sessionId, first.path)} />
+              <Text style={[styles.emptyHint, { color: tokens.ink4 }]}>or press j</Text>
+            </View>
+          ) : undefined
+        }
       />
-      {first ? <Text style={[styles.emptyHint, { color: tokens.ink4 }]}>or press j</Text> : null}
     </View>
   );
 }
@@ -263,7 +276,8 @@ const styles = StyleSheet.create({
   modes: { flexDirection: "row", borderWidth: 1, borderRadius: radii.radius4, overflow: "hidden", marginRight: space.space4 },
   mode: { paddingHorizontal: 7, height: 22, justifyContent: "center" },
   modeText: { fontFamily: sansFamilyFor(500), fontSize: 10.5 },
-  reviewButton: { height: 26, paddingHorizontal: space.space12, marginLeft: space.space4 },
+  reviewButton: { height: 24, flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: space.space8, marginLeft: space.space4, borderWidth: 1, borderRadius: radii.radius4 },
   empty: { flex: 1, alignItems: "center", justifyContent: "center", gap: space.space8 },
+  emptyAction: { alignItems: "center", gap: space.space8 },
   emptyHint: { fontFamily: monoFamily.regular, fontSize: 10.5 },
 });

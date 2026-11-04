@@ -136,6 +136,7 @@ function Body({ sessionId }: { sessionId: string }) {
           <Text style={[styles.meta, { color: tokens.ink3 }]}>View only. This session runs in a terminal.</Text>
         </View>
       ) : (
+        <View style={styles.composerClip}>
         <Composer
           sessionId={sessionId}
           busy={busy}
@@ -148,6 +149,7 @@ function Body({ sessionId }: { sessionId: string }) {
           onSend={handleSend}
           onInterrupt={handleInterrupt}
         />
+        </View>
       )}
     </View>
   );
@@ -167,5 +169,6 @@ const styles = StyleSheet.create({
   task: { height: 24, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space16 },
   taskText: { flex: 1, minWidth: 0, fontFamily: sansFamilyFor(400), fontSize: 12 },
   more: { paddingHorizontal: space.space16, paddingTop: 2 },
+  composerClip: { overflow: "hidden", minWidth: 0 },
   readOnly: { padding: space.space16, borderTopWidth: StyleSheet.hairlineWidth },
 });
