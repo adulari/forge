@@ -70,6 +70,7 @@ const WORKBENCH_PALETTE_ENTRIES: readonly WorkbenchPaletteEntry[] = [
   { menu: "view:layout-grid", title: "Layout: Grid 2 x 2", keywords: "layout preset grid four panes" },
   { menu: "view:layout-review", title: "Layout: Review", keywords: "layout preset review git diff tasks" },
   { menu: "view:layout-reset", title: "Reset layout", keywords: "reset layout default panes docks sizes" },
+  { menu: "view:ide-mode", title: "Toggle IDE mode", keywords: "ide mode review workbench agents changes diff editor chat switch", shortcut: "ide.toggle" },
   { menu: "view:sidebar", title: "Toggle sidebar", keywords: "sidebar rail collapse expand", shortcut: "shell.sidebar" },
   { menu: "view:tasks", title: "Toggle Tasks panel", keywords: "tasks todo list dock panel right", shortcut: "workbench.tasks" },
   { menu: "view:agents", title: "Toggle Agents panel", keywords: "agents subagents dock panel right", shortcut: "workbench.agents" },

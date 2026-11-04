@@ -147,9 +147,11 @@ export interface ComposerProps {
   onInterrupt: () => void;
   /** The session's earlier user prompts, oldest first, for ArrowUp recall. */
   recallPrompts?: readonly string[];
+  /** The composer sits in a narrow pane (IDE agent panel): chips drop their words so the row fits. */
+  compact?: boolean;
 }
 
-function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPinned, effort, temper, onSend, onInterrupt, recallPrompts }: ComposerProps) {
+function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPinned, effort, temper, onSend, onInterrupt, recallPrompts, compact = false }: ComposerProps) {
   const { scheme, tokens } = useTheme();
   const depth = scheme === "dark" ? depthDark : depthLight;
   const imeProps = { onCompositionEnd: recordComposerImeCommit } as unknown as React.ComponentProps<typeof TextInput>;
@@ -180,7 +182,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
   const followUp = useFollowUpSetting();
   const updateConfig = useUpdateConfig();
   const { width: windowWidth } = useWindowDimensions();
-  const iconOnlyChips = windowWidth < ICON_ONLY_CHIPS_BELOW;
+  const iconOnlyChips = compact || windowWidth < ICON_ONLY_CHIPS_BELOW;
   const reviewComments = useReviewComments(sessionId);
   const visualAnnotations = useVisualAnnotations(sessionId);
   const toast = useToast();
@@ -987,8 +989,8 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                   way rather than hiding the only way to open the picker. */}
               <MetaChip
                 // A phone needs the width for the model's name; the gauge glyph says "effort".
-                label={isCompact ? effort ?? "auto" : `effort · ${effort ?? "auto"}`}
-                icon={isCompact ? <Gauge size={11} strokeWidth={1.75} color={tokens.ink4} /> : undefined}
+                label={isCompact || compact ? effort ?? "auto" : `effort · ${effort ?? "auto"}`}
+                icon={isCompact || compact ? <Gauge size={11} strokeWidth={1.75} color={tokens.ink4} /> : undefined}
                 color={tokens.ink3}
                 accessibilityLabel={`reasoning effort: ${effort ?? "auto"} — change effort`}
                 testID="composer-effort-chip"

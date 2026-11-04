@@ -45,9 +45,16 @@ export type AppShortcutAction =
   | "session.agents"
   | "session.review"
   | "session.focusComposer"
-  | "session.interrupt";
+  | "session.interrupt"
+  | "ide.toggle"
+  | "ide.nextFile"
+  | "ide.prevFile"
+  | "ide.nextHunk"
+  | "ide.prevHunk"
+  | "ide.markReviewed"
+  | "ide.messageAgent";
 
-export type AppShortcutGroup = "Navigation" | "Workbench" | "Session" | "Composer" | "Sidebar";
+export type AppShortcutGroup = "Navigation" | "Workbench" | "Session" | "Composer" | "Sidebar" | "IDE";
 
 export interface ShortcutBinding {
   key: string;
@@ -133,6 +140,13 @@ export const APP_SHORTCUTS: readonly AppShortcutDescriptor[] = [
   { action: "session.review", label: "Session: Review", description: "Switch the current session to Review.", group: "Session", defaultBinding: binding("r", { alt: true }) },
   { action: "session.focusComposer", label: "Focus composer", description: "Move focus to the prompt composer.", group: "Session", defaultBinding: binding("e", { mod: true }) },
   { action: "session.interrupt", label: "Interrupt session", description: "Stop the active turn.", group: "Session", defaultBinding: binding(".", { mod: true }) },
+  { action: "ide.toggle", label: "Toggle IDE mode", description: "Switch between Chat and the IDE review workbench.", group: "Workbench", defaultBinding: binding("e", { mod: true, shift: true }) },
+  { action: "ide.nextFile", label: "Next changed file", description: "Open the next file in the change queue.", group: "IDE", defaultBinding: binding("j", {}), when: "ideReview" },
+  { action: "ide.prevFile", label: "Previous changed file", description: "Open the previous file in the change queue.", group: "IDE", defaultBinding: binding("k", {}), when: "ideReview" },
+  { action: "ide.nextHunk", label: "Next change", description: "Jump to the next hunk in the open diff.", group: "IDE", defaultBinding: binding("n", {}), when: "ideReview" },
+  { action: "ide.prevHunk", label: "Previous change", description: "Jump to the previous hunk in the open diff.", group: "IDE", defaultBinding: binding("p", {}), when: "ideReview" },
+  { action: "ide.markReviewed", label: "Mark file reviewed", description: "Mark the open file reviewed and move to the next one.", group: "IDE", defaultBinding: binding("r", {}), when: "ideReview" },
+  { action: "ide.messageAgent", label: "Message the agent", description: "Move focus to the agent's composer.", group: "IDE", defaultBinding: binding("m", {}), when: "ideReview" },
 ] as const;
 
 const ACTIONS = new Set<AppShortcutAction>(APP_SHORTCUTS.map(({ action }) => action));
@@ -453,6 +467,7 @@ const NATIVE_MENU_ACTIONS: Partial<Record<AppShortcutAction, string>> = {
   "shell.sidebar": "view:sidebar",
   "shell.usage": "view:usage",
   "shell.quickComposer": "session:quick-composer",
+  "ide.toggle": "view:ide-mode",
   "workbench.split": "view:split-pane",
   "workbench.terminal": "view:terminal",
   "workbench.gitReview": "view:git-review",
