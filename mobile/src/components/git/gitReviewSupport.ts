@@ -5,7 +5,7 @@
 // forge-anywhere-protocol/src/bridge.rs, so a diff can be reviewed from the phone — the case
 // Anywhere exists for. The MUTATING half (switch/stage/unstage/commit) is deliberately not
 // bridged: the host refuses those methods on the git routes, so a relay command cannot alter the
-// working tree. Over Anywhere the dock therefore renders read-only rather than offering controls
+// working tree (the one exception is `git_hunk`, a single-hunk stage/unstage/revert; the dock still hides its hunk controls here). Over Anywhere the dock therefore renders read-only rather than offering controls
 // whose requests would come back denied.
 //
 // Extracted from GitReviewDock so both predicates are unit-testable without rendering the dock.

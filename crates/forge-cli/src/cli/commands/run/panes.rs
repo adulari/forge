@@ -33,6 +33,7 @@ enum Msg {
     Jobs(Vec<JobRow>),
     Tail(u32, String),
     JobNote(String),
+    Reverted(Result<String, String>),
 }
 
 pub(crate) struct PaneHost {
@@ -151,8 +152,10 @@ impl PaneHost {
         heartbeat: &mut dyn FnMut(),
     ) -> Result<bool> {
         if app.diff_overlay.open {
-            if app.diff_overlay.key(key) == DiffAction::Refresh {
-                self.tree_inflight = false;
+            match app.diff_overlay.key(key) {
+                DiffAction::Refresh => self.tree_inflight = false,
+                DiffAction::RevertHunk { path, header } => self.spawn_revert(app, path, header),
+                DiffAction::None => {}
             }
             return Ok(true);
         }
@@ -184,6 +187,15 @@ impl PaneHost {
             }
             _ => Ok(false),
         }
+    }
+
+    fn spawn_revert(&mut self, app: &App, path: String, header: String) {
+        let workspace = Self::workspace(app);
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let result = super::hunk_revert::revert_hunk(&workspace, &path, &header);
+            let _ = tx.send(Msg::Reverted(result));
+        });
     }
 
     fn spawn_tail(&mut self, app: &App, id: u32) {
@@ -309,6 +321,13 @@ impl PaneHost {
                 }
                 Msg::Tail(id, text) => app.jobs_overlay.set_tail(id, &text),
                 Msg::JobNote(note) => app.jobs_overlay.notice = Some(note),
+                Msg::Reverted(result) => {
+                    app.diff_overlay.notice = Some(match result {
+                        Ok(note) | Err(note) => note,
+                    });
+                    app.diff_overlay.request_refresh();
+                    self.tree_inflight = false;
+                }
             }
         }
         dirty

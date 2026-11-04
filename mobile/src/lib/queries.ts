@@ -74,6 +74,17 @@ import {
   switchGitBranch,
   createGitBranch,
   type GitDiffResponse,
+  type BlameResponse,
+  type GitHunkRequest,
+  type GitHunkResponse,
+  type JobTailResponse,
+  type ProjectChangesResponse,
+  type SessionJobsResponse,
+  applyGitHunk,
+  getBlame,
+  getJobTail,
+  getProjectChanges,
+  getSessionJobs,
   getGitDiff,
   type GitPathsRequest,
   type GitCommitRequest,
@@ -1441,4 +1452,89 @@ export function useTurnCompleted(snapshot: Snapshot | null): boolean {
   }, [busy, waiting, sessionId, title, costUsd, contextTokens, contextLimit, question, promptSeq, tasksDone, tasksTotal, agentLabel, baseUrl, queryClient]);
 
   return completed;
+}
+
+// ---------------------------------------------------------------------------
+// IDE mode routes (blame, background jobs, project changes, hunk actions)
+// ---------------------------------------------------------------------------
+
+export const ideKeys = (baseUrl: string | null) => ({
+  blame: (sessionId: string, path: string) => ["ide", "blame", baseUrl, sessionId, path] as const,
+  jobs: (sessionId: string) => ["ide", "jobs", baseUrl, sessionId] as const,
+  jobTail: (sessionId: string, job: number, lines: number) =>
+    ["ide", "jobs", baseUrl, sessionId, "tail", job, lines] as const,
+  projectChanges: (cwd: string) => ["ide", "changes", baseUrl, cwd] as const,
+});
+
+/** Which turn wrote each line of `path`. Heavy panels call this on first open only. */
+export function useBlame(sessionId: string | null, path: string | null, enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery<BlameResponse>({
+    queryKey: ideKeys(baseUrl).blame(sessionId ?? "", path ?? ""),
+    queryFn: () => getBlame(baseUrl as string, sessionId as string, path as string),
+    enabled: enabled && baseUrl != null && sessionId != null && path != null && path !== "",
+    staleTime: 15_000,
+    retry: false,
+  });
+}
+
+export function useSessionJobs(sessionId: string | null, enabled = true, pollMs: number | false = 2_000) {
+  const { baseUrl } = useAuth();
+  return useQuery<SessionJobsResponse>({
+    queryKey: ideKeys(baseUrl).jobs(sessionId ?? ""),
+    queryFn: () => getSessionJobs(baseUrl as string, sessionId as string),
+    enabled: enabled && baseUrl != null && sessionId != null,
+    refetchInterval: enabled ? pollMs : false,
+    retry: false,
+  });
+}
+
+export function useJobTail(
+  sessionId: string | null,
+  job: number | null,
+  enabled = true,
+  lines = 200,
+  pollMs: number | false = 2_000,
+) {
+  const { baseUrl } = useAuth();
+  return useQuery<JobTailResponse>({
+    queryKey: ideKeys(baseUrl).jobTail(sessionId ?? "", job ?? -1, lines),
+    queryFn: () => getJobTail(baseUrl as string, sessionId as string, job as number, lines),
+    enabled: enabled && baseUrl != null && sessionId != null && job != null,
+    refetchInterval: enabled ? pollMs : false,
+    retry: false,
+  });
+}
+
+/** Every live session on a project with its changed files, in one call. */
+export function useProjectChanges(cwd: string | null, enabled = true, pollMs: number | false = 5_000) {
+  const { baseUrl } = useAuth();
+  return useQuery<ProjectChangesResponse>({
+    queryKey: ideKeys(baseUrl).projectChanges(cwd ?? ""),
+    queryFn: () => getProjectChanges(baseUrl as string, cwd as string),
+    enabled: enabled && baseUrl != null && cwd != null && cwd !== "",
+    refetchInterval: enabled ? pollMs : false,
+    placeholderData: keepPreviousData,
+  });
+}
+
+/** Stage, unstage or revert one hunk. Settles by refreshing everything a hunk can move, including
+ * after a stale-patch 409 (the refetch is what the client needs next). */
+export function useGitHunk() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation<GitHunkResponse, Error, GitHunkRequest>({
+    mutationFn: (body) => applyGitHunk(baseUrl as string, body),
+    onSettled: (_data, _error, body) => {
+      for (const key of [
+        ["git", "status", baseUrl, body.session],
+        ["git", "diff", baseUrl, body.session],
+        ["sessions", "diff", baseUrl, body.session],
+        ["workspace", "file", baseUrl, body.session],
+        ["ide", "changes", baseUrl],
+      ]) {
+        void queryClient.invalidateQueries({ queryKey: key });
+      }
+    },
+  });
 }

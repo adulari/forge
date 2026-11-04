@@ -20,11 +20,17 @@ pub use model::{
 pub use render::render_diff_overlay;
 
 /// What the host does after a key.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DiffAction {
     None,
     /// The working-tree source was selected: read git again.
     Refresh,
+    /// The person confirmed reverting one hunk of a working-tree file. The host applies it with
+    /// `git apply -R` and refreshes the tree; `header` is the hunk's `@@` line.
+    RevertHunk {
+        path: String,
+        header: String,
+    },
 }
 
 /// Index of the working-tree source in [`DiffOverlay::sources`].
@@ -46,6 +52,10 @@ pub struct DiffOverlay {
     /// Why the working tree could not be read (not a repository, git missing).
     pub error: Option<String>,
     view_h: Cell<usize>,
+    /// A hunk revert waiting for `y`: `(path, hunk header)`.
+    confirm_revert: Option<(String, String)>,
+    /// The outcome of the last revert, shown in the hint row until the next key.
+    pub notice: Option<String>,
     /// Set by the renderer: the diff column is too narrow for split rows, so unified is drawn.
     narrow: Cell<bool>,
 }
@@ -105,6 +115,34 @@ impl DiffOverlay {
         let max = self.files().len().saturating_sub(1);
         self.file = self.file.min(max);
         self.scroll = 0;
+    }
+
+    /// The pending revert confirmation, as the hint row shows it.
+    pub fn confirm_prompt(&self) -> Option<String> {
+        self.confirm_revert
+            .as_ref()
+            .map(|(path, header)| format!("revert hunk {header} in {path}? y/n"))
+    }
+
+    /// The hunk at the top of the view, when the working tree is shown and it can be reverted.
+    fn revertable_hunk(&self) -> Option<(String, String)> {
+        if self.source != TREE {
+            return None;
+        }
+        let file = self.current()?;
+        if file.binary || matches!(file.status, FileStatus::Untracked | FileStatus::Renamed) {
+            return None;
+        }
+        let (_, starts) = self.rows();
+        let index = starts.iter().rposition(|&start| start <= self.scroll)?;
+        Some((file.path.clone(), file.hunks.get(index)?.header.clone()))
+    }
+
+    /// Read the working tree again (after the host changed it).
+    pub fn request_refresh(&mut self) {
+        if self.source == TREE {
+            self.loading = true;
+        }
     }
 
     pub fn sources(&self) -> &[DiffSource] {
@@ -216,6 +254,15 @@ impl DiffOverlay {
 
     /// Handle one key while the overlay is open; it owns every key.
     pub fn key(&mut self, key: KeyKind) -> DiffAction {
+        self.notice = None;
+        if let Some((path, header)) = self.confirm_revert.take() {
+            // Any key other than `y` cancels, so a stray press never reverts.
+            if key == KeyKind::Char('y') {
+                return DiffAction::RevertHunk { path, header };
+            }
+            self.notice = Some("revert cancelled".to_string());
+            return DiffAction::None;
+        }
         let n = self.files().len();
         match key {
             KeyKind::Esc | KeyKind::Char('q') => self.close(),
@@ -250,6 +297,13 @@ impl DiffOverlay {
                 return DiffAction::Refresh;
             }
             KeyKind::Char('m') => self.toggle_reviewed(),
+            KeyKind::Char('x') => match self.revertable_hunk() {
+                Some(target) => self.confirm_revert = Some(target),
+                None => {
+                    self.notice =
+                        Some("hunks can be reverted in the working-tree source".to_string())
+                }
+            },
             _ => {}
         }
         DiffAction::None

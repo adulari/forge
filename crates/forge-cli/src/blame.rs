@@ -26,6 +26,8 @@ pub struct LineAttribution {
     pub session_id: Option<String>,
     pub seq: Option<i64>,
     pub created_at: Option<i64>,
+    /// The `write_file`/`edit_file` call that wrote the line.
+    pub tool_call_id: Option<String>,
 }
 
 impl LineAttribution {
@@ -37,8 +39,40 @@ impl LineAttribution {
             session_id: None,
             seq: None,
             created_at: None,
+            tool_call_id: None,
         }
     }
+}
+
+/// Attribute every line of `current` (the content of `target` on disk) from the store's recorded
+/// edits. The one implementation behind both `forge blame` and `GET /api/blame`.
+pub fn blame_file(
+    store: &forge_store::Store,
+    target: &Path,
+    current: &str,
+) -> anyhow::Result<Vec<LineAttribution>> {
+    // Narrow the store query with the plain file name (the one suffix guaranteed to survive
+    // regardless of which cwd a past session ran `write_file`/`edit_file` from); the precise
+    // per-row path resolution in `matching_edits` is what decides "is this the same file".
+    let suffix = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let candidates = store.file_edits(suffix)?;
+    let edits: Vec<FileEditRow> = matching_edits(target, &candidates)
+        .into_iter()
+        .cloned()
+        .collect();
+    Ok(attribute_lines(current, &edits))
+}
+
+/// The prompt that led to a turn, as one line of at most `max` characters.
+pub fn prompt_summary(turn: &TurnContext, max: usize) -> Option<String> {
+    turn.user_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| clip(p, max))
 }
 
 /// A line stripped of leading/trailing whitespace that is too ambiguous to attribute even when it
@@ -137,6 +171,7 @@ pub fn attribute_lines(current_content: &str, edits: &[FileEditRow]) -> Vec<Line
                     session_id: Some(edit.session_id.clone()),
                     seq: Some(edit.seq),
                     created_at: Some(edit.created_at),
+                    tool_call_id: Some(edit.tool_call_id.clone()),
                 },
                 None => LineAttribution::human(line_no, line),
             }
@@ -292,6 +327,7 @@ mod tests {
         created_at: i64,
     ) -> FileEditRow {
         FileEditRow {
+            tool_call_id: format!("call-{seq}-{created_at}"),
             tool_name: tool_name.to_string(),
             args_json: args_json.to_string(),
             path: path.to_string(),
@@ -447,6 +483,7 @@ mod tests {
                 session_id: Some("abcdef1234567890".to_string()),
                 seq: Some(3),
                 created_at: Some(1_000),
+                tool_call_id: None,
             },
             LineAttribution::human(2, "// handwritten"),
         ];
@@ -474,6 +511,7 @@ mod tests {
             session_id: Some("abcdef1234567890".to_string()),
             seq: Some(7),
             created_at: Some(1_000),
+            tool_call_id: None,
         };
         let turn = TurnContext {
             user_prompt: Some("add the shared counter".to_string()),
@@ -493,6 +531,7 @@ mod tests {
             session_id: Some("s".to_string()),
             seq: Some(2),
             created_at: Some(3),
+            tool_call_id: None,
         }];
         let out = render_json(&attrs);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");

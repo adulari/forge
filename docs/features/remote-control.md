@@ -872,3 +872,21 @@ module and are not covered yet.
   stopped, HTTPS certificates off, or ready.
 - **Reverse proxy.** `[remote] public_url = "https://forge.example.com"` makes links and QR codes
   point at an origin you manage.
+
+## IDE mode routes
+
+Read and write routes behind the desktop IDE mode. All are token-scoped like the rest of `/api`; reads need `view`, the hunk write needs `workspace-write`. Over Forge Anywhere the read routes and `git_hunk` are typed `RouteId`s (`blame`, `session_jobs`, `session_job_tail`, `project_changes`, `git_hunk`); `git_hunk` is the only git write the bridge carries, because it can do no more than the already-bridged `write_workspace_file`. The mobile review dock still hides hunk actions over Anywhere, matching its read-only policy.
+
+| Route | Request | Response |
+|---|---|---|
+| `POST /api/git/hunk` | `{session, path, hunk_header, patch, action: "stage"\|"unstage"\|"revert"}`; `patch` is a single-file, single-hunk unified diff naming exactly `path` | `{ok, action}`. 400 for a patch that is not one hunk of `path` or a path outside the repository; 409 `stale_patch` when it no longer applies (refetch the diff); 409 `session_busy` for a revert while the session is mid-turn |
+| `GET /api/blame?session=&path=` | repo-relative path | `{path, line_count, lines: [{line, session_id, turn, model, tool_call_id, prompt_summary, created_at}]}`; only lines a recorded `write_file`/`edit_file` wrote are listed. Same attribution as `forge blame` (`crates/forge-cli/src/blame.rs`) |
+| `GET /api/sessions/{id}/jobs` | | `{jobs: [{id, command, running, status, started_at}]}` |
+| `GET /api/sessions/{id}/jobs/{job}/tail?lines=` | `lines` default 200, max 2000 | `{id, running, status, text}`; 404 for an unknown job |
+| `GET /api/projects/changes?cwd=` | any directory inside the project | `{cwd, sessions: [{session_id, title, branch, worktree, waiting, busy, files: [{path, kind, adds, dels, content_hash}], truncated}]}` |
+
+Hunk actions: `stage` applies the hunk to the index (`git apply --cached`, patch taken from the working-tree-vs-index diff), `unstage` undoes a staged hunk (`git apply -R --cached`, patch from the staged diff), `revert` undoes it in the working tree only (`git apply -R`). Reverting a hunk that is also staged means unstaging it first. Limitation: the diff route drops `\ No newline at end of file` markers, so a hunk that touches an unterminated last line cannot be applied and answers 409.
+
+Project changes: a worktree session lists its worktree against the fork point (the `GET /api/sessions/{id}/diff` machinery). Sessions sharing one checkout split that checkout's `git status`, attributed by the store's `write_file`/`edit_file` records made since the last commit; a file several sessions edited lists under each, and dirty files no record explains go under a synthetic session `unattributed`. Changes made by shell commands are not tool-call edits and are never attributed. `.forge/` is ignored. `content_hash` is a stable digest of the file's current bytes (`deleted` when absent).
+
+TUI: `/diff` opens the diff overlay; `x` then `y` reverts the hunk under the view in the working-tree source (`crates/forge-cli/src/cli/commands/run/hunk_revert.rs`). Mobile: the working-tree review cards show Stage/Unstage/Revert per hunk, and Session actions > Background jobs lists jobs with their log tail.

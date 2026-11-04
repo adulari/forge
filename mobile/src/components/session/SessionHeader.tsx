@@ -22,6 +22,7 @@ import {
   Send,
   Settings2,
   Share2,
+  ListTree,
   SquareTerminal,
   Swords,
   Workflow,
@@ -72,6 +73,7 @@ export interface SessionHeaderProps {
   prChip?: React.ReactNode;
   onMemory: () => void;
   onLattice: () => void;
+  onJobs: () => void;
   onManageLifecycle: () => void;
   /** Expanded workbench controls. Compact layouts use their native navigation instead. */
   onToggleGitReview?: () => void;
@@ -246,7 +248,8 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
           <ListRow title="Create pull request" leading={<GitPullRequest size={20} color={tokens.ink2} />} onPress={() => run(props.onPullRequest)} />
           <ListRow title="Ports and project actions" leading={<Plug size={20} color={tokens.ink2} />} onPress={() => run(props.onPorts)} />
           <ListRow title="Manage project memory" leading={<Brain size={20} color={tokens.ink2} />} onPress={() => run(props.onMemory)} />
-          <ListRow title="Inspect code symbol" leading={<Network size={20} color={tokens.ink2} />} onPress={() => run(props.onLattice)} showSeparator={false} />
+          <ListRow title="Inspect code symbol" leading={<Network size={20} color={tokens.ink2} />} onPress={() => run(props.onLattice)} />
+          <ListRow title="Background jobs" leading={<ListTree size={20} color={tokens.ink2} />} onPress={() => run(props.onJobs)} showSeparator={false} />
         </ScrollView>
       </Sheet>
     </View>

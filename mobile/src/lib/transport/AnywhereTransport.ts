@@ -47,6 +47,11 @@ export type BridgeRoute =
   | "git_diff"
   | "session_diff"
   | "session_agents"
+  | "blame"
+  | "session_jobs"
+  | "session_job_tail"
+  | "project_changes"
+  | "git_hunk"
   | "workspace_entries"
   | "read_workspace_file"
   | "write_workspace_file"
@@ -282,6 +287,10 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/git/status": { GET: "git_status" },
     "/api/git/branches": { GET: "git_branches" },
     "/api/git/diff": { GET: "git_diff" },
+    // The one git write the bridge carries (see RouteId::GitHunk in forge-anywhere-protocol).
+    "/api/git/hunk": { POST: "git_hunk" },
+    "/api/blame": { GET: "blame" },
+    "/api/projects/changes": { GET: "project_changes" },
     "/api/workspace/entries": { GET: "workspace_entries" },
     "/api/workspace/file": { GET: "read_workspace_file", PUT: "write_workspace_file" },
     "/api/workspace/search": { GET: "workspace_search" },
@@ -317,6 +326,17 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
   const sessionAgents = path.match(/^\/api\/sessions\/([^/]+)\/agents$/);
   if (sessionAgents && method === "GET") {
     return { route: "session_agents", parameters: [sessionPathParameter(sessionAgents[1])] };
+  }
+  const sessionJobs = path.match(/^\/api\/sessions\/([^/]+)\/jobs$/);
+  if (sessionJobs && method === "GET") {
+    return { route: "session_jobs", parameters: [sessionPathParameter(sessionJobs[1])] };
+  }
+  const sessionJobTail = path.match(/^\/api\/sessions\/([^/]+)\/jobs\/(\d{1,10})\/tail$/);
+  if (sessionJobTail && method === "GET") {
+    return {
+      route: "session_job_tail",
+      parameters: [sessionPathParameter(sessionJobTail[1]), sessionJobTail[2]],
+    };
   }
   const schedule = path.match(/^\/api\/schedules\/([^/]+)\/(pause|resume|delete)$/);
   if (schedule && method === "POST") {

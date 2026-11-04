@@ -296,6 +296,7 @@ export function GitReviewDock({ sessionId }: { sessionId: string }): React.JSX.E
           focusRequest={focusRequest}
           ignoreWhitespace={ignoreWhitespace}
           onToggleWhitespace={() => setIgnoreWhitespace((current) => !current)}
+          readOnly={readOnly}
         />
       </View>
 

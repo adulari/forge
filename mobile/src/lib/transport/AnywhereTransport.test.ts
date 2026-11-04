@@ -260,6 +260,11 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/sessions/s1/diff");
     await transport.fetch("fany://host-1/api/sessions/s1/agents");
     await transport.fetch("fany://host-1/api/schedules/nightly-1/pause", { method: "POST" });
+    await transport.fetch("fany://host-1/api/blame?session=s1&path=a.rs");
+    await transport.fetch("fany://host-1/api/projects/changes?cwd=%2Fp");
+    await transport.fetch("fany://host-1/api/sessions/s1/jobs");
+    await transport.fetch("fany://host-1/api/sessions/s1/jobs/42/tail?lines=5");
+    await transport.fetch("fany://host-1/api/git/hunk", { method: "POST", body: "{}" });
 
     expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
       ["workspace_entries", "?session=s1&path=src"],
@@ -268,6 +273,11 @@ describe("AnywhereTransport", () => {
       ["session_diff", "s1"],
       ["session_agents", "s1"],
       ["pause_schedule", "nightly-1"],
+      ["blame", "?session=s1&path=a.rs"],
+      ["project_changes", "?cwd=%2Fp"],
+      ["session_jobs", "s1"],
+      ["session_job_tail", "s1"],
+      ["git_hunk", ""],
     ]);
     await expect(
       transport.fetch("fany://host-1/api/schedules", { method: "POST", body: "{}" }),
