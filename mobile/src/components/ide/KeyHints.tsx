@@ -32,7 +32,7 @@ export function KeyHints() {
   const tokens = useTokens();
   const { width } = useWindowDimensions();
   const { active, rows, bottomOpen, toggleBottom } = useIde();
-  const terminal = useShortcutLabel("workbench.terminal");
+  const terminal = useShortcutLabel("ide.terminal");
   const reviewing = active?.kind === "diff";
   const wide = width >= 1180;
   return (
@@ -52,9 +52,14 @@ export function KeyHints() {
       {reviewing ? (
         <>
           <Hint keys={["j", "k"]} label="files" />
-          {wide ? <Hint keys={["n", "p"]} label="changes" /> : null}
+          <Hint keys={["n", "p"]} label="hunks" />
+          <Hint keys={["a"]} label="accept" />
+          <Hint keys={["x"]} label="revert" />
+          <Hint keys={["c"]} label="comment" />
+          {wide ? <Hint keys={["e"]} label="edit" /> : null}
+          {wide ? <Hint keys={["w"]} label="why" /> : null}
           <Hint keys={["r"]} label="reviewed" />
-          <Hint keys={["m"]} label="message" />
+          {wide ? <Hint keys={["m"]} label="message" /> : null}
         </>
       ) : rows.length > 0 ? (
         <Hint keys={["j"]} label="open the first file" />

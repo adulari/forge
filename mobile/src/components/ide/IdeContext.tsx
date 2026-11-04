@@ -21,6 +21,7 @@ import {
 import { defaultProject, type SessionChanges } from "./changesAdapter";
 import { EMPTY_TABS, activeTab, editorTabsReducer, tabId, type EditorTab, type EditorTabsAction } from "./editorTabsModel";
 import { onIdeTerminalToggle } from "./ideEvents";
+import { failingPathsOf, useFailingChecks } from "./ideSignals";
 import { markFileReviewed, unmarkFileReviewed, useReviewedMarks } from "./reviewedStore";
 import { useIdeProjects, useProjectChanges, useProjectSessions } from "./useIdeData";
 
@@ -108,17 +109,22 @@ export function IdeProvider({ children }: { children: React.ReactNode }) {
   const { bySession, loading: changesLoading } = useProjectChanges(sessions);
   const marks = useReviewedMarks();
 
+  const failing = useFailingChecks();
   const agents = useMemo<QueueAgent[]>(
     () =>
-      sessions.map((row) => ({
-        sessionId: row.id,
-        name: row.title?.trim() || `session ${row.id.slice(0, 8)}`,
-        waiting: row.waiting,
-        busy: row.busy,
-        lastActivity: row.last_activity,
-        files: bySession.get(row.id)?.files ?? [],
-      })),
-    [sessions, bySession],
+      sessions.map((row) => {
+        const failingPaths = failingPathsOf(failing, row.id);
+        const files = bySession.get(row.id)?.files ?? [];
+        return {
+          sessionId: row.id,
+          name: row.title?.trim() || `session ${row.id.slice(0, 8)}`,
+          waiting: row.waiting,
+          busy: row.busy,
+          lastActivity: row.last_activity,
+          files: failingPaths.size === 0 ? files : files.map((file) => (failingPaths.has(file.path) ? { ...file, failing: true } : file)),
+        };
+      }),
+    [sessions, bySession, failing],
   );
   const groups = useMemo(() => buildQueue({ agents, marks, scope }), [agents, marks, scope]);
   const rows = useMemo(() => flattenQueue(groups), [groups]);

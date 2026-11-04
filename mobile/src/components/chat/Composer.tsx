@@ -976,7 +976,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                   // The daemon sends the literal sentinel "—" for an Automatic session (no
                   // model pinned yet) — same value StatusStrip already special-cases. A raw
                   // dash on the chip reads as broken/missing data, not as "automatic".
-                  label={modelChipLabel(model, modelPinned, isCompact)}
+                  label={modelChipLabel(model, modelPinned, isCompact || compact)}
                   icon={<ProviderGlyph provider={model} size={12} color={tokens.ink3} accessibilityLabel={null} />}
                   color={tokens.ink2}
                   accessibilityLabel={`model: ${modelChipLabel(model, modelPinned)} — change model`}
@@ -1290,7 +1290,8 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   metaChipFixed: { flexShrink: 0 },
-  metaChipLabel: { flexShrink: 1, minWidth: 0 },
+  // A floor, so a crowded row (the IDE agent panel at 1024px) never squeezes a chip to one glyph.
+  metaChipLabel: { flexShrink: 1, minWidth: 40 },
   metaSpacer: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
   metaIcon: { width: 32, height: 32 },
   row: {

@@ -52,7 +52,15 @@ export type AppShortcutAction =
   | "ide.nextHunk"
   | "ide.prevHunk"
   | "ide.markReviewed"
-  | "ide.messageAgent";
+  | "ide.messageAgent"
+  | "ide.acceptHunk"
+  | "ide.revertHunk"
+  | "ide.commentHunk"
+  | "ide.explainHunk"
+  | "ide.edit"
+  | "ide.sendReview"
+  | "ide.toggleTrace"
+  | "ide.terminal";
 
 export type AppShortcutGroup = "Navigation" | "Workbench" | "Session" | "Composer" | "Sidebar" | "IDE";
 
@@ -147,6 +155,14 @@ export const APP_SHORTCUTS: readonly AppShortcutDescriptor[] = [
   { action: "ide.prevHunk", label: "Previous change", description: "Jump to the previous hunk in the open diff.", group: "IDE", defaultBinding: binding("p", {}), when: "ideReview" },
   { action: "ide.markReviewed", label: "Mark file reviewed", description: "Mark the open file reviewed and move to the next one.", group: "IDE", defaultBinding: binding("r", {}), when: "ideReview" },
   { action: "ide.messageAgent", label: "Message the agent", description: "Move focus to the agent's composer.", group: "IDE", defaultBinding: binding("m", {}), when: "ideReview" },
+  { action: "ide.acceptHunk", label: "Accept hunk", description: "Stage the hunk in view.", group: "IDE", defaultBinding: binding("a", {}), when: "ideReview" },
+  { action: "ide.revertHunk", label: "Revert hunk", description: "Undo the hunk in view in the working tree. A toast offers to bring it back.", group: "IDE", defaultBinding: binding("x", {}), when: "ideReview" },
+  { action: "ide.commentHunk", label: "Comment on hunk", description: "Write a review comment on the hunk in view.", group: "IDE", defaultBinding: binding("c", {}), when: "ideReview" },
+  { action: "ide.explainHunk", label: "Explain this change", description: "Ask the agent to explain the hunk in view, without interrupting its turn.", group: "IDE", defaultBinding: binding("/", { shift: true }), when: "ideReview" },
+  { action: "ide.edit", label: "Edit file", description: "Open the open diff's file in the editor.", group: "IDE", defaultBinding: binding("e", {}), when: "ideReview" },
+  { action: "ide.toggleTrace", label: "Toggle why-trace", description: "Show which agent turn wrote each line.", group: "IDE", defaultBinding: binding("w", {}), when: "ideReview" },
+  { action: "ide.sendReview", label: "Send review", description: "Send the pending review comments to the agent as one prompt.", group: "IDE", defaultBinding: binding("enter", { mod: true, shift: true }) },
+  { action: "ide.terminal", label: "Toggle IDE bottom panel", description: "Open or close the terminal, checks and shells panel.", group: "IDE", defaultBinding: binding("`", { mod: true }) },
 ] as const;
 
 const ACTIONS = new Set<AppShortcutAction>(APP_SHORTCUTS.map(({ action }) => action));

@@ -1,6 +1,6 @@
 // Branch, sync, the staged and unstaged lists and the commit box for the agent in view: the
 // Review dock's left column, reused as is. Picking a file opens its diff in the editor.
-import { GitBranch } from "lucide-react-native";
+import { GitBranch, Rocket } from "lucide-react-native";
 import React, { useCallback, useState } from "react";
 import { StyleSheet, Text, View , ScrollView } from "react-native";
 
@@ -20,6 +20,8 @@ import { GitFileList, type GitSelection } from "../git/GitFileList";
 import { GitSyncBar } from "../git/GitSyncBar";
 import { type CommitAction, type DiscardKind, classifyGitStatusError, discardMessage, isGitReviewReadOnly, isGitReviewSupported } from "../git/gitReviewSupport";
 import { useIde } from "./IdeContext";
+import { IdeTextButton } from "./ideUi";
+import { shipHint, shipLabel, shipSteps, type ShipStep } from "./shipModel";
 
 export function GitTab() {
   const { panelSessionId } = useIde();
@@ -44,6 +46,8 @@ function GitColumn({ sessionId }: { sessionId: string }) {
   const [message, setMessage] = useState("");
   const [pushedTo, setPushedTo] = useState<string | null>(null);
   const [commitAction, setCommitAction] = useCommitAction();
+  const [manual, setManual] = useState(false);
+  const [shipping, setShipping] = useState<ShipStep | null>(null);
   const [pending, setPending] = useState<{ paths: string[]; kind: DiscardKind } | null>(null);
 
   const select = useCallback((selection: GitSelection) => openChange(sessionId, selection.path), [openChange, sessionId]);
@@ -73,6 +77,35 @@ function GitColumn({ sessionId }: { sessionId: string }) {
       } catch {
         // The push error renders under the commit result; the commit itself stands.
       }
+    }
+  };
+
+  const unstagedPaths = [...data.unstaged, ...data.untracked].map((row) => row.path);
+  const steps = shipSteps({ staged: data.staged.length, unstaged: unstagedPaths.length, hasMessage: message.trim().length > 0, canPush: data.has_remote !== false });
+  const ship = async () => {
+    setPushedTo(null);
+    push.reset();
+    commit.reset();
+    let text = message;
+    try {
+      for (const step of steps) {
+        setShipping(step);
+        if (step === "stage") await stage.mutateAsync({ session: sessionId, paths: unstagedPaths });
+        else if (step === "message") {
+          text = (await generate.mutateAsync({ session: sessionId })).message;
+          setMessage(text);
+        } else if (step === "commit") {
+          await commit.mutateAsync({ session: sessionId, message: text });
+          setMessage("");
+        } else {
+          const pushed = await push.mutateAsync({ session: sessionId });
+          setPushedTo(pushed.remote ?? "remote");
+        }
+      }
+    } catch (error) {
+      toast.show(error instanceof Error ? error.message : "Could not finish shipping.", { tone: "danger" });
+    } finally {
+      setShipping(null);
     }
   };
 
@@ -112,6 +145,29 @@ function GitColumn({ sessionId }: { sessionId: string }) {
         )}
       </View>
       {!readOnly ? (
+        <View style={[styles.ship, { borderTopColor: tokens.border }]}>
+          <View style={styles.shipText}>
+            <Text numberOfLines={2} style={[typeScale.meta, { color: shipping ? tokens.ink : tokens.ink3 }]}>
+              {shipping ? `Now: ${shipping === "message" ? "writing a message" : shipping === "stage" ? "staging" : shipping === "commit" ? "committing" : "pushing"}…` : pushedTo ? `Shipped to ${pushedTo}.` : commit.data ? `Committed ${commit.data.sha.slice(0, 7)}.` : shipHint(steps)}
+            </Text>
+            {message.trim() ? (
+              <Text numberOfLines={1} style={[typeScale.monoMeta, { color: tokens.ink2 }]}>
+                {message.split("\n")[0]}
+              </Text>
+            ) : null}
+          </View>
+          <IdeTextButton label={manual ? "Hide message box" : "Edit message"} onPress={() => setManual((value) => !value)} />
+          <IdeTextButton
+            label={shipLabel(steps)}
+            tone="accent"
+            icon={<Rocket size={12} strokeWidth={1.75} color={tokens.accent} />}
+            disabled={steps.length === 0}
+            loading={shipping != null}
+            onPress={() => void ship()}
+          />
+        </View>
+      ) : null}
+      {!readOnly && manual ? (
         <GitCommitBox
           branch={data.branch}
           baseBranch={data.base_branch}
@@ -152,5 +208,7 @@ function GitColumn({ sessionId }: { sessionId: string }) {
 
 const styles = StyleSheet.create({
   fill: { flex: 1, minHeight: 0 },
+  ship: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12, paddingVertical: space.space8, borderTopWidth: StyleSheet.hairlineWidth },
+  shipText: { flex: 1, minWidth: 0, gap: 2 },
   notice: { paddingHorizontal: space.space12, paddingVertical: space.space16 },
 });

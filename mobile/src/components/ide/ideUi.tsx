@@ -47,6 +47,47 @@ export function IdeIconButton({
   );
 }
 
+/** A compact text button for hunk, review and panel actions: icon, label, optional key hint. */
+export function IdeTextButton({
+  label,
+  onPress,
+  icon,
+  keyHint,
+  tone = "neutral",
+  disabled,
+  loading,
+  active,
+}: {
+  label: string;
+  onPress: () => void;
+  icon?: React.ReactNode;
+  keyHint?: string;
+  tone?: "neutral" | "accent" | "danger";
+  disabled?: boolean;
+  loading?: boolean;
+  active?: boolean;
+}) {
+  const tokens = useTokens();
+  const ink = tone === "accent" ? tokens.accent : tone === "danger" ? tokens.danger : tokens.ink2;
+  return (
+    <Pressable
+      onPress={disabled || loading ? undefined : onPress}
+      disabled={disabled || loading}
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: !!disabled, busy: !!loading, selected: !!active }}
+      style={({ hovered, pressed }: { hovered?: boolean; pressed: boolean }) => [
+        styles.textButton,
+        { backgroundColor: active || hovered || pressed ? tokens.bg3 : "transparent", borderColor: tone === "accent" ? tokens.accent : tokens.border, opacity: disabled ? 0.4 : loading ? 0.6 : 1 },
+      ]}
+    >
+      {icon}
+      <Text style={[styles.textButtonLabel, { color: ink }]}>{label}</Text>
+      {keyHint ? <Keycap label={keyHint} /> : null}
+    </Pressable>
+  );
+}
+
 /** A keyboard key as a small outlined cap. */
 export function Keycap({ label }: { label: string }) {
   const tokens = useTokens();
@@ -99,6 +140,8 @@ export function PaneFill({ children, background }: { children: React.ReactNode; 
 }
 
 const styles = StyleSheet.create({
+  textButton: { height: 22, flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: space.space8, borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius4 },
+  textButtonLabel: { fontFamily: sansFamilyFor(500), fontSize: 11 },
   iconButton: { width: 24, height: 24, borderRadius: radii.radius4, alignItems: "center", justifyContent: "center" },
   keycap: {
     minWidth: 16,

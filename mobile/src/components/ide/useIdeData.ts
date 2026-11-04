@@ -6,7 +6,7 @@ import { useEffect, useMemo, useRef } from "react";
 
 import { getGitStatus, getSessionDiff, type SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
-import { useSessions } from "../../lib/queries";
+import { useProjectChanges as useProjectChangesRoute, useSessions } from "../../lib/queries";
 import { projectChips } from "../../lib/fleetProjects";
 import { projectName } from "../../lib/sidebarModel";
 import {
@@ -16,6 +16,7 @@ import {
   projectSessions,
   type SessionChanges,
 } from "./changesAdapter";
+import { changesCwd, routeMissing, sessionChangesFromRoute } from "./changesFromRoute";
 import { pruneReviewedMarks } from "./reviewedStore";
 
 // The same keys lib/queries.ts uses for the Review dock, so a stage, discard or commit there
@@ -50,10 +51,47 @@ export interface ProjectChanges {
 }
 
 /**
- * One query per working tree. Swap this body for `GET /api/projects/changes?cwd=` when the route
- * exists; consumers only see `SessionChanges`.
+ * One call to `GET /api/projects/changes?cwd=` (real content hashes, attributed per agent). A
+ * daemon that predates the route answers 404, and only then does the client fall back to one
+ * query per working tree.
  */
 export function useProjectChanges(sessions: readonly SessionRow[]): ProjectChanges {
+  const cwd = useMemo(() => changesCwd(sessions), [sessions]);
+  const route = useProjectChangesRoute(cwd, sessions.length > 0);
+  const fallback = route.isError && routeMissing(route.error);
+  // The fleet already knows when a session's line counts move: refresh right then, not on the poll.
+  const fleetSignature = sessions.map((row) => `${row.id}:${row.diff_added ?? "-"}:${row.diff_removed ?? "-"}:${row.busy ? 1 : 0}`).join("|");
+  const lastSignature = useRef(fleetSignature);
+  const { refetch } = route;
+  useEffect(() => {
+    if (lastSignature.current === fleetSignature) return;
+    lastSignature.current = fleetSignature;
+    void refetch();
+  }, [fleetSignature, refetch]);
+  const legacy = useLegacyChanges(fallback ? sessions : []);
+  const bySession = useMemo(
+    () => (route.data && !fallback ? sessionChangesFromRoute(route.data, sessions) : legacy.bySession),
+    [route.data, fallback, sessions, legacy.bySession],
+  );
+  const loading = fallback ? legacy.loading : route.isPending && sessions.length > 0;
+  const value = useMemo<ProjectChanges>(() => ({ bySession, loading }), [bySession, loading]);
+
+  // Marks for files that changed again or left the set go away, but only for trees that answered.
+  useEffect(() => {
+    if (fallback || !route.data) return;
+    const live = new Map<string, Map<string, string>>();
+    for (const [id, changes] of bySession) {
+      if (route.data.sessions.some((group) => group.session_id === id)) {
+        live.set(id, new Map(changes.files.map((file) => [file.path, file.hash])));
+      }
+    }
+    if (live.size > 0) pruneReviewedMarks(live);
+  }, [bySession, fallback, route.data]);
+  return value;
+}
+
+/** One query per working tree, for daemons without the project-changes route. */
+function useLegacyChanges(sessions: readonly SessionRow[]): ProjectChanges {
   const { baseUrl } = useAuth();
   const queryClient = useQueryClient();
   const plan = useMemo(() => planChangeQueries(sessions), [sessions]);
