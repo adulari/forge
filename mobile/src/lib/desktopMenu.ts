@@ -91,6 +91,7 @@ export type DesktopMenuId =
   | "view:layout-review"
   | "view:layout-reset"
   | "view:git-review"
+  | "view:ide-mode"
   | "view:browser-preview"
   | "view:gallery"
   | "view:actions"
@@ -247,6 +248,7 @@ function runDefault(id: string): void {
     case "view:split-pane":
     case "view:terminal":
     case "view:git-review":
+    case "view:ide-mode":
     case "view:browser-preview":
     case "view:gallery":
     case "view:actions":

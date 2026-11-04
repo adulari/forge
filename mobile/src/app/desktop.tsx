@@ -9,6 +9,7 @@ import { SectionHeader } from "../components/ds/SectionHeader";
 import { Segmented } from "../components/ds/Segmented";
 import { Switch } from "../components/ds/Switch";
 import { useToast } from "../components/ds/ToastHost";
+import { setIdeModeEnabled, useIdeModePreferences } from "../lib/ideModePrefs";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { getLaunchSettings, setLaunchAtLogin, setStartMinimized, type LaunchSettings } from "../lib/desktopLaunch";
 import {
@@ -32,6 +33,8 @@ export default function DesktopScreen() {
   const toast = useToast();
   const prefs = useDesktopShellPrefs();
   const chord = useShortcutBinding("shell.quickComposer");
+  const ide = useIdeModePreferences();
+  const ideChord = useShortcutBinding("ide.toggle");
   const chordNote = describeChordStatus(useGlobalChordStatus());
   const [launch, setLaunch] = useState<LaunchSettings | null>(null);
 
@@ -73,6 +76,23 @@ export default function DesktopScreen() {
       <SettingsShell active="desktop">
         <Screen scroll contentContainerStyle={styles.content}>
           <PageHeader title="Desktop" subtitle="How Forge behaves as an app on this computer. These stay on this device." />
+
+          <View>
+            <SectionHeader>IDE mode</SectionHeader>
+            <ListRow
+              title="Open in IDE mode"
+              subtitle={`A review workbench for the agents on a project: changes, diffs, files and git beside the agent. Switch any time with ${formatShortcut(ideChord)} or the Chat | IDE control in the title bar.`}
+              showSeparator={false}
+              trailing={
+                <Switch
+                  value={ide.enabled}
+                  onValueChange={setIdeModeEnabled}
+                  disabled={!ide.loaded}
+                  accessibilityLabel="Open in IDE mode"
+                />
+              }
+            />
+          </View>
 
           {!isTauri ? (
             <Text style={[type.sub, { color: tokens.ink3 }]}>These settings belong to the Forge desktop app.</Text>

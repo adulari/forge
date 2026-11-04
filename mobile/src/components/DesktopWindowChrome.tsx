@@ -16,6 +16,8 @@ import { Modal, Pressable, StyleSheet, Text, View, useWindowDimensions, type Vie
 import { getSessions } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { SyncStatusPill } from "./anywhere/SyncStatusPill";
+import { IdeModeControl } from "./ide/IdeModeControl";
+import { useIdeMode } from "./ide/useIdeMode";
 import { LayoutControl } from "./shell/LayoutMenu";
 import { RAILLESS_ROUTES } from "./shell/railless";
 import { isMacOS, isTauri } from "../lib/platform";
@@ -81,7 +83,9 @@ export function DesktopWindowChrome() {
   // settings-family routes that bring their own rail.
   const { isPaired } = useAuth();
   const pathname = usePathname();
-  const showLayout = isPaired && windowWidth >= 1024 && !RAILLESS_ROUTES.test(pathname);
+  const ide = useIdeMode();
+  // Layout presets arrange chat panes; IDE mode has its own fixed workbench.
+  const showLayout = isPaired && windowWidth >= 1024 && !RAILLESS_ROUTES.test(pathname) && !ide.visible;
   const [windowControls, setWindowControls] = useState<WindowControls | null>(null);
 
   useEffect(() => {
@@ -182,6 +186,12 @@ export function DesktopWindowChrome() {
           </View>
         ) : null}
       </Modal>
+
+      {ide.available ? (
+        <WebView dataSet={{ tauriDragRegion: "false" }}>
+          <IdeModeControl />
+        </WebView>
+      ) : null}
 
       {showLayout ? (
         <WebView dataSet={{ tauriDragRegion: "false" }}>

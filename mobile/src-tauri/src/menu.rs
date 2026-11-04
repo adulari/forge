@@ -71,6 +71,7 @@ pub const VIEW_LAYOUT_GRID: &str = "view:layout-grid";
 pub const VIEW_LAYOUT_REVIEW: &str = "view:layout-review";
 pub const VIEW_LAYOUT_RESET: &str = "view:layout-reset";
 pub const VIEW_GIT_REVIEW: &str = "view:git-review";
+pub const VIEW_IDE_MODE: &str = "view:ide-mode";
 pub const VIEW_BROWSER_PREVIEW: &str = "view:browser-preview";
 pub const VIEW_APPEARANCE_LIGHT: &str = "view:appearance:light";
 pub const VIEW_APPEARANCE_DARK: &str = "view:appearance:dark";
@@ -105,6 +106,7 @@ fn mutable_accelerator(id: &str) -> bool {
             | VIEW_TERMINAL
             | VIEW_USAGE
             | VIEW_GIT_REVIEW
+            | VIEW_IDE_MODE
             | VIEW_PANE_CLOSE
             | VIEW_PANE_MAXIMIZE
             | VIEW_PANE_NEXT
@@ -351,6 +353,7 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .item(&item(VIEW_GIT_REVIEW, "Git Review", Some("CmdOrCtrl+G"))?)
         .item(&item(VIEW_BROWSER_PREVIEW, "Browser Preview", None)?)
         .separator()
+        .item(&item(VIEW_IDE_MODE, "IDE Mode", Some("CmdOrCtrl+Shift+E"))?)
         .item(&layouts)
         .item(&appearance)
         .build()?;
