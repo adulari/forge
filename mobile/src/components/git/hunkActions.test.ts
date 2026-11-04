@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { ApiError } from "../../lib/api";
 import { buildHunkPatch, classifyHunkError, hunkActionsFor } from "./hunkActions";
+
+function apiError(status: number, message: string, body?: unknown) {
+  return Object.assign(new Error(message), { status, body });
+}
 
 const plain = { binary: false, kind: "modified" as const, skipped_lines: 0, orig_path: null };
 
@@ -44,9 +47,9 @@ describe("buildHunkPatch", () => {
 
 describe("classifyHunkError", () => {
   it("tells a stale patch from a busy session and from other failures", () => {
-    expect(classifyHunkError(new ApiError(409, "x", { code: "stale_patch" })).kind).toBe("stale");
-    expect(classifyHunkError(new ApiError(409, "busy", { code: "session_busy" })).kind).toBe("busy");
-    expect(classifyHunkError(new ApiError(400, "bad")).kind).toBe("error");
+    expect(classifyHunkError(apiError(409, "x", { code: "stale_patch" })).kind).toBe("stale");
+    expect(classifyHunkError(apiError(409, "busy", { code: "session_busy" })).kind).toBe("busy");
+    expect(classifyHunkError(apiError(400, "bad")).kind).toBe("error");
     expect(classifyHunkError(new Error("boom")).message).toBe("boom");
   });
 });

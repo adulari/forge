@@ -1,7 +1,7 @@
 // Per-hunk Stage / Unstage / Revert for the review dock (POST /api/git/hunk). Pure: builds the
 // single-hunk patch the daemon applies, decides which actions a card offers, and turns a failed
 // request into what the card should do next.
-import { ApiError, type GitDiffFile, type GitDiffHunk, type GitHunkAction } from "../../lib/api";
+import type { GitDiffFile, GitDiffHunk, GitHunkAction } from "../../lib/api";
 import { type DiffBucket } from "./gitDiffEntries";
 
 export interface HunkActionSpec {
@@ -45,8 +45,10 @@ export type HunkFailure =
 
 /** 409 `stale_patch`: the file changed since the diff was fetched, refetch rather than retry. */
 export function classifyHunkError(error: unknown): HunkFailure {
-  if (error instanceof ApiError && error.status === 409) {
-    const code = (error.body as { code?: string } | undefined)?.code;
+  // Duck-typed rather than `instanceof ApiError` so this module never loads the api client at runtime.
+  const failed = error as { status?: unknown; body?: unknown; message?: string } | null;
+  if (error instanceof Error && failed?.status === 409) {
+    const code = (failed.body as { code?: string } | undefined)?.code;
     if (code === "session_busy") return { kind: "busy", message: error.message };
     return { kind: "stale", message: "The file changed since this diff loaded. Refreshed." };
   }
