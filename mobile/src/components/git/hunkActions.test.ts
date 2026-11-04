@@ -30,6 +30,12 @@ describe("buildHunkPatch", () => {
       "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1,2 +1,2 @@\n keep\n-old\n+new\n",
     );
   });
+  it("passes the no-newline marker through", () => {
+    const cut = { header: "@@ -1 +1 @@", lines: ["-a", "\\ No newline at end of file", "+b", "\\ No newline at end of file"] };
+    expect(buildHunkPatch({ path: "f", kind: "modified" }, cut)).toBe(
+      "--- a/f\n+++ b/f\n@@ -1 +1 @@\n-a\n\\ No newline at end of file\n+b\n\\ No newline at end of file\n",
+    );
+  });
   it("uses /dev/null for created and deleted files", () => {
     expect(buildHunkPatch({ path: "n", kind: "created" }, hunk)).toContain("--- /dev/null\n+++ b/n\n");
     expect(buildHunkPatch({ path: "n", kind: "deleted" }, hunk)).toContain("--- a/n\n+++ /dev/null\n");

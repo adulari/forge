@@ -219,3 +219,33 @@ async fn the_route_maps_outcomes_to_status_codes() {
     let (status, _) = http_post(&app, "/api/git/hunk", body("f.txt", &patch, "obliterate")).await;
     assert!(status.is_client_error(), "unknown action is rejected");
 }
+
+#[test]
+fn a_hunk_touching_an_unterminated_last_line_stages_and_reverts() {
+    let dir = repo_with(&[("n.txt", "one\ntwo\nthree")]);
+    std::fs::write(dir.path().join("n.txt"), "one\ntwo\nTHREE").unwrap();
+    let raw = git_out(dir.path(), &["diff"]);
+    let files = super::super::diff::parse_unified_diff(&raw);
+    let hunk = &files[0].hunks[0];
+    assert_eq!(
+        hunk.lines.iter().filter(|l| l.starts_with('\\')).count(),
+        2,
+        "both sides lack the final newline, so the marker follows `-three` and `+THREE`"
+    );
+    assert_eq!(files[0].total_lines, 4, "markers are not counted");
+    let patch = format!(
+        "--- a/n.txt\n+++ b/n.txt\n{}\n{}\n",
+        hunk.header,
+        hunk.lines.join("\n")
+    );
+    let patch = validate_hunk_patch("n.txt", &hunk.header, &patch).unwrap();
+
+    apply_hunk(dir.path(), HunkAction::Stage, &patch).unwrap();
+    assert!(git_out(dir.path(), &["diff", "--cached"]).contains("+THREE"));
+    apply_hunk(dir.path(), HunkAction::Unstage, &patch).unwrap();
+    assert!(git_out(dir.path(), &["diff", "--cached"]).is_empty());
+
+    apply_hunk(dir.path(), HunkAction::Revert, &patch).unwrap();
+    let on_disk = std::fs::read_to_string(dir.path().join("n.txt")).unwrap();
+    assert_eq!(on_disk, "one\ntwo\nthree");
+}
