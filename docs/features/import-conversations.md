@@ -28,5 +28,11 @@ importable again.
 Conversations whose folder no longer exists open in the fallback project (the terminal chat's
 directory, the home directory, or the one picked in the app).
 
-Over Forge Anywhere the two routes are not bridged yet: the relay protocol has a fixed route list.
-Use the app on the same network, or the terminal.
+Rows already in Forge show **Open** and, for Claude Code, **Sync new turns** (the scan rows carry
+`linked_session_id`). Importing a single conversation opens it. "Continue a Claude Code session…" in
+the palette, Home and New session picks one and opens it directly; in the terminal chat
+`/continue-claude` does the same, and linked rows in `/import` are synced instead of refused. See
+`session-switch.md` for the routes.
+
+Over Forge Anywhere `GET /api/import/scan` and the continue/export routes are bridged; the bulk
+`POST /api/import` is not.
