@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyDesktopOta,
   describeDesktopOta,
+  fetchDesktopRenderLine,
   dismissDesktopOtaBanner,
   getDesktopOtaStatus,
   markDesktopOtaHealthy,
@@ -51,6 +52,16 @@ describe("desktop OTA client", () => {
       "ota_status",
     ]);
     expect(getDesktopOtaStatus()?.booting).toBe(false);
+  });
+
+  it("reads the Linux rendering line and treats an older shell as having none", async () => {
+    mocks.invoke.mockResolvedValue("wayland (hyprland) · nvidia · vblank shim on");
+    expect(await fetchDesktopRenderLine()).toBe("wayland (hyprland) · nvidia · vblank shim on");
+    expect(mocks.invoke).toHaveBeenCalledWith("desktop_render_diagnostics");
+    mocks.invoke.mockResolvedValue(null);
+    expect(await fetchDesktopRenderLine()).toBeNull();
+    mocks.invoke.mockRejectedValue(new Error("command desktop_render_diagnostics not found"));
+    expect(await fetchDesktopRenderLine()).toBeNull();
   });
 
   it("hides the rows when the shell predates the OTA commands", async () => {

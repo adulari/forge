@@ -312,6 +312,8 @@ async fn launch_update(app: &AppHandle) -> Result<(), String> {
     }
     match result {
         Ok(Ok(())) => {
+            #[cfg(target_os = "linux")]
+            crate::appimage_launcher::neutralize_current();
             // Windows exits inside the install and its installer relaunches Forge.
             std::env::set_var(JUST_UPDATED_ENV, "1");
             app.restart()
@@ -368,6 +370,8 @@ async fn background_loop(app: AppHandle, policy: Policy) {
             update.version
         );
         if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+            #[cfg(target_os = "linux")]
+            crate::appimage_launcher::neutralize_current();
             installed = Some(update.version.clone());
             if let Ok(mut v) = INSTALLED_VERSION.lock() {
                 *v = Some(update.version.clone());

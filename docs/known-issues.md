@@ -96,6 +96,8 @@ it anyway. #1010 makes `forge doctor` report a unit that lacks the directive, an
 
 ## Linux Wayland/WebKitGTK launch crash (fixed by default renderer workaround)
 
+Current behaviour, opt-outs and the other Linux WebKitGTK workarounds: [desktop-linux.md](desktop-linux.md).
+
 **Finding (verified):** the release desktop binary exited before mapping a window on a Hyprland/
 wlroots Wayland session with `Gdk-Message: Error 71 (Protocol error) dispatching to Wayland
 display`. The same binary mapped normally when launched with
@@ -213,8 +215,10 @@ AppImage on a Hyprland/wlroots session:
 It is WebKitGTK's dmabuf renderer that fails, which is the same cause already documented for the
 direct binary — so the upstream x11 pin treats a symptom.
 
-**Fix:** `scripts/ci/appimage-wayland-backend.sh` rewrites that generated hook at package time to
-prefer the session's backend and disable the dmabuf renderer, both still overridable by the user.
+**Fix:** `scripts/ci/appimage-wayland-backend.sh` removes that generated pin at package time and sets
+nothing in its place: the app itself (`mobile/src-tauri/src/linux_render.rs`) chooses the backend and
+disables the dmabuf renderer at startup, never overriding a value the user set. See
+[desktop-linux.md](desktop-linux.md).
 It refuses to run if upstream's hook no longer matches, so a template change stops the build rather
 than silently shipping XWayland again; `scripts/ci/test-appimage-wayland-backend.sh` covers that.
 

@@ -21,11 +21,11 @@ set -euo pipefail
 #                                                    class=forge-desktop xwayland=False
 #
 # The upstream x11 pin is therefore treating a symptom: the crash is WebKitGTK's dmabuf renderer,
-# not the Wayland backend itself. Disabling that renderer is the same workaround Forge already
-# documents for the direct binary, so both artifacts now behave identically.
-#
-# Both values stay overridable: a user on a compositor where dmabuf works, or who wants XWayland,
-# can still set GDK_BACKEND or WEBKIT_DISABLE_DMABUF_RENDERER in their environment.
+# not the Wayland backend itself. The pin is removed and the app (linux_render.rs) chooses the
+# backend and disables that renderer at startup, identically for the AppImage and the direct
+# binary. AppRun must not export GDK_BACKEND at all: the app treats any value present at startup as
+# the user's own choice and never overrides it, and it applies its one XWayland fallback (Wayland +
+# proprietary NVIDIA + WebKitGTK 2.54) only while the variable is unset.
 
 appdir=${1:?usage: appimage-wayland-backend.sh <AppDir>}
 hook="$appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
@@ -48,18 +48,10 @@ from pathlib import Path
 hook = Path(sys.argv[1])
 text = hook.read_text()
 replacement = (
-    '# Patched by scripts/ci/appimage-wayland-backend.sh: prefer the session\'s own backend and\n'
-    '# disable WebKitGTK\'s dmabuf renderer, which is what actually crashed under Wayland\n'
-    '# (Gdk Error 71), rather than pinning every user to XWayland.\n'
-    'if [[ -n ${WAYLAND_DISPLAY:-} && -z ${GDK_BACKEND:-} ]]; then\n'
-    '  export GDK_BACKEND=wayland\n'
-    'fi\n'
-    '# Only the Wayland backend hits the dmabuf crash, and X11 ships with the renderer enabled\n'
-    '# today, so keyed on the backend actually in use rather than on whether we defaulted it —\n'
-    '# a caller who sets GDK_BACKEND=wayland themselves still needs the workaround.\n'
-    'if [[ ${GDK_BACKEND:-} == wayland ]]; then\n'
-    '  export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"\n'
-    'fi'
+    '# Patched by scripts/ci/appimage-wayland-backend.sh: GDK_BACKEND is deliberately NOT set here.\n'
+    '# Forge picks the backend and the WebKitGTK workarounds itself at startup\n'
+    '# (mobile/src-tauri/src/linux_render.rs), and it can only tell a value the user chose from one\n'
+    '# chosen for them if nothing in AppRun sets it.'
 )
 lines = text.splitlines()
 for index, line in enumerate(lines):

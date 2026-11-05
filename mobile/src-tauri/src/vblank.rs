@@ -10,7 +10,7 @@
 //! CRTC's mode timings. With this in place the same setup ran at 143 fps, one frame per vblank.
 
 use std::ffi::{c_int, c_long, c_uint, c_ulong, c_void, CStr};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 const DRM_VBLANK_RELATIVE: u32 = 0x1;
@@ -27,6 +27,13 @@ const COUNTER_BASE: u32 = 1 << 24;
 /// derived from a sequence we replied with. WebKit's per-frame wait arrives as absolute `1`; taken
 /// literally it is always in the past, returns at once and spins the frame loop at ~1000 fps.
 const STALE_WINDOW: i32 = 1 << 16;
+
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Turns the emulation off (`FORGE_DESKTOP_NO_VBLANK_SHIM`); the passthrough to libdrm stays.
+pub(crate) fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Relaxed);
+}
 
 const NANOS_PER_SEC: i64 = 1_000_000_000;
 const FALLBACK_PERIOD_NS: i64 = NANOS_PER_SEC / 60;
@@ -260,7 +267,7 @@ pub unsafe extern "C" fn drmWaitVBlank(fd: c_int, vbl: *mut DrmVBlank) -> c_int 
         }
         set_errno(failure);
     }
-    if result == 0 || failure != libc::EOPNOTSUPP {
+    if result == 0 || failure != libc::EOPNOTSUPP || !ENABLED.load(Ordering::Relaxed) {
         return result;
     }
     if request.kind & (DRM_VBLANK_EVENT | DRM_VBLANK_SIGNAL) != 0 {
