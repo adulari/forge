@@ -742,3 +742,219 @@ pub(crate) fn open_from_chat(
         Err(e) => app.note(&format!("IDE mode: {e}")),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::{Query, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use forge_tui::ide::hunk::HunkAction;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    const TOKEN: &str = "tok";
+
+    #[derive(Default)]
+    struct Seen {
+        hunks: Mutex<Vec<serde_json::Value>>,
+        stage: Mutex<Vec<serde_json::Value>>,
+        stale: bool,
+    }
+
+    async fn serve(seen: Arc<Seen>) -> String {
+        let app = Router::new()
+            .route(&format!("/{TOKEN}/api/sessions"), get(|| async { Json(serde_json::json!([{"id":"a","title":"x","cwd":"/repo","last_activity":5,"model":"m::n"}])) }))
+            .route(&format!("/{TOKEN}/api/projects/changes"), get(|Query(q): Query<HashMap<String, String>>| async move {
+                assert_eq!(q.get("cwd").map(String::as_str), Some("/repo"));
+                Json(serde_json::json!({"cwd":"/repo","sessions":[{"session_id":"a","title":"x","branch":"main","waiting":false,"busy":false,"truncated":0,
+                    "files":[{"path":"src/a.rs","kind":"modified","adds":1,"dels":1,"content_hash":"h1"}]}]}))
+            }))
+            .route(&format!("/{TOKEN}/api/git/status"), get(|| async { Json(serde_json::json!({"root":"/repo","branch":"main","staged":[],"unstaged":[{"path":"src/a.rs","status":"M","adds":1,"dels":1,"binary":false}],"untracked":[],"conflicted":[],"truncated":0,"ahead":0,"behind":0,"has_remote":false})) }))
+            .route(&format!("/{TOKEN}/api/git/diff"), get(|Query(q): Query<HashMap<String, String>>| async move {
+                assert_eq!(q.get("staged").map(String::as_str), Some("false"));
+                assert_eq!(q.get("path").map(String::as_str), Some("src/a.rs"));
+                Json(serde_json::json!({"root":"/repo","staged":false,"files":[{"path":"src/a.rs","kind":"modified","binary":false,"adds":1,"dels":1,"skipped_lines":0,"offset":0,"total_lines":3,
+                    "hunks":[{"header":"@@ -1,2 +1,2 @@","lines":[" k","-a","+b"]}]}]}))
+            }))
+            .route(&format!("/{TOKEN}/api/git/hunk"), post(|State(seen): State<Arc<Seen>>, Json(body): Json<serde_json::Value>| async move {
+                seen.hunks.lock().unwrap().push(body);
+                if seen.stale {
+                    return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"stale","code":"stale_patch"}))).into_response();
+                }
+                Json(serde_json::json!({"ok":true})).into_response()
+            }))
+            .route(&format!("/{TOKEN}/api/git/stage"), post(|State(seen): State<Arc<Seen>>, Json(body): Json<serde_json::Value>| async move {
+                seen.stage.lock().unwrap().push(body);
+                Json(serde_json::json!({"ok":true}))
+            }))
+            .with_state(seen);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn api(base: String) -> (Api, mpsc::UnboundedReceiver<Ev>) {
+        let (ev, rx) = mpsc::unbounded_channel();
+        (
+            Api {
+                http: reqwest::Client::new(),
+                base,
+                token: TOKEN.into(),
+                cwd: "/repo".into(),
+                ev,
+            },
+            rx,
+        )
+    }
+
+    async fn next(rx: &mut mpsc::UnboundedReceiver<Ev>) -> IdeEvent {
+        loop {
+            if let Some(Ev::Ide(event)) = rx.recv().await {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refresh_reads_the_fleet_and_the_projects_changes() {
+        let (api, mut rx) = api(serve(Arc::default()).await);
+        api.refresh().await;
+        assert!(matches!(next(&mut rx).await, IdeEvent::Fleet(rows) if rows[0].id == "a"));
+        match next(&mut rx).await {
+            IdeEvent::Changes(Ok(changes)) => {
+                assert_eq!(changes.sessions[0].files[0].content_hash, "h1");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_diff_asks_status_then_the_unstaged_diff_of_that_path() {
+        let (api, mut rx) = api(serve(Arc::default()).await);
+        api.diff("a", "src/a.rs", false).await;
+        match next(&mut rx).await {
+            IdeEvent::Diff(loaded) => {
+                assert_eq!(loaded.bucket, Bucket::Unstaged);
+                assert_eq!(loaded.file.unwrap().unwrap().hunks.len(), 1);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hunk_posts_the_daemons_exact_shape() {
+        let seen = Arc::new(Seen::default());
+        let (api, mut rx) = api(serve(seen.clone()).await);
+        api.hunk(
+            "a".into(),
+            "src/a.rs".into(),
+            "@@ -1,2 +1,2 @@".into(),
+            "p".into(),
+            HunkAction::Stage,
+            None,
+            false,
+        )
+        .await;
+        assert!(matches!(next(&mut rx).await, IdeEvent::Hunk(o) if o.result.is_ok()));
+        let body = seen.hunks.lock().unwrap()[0].clone();
+        assert_eq!(body["action"], "stage");
+        assert_eq!(body["hunk_header"], "@@ -1,2 +1,2 @@");
+        assert_eq!(body["session"], "a");
+    }
+
+    #[tokio::test]
+    async fn a_409_stale_patch_reads_as_stale_and_keeps_no_undo() {
+        let seen = Arc::new(Seen {
+            stale: true,
+            ..Default::default()
+        });
+        let (api, mut rx) = api(serve(seen).await);
+        let undo = UndoRecord {
+            session_id: "a".into(),
+            path: "p".into(),
+            label: "l".into(),
+            steps: vec![],
+        };
+        api.hunk(
+            "a".into(),
+            "p".into(),
+            "@@ -1 +1 @@".into(),
+            "x".into(),
+            HunkAction::Revert,
+            Some(undo),
+            false,
+        )
+        .await;
+        match next(&mut rx).await {
+            IdeEvent::Hunk(o) => {
+                assert!(matches!(o.result, Err(HunkFailure::Stale(_))));
+                assert!(o.undo.is_none());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn staging_posts_paths_and_reports_one_git_op() {
+        let seen = Arc::new(Seen::default());
+        let (api, mut rx) = api(serve(seen.clone()).await);
+        api.git_op(
+            "api/git/stage",
+            serde_json::json!({"session":"a","paths":["x"]}),
+            "staged x".into(),
+        )
+        .await;
+        assert!(matches!(next(&mut rx).await, IdeEvent::GitOp(Ok(note)) if note == "staged x"));
+        assert_eq!(seen.stage.lock().unwrap()[0]["paths"][0], "x");
+    }
+
+    #[tokio::test]
+    async fn a_missing_route_is_distinguished_from_a_failure() {
+        let (api, mut rx) = api(serve(Arc::default()).await);
+        // Point at a path the stand-in does not serve.
+        let err = super::get::<serde_json::Value>(&api.http, &api.base, TOKEN, "api/nope", &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, 404);
+        drop(rx.try_recv());
+        assert!(matches!(
+            classify(CallError {
+                status: 409,
+                code: "session_busy".into(),
+                message: "m".into()
+            }),
+            HunkFailure::Busy(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_dead_url_is_an_error_not_a_daemon_start() {
+        let err = ensure_daemon(Some("http://127.0.0.1:9".into()), Some("t".into()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no forge serve daemon"), "{err}");
+    }
+
+    #[test]
+    fn marks_persist_under_the_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = forge_tui::ide::model::marks_to_json(
+            &{
+                let mut m = forge_tui::ide::model::ReviewedMarks::new();
+                forge_tui::ide::model::mark_reviewed(&mut m, "s", "f", "h");
+                m
+            },
+            10,
+        );
+        let path = dir.path().join(MARKS_FILE);
+        std::fs::write(&path, &json).unwrap();
+        let back = forge_tui::ide::model::marks_from_json(&std::fs::read_to_string(path).unwrap());
+        assert_eq!(back.len(), 1);
+    }
+}

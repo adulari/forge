@@ -18,7 +18,9 @@
 # Script commands (one per line; '#' comments and blank lines ignored):
 #   send <text>      type <text> then Enter
 #   type <text>      type <text> WITHOUT Enter
-#   key  <Name>      send a named key: Enter Escape Up Down Left Right PageUp PageDown Home End Tab BTab
+#   key  <Name>      send a named key or chord (tmux names): Enter Escape Up Down Left Right PageUp
+#                    PageDown Home End Tab BTab, F1-F12, Ctrl chords C-x, Alt chords M-x, C-Enter
+#   chord <C-x M-x F2 ...>  send several keys/chords in one call, space separated
 #   sleep <ms>       wait <ms> milliseconds
 #   capture [label]  dump the current screen (blank lines trimmed), with an optional label
 #   expect <substr>  fail the run if the current screen does NOT contain <substr>
@@ -29,13 +31,15 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-FORGE="$REPO/target/release/forge"
+FORGE="${FORGE_BIN:-$REPO/target/release/forge}"
 COLS=200
 ROWS=50
 REAL=0
 MODEL=""
 MODE=""
 KEEP=0
+PRE=""
+CWD_DIR=""
 
 while [[ "${1:-}" == --* ]]; do
   case "$1" in
@@ -43,6 +47,10 @@ while [[ "${1:-}" == --* ]]; do
     --model) MODEL="$2"; shift 2 ;;
     --mode) MODE="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
+    # Run this command in the work dir before the TUI starts (seed a repo, start a daemon).
+    --pre) PRE="$2"; shift 2 ;;
+    # Start the TUI in this directory instead of the throwaway work dir.
+    --cwd) CWD_DIR="$2"; shift 2 ;;
     --cols) COLS="$2"; shift 2 ;;
     --rows) ROWS="$2"; shift 2 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
@@ -71,7 +79,9 @@ MODE_ARGS="--mock"
 
 tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS"
 # Run in an isolated cwd + DB so the dev's real sessions/usage are untouched.
-tmux send-keys -t "$SESSION" "cd '$WORK' && FORGE_DB='$DB' '$FORGE' chat $MODE_ARGS" Enter
+[[ -n "$PRE" ]] && (cd "$WORK" && WORK="$WORK" bash -c "$PRE") || true
+START_DIR="${CWD_DIR:-$WORK}"
+tmux send-keys -t "$SESSION" "cd '$START_DIR' && FORGE_DB='$DB' '$FORGE' chat $MODE_ARGS" Enter
 sleep 3
 
 screen() { tmux capture-pane -t "$SESSION" -p; }
@@ -87,6 +97,7 @@ while IFS= read -r line || [[ -n "$line" ]]; do
     send) tmux send-keys -t "$SESSION" "$arg"; sleep 0.4; tmux send-keys -t "$SESSION" Enter ;;
     type) tmux send-keys -t "$SESSION" "$arg" ;;
     key)  tmux send-keys -t "$SESSION" "$arg" ;;
+    chord) for k in $arg; do tmux send-keys -t "$SESSION" "$k"; sleep 0.15; done ;;
     sleep) sleep "$(awk "BEGIN{print $arg/1000}")" ;;
     capture)
       echo "──── screen${arg:+ ($arg)} ────"
