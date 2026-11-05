@@ -20,6 +20,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { HostDot } from "../components/anywhere/HostDot";
 import { Banner } from "../components/ds/Banner";
+import { openClaudePicker } from "../lib/claudeHandoff";
 import { Button } from "../components/ds/Button";
 import { IconButton } from "../components/ds/IconButton";
 import { ListRow } from "../components/ds/ListRow";
@@ -532,6 +533,17 @@ export default function NewSessionScreen() {
           {serverError}
         </Text>
       ) : null}
+      <View style={styles.claudeRow}>
+        <Button
+          label="Continue a Claude Code session…"
+          variant="ghost"
+          onPress={() => {
+            onClose();
+            openClaudePicker();
+          }}
+          accessibilityLabel="Continue a Claude Code session"
+        />
+      </View>
     </View>
   );
 
@@ -712,6 +724,7 @@ const styles = StyleSheet.create({
   sectionLabel: { paddingTop: space.space24, paddingBottom: space.space4 },
   temperBlock: { gap: space.space4, paddingVertical: space.space12 },
   errorText: { paddingTop: space.space8 },
+  claudeRow: { paddingTop: space.space8, alignItems: "flex-start" },
   defaultHostDot: { width: 7, height: 7, borderRadius: 3.5 },
   hostSheetContent: { paddingHorizontal: space.space16, paddingBottom: space.space32, gap: space.space12 },
   hostNote: { paddingTop: space.space8 },

@@ -18,6 +18,7 @@ import {
   QrCode,
   Settings2,
   Sparkles,
+  SquareTerminal,
   SunMedium,
   Wand2,
 } from "lucide-react-native";
@@ -31,6 +32,8 @@ import { runDesktopMenuAction, type DesktopMenuId } from "../../lib/desktopMenu"
 import { haptics } from "../../lib/haptics";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
+import { openClaudePicker } from "../../lib/claudeHandoff";
+import { useContinueInClaudeCode } from "../../lib/claudeHandoffQueries";
 import { openSession } from "../../lib/nav";
 import { SETTINGS_ENTRIES } from "../../lib/palette/settingsEntries";
 import { configHref, settingsIndex } from "../../lib/settingsSearch";
@@ -127,6 +130,7 @@ export function usePaletteSources(options: PaletteSourceOptions) {
   const toast = useToast();
   const { data: sessions } = useSessions();
   const archiveSession = useArchiveSession();
+  const continueInClaudeCode = useContinueInClaudeCode();
   const skillCommands = useSkillCommands();
   const { signedIn: anywhereSignedIn, account: anywhereAccount } = useAnywhere();
   const { hosts: anywhereHosts } = useAnywhereHosts();
@@ -206,7 +210,33 @@ export function usePaletteSources(options: PaletteSourceOptions) {
       });
     }
 
+    items.push({
+      id: "action:continue-claude-session",
+      section: "commands",
+      title: "Continue a Claude Code session…",
+      subtitle: "bring one into Forge",
+      keywords: "claude code continue import resume session conversation bring switch",
+      leading: <SquareTerminal size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+      onSelect: () => {
+        close();
+        openClaudePicker();
+      },
+    });
+
     if (activeSessionId) {
+      items.push({
+        id: "action:continue-in-claude",
+        section: "commands",
+        title: "Continue in Claude Code",
+        subtitle: "open this session in Claude Code",
+        keywords: "claude code continue hand off switch resume terminal",
+        leading: <SquareTerminal size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+        onSelect: () => {
+          const id = activeSessionId;
+          close();
+          continueInClaudeCode(id);
+        },
+      });
       items.push({
         id: "action:archive-current",
         section: "commands",
@@ -375,7 +405,7 @@ export function usePaletteSources(options: PaletteSourceOptions) {
 
     return items.map((item) => ({ ...item, recency: recencyOf(recents, item.id) }));
   }, [
-    tokens, activeSessionId, scheme, setScheme, close, archiveSession, toast, runSlashCommand, skillCommands, isCompact,
+    tokens, activeSessionId, scheme, setScheme, close, archiveSession, continueInClaudeCode, toast, runSlashCommand, skillCommands, isCompact,
     newSessionHint, fleetHint, inboxHint, historyHint, anywhereSignedIn, anywhereHosts, anywhereAccount, recents,
     openWhatsNew, openSchedules,
   ]);

@@ -9,6 +9,7 @@ pub(crate) mod git;
 pub(crate) mod host;
 pub(crate) mod import;
 pub(crate) mod import_claude_session;
+pub(crate) mod continue_claude;
 pub(crate) mod import_sessions;
 pub(crate) mod lattice;
 pub(crate) mod local;

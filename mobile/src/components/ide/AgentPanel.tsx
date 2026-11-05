@@ -1,10 +1,11 @@
 // Right panel: the agent in view. Header (model, state, cost), the needs-you card the chat uses,
 // a compact timeline, tasks, and the real composer. It mounts one session socket, for this agent
 // only; switching agents tears it down.
-import { Check, Circle, CircleDot, Users } from "lucide-react-native";
+import { Check, Circle, CircleDot, SquareTerminal, Users } from "lucide-react-native";
 import React, { useCallback, useEffect, useMemo } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
+import { useContinueInClaudeCode } from "../../lib/claudeHandoffQueries";
 import { SessionProvider, useSessionCtx } from "../../lib/sessionContext";
 import { newClientMsgId } from "../../lib/offlineQueue";
 import { useHistory, useLiveHistoryRefresh } from "../../lib/queries";
@@ -21,7 +22,7 @@ import { shortModelLabel } from "../fleet/shortModelLabel";
 import { registerAgentSender } from "./agentBridge";
 import { useIde } from "./IdeContext";
 import { Timeline } from "./Timeline";
-import { AgentDot, SectionLabel } from "./ideUi";
+import { AgentDot, IdeIconButton, SectionLabel } from "./ideUi";
 
 export function AgentPanel() {
   const tokens = useTokens();
@@ -44,6 +45,7 @@ function Body({ sessionId }: { sessionId: string }) {
   const toast = useToast();
   const { snapshot, send, connectionState, focusComposer } = useSessionCtx();
   const { panelSession, composerSignal } = useIde();
+  const continueInClaudeCode = useContinueInClaudeCode();
 
   useEffect(() => {
     if (composerSignal > 0) focusComposer();
@@ -93,6 +95,11 @@ function Body({ sessionId }: { sessionId: string }) {
           <Text numberOfLines={1} style={[styles.title, { color: tokens.ink }]}>
             {panelSession?.title?.trim() || `session ${sessionId.slice(0, 8)}`}
           </Text>
+          <IdeIconButton
+            icon={<SquareTerminal size={14} strokeWidth={1.75} color={tokens.ink3} />}
+            label="Continue in Claude Code"
+            onPress={() => continueInClaudeCode(sessionId)}
+          />
         </View>
         <View style={styles.metaRow}>
           <ProviderGlyph provider={model} size={11} color={tokens.ink3} />

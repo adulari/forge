@@ -124,6 +124,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Undo
         | CommandAction::ListCheckpoints
         | CommandAction::Claude
+        | CommandAction::ContinueClaude(_)
         | CommandAction::Quit => Refuse,
     }
 }
@@ -287,7 +288,7 @@ mod tests {
             "/duel x",
             "/some-file-command",
         ];
-        let refused = ["/resume abc", "/undo", "/checkpoints", "/claude", "/quit"];
+        let refused = ["/resume abc", "/undo", "/checkpoints", "/claude", "/continue-claude", "/quit"];
         for l in immediate {
             assert_eq!(policy(l), Immediate, "{l}");
         }

@@ -22,6 +22,7 @@ import { Banner } from "../../../components/ds/Banner";
 import { IconButton } from "../../../components/ds/IconButton";
 import { TabStrip, type TabStripOption } from "../../../components/ds/TabStrip";
 import { useToast } from "../../../components/ds/ToastHost";
+import { useContinueInClaudeCode } from "../../../lib/claudeHandoffQueries";
 import { OverlayHost } from "../../../components/overlay/OverlayHost";
 import { usePalette } from "../../../components/overlay/CommandPalette";
 import { ChildSessionHeader } from "../../../components/session/ChildSessionHeader";
@@ -403,6 +404,8 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const onLattice = useCallback(() => setLatticeVisible(true), []);
   const onJobs = useCallback(() => setJobsVisible(true), []);
   const onManageLifecycle = useCallback(() => setLifecycleVisible(true), []);
+  const continueInClaudeCode = useContinueInClaudeCode();
+  const onContinueClaude = useCallback(() => continueInClaudeCode(sessionId), [continueInClaudeCode, sessionId]);
   const onToggleFiles = useCallback(() => {
     if (activeRightSurface?.kind === "files") workbench.hidePlacement("right");
     else workbench.openSurface({ kind: "files" });
@@ -504,6 +507,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             onLattice={onLattice}
             onJobs={onJobs}
             onManageLifecycle={onManageLifecycle}
+            onContinueClaude={onContinueClaude}
             onToggleFiles={onToggleFiles}
             onTogglePreview={onTogglePreview}
             onToggleGitReview={onToggleGitReview}

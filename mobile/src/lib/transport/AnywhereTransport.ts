@@ -66,7 +66,13 @@ export type BridgeRoute =
   | "identity"
   | "account_sync_status"
   | "account_sync_update"
-  | "account_sync_now";
+  | "account_sync_now"
+  // Claude Code <-> Forge hand-off. The two POSTs write to the host's own session stores and need
+  // the daemon's manage-providers scope.
+  | "import_scan"
+  | "session_claude"
+  | "export_session_claude"
+  | "continue_claude_session";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -301,6 +307,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/identity": { GET: "identity" },
     "/api/anywhere/sync": { GET: "account_sync_status", PUT: "account_sync_update" },
     "/api/anywhere/sync/now": { POST: "account_sync_now" },
+    "/api/import/scan": { GET: "import_scan" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };
@@ -318,6 +325,17 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     if (method === expectedMethod) {
       return { route: operation[session[2]], parameters: [sessionPathParameter(session[1])] };
     }
+  }
+  const sessionClaude = path.match(/^\/api\/sessions\/([^/]+)\/claude$/);
+  if (sessionClaude && (method === "GET" || method === "POST")) {
+    return {
+      route: method === "GET" ? "session_claude" : "export_session_claude",
+      parameters: [sessionPathParameter(sessionClaude[1])],
+    };
+  }
+  const continueClaude = path.match(/^\/api\/claude\/sessions\/([^/]+)\/continue$/);
+  if (continueClaude && method === "POST") {
+    return { route: "continue_claude_session", parameters: [sessionPathParameter(continueClaude[1])] };
   }
   const sessionDiff = path.match(/^\/api\/sessions\/([^/]+)\/diff$/);
   if (sessionDiff && method === "GET") {

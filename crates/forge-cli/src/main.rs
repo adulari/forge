@@ -128,6 +128,7 @@ mod serve_going_away;
 mod serve_history;
 mod serve_hosts;
 mod serve_ide;
+mod serve_claude_link;
 mod serve_import;
 mod serve_input_gate;
 mod serve_keybindings;

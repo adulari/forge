@@ -265,6 +265,10 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/sessions/s1/jobs");
     await transport.fetch("fany://host-1/api/sessions/s1/jobs/42/tail?lines=5");
     await transport.fetch("fany://host-1/api/git/hunk", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/import/scan");
+    await transport.fetch("fany://host-1/api/sessions/s1/claude");
+    await transport.fetch("fany://host-1/api/sessions/s1/claude", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/claude/sessions/0a1b-22/continue", { method: "POST", body: "{}" });
 
     expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
       ["workspace_entries", "?session=s1&path=src"],
@@ -278,6 +282,10 @@ describe("AnywhereTransport", () => {
       ["session_jobs", "s1"],
       ["session_job_tail", "s1"],
       ["git_hunk", ""],
+      ["import_scan", ""],
+      ["session_claude", "s1"],
+      ["export_session_claude", "s1"],
+      ["continue_claude_session", "0a1b-22"],
     ]);
     await expect(
       transport.fetch("fany://host-1/api/schedules", { method: "POST", body: "{}" }),

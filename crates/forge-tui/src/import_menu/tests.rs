@@ -20,6 +20,7 @@ fn row(agent: &str, id: &str, title: &str, cwd: Option<&str>) -> ImportRow {
         cwd_exists: cwd.is_some(),
         modified: now() - 3 * 86_400,
         imported: false,
+        linked: false,
     }
 }
 
@@ -31,6 +32,7 @@ fn menu() -> ImportMenu {
         row("codex", "x1", "list the files", Some("/work/cli")),
         ImportRow {
             imported: true,
+            linked: true,
             ..row("claude", "c2", "already here", Some("/work/api"))
         },
         row("codex", "x2", "port the parser", None),
@@ -110,6 +112,32 @@ fn enter_imports_the_selection_or_else_the_focused_row() {
         panic!("import")
     };
     assert_eq!(picks.len(), 3);
+}
+
+#[test]
+fn enter_on_a_claude_row_continues_it_and_a_linked_row_syncs_instead_of_refusing() {
+    let mut m = menu();
+    assert_eq!(m.key(KeyKind::Enter), ImportAction::Continue("c1".into()));
+    assert!(m.importing);
+    m.finish_continue();
+    assert!(!m.open);
+
+    let mut m = menu();
+    m.cursor = 2;
+    assert_eq!(m.visible()[2].id, "c2");
+    assert!(m.visible()[2].linked);
+    assert_eq!(m.key(KeyKind::Enter), ImportAction::Continue("c2".into()));
+
+    let mut m = ImportMenu::default();
+    m.open_claude("/home/me".into());
+    assert_eq!(m.agent, AgentFilter::Claude);
+}
+
+#[test]
+fn a_linked_row_is_marked_linked_on_screen() {
+    let mut app = App::default();
+    app.import_menu = menu();
+    assert!(screen(&app, 100, 30).contains("linked"));
 }
 
 #[test]

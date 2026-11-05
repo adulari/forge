@@ -124,6 +124,15 @@ fn classification_maps_routes_to_scopes() {
     assert_eq!(scope(Method::GET, "/api/import/scan"), "manage-providers");
     assert_eq!(scope(Method::POST, "/api/import"), "manage-providers");
     assert_eq!(
+        scope(Method::POST, "/api/claude/sessions/c1/continue"),
+        "manage-providers"
+    );
+    assert_eq!(
+        scope(Method::POST, "/api/sessions/s1/claude"),
+        "manage-providers"
+    );
+    assert_eq!(scope(Method::GET, "/api/sessions/s1/claude"), "view");
+    assert_eq!(
         scope(Method::POST, "/api/agent-installs/update-all"),
         "manage-providers"
     );

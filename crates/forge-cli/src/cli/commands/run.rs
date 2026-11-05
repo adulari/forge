@@ -5140,6 +5140,14 @@ pub(crate) async fn run_chat_tui(
         if import_driver.tick(&mut app) {
             dirty = true;
         }
+        if let Some(done) = import_driver.take_switch() {
+            if busy {
+                app.note("⚠ a turn is running: run /continue-claude again when it finishes");
+            } else {
+                import_menu::switch_in_place(done, &session, &mut tui, &mut app).await;
+            }
+            dirty = true;
+        }
         if agents_driver.tick(&mut app) {
             dirty = true;
         }

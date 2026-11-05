@@ -26,6 +26,7 @@ import { ForkSheet } from "../session/ForkSheet";
 import { MAX_PANES } from "../workbench/layoutModel";
 import type { OpenMode } from "../workbench/WorkbenchProvider";
 import { ActionRunningIndicator } from "../ports/ActionRunningIndicator";
+import { useContinueInClaudeCode } from "../../lib/claudeHandoffQueries";
 import { useActionMenuEntries } from "../ports/useActionMenuEntries";
 import { PopoverMenu, type MenuAnchor, type MenuEntry } from "./PopoverMenu";
 import { useDragSource } from "./sessionDrag";
@@ -63,6 +64,7 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
   const star = useStarSession();
   const markDone = useMarkSessionDone();
   const createSession = useCreateSession();
+  const continueInClaudeCode = useContinueInClaudeCode();
   const warmSession = useCallback(
     (id: string) => void prefetchHistory(id).then(() => requestSessionPrewarm(id)),
     [prefetchHistory],
@@ -190,6 +192,14 @@ export function SidebarSessionRow({ row, serverId, depth, showDiff, selected, pa
           { id: row.id, done: row.done_at == null },
           { onError: (error) => toast.show(errorText(error, "could not update the session"), { tone: "danger" }) },
         ),
+    },
+    {
+      kind: "item",
+      id: "claude",
+      label: "Continue in Claude Code",
+      disabled: terminal,
+      hint: terminal ? "open in a terminal" : undefined,
+      onPress: () => continueInClaudeCode(row.id),
     },
     ...actionEntries,
     { kind: "separator", id: "sep-end" },

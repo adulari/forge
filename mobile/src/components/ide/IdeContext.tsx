@@ -20,8 +20,9 @@ import {
 } from "./changeQueueModel";
 import { defaultProject, type SessionChanges } from "./changesAdapter";
 import { EMPTY_TABS, activeTab, editorTabsReducer, tabId, type EditorTab, type EditorTabsAction } from "./editorTabsModel";
-import { onIdeTerminalToggle } from "./ideEvents";
-import { failingPathsOf, useFailingChecks } from "./ideSignals";
+import { onIdeClaudeTerminal, onIdeTerminalToggle } from "./ideEvents";
+import { failingPathsOf, setBottomTab, setIdeTerminalId, useFailingChecks } from "./ideSignals";
+import { CLAUDE_TERMINAL_ID } from "../../lib/claudeHandoff";
 import { markFileReviewed, unmarkFileReviewed, useReviewedMarks } from "./reviewedStore";
 import { useIdeProjects, useProjectChanges, useProjectSessions } from "./useIdeData";
 
@@ -206,6 +207,16 @@ export function IdeProvider({ children }: { children: React.ReactNode }) {
   const toggleBottom = useCallback(() => setBottomOpen((open) => !open), []);
   const focusComposer = useCallback(() => setComposerSignal((n) => n + 1), []);
   useEffect(() => onIdeTerminalToggle(toggleBottom), [toggleBottom]);
+  useEffect(
+    () =>
+      onIdeClaudeTerminal((sessionId) => {
+        setScopeState(sessionId);
+        setIdeTerminalId(CLAUDE_TERMINAL_ID);
+        setBottomTab("terminal");
+        setBottomOpen(true);
+      }),
+    [],
+  );
 
   const value = useMemo<IdeContextValue>(
     () => ({

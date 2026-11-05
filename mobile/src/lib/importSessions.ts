@@ -15,6 +15,9 @@ export interface ImportCandidate {
   bytes: number;
   /** The Forge session an earlier import made of it. */
   imported_session_id: string | null;
+  /** The Forge session mirroring it (Claude Code only): such a row can be synced again. Older
+   * daemons do not send it. */
+  linked_session_id?: string | null;
 }
 
 export interface ImportScan {

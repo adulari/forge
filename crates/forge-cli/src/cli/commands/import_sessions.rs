@@ -51,6 +51,9 @@ pub(crate) struct Candidate {
     pub(crate) bytes: u64,
     /// The Forge session an earlier import made of it, while that session still exists.
     pub(crate) imported_session_id: Option<String>,
+    /// The Forge session mirroring this Claude Code conversation (Claude Code only): a row with
+    /// one can be synced again, not only opened.
+    pub(crate) linked_session_id: Option<String>,
     #[serde(skip)]
     pub(crate) path: PathBuf,
 }
@@ -156,6 +159,7 @@ fn scan_claude(projects: &Path, out: &mut Vec<Candidate>) {
                 modified: meta.modified().map_or(0, secs),
                 bytes: meta.len(),
                 imported_session_id: None,
+                linked_session_id: None,
                 path,
             });
         }
@@ -181,6 +185,7 @@ fn scan_codex(dir: &Path, out: &mut Vec<Candidate>) {
             modified: meta.modified().map_or(0, secs),
             bytes: meta.len(),
             imported_session_id: None,
+            linked_session_id: None,
             path,
         });
     }
@@ -252,6 +257,10 @@ pub(crate) fn scan_in(
                 Agent::Codex => ledger.as_ref().and_then(|l| l.map.get(&c.id).cloned()),
             };
             c.imported_session_id = session.filter(|s| store.session_exists(s).unwrap_or(false));
+            c.linked_session_id = c
+                .imported_session_id
+                .clone()
+                .filter(|_| c.agent == Agent::Claude);
         }
     }
     found.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.id.cmp(&b.id)));
