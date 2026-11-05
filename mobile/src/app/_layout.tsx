@@ -14,7 +14,7 @@ import { PersistQueryClientProvider } from "@tanstack/react-query-persist-client
 import { useFonts } from "expo-font";
 import { DefaultTheme, Redirect, Stack, ThemeProvider as NavThemeProvider, usePathname } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
-import React, { Activity, useEffect, useLayoutEffect, useMemo, useState } from "react";
+import React, { Activity, Suspense, lazy, useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { ActivityIndicator, StyleSheet, View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
@@ -51,7 +51,6 @@ import { useIdeModePreferences } from "../lib/ideModePrefs";
 import { LayoutTip } from "../components/shell/LayoutTip";
 import { RAILLESS_ROUTES } from "../components/shell/railless";
 import { PaneGrid } from "../components/shell/SplitPanes";
-import { IdeShell } from "../components/ide/IdeShell";
 import { useIdeMode } from "../components/ide/useIdeMode";
 import { WorkbenchProvider, useWorkbench } from "../components/workbench/WorkbenchProvider";
 import { activeWorkbenchSurface } from "../components/workbench/model";
@@ -352,7 +351,9 @@ function RootNavigator() {
           {ideMounted ? (
             <Activity mode={ide.visible ? "visible" : "hidden"}>
               <View style={ide.visible ? styles.ideRow : styles.hidden}>
-                <IdeShell />
+                <Suspense fallback={null}>
+                  <IdeShell />
+                </Suspense>
               </View>
             </Activity>
           ) : null}
@@ -377,6 +378,10 @@ const styles = StyleSheet.create({
   hidden: { display: "none" },
   detailColumn: { flex: 1, minHeight: 0 },
 });
+
+// IDE mode is off by default: its component tree is its own chunk, fetched on first show or on the
+// idle pre-mount, never part of the entry bundle.
+const IdeShell = lazy(() => import("../components/ide/IdeShell").then((m) => ({ default: m.IdeShell })));
 
 export default function RootLayout() {
   const persistOptions = useMemo(() => ({ persister: asyncStoragePersister }), []);
