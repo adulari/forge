@@ -242,7 +242,9 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
     // already measured for this exact text, so there is nothing to do.
     if (measuredForText.current === text) return;
     measuredForText.current = text;
-    if (textFitsOneLine(node, text)) {
+    // An empty composer is one line by definition. Asking `textFitsOneLine` about it forced the
+    // first synchronous layout of the whole shell during the initial mount.
+    if (text === "" || textFitsOneLine(node, text)) {
       setHeight(MIN_HEIGHT);
       return;
     }

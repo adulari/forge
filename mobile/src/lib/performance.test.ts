@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getDesktopPerformanceSnapshot,
+  isDesktopPerformanceMonitorRunning,
   recordComposerInput,
   resetDesktopPerformanceSamples,
   startDesktopPerformanceMonitor,
@@ -52,6 +53,15 @@ afterEach(() => {
 });
 
 describe("desktop performance monitor", () => {
+  it("only schedules frames while it is running", () => {
+    expect(isDesktopPerformanceMonitorRunning()).toBe(false);
+    expect(frameQueue).toHaveLength(0);
+    startDesktopPerformanceMonitor();
+    expect(isDesktopPerformanceMonitorRunning()).toBe(true);
+    stopDesktopPerformanceMonitor();
+    expect(isDesktopPerformanceMonitorRunning()).toBe(false);
+  });
+
   it("keeps the frame-interval ring buffer bounded instead of growing (and sorting) forever", () => {
     startDesktopPerformanceMonitor();
     flushFrame(0); // first callback only establishes lastFrameAt — no interval yet

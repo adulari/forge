@@ -190,7 +190,11 @@ export function startDesktopPerformanceMonitor(): void {
   }
 }
 
-/** Stops the always-on rAF sampler and long-task observer. Safe to call when not running, and
+export function isDesktopPerformanceMonitorRunning(): boolean {
+  return frameHandle != null;
+}
+
+/** Stops the rAF sampler and long-task observer. Safe to call when not running, and
  * `startDesktopPerformanceMonitor` is safe to call again afterwards (matches its own
  * `frameHandle == null` idempotency guard). */
 export function stopDesktopPerformanceMonitor(): void {
