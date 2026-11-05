@@ -87,7 +87,10 @@ async fn forge_blocker(state: &DaemonState, id: &str) -> Option<String> {
     None
 }
 
-async fn link_status(State(state): State<Arc<DaemonState>>, AxumPath(id): AxumPath<String>) -> Response {
+async fn link_status(
+    State(state): State<Arc<DaemonState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
     let store = state.store.clone();
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<LinkBody>> {
         let Some(meta) = store.session_meta(&id)? else {
@@ -120,47 +123,48 @@ async fn export(State(state): State<Arc<DaemonState>>, AxumPath(id): AxumPath<St
         return err_response(StatusCode::CONFLICT, &why);
     }
     let store = state.store.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<ExportBody, (StatusCode, String)> {
-        let fail = |status, e: anyhow::Error| (status, format!("{e:#}"));
-        let meta = store
-            .session_meta(&id)
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.into()))?
-            .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?;
-        let linked = store
-            .cc_link_for_forge(&id)
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.into()))?;
-        if linked.is_none()
-            && store
-                .mirrorable_rows_after(&id, -1)
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<ExportBody, (StatusCode, String)> {
+            let fail = |status, e: anyhow::Error| (status, format!("{e:#}"));
+            let meta = store
+                .session_meta(&id)
                 .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.into()))?
-                == 0
-        {
-            return Err((
-                StatusCode::CONFLICT,
-                "nothing to carry over yet: send a message first".to_string(),
-            ));
-        }
-        if let Some(link) = &linked {
-            let path = PathBuf::from(&link.cc_path);
-            if let Some(why) = cc_fs::open_reason(&link.cc_session_id, &path, &meta.cwd) {
+                .ok_or_else(|| (StatusCode::NOT_FOUND, "session not found".to_string()))?;
+            let linked = store
+                .cc_link_for_forge(&id)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.into()))?;
+            if linked.is_none()
+                && store
+                    .mirrorable_rows_after(&id, -1)
+                    .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.into()))?
+                    == 0
+            {
                 return Err((
                     StatusCode::CONFLICT,
-                    format!("Claude Code looks open on this session: {why}"),
+                    "nothing to carry over yet: send a message first".to_string(),
                 ));
             }
-        }
-        let report = sync::export_to_claude(&store, &id)
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        let (launch, _note) = switch::claude_launch(&store, &id, &report.cc_session_id)
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        Ok(ExportBody {
-            cc_session_id: report.cc_session_id,
-            cwd: meta.cwd,
-            command: launch.display(),
-            warning: report.warning,
+            if let Some(link) = &linked {
+                let path = PathBuf::from(&link.cc_path);
+                if let Some(why) = cc_fs::open_reason(&link.cc_session_id, &path, &meta.cwd) {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        format!("Claude Code looks open on this session: {why}"),
+                    ));
+                }
+            }
+            let report = sync::export_to_claude(&store, &id)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let (launch, _note) = switch::claude_launch(&store, &id, &report.cc_session_id)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            Ok(ExportBody {
+                cc_session_id: report.cc_session_id,
+                cwd: meta.cwd,
+                command: launch.display(),
+                warning: report.warning,
+            })
         })
-    })
-    .await;
+        .await;
     match result {
         Ok(Ok(body)) => json_response(&body),
         Ok(Err((status, msg))) => err_response(status, &msg),
@@ -185,68 +189,81 @@ async fn continue_session(
         }
     }
     let fallback = forge_config::home_dir();
-    let result = tokio::task::spawn_blocking(move || -> Result<ContinueBody, (StatusCode, String)> {
-        let fail = |status, e: anyhow::Error| (status, format!("{e:#}"));
-        let candidates = import_sessions::scan(Some(&store));
-        let found = candidates
-            .iter()
-            .find(|c| c.agent == Agent::Claude && c.id == cc_id)
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    "that Claude Code session is not on this machine".to_string(),
+    let result =
+        tokio::task::spawn_blocking(move || -> Result<ContinueBody, (StatusCode, String)> {
+            let fail = |status, e: anyhow::Error| (status, format!("{e:#}"));
+            let candidates = import_sessions::scan(Some(&store));
+            let found = candidates
+                .iter()
+                .find(|c| c.agent == Agent::Claude && c.id == cc_id)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::NOT_FOUND,
+                        "that Claude Code session is not on this machine".to_string(),
+                    )
+                })?;
+            let mode = import_sessions::default_mode();
+            let link = store
+                .cc_link_for_cc(&cc_id)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.into()))?
+                .filter(|l| store.session_exists(&l.forge_session_id).unwrap_or(false));
+            let Some(link) = link else {
+                let pick = Selection {
+                    agent: Agent::Claude,
+                    id: cc_id.clone(),
+                };
+                let outcome = import_sessions::import_from(
+                    &store,
+                    &candidates,
+                    std::slice::from_ref(&pick),
+                    fallback.as_deref(),
+                    &mode,
                 )
-            })?;
-        let mode = import_sessions::default_mode();
-        let link = store
-            .cc_link_for_cc(&cc_id)
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e.into()))?
-            .filter(|l| store.session_exists(&l.forge_session_id).unwrap_or(false));
-        let Some(link) = link else {
-            let pick = Selection {
-                agent: Agent::Claude,
-                id: cc_id.clone(),
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "nothing imported".to_string(),
+                    )
+                })?;
+                if let Some(error) = outcome.error {
+                    return Err((StatusCode::UNPROCESSABLE_ENTITY, error));
+                }
+                let session_id = outcome.session_id.ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "import produced no session".to_string(),
+                    )
+                })?;
+                return Ok(ContinueBody {
+                    session_id,
+                    mode: "imported",
+                    appended: outcome.messages,
+                    warning: None,
+                });
             };
-            let outcome = import_sessions::import_from(
-                &store,
-                &candidates,
-                std::slice::from_ref(&pick),
-                fallback.as_deref(),
-                &mode,
-            )
-            .into_iter()
-            .next()
-            .ok_or_else(|| (StatusCode::INTERNAL_SERVER_ERROR, "nothing imported".to_string()))?;
-            if let Some(error) = outcome.error {
-                return Err((StatusCode::UNPROCESSABLE_ENTITY, error));
-            }
-            let session_id = outcome.session_id.ok_or_else(|| {
-                (StatusCode::INTERNAL_SERVER_ERROR, "import produced no session".to_string())
-            })?;
-            return Ok(ContinueBody {
-                session_id,
-                mode: "imported",
-                appended: outcome.messages,
-                warning: None,
-            });
-        };
-        let own = PathBuf::from(&link.cc_path);
-        let path = if own.is_file() { own } else { found.path.clone() };
-        let report = sync::mirror_from_claude(&store, &path, &mode)
-            .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
-        let (mode, appended) = match report.kind {
-            Mirrored::Imported | Mirrored::Reimported => ("imported", 0),
-            Mirrored::Appended(n) => ("synced", n),
-            Mirrored::Unchanged => ("synced", 0),
-        };
-        Ok(ContinueBody {
-            session_id: report.forge_id,
-            mode,
-            appended,
-            warning: report.warning,
+            let own = PathBuf::from(&link.cc_path);
+            let path = if own.is_file() {
+                own
+            } else {
+                found.path.clone()
+            };
+            let report = sync::mirror_from_claude(&store, &path, &mode)
+                .map_err(|e| fail(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let (mode, appended) = match report.kind {
+                Mirrored::Imported | Mirrored::Reimported => ("imported", 0),
+                Mirrored::Appended(n) => ("synced", n),
+                Mirrored::Unchanged => ("synced", 0),
+            };
+            Ok(ContinueBody {
+                session_id: report.forge_id,
+                mode,
+                appended,
+                warning: report.warning,
+            })
         })
-    })
-    .await;
+        .await;
     match result {
         Ok(Ok(body)) => {
             // An idle driver holds the old history in memory; dropping it makes the next attach

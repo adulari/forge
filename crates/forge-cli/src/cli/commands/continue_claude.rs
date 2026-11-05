@@ -38,11 +38,10 @@ pub(crate) fn continue_claude_session(
             agent: Agent::Claude,
             id: cc_id.to_string(),
         };
-        let outcome =
-            import_sessions::import_from(store, &candidates, &[pick], fallback_cwd, mode)
-                .into_iter()
-                .next()
-                .ok_or_else(|| anyhow!("nothing imported"))?;
+        let outcome = import_sessions::import_from(store, &candidates, &[pick], fallback_cwd, mode)
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("nothing imported"))?;
         if let Some(error) = outcome.error {
             bail!(error);
         }
@@ -56,7 +55,11 @@ pub(crate) fn continue_claude_session(
         });
     };
     let own = PathBuf::from(&link.cc_path);
-    let path = if own.is_file() { own } else { found.path.clone() };
+    let path = if own.is_file() {
+        own
+    } else {
+        found.path.clone()
+    };
     let report = sync::mirror_from_claude(store, &path, mode)?;
     let (imported, appended) = match report.kind {
         Mirrored::Imported | Mirrored::Reimported => (true, 0),

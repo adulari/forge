@@ -51,7 +51,11 @@ impl Fixture {
 
     fn add_turns(&self, id: &str, from: i64, turns: &[(&str, &str)]) {
         for (i, (who, text)) in turns.iter().enumerate() {
-            let role = if *who == "user" { Role::User } else { Role::Assistant };
+            let role = if *who == "user" {
+                Role::User
+            } else {
+                Role::Assistant
+            };
             self.store
                 .add_message(id, from + i as i64, role, text, None)
                 .unwrap();
@@ -106,7 +110,8 @@ fn append_claude_turn(path: &Path, text: &str) {
     user["message"]["content"] = json!(format!("{text} (question)"));
     assistant["uuid"] = json!(forge_types::new_id());
     assistant["parentUuid"] = user["uuid"].clone();
-    assistant["message"]["content"] = json!([{ "type": "text", "text": format!("{text} (answer)") }]);
+    assistant["message"]["content"] =
+        json!([{ "type": "text", "text": format!("{text} (answer)") }]);
     let mut body = std::fs::read_to_string(path).unwrap();
     body.push_str(&format!("{user}\n{assistant}\n"));
     std::fs::write(path, body).unwrap();
@@ -136,9 +141,17 @@ async fn a_second_export_appends_only_the_new_turns() {
     assert_eq!(status, StatusCode::OK);
     let after = lines(&path);
     assert!(count(&after) > count(&before));
-    assert_eq!(&after[..count(&before)], &before[..], "earlier turns untouched");
-    assert!(after[count(&before)..].iter().any(|l| l.contains("now tests")));
-    assert!(!after[count(&before)..].iter().any(|l| l.contains("build a parser")));
+    assert_eq!(
+        &after[..count(&before)],
+        &before[..],
+        "earlier turns untouched"
+    );
+    assert!(after[count(&before)..]
+        .iter()
+        .any(|l| l.contains("now tests")));
+    assert!(!after[count(&before)..]
+        .iter()
+        .any(|l| l.contains("build a parser")));
 
     let (status, link) = http_get(&app, &format!("/api/sessions/{id}/claude")).await;
     assert_eq!(status, StatusCode::OK);
@@ -166,7 +179,12 @@ async fn an_unlinked_session_reports_so_and_a_missing_one_is_404() {
 async fn an_empty_session_has_nothing_to_carry_over() {
     let fx = Fixture::new();
     let id = fx.session(&[]);
-    let (status, body) = http_post(&fx.router(), &format!("/api/sessions/{id}/claude"), json!({})).await;
+    let (status, body) = http_post(
+        &fx.router(),
+        &format!("/api/sessions/{id}/claude"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
 }
 
@@ -176,7 +194,12 @@ async fn a_session_open_in_a_terminal_is_409() {
     let id = fx.session(&[("user", "hi"), ("assistant", "hello")]);
     fx.store.set_session_local_live(&id, true).unwrap();
     fx.store.touch_session_local_presence(&id, false).unwrap();
-    let (status, body) = http_post(&fx.router(), &format!("/api/sessions/{id}/claude"), json!({})).await;
+    let (status, body) = http_post(
+        &fx.router(),
+        &format!("/api/sessions/{id}/claude"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert!(
         std::fs::read_dir(fx.claude.path().join("projects")).is_err(),
@@ -205,16 +228,27 @@ async fn continuing_a_linked_session_syncs_instead_of_importing_again() {
     assert_eq!(row["linked_session_id"], id);
 
     append_claude_turn(&path, "ran the benchmarks");
-    let (status, synced) =
-        http_post(&app, &format!("/api/claude/sessions/{cc_id}/continue"), json!({})).await;
+    let (status, synced) = http_post(
+        &app,
+        &format!("/api/claude/sessions/{cc_id}/continue"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{synced}");
     assert_eq!(synced["mode"], "synced");
     assert_eq!(synced["session_id"], id);
     assert!(synced["appended"].as_u64().unwrap() >= 2, "{synced}");
-    assert_eq!(fx.store.matching_session_ids("").unwrap().len(), sessions_before);
+    assert_eq!(
+        fx.store.matching_session_ids("").unwrap().len(),
+        sessions_before
+    );
 
-    let (status, again) =
-        http_post(&app, &format!("/api/claude/sessions/{cc_id}/continue"), json!({})).await;
+    let (status, again) = http_post(
+        &app,
+        &format!("/api/claude/sessions/{cc_id}/continue"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(again["mode"], "synced");
     assert_eq!(again["appended"], 0, "a second sync has nothing to add");
@@ -230,8 +264,12 @@ async fn continuing_an_unknown_claude_session_imports_it_and_a_missing_one_is_40
 
     // A daemon that never saw the link: the same transcript, an empty store.
     let other = router(Arc::new(Store::open_in_memory().unwrap()), fx.work.path());
-    let (status, body) =
-        http_post(&other, &format!("/api/claude/sessions/{cc_id}/continue"), json!({})).await;
+    let (status, body) = http_post(
+        &other,
+        &format!("/api/claude/sessions/{cc_id}/continue"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["mode"], "imported");
     assert!(body["session_id"].as_str().is_some_and(|s| !s.is_empty()));
@@ -249,7 +287,11 @@ async fn continuing_into_a_session_open_in_a_terminal_is_409() {
     let cc_id = exported["cc_session_id"].as_str().unwrap().to_string();
     fx.store.set_session_local_live(&id, true).unwrap();
     fx.store.touch_session_local_presence(&id, true).unwrap();
-    let (status, _) =
-        http_post(&app, &format!("/api/claude/sessions/{cc_id}/continue"), json!({})).await;
+    let (status, _) = http_post(
+        &app,
+        &format!("/api/claude/sessions/{cc_id}/continue"),
+        json!({}),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }

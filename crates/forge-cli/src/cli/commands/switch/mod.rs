@@ -310,7 +310,11 @@ fn path_cwd(store: &Store, path: &Path, cc_id: &str) -> String {
         .unwrap_or_default()
 }
 
-pub(crate) fn claude_launch(store: &Store, forge_id: &str, cc_id: &str) -> Result<(Launch, Option<String>)> {
+pub(crate) fn claude_launch(
+    store: &Store,
+    forge_id: &str,
+    cc_id: &str,
+) -> Result<(Launch, Option<String>)> {
     let meta = store.session_meta(forge_id)?.context("session vanished")?;
     let pinned = meta.pinned_model.as_deref();
     let (model, note) = match pinned {

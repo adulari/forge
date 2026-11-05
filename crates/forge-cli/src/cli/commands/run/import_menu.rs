@@ -195,8 +195,14 @@ pub(crate) async fn switch_in_place(
         title: String::new(),
         subtitle: String::new(),
     };
-    match super::pickers::picker_accept(forge_tui::PickerKind::Sessions, &row, session, Some(tui), app)
-        .await
+    match super::pickers::picker_accept(
+        forge_tui::PickerKind::Sessions,
+        &row,
+        session,
+        Some(tui),
+        app,
+    )
+    .await
     {
         Ok(_) => app.note(&format!("● {}", done.note)),
         Err(error) => app.note(&format!("⚠ {error:#}")),

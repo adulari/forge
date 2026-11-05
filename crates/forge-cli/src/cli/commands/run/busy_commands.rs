@@ -288,7 +288,14 @@ mod tests {
             "/duel x",
             "/some-file-command",
         ];
-        let refused = ["/resume abc", "/undo", "/checkpoints", "/claude", "/continue-claude", "/quit"];
+        let refused = [
+            "/resume abc",
+            "/undo",
+            "/checkpoints",
+            "/claude",
+            "/continue-claude",
+            "/quit",
+        ];
         for l in immediate {
             assert_eq!(policy(l), Immediate, "{l}");
         }

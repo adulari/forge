@@ -68,11 +68,10 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
             let id = single_path_parameter(request)?;
             let (method, path) = match request.route {
                 RouteId::SessionClaude => (Method::GET, format!("/api/sessions/{id}/claude")),
-                RouteId::ExportSessionClaude => (Method::POST, format!("/api/sessions/{id}/claude")),
-                _ => (
-                    Method::POST,
-                    format!("/api/claude/sessions/{id}/continue"),
-                ),
+                RouteId::ExportSessionClaude => {
+                    (Method::POST, format!("/api/sessions/{id}/claude"))
+                }
+                _ => (Method::POST, format!("/api/claude/sessions/{id}/continue")),
             };
             Ok(RouteTarget {
                 method,
@@ -322,8 +321,18 @@ mod tests {
     fn claude_hand_off_routes_are_typed_and_the_writes_are_post_only() {
         let cases = [
             (RouteId::ImportScan, "GET", &[][..], "/api/import/scan"),
-            (RouteId::SessionClaude, "GET", &["s_1"][..], "/api/sessions/s_1/claude"),
-            (RouteId::ExportSessionClaude, "POST", &["s_1"][..], "/api/sessions/s_1/claude"),
+            (
+                RouteId::SessionClaude,
+                "GET",
+                &["s_1"][..],
+                "/api/sessions/s_1/claude",
+            ),
+            (
+                RouteId::ExportSessionClaude,
+                "POST",
+                &["s_1"][..],
+                "/api/sessions/s_1/claude",
+            ),
             (
                 RouteId::ContinueClaudeSession,
                 "POST",
@@ -339,7 +348,9 @@ mod tests {
         for route in [RouteId::ExportSessionClaude, RouteId::ContinueClaudeSession] {
             assert!(validate_command_request(&request(route, "GET", &["s_1"])).is_err());
         }
-        assert!(validate_command_request(&request(RouteId::SessionClaude, "POST", &["s_1"])).is_err());
+        assert!(
+            validate_command_request(&request(RouteId::SessionClaude, "POST", &["s_1"])).is_err()
+        );
         assert!(route_target(&request(RouteId::ContinueClaudeSession, "POST", &["../x"])).is_err());
     }
 
