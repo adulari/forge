@@ -272,3 +272,46 @@ fn the_content_hash_names_bytes_not_mtimes() {
     std::fs::write(&file, "one").unwrap();
     assert_eq!(one, content_hash(&file));
 }
+
+#[test]
+fn untracked_build_noise_is_hidden_but_real_files_and_tracked_files_stay() {
+    let dir = repo_with(&[("keep.py", "x = 1\n"), ("tracked.pyc", "bin")]);
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("pkg/__pycache__")).unwrap();
+    std::fs::write(root.join("pkg/__pycache__/m.cpython-312.pyc"), "x").unwrap();
+    std::fs::write(root.join("stray.pyc"), "x").unwrap();
+    std::fs::write(root.join(".DS_Store"), "x").unwrap();
+    std::fs::write(root.join("new.py"), "y = 2\n").unwrap();
+    std::fs::write(root.join("tracked.pyc"), "changed").unwrap();
+    let mut paths: Vec<String> = tree_files(root).into_iter().map(|f| f.path).collect();
+    paths.sort();
+    assert_eq!(paths, vec!["new.py".to_string(), "tracked.pyc".to_string()]);
+}
+
+#[test]
+fn noise_path_matcher() {
+    use super::super::is_noise_path;
+    for noisy in [
+        "a/__pycache__/x.txt",
+        "m.pyc",
+        "a/b.pyo",
+        ".DS_Store",
+        "d/.DS_Store",
+        ".pytest_cache/v/cache",
+        ".mypy_cache/x",
+        ".ruff_cache/x",
+        "web/node_modules/p/index.js",
+        "f.swp",
+    ] {
+        assert!(is_noise_path(noisy), "{noisy}");
+    }
+    for real in [
+        "src/main.rs",
+        "pycache.txt",
+        "node_modules",
+        "a/b.pyc.md",
+        "notes.swpx",
+    ] {
+        assert!(!is_noise_path(real), "{real}");
+    }
+}

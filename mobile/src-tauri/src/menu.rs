@@ -93,29 +93,34 @@ pub struct MenuAccelerator {
     accelerator: Option<String>,
 }
 
+/// Menu ids whose key equivalent the webview may rewrite. Standard Edit, Quit and
+/// window-management accelerators stay native platform behavior.
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+const MUTABLE_ACCELERATOR_IDS: &[&str] = &[
+    SESSION_NEW,
+    SESSION_QUICK_COMPOSER,
+    SESSION_SEARCH,
+    SESSION_INTERRUPT,
+    VIEW_SIDEBAR,
+    VIEW_SPLIT_PANE,
+    VIEW_TERMINAL,
+    VIEW_USAGE,
+    VIEW_GIT_REVIEW,
+    VIEW_IDE_MODE,
+    VIEW_PANE_CLOSE,
+    VIEW_PANE_MAXIMIZE,
+    VIEW_PANE_NEXT,
+    VIEW_PANE_PREV,
+    VIEW_TASKS,
+    VIEW_AGENTS,
+    VIEW_PLAN,
+    VIEW_FILES,
+    VIEW_BROWSER_PREVIEW,
+];
+
 #[cfg(target_os = "macos")]
 fn mutable_accelerator(id: &str) -> bool {
-    matches!(
-        id,
-        SESSION_NEW
-            | SESSION_QUICK_COMPOSER
-            | SESSION_SEARCH
-            | SESSION_INTERRUPT
-            | VIEW_SIDEBAR
-            | VIEW_SPLIT_PANE
-            | VIEW_TERMINAL
-            | VIEW_USAGE
-            | VIEW_GIT_REVIEW
-            | VIEW_IDE_MODE
-            | VIEW_PANE_CLOSE
-            | VIEW_PANE_MAXIMIZE
-            | VIEW_PANE_NEXT
-            | VIEW_PANE_PREV
-            | VIEW_TASKS
-            | VIEW_AGENTS
-            | VIEW_PLAN
-            | VIEW_FILES
-    )
+    MUTABLE_ACCELERATOR_IDS.contains(&id)
 }
 
 #[cfg(target_os = "macos")]
@@ -136,27 +141,33 @@ fn find_menu_items<R: Runtime>(items: Vec<MenuItemKind<R>>, id: &str) -> Vec<Men
 }
 
 /// Keeps macOS menu key equivalents aligned with the persisted webview shortcut
-/// preferences. Only the closed list above is mutable: standard Edit, Quit, and
-/// window-management accelerators remain native platform behavior.
+/// preferences. Only `MUTABLE_ACCELERATOR_IDS` is mutable. Unknown, immutable or
+/// missing ids are skipped with a warning and returned, so one stale id never
+/// rejects the whole batch.
 #[tauri::command]
 pub fn set_menu_accelerators<R: Runtime>(
     app: AppHandle<R>,
     accelerators: Vec<MenuAccelerator>,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     #[cfg(target_os = "macos")]
     {
         let menu = app
             .menu()
             .ok_or_else(|| "application menu is not installed".to_string())?;
+        let mut skipped = Vec::new();
         let mut resolved = Vec::with_capacity(accelerators.len());
         for update in accelerators {
             if !mutable_accelerator(&update.id) {
-                return Err(format!("menu accelerator is not mutable: {}", update.id));
+                eprintln!("menu accelerator is not mutable: {}", update.id);
+                skipped.push(update.id);
+                continue;
             }
             let items =
                 find_menu_items(menu.items().map_err(|error| error.to_string())?, &update.id);
             if items.is_empty() {
-                return Err(format!("menu item is missing: {}", update.id));
+                eprintln!("menu item is missing: {}", update.id);
+                skipped.push(update.id);
+                continue;
             }
             resolved.push((items, update.accelerator));
         }
@@ -179,13 +190,13 @@ pub fn set_menu_accelerators<R: Runtime>(
                     .map_err(|error| error.to_string())?;
             }
         }
-        Ok(())
+        Ok(skipped)
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (app, accelerators);
-        Ok(())
+        Ok(Vec::new())
     }
 }
 
@@ -351,7 +362,11 @@ pub fn install<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
         .item(&item(VIEW_PLAN, "Plan", Some("CmdOrCtrl+Shift+L"))?)
         .item(&item(VIEW_FILES, "Files", Some("CmdOrCtrl+Shift+F"))?)
         .item(&item(VIEW_GIT_REVIEW, "Git Review", Some("CmdOrCtrl+G"))?)
-        .item(&item(VIEW_BROWSER_PREVIEW, "Browser Preview", None)?)
+        .item(&item(
+            VIEW_BROWSER_PREVIEW,
+            "Browser Preview",
+            Some("CmdOrCtrl+Shift+B"),
+        )?)
         .separator()
         .item(&item(VIEW_IDE_MODE, "IDE Mode", Some("CmdOrCtrl+Shift+E"))?)
         .item(&layouts)
@@ -432,4 +447,31 @@ pub fn handle_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
             decision: None,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_js_native_menu_action_is_a_mutable_menu_id() {
+        let source = include_str!("../../src/lib/shortcuts/bindings.ts");
+        let start = source
+            .find("const NATIVE_MENU_ACTIONS")
+            .expect("NATIVE_MENU_ACTIONS in bindings.ts");
+        let body = &source[start..];
+        let body = &body[body.find('{').unwrap() + 1..];
+        let body = &body[..body.find("};").unwrap()];
+        let ids: Vec<&str> = body
+            .lines()
+            .filter_map(|line| line.split('"').nth(3))
+            .collect();
+        assert!(ids.len() >= 15, "parsed too few ids: {ids:?}");
+        for id in ids {
+            assert!(
+                MUTABLE_ACCELERATOR_IDS.contains(&id),
+                "{id} is mapped in NATIVE_MENU_ACTIONS but not mutable natively"
+            );
+        }
+    }
 }

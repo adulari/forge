@@ -625,6 +625,33 @@ pub(crate) async fn git_commit(
 /// it forked from. Same machinery `POST /api/sessions/{id}/merge` uses to decide what to apply
 /// ([`worktree_repo_and_branch`] + `git merge-base HEAD <branch>`), but read-only: the diff is
 /// taken IN the worktree so uncommitted edits are included without committing anything.
+/// Build and tool-cache residue that clutters the change queue when untracked. Applied to
+/// untracked rows only: a tracked file is a deliberate change whatever its name. Mirrored in
+/// `mobile/src/components/ide/noisePaths.ts`.
+pub(super) fn is_noise_path(path: &str) -> bool {
+    const DIRS: &[&str] = &[
+        "__pycache__",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        "node_modules",
+    ];
+    let mut segments = path.split('/').filter(|s| !s.is_empty()).peekable();
+    while let Some(segment) = segments.next() {
+        if segments.peek().is_some() {
+            if DIRS.contains(&segment) {
+                return true;
+            }
+        } else {
+            return segment == ".DS_Store"
+                || [".pyc", ".pyo", ".swp"]
+                    .iter()
+                    .any(|ext| segment.ends_with(ext));
+        }
+    }
+    false
+}
+
 /// Unified new-file diffs for the untracked, non-ignored files of `dir` (capped), without touching
 /// the index. `git diff --no-index` exits 1 when the files differ, so the status is not checked.
 fn untracked_as_new_file_diffs(dir: &Path) -> String {
@@ -636,7 +663,7 @@ fn untracked_as_new_file_diffs(dir: &Path) -> String {
     let mut out = String::new();
     for rel in String::from_utf8_lossy(&listing)
         .split('\0')
-        .filter(|p| !p.is_empty())
+        .filter(|p| !p.is_empty() && !is_noise_path(p))
         .take(MAX_FILES)
     {
         if std::fs::metadata(dir.join(rel)).is_ok_and(|m| !m.is_file() || m.len() > MAX_BYTES) {
