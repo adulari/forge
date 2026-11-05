@@ -81,6 +81,18 @@ fn lines(path: &Path) -> Vec<String> {
         .collect()
 }
 
+/// A transcript written moments ago counts as open when any interactive `claude` runs on the
+/// machine (CI runners and developers' laptops have them), so tests age it first.
+fn settle(path: &Path) {
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+}
+
 fn count(lines: &[String]) -> usize {
     lines.len()
 }
@@ -130,12 +142,14 @@ async fn a_second_export_appends_only_the_new_turns() {
     assert_eq!(first["cwd"], fx.work.path().display().to_string());
     let path = fx.transcript(&cc_id);
     let before = lines(&path);
+    settle(&path);
 
     let (status, again) = http_post(&app, &format!("/api/sessions/{id}/claude"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(again["cc_session_id"], cc_id, "same transcript");
     assert_eq!(lines(&path), before, "nothing new, nothing written");
 
+    settle(&path);
     fx.add_turns(&id, 2, &[("user", "now tests"), ("assistant", "added")]);
     let (status, _) = http_post(&app, &format!("/api/sessions/{id}/claude"), json!({})).await;
     assert_eq!(status, StatusCode::OK);
