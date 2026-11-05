@@ -414,6 +414,8 @@ pub struct App {
     pub diff_overlay: crate::diff_overlay::DiffOverlay,
     /// The background-shells list (`/jobs`), while open.
     pub jobs_overlay: crate::jobs_overlay::JobsOverlay,
+    /// `/ide` or its key asked for IDE mode; the host opens it on its next loop turn.
+    pub ide_requested: bool,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
     /// The `/usage` overlay state.
@@ -997,6 +999,8 @@ pub enum KeyKind {
     /// Park the draft on the stash, or bring the newest stashed draft back when the composer is
     /// empty (default Ctrl+X; Ctrl+S under the `claude-code` preset).
     StashPrompt,
+    /// F2 (configurable) — open IDE mode, the project review workbench.
+    OpenIde,
     /// Ctrl+V (configurable) — open the `/voice` recording overlay, same as typing `/voice`.
     ToggleVoice,
     /// Ctrl+D — delete the character under the cursor; on an empty prompt, quit (see `App::ctrl_d`).
@@ -1232,6 +1236,7 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::ToggleReasoning
         | KeyKind::OpenCommandCenter
         | KeyKind::OpenKeybindConfig
+        | KeyKind::OpenIde
         | KeyKind::Suspend
         | KeyKind::VerbosityCycle
         | KeyKind::Pending

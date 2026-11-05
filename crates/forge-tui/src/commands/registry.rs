@@ -81,6 +81,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/board",
     },
     Command {
+        name: "ide",
+        desc: "IDE mode: review what agents changed, stage or revert hunks, answer them (F2)",
+        usage: "/ide",
+    },
+    Command {
         name: "dispatch",
         desc: "split a request into parallel sessions on the daemon (see forge board)",
         usage: "/dispatch <request>",

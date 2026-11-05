@@ -538,6 +538,11 @@ impl IdeApp {
             .map(|(_, h)| h)
     }
 
+    /// Something on screen moves with time (a spinner, a toast about to expire).
+    pub fn animating(&self) -> bool {
+        self.toast.is_some() || self.agents.iter().any(|a| a.busy)
+    }
+
     pub fn is_typing(&self) -> bool {
         self.composer.active || self.commit.active
     }

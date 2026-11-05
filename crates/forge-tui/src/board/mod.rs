@@ -152,5 +152,7 @@ pub enum BoardAction {
     /// Merge every `succeeded` worker of this dispatch in index order, stopping at the first
     /// conflict or error.
     MergeFinished(String),
+    /// Open IDE mode (F2) over the board, then come back.
+    OpenIde,
     Quit,
 }

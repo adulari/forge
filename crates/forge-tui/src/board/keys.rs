@@ -58,12 +58,18 @@ pub const HELP: &[(&str, &str)] = &[
     ("c", "copy the session id"),
     ("R", "refresh now"),
     ("?", "this help"),
+    ("F2", "IDE mode: review what agents changed"),
     ("q  Ctrl+C", "quit — sessions keep running"),
 ];
 
 pub fn handle_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
     if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
         return vec![BoardAction::Quit];
+    }
+    if matches!(key.code, KeyCode::F(2))
+        && !matches!(app.focus, Focus::Composer | Focus::Confirm | Focus::Form)
+    {
+        return vec![BoardAction::OpenIde];
     }
     match app.focus {
         Focus::Composer => composer_key(app, key),

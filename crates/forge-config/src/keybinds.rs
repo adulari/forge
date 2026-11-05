@@ -225,6 +225,9 @@ impl Default for KeybindsConfig {
         binds.insert("voice".into(), bind("v", true, false, false));
         binds.insert("kill_line_forward".into(), bind("k", false, true, false));
         binds.insert("stash".into(), bind("x", true, false, false));
+        // F2: free in the default keymap (the claude-code preset gives F2 to the command center
+        // and moves this to F3).
+        binds.insert("ide".into(), bind("f2", false, false, false));
         Self {
             preset: KeybindPreset::Forge,
             binds,
@@ -238,7 +241,7 @@ impl Default for KeybindsConfig {
 /// The actions the `claude-code` preset moves, and where to. Every other action keeps its Forge
 /// default. The freed chords fall through to the composer's readline keys (Ctrl+K kill to end of
 /// line, Ctrl+N history) or are ignored (Ctrl+Z, Ctrl+S, Ctrl+R), never typed as a letter.
-fn claude_code_moves() -> [(&'static str, KeyCombo); 6] {
+fn claude_code_moves() -> [(&'static str, KeyCombo); 7] {
     [
         ("command_center", KeyCombo::new("f2", false, false, false)),
         ("new_session", KeyCombo::new("n", false, true, false)),
@@ -246,6 +249,7 @@ fn claude_code_moves() -> [(&'static str, KeyCombo); 6] {
         ("toggle_reasoning", KeyCombo::new("t", false, true, false)),
         ("model_picker", KeyCombo::new("p", false, true, false)),
         ("temper_cycle", KeyCombo::new("m", false, true, false)),
+        ("ide", KeyCombo::new("f3", false, false, false)),
     ]
 }
 

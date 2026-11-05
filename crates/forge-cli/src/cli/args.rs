@@ -448,6 +448,21 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "project")]
         all: bool,
     },
+    /// IDE mode: the project review workbench on a full-screen terminal. Every agent on the
+    /// project, what each one changed (needs-you first), a diff with per-hunk stage, revert and
+    /// undo, the agent in view with its permission prompts, and git. Starts the background daemon
+    /// if it is not running. `F2` or Esc leaves.
+    Ide {
+        /// The project directory. Defaults to the current directory.
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Daemon base URL. Defaults to the local daemon.
+        #[arg(long)]
+        url: Option<String>,
+        /// Daemon token. Defaults to the persisted `serve-token`.
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Plan and dispatch: hand one request to a coordinator session on the running `forge serve`
     /// daemon, which reads the project and proposes a split into work items. Nothing starts until
     /// you approve the split (all of it, or `--only` some items), ask for a revision, or cancel;
