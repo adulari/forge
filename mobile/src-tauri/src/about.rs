@@ -212,6 +212,10 @@ fn render(info: &AboutInfo, fallback_version: &str) -> String {
         _ => String::new(),
     };
 
+    let render_line = crate::render_diagnostics_line()
+        .map(|line| format!(r#"<span class="meta">{}</span>"#, escape(&line)))
+        .unwrap_or_default();
+
     format!(
         r##"<!doctype html>
 <html lang="en">
@@ -234,7 +238,7 @@ fn render(info: &AboutInfo, fallback_version: &str) -> String {
     display: flex; flex-direction: column; align-items: center; gap: 8px;
   }}
   .name {{ font-size: 15px; font-weight: 600; letter-spacing: -0.2px; }}
-  .meta {{ font-family: 'Geist Mono', ui-monospace, monospace; font-size: 10px; color: {INK4}; }}
+  .meta {{ font-family: 'Geist Mono', ui-monospace, monospace; font-size: 10px; color: {INK4}; text-align: center; }}
   .actions {{ display: flex; gap: 7px; padding-top: 4px; }}
   a.button {{
     font-size: 10px; color: {INK2}; text-decoration: none;
@@ -249,6 +253,7 @@ fn render(info: &AboutInfo, fallback_version: &str) -> String {
     <span class="name">Forge</span>
     <span class="meta">{version_line}</span>
     {daemon_line}
+    {render_line}
     <div class="actions">
       <a class="button" href="forge://check-updates">Check for updates</a>
       <a class="button" href="forge://acknowledgements">Acknowledgements</a>

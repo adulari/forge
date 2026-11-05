@@ -100,6 +100,7 @@ export function buildSupportSummary(
   clientProtocol: number,
   update: DesktopUpdateState,
   nativeRuntimeVersion: string | null = null,
+  renderLine: string | null = null,
 ): string {
   const { host, resources, runtime } = diagnostics;
   const checks = diagnostics.checks
@@ -119,6 +120,7 @@ export function buildSupportSummary(
     `push=web:${runtime.web_push_ready ? "ready" : "off"},native:${runtime.native_push_ready ? "ready" : "off"}`,
     `checks=${checks || "none"}`,
     `desktop_update=${update.phase}${update.availableVersion ? `:${update.availableVersion}` : ""}`,
+    ...(renderLine ? [`desktop_render=${renderLine}`] : []),
     `checked_at=${diagnostics.checked_at}`,
   ].join("\n");
 }

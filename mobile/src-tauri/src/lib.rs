@@ -16,8 +16,12 @@ use tauri::Manager;
 use tauri::{RunEvent, WindowEvent};
 
 mod about;
+#[cfg(target_os = "linux")]
+mod appimage_launcher;
 mod auto_update;
 mod desktop_shell;
+#[cfg(target_os = "linux")]
+pub mod linux_render;
 mod menu;
 mod nearby;
 mod onboarding;
@@ -125,6 +129,24 @@ fn perf_seed_server() -> Result<Option<PerfSeedServer>, String> {
         added_at: 0,
     }))
 }
+/// The line Settings -> Diagnostics shows: which Linux WebKitGTK workarounds this launch applied.
+/// `None` off Linux, and on a build that predates the module.
+#[tauri::command]
+fn desktop_render_diagnostics() -> Option<String> {
+    render_diagnostics_line()
+}
+
+pub(crate) fn render_diagnostics_line() -> Option<String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_render::diagnostics_line()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 #[tauri::command]
 fn perf_native_now() -> f64 {
     perf_elapsed_ms()
@@ -201,6 +223,7 @@ pub fn run(process_start: Instant) {
     builder
         .register_uri_scheme_protocol(about::URI_SCHEME, about::serve)
         .invoke_handler(tauri::generate_handler![
+            desktop_render_diagnostics,
             auto_update::desktop_update_installable,
             auto_update::desktop_update_installed_version,
             ota::ota_status,

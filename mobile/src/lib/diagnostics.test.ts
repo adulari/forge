@@ -93,10 +93,12 @@ describe("buildSupportSummary", () => {
         releaseUrl: null,
       },
       "runtime-fingerprint",
+      "wayland (hyprland) · nvidia · vblank shim on",
     );
 
     expect(summary).toContain("daemon=1.4.0 protocol=9");
     expect(summary).toContain("native_runtime=runtime-fingerprint");
+    expect(summary).toContain("desktop_render=wayland (hyprland) · nvidia · vblank shim on");
     expect(summary).toContain("Git=ok");
     expect(summary).toContain("desktop_update=available:1.6.0");
     expect(summary).not.toContain("secret-hostname");

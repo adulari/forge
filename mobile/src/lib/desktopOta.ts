@@ -59,6 +59,17 @@ async function call<T>(command: string): Promise<T> {
   return invoke<T>(command);
 }
 
+/** The one-line summary of the Linux WebKitGTK workarounds this launch applied
+ * (src-tauri/src/linux_render.rs). Null off Linux, outside the shell, or on a shell that predates it. */
+export async function fetchDesktopRenderLine(): Promise<string | null> {
+  if (!isTauri) return null;
+  try {
+    return (await call<string | null>("desktop_render_diagnostics")) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function refreshDesktopOtaStatus(): Promise<DesktopOtaStatus | null> {
   if (!isTauri) return null;
   try {
