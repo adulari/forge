@@ -1,6 +1,6 @@
 pkgbase = forge-bin
 	pkgdesc = Fast, model-agnostic AI coding harness and CLI in Rust (prebuilt binary)
-	pkgver = 2.27.0
+	pkgver = 2.28.0
 	pkgrel = 1
 	url = https://github.com/Adulari/forge
 	install = forge-bin.install
@@ -11,9 +11,9 @@ pkgbase = forge-bin
 	conflicts = forge
 	options = !strip
 	options = !debug
-	source_x86_64 = forge-2.27.0-x86_64.tar.gz::https://github.com/Adulari/forge/releases/download/v2.27.0/forge-x86_64-unknown-linux-gnu.tar.gz
-	sha256sums_x86_64 = 7fd0be987d788f0e1818f11251e48264535b50f628e7b64d814d20bcf7b563dd
-	source_aarch64 = forge-2.27.0-aarch64.tar.gz::https://github.com/Adulari/forge/releases/download/v2.27.0/forge-aarch64-unknown-linux-gnu.tar.gz
-	sha256sums_aarch64 = 7c3fef7373c6b2076ca937bc091e4a41c994b6152ae0f078a456d204da3f2a92
+	source_x86_64 = forge-2.28.0-x86_64.tar.gz::https://github.com/Adulari/forge/releases/download/v2.28.0/forge-x86_64-unknown-linux-gnu.tar.gz
+	sha256sums_x86_64 = deffba50bdf8fba469823a85689b892eece6abf292db71559891ab6fd1d66f2a
+	source_aarch64 = forge-2.28.0-aarch64.tar.gz::https://github.com/Adulari/forge/releases/download/v2.28.0/forge-aarch64-unknown-linux-gnu.tar.gz
+	sha256sums_aarch64 = 68fc3233f77dea5c13da5d8d0fac8b22e4601f0ee30bf2198b827c42dc1f0194
 
 pkgname = forge-bin
