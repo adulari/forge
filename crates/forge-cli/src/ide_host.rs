@@ -470,6 +470,8 @@ impl IdeHost {
         };
         let mut pool = SocketPool::new(self.base.clone(), self.token.clone(), ev_tx.clone());
         let mut guard = TerminalGuard::enter()?;
+        // The screen still holds whatever was there (the chat); the new terminal must repaint it all.
+        guard.terminal.clear()?;
         if let Ok((w, h)) = crossterm::terminal::size() {
             self.app.apply(IdeEvent::Resize(w, h));
         }

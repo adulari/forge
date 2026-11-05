@@ -10,7 +10,7 @@ export HOME="$ROOT/home" XDG_CONFIG_HOME="$ROOT/home/.config" XDG_DATA_HOME="$RO
 export FORGE_DB="$ROOT/forge.db"
 PORT=$((20000 + RANDOM % 20000))
 mkdir -p "$XDG_CONFIG_HOME/forge" "$HOME/.local/share"
-printf '[remote]\nport = %s\n' "$PORT" > "$XDG_CONFIG_HOME/forge/config.toml"
+printf '[remote]\nport = %s\n[keybinds]\npreset = "forge"\n' "$PORT" > "$XDG_CONFIG_HOME/forge/config.toml"
 SCRATCH="$ROOT/repo"
 mkdir -p "$SCRATCH/src" && cd "$SCRATCH" && git init -q && git config user.email t@t && git config user.name t
 printf 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n' > src/a.txt

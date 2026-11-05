@@ -81,7 +81,7 @@ fn agents(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, 
     };
     section_label(buf, rect, rect.y, "Agents", &right, right_style);
     let focused = app.focus == Pane::Rail && app.rail_focus == RailFocus::Agents;
-    let mut y = rect.y + 1;
+    let y = rect.y + 1;
     if app.agents.is_empty() {
         let note = if app.changes_note.is_some() {
             "daemon unavailable"
@@ -105,7 +105,8 @@ fn agents(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, 
     let start = (cursor + 1)
         .saturating_sub(room)
         .min(total.saturating_sub(room));
-    for index in start..total.min(start + room) {
+    for (offset, index) in (start..total.min(start + room)).enumerate() {
+        let y = rect.y + 1 + offset as u16;
         let row_rect = Rect {
             y,
             height: 1,
@@ -191,7 +192,6 @@ fn agents(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, 
             }
             hits.push((row_rect, Hit::Agent(agent.id.clone())));
         }
-        y += 1;
     }
 }
 
@@ -218,7 +218,7 @@ fn tabs(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hi
         if x + w + 1 > rect.right() {
             break;
         }
-        put(buf, x, rect.y, &format!("{text}"), style, w);
+        put(buf, x, rect.y, &text, style, w);
         hits.push((
             Rect {
                 x,

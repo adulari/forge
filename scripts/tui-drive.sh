@@ -63,6 +63,9 @@ command -v tmux >/dev/null || { echo "tmux is required (the vt100 emulator)" >&2
 [[ -x "$FORGE" ]] || { echo "building forge (release)…" >&2; (cd "$REPO" && cargo build --release -p forge-agent) || exit 1; }
 
 SESSION="forge-drive-$$"
+# A private tmux server, never the default socket: the harness must not touch the user's tmux.
+SOCK="forge-drive-$$"
+tmux() { command tmux -L "$SOCK" "$@"; }
 WORK="$(mktemp -d)"
 DB="$WORK/forge.db"
 FAILED=0
@@ -77,7 +80,7 @@ MODE_ARGS="--mock"
 [[ -n "$MODEL" ]] && MODE_ARGS="$MODE_ARGS --model $MODEL"
 [[ -n "$MODE" ]] && MODE_ARGS="$MODE_ARGS --mode $MODE"
 
-tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS"
+tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" "bash --noprofile --norc"
 # Run in an isolated cwd + DB so the dev's real sessions/usage are untouched.
 [[ -n "$PRE" ]] && (cd "$WORK" && WORK="$WORK" bash -c "$PRE") || true
 START_DIR="${CWD_DIR:-$WORK}"

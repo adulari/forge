@@ -268,12 +268,10 @@ fn rail_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
             RailTab::Files => {}
         },
     }
-    // On the Changes list `j/k` walk the files, as everywhere else.
-    if app.rail_focus == RailFocus::List && app.rail_tab == RailTab::Changes {
-        if let Some(actions) = review_key(app, key) {
-            return actions;
-        }
-    } else if !matches!(key.code, KeyCode::Char('j' | 'k')) {
+    // On the Changes list `j/k` walk the files, as everywhere else; elsewhere they are the
+    // list's own keys and were handled above.
+    let lists_own_jk = !(app.rail_focus == RailFocus::List && app.rail_tab == RailTab::Changes);
+    if !(lists_own_jk && matches!(key.code, KeyCode::Char('j' | 'k'))) {
         if let Some(actions) = review_key(app, key) {
             return actions;
         }
