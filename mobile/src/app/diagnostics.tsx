@@ -18,6 +18,7 @@ import { ApiError } from "../lib/api";
 import { useAppVersion } from "../lib/appVersion";
 import {
   applyDesktopOta,
+  fetchDesktopRenderLine,
   checkDesktopOtaNow,
   describeDesktopOta,
   refreshDesktopOtaStatus,
@@ -90,6 +91,10 @@ export default function DiagnosticsScreen() {
   const ota = useDesktopOtaStatus();
   const [otaBusy, setOtaBusy] = useState(false);
   const nativeRuntimeVersion = Updates.runtimeVersion ?? null;
+  const [renderLine, setRenderLine] = useState<string | null>(null);
+  useEffect(() => {
+    void fetchDesktopRenderLine().then(setRenderLine);
+  }, []);
   const [performanceSnapshot, setPerformanceSnapshot] = useState<DesktopPerformanceSnapshot>(() => getDesktopPerformanceSnapshot());
   const [relayMetrics, setRelayMetrics] = useState(() => getRelayMetrics());
   const [coldStart, setColdStart] = useState(() => getColdStartTimings());
@@ -185,11 +190,12 @@ export default function DiagnosticsScreen() {
       PROTOCOL_VERSION,
       update,
       nativeRuntimeVersion,
+      renderLine,
     );
     void Clipboard.setStringAsync(summary)
       .then(() => toast.show("Copied sanitized support summary.", { tone: "neutral" }))
       .catch(() => toast.show("couldn't copy the support summary.", { tone: "danger" }));
-  }, [appVersion, diagnostics, nativeRuntimeVersion, toast, update]);
+  }, [appVersion, diagnostics, nativeRuntimeVersion, renderLine, toast, update]);
 
   const oldDaemon = query.error instanceof ApiError && query.error.status === 404;
 
@@ -250,6 +256,9 @@ export default function DiagnosticsScreen() {
                     title={nativeRuntimeVersion}
                     subtitle="Embedded native/OTA runtime fingerprint"
                   />
+                ) : null}
+                {renderLine ? (
+                  <ListRow title={renderLine} subtitle="Linux rendering workarounds applied at launch" />
                 ) : null}
                 <ListRow
                   title={`Daemon v${diagnostics.host.version}`}

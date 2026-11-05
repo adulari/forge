@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Guards scripts/ci/appimage-wayland-backend.sh, which is what stops the AppImage shipping with
-# GDK_BACKEND pinned to x11. It runs at package time inside the desktop release workflow, where a
+# GDK_BACKEND pinned to x11 or pre-empting the app's own choice. It runs at package time inside the
+# desktop release workflow, where a
 # silent no-op would ship an XWayland build again without anyone noticing.
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -20,58 +21,28 @@ export XDG_DATA_DIRS="$APPDIR/usr/share:/usr/share:$XDG_DATA_DIRS"
 HOOK
 }
 
-# 1. The x11 pin is replaced, both values stay overridable, and the rest of the hook survives.
+# 1. The x11 pin is removed without replacement, and the rest of the hook survives. Setting any
+# backend here would make the app mistake it for the user's choice.
 appdir="$work/ok"
 make_hook "$appdir"
 bash "$fixer" "$appdir" >/dev/null
 hook="$appdir/apprun-hooks/linuxdeploy-plugin-gtk.sh"
-grep -q '^if \[\[ -n \${WAYLAND_DISPLAY:-} && -z \${GDK_BACKEND:-} \]\]; then$' "$hook" \
-  || { echo 'expected a Wayland-session guard around the GDK_BACKEND default' >&2; exit 1; }
-grep -q '^  export GDK_BACKEND=wayland$' "$hook" \
-  || { echo 'expected the Wayland-preferring GDK_BACKEND export' >&2; exit 1; }
-grep -q '^  export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"$' "$hook" \
-  || { echo 'expected the dmabuf renderer to be disabled' >&2; exit 1; }
-grep -q '^export GDK_BACKEND=x11' "$hook" \
-  && { echo 'the x11 pin survived the patch' >&2; exit 1; }
+grep -q 'GDK_BACKEND=' "$hook" \
+  && { echo 'the patched hook must not assign GDK_BACKEND' >&2; exit 1; }
+grep -q 'WEBKIT_DISABLE_DMABUF_RENDERER' "$hook" \
+  && { echo 'the patched hook must leave the renderer to the app' >&2; exit 1; }
 grep -q 'XDG_DATA_DIRS' "$hook" \
   || { echo 'unrelated hook lines must be preserved' >&2; exit 1; }
 
-# 1b. The default must not break X11-only hosts. With no Wayland display and no explicit backend,
-# the hook leaves GDK_BACKEND unset so GTK can select X11 normally.
-if env -u WAYLAND_DISPLAY -u GDK_BACKEND bash -c 'source "$1"; [[ -z ${GDK_BACKEND:-} ]]' _ "$hook"; then
-  :
-else
-  echo 'X11-only environments must not be forced onto the Wayland backend' >&2
-  exit 1
-fi
-
-# 1c. A Wayland session receives the native backend default when the caller has not overridden it.
-if env -u GDK_BACKEND WAYLAND_DISPLAY=wayland-0 bash -c 'source "$1"; [[ $GDK_BACKEND == wayland ]]' _ "$hook"; then
-  :
-else
-  echo 'Wayland sessions must receive the native backend default' >&2
-  exit 1
-fi
-
-# 1d. The dmabuf workaround exists for the Wayland crash (Gdk Error 71) only. X11 ships today with
-# the renderer enabled, so an X11 host must not silently lose it.
-if env -u WAYLAND_DISPLAY -u GDK_BACKEND -u WEBKIT_DISABLE_DMABUF_RENDERER \
-    bash -c 'source "$1"; [[ -z ${WEBKIT_DISABLE_DMABUF_RENDERER:-} ]]' _ "$hook"; then
-  :
-else
-  echo 'an X11-only host must keep the dmabuf renderer enabled' >&2
-  exit 1
-fi
-
-# 1e. A caller who selects Wayland explicitly still needs the workaround, even though the hook did
-# not choose the backend for them.
-if env -u WEBKIT_DISABLE_DMABUF_RENDERER GDK_BACKEND=wayland \
-    bash -c 'source "$1"; [[ ${WEBKIT_DISABLE_DMABUF_RENDERER:-} == 1 ]]' _ "$hook"; then
-  :
-else
-  echo 'an explicit Wayland backend must still disable the dmabuf renderer' >&2
-  exit 1
-fi
+# 1b. Sourced on a Wayland session, an X11 host and with an explicit user value, the hook leaves
+# the user's environment exactly as it found it.
+for setup in 'WAYLAND_DISPLAY=wayland-0' 'DISPLAY=:0'; do
+  env -u GDK_BACKEND -u WAYLAND_DISPLAY -u DISPLAY -u WEBKIT_DISABLE_DMABUF_RENDERER "$setup" \
+    bash -c 'source "$1"; [[ -z ${GDK_BACKEND:-} && -z ${WEBKIT_DISABLE_DMABUF_RENDERER:-} ]]' _ "$hook" \
+    || { echo "the hook must not set the backend or renderer ($setup)" >&2; exit 1; }
+done
+env GDK_BACKEND=x11 bash -c 'source "$1"; [[ $GDK_BACKEND == x11 ]]' _ "$hook" \
+  || { echo 'a user-chosen backend must survive the hook' >&2; exit 1; }
 
 # 2. A hook without the expected pin must fail loudly. If linuxdeploy changes its template, the
 #    build has to stop rather than quietly ship XWayland again.
