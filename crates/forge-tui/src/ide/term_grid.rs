@@ -2,16 +2,8 @@
 
 use std::collections::VecDeque;
 
-use termwiz::cell::{Intensity, Underline};
-use termwiz::color::ColorSpec;
-use termwiz::escape::csi::{
-    Cursor, DecPrivateMode, DecPrivateModeCode, Edit, EraseInDisplay, EraseInLine, Mode, Sgr, CSI,
-};
-use termwiz::escape::esc::{Esc, EscCode};
-use termwiz::escape::osc::OperatingSystemCommand;
-use termwiz::escape::parser::Parser;
-use termwiz::escape::{Action, ControlCode};
 use unicode_width::UnicodeWidthChar;
+use vtparse::{CsiParam, VTActor, VTParser};
 
 const SCROLLBACK_CAP: usize = 1000;
 const TAB_STOP: usize = 8;
@@ -112,7 +104,7 @@ struct SavedCursor {
 }
 
 pub struct TermGrid {
-    parser: Option<Parser>,
+    parser: Option<VTParser>,
     main: Screen,
     alt: Screen,
     in_alt: bool,
@@ -132,7 +124,7 @@ impl TermGrid {
         let cols = usize::from(cols.max(1));
         let rows = usize::from(rows.max(1));
         Self {
-            parser: Some(Parser::new()),
+            parser: Some(VTParser::new()),
             main: Screen::new(cols, rows),
             alt: Screen::new(cols, rows),
             in_alt: false,
@@ -150,7 +142,7 @@ impl TermGrid {
 
     pub fn feed(&mut self, bytes: &[u8]) {
         if let Some(mut parser) = self.parser.take() {
-            parser.parse(bytes, |action| self.apply(action));
+            parser.parse(bytes, self);
             self.parser = Some(parser);
         }
     }
@@ -269,19 +261,7 @@ impl TermGrid {
         }
     }
 
-    fn apply(&mut self, action: Action) {
-        match action {
-            Action::Print(c) => self.print(c),
-            Action::PrintString(s) => s.chars().for_each(|c| self.print(c)),
-            Action::Control(code) => self.control(code),
-            Action::CSI(csi) => self.csi(csi),
-            Action::Esc(esc) => self.esc(esc),
-            Action::OperatingSystemCommand(osc) => self.osc(*osc),
-            _ => {}
-        }
-    }
-
-    fn print(&mut self, c: char) {
+    fn put_char(&mut self, c: char) {
         let width = match c.width() {
             Some(w) if w > 0 => w,
             _ => return,
@@ -324,21 +304,21 @@ impl TermGrid {
         }
     }
 
-    fn control(&mut self, code: ControlCode) {
-        match code {
-            ControlCode::CarriageReturn => {
+    fn control(&mut self, byte: u8) {
+        match byte {
+            b'\r' => {
                 self.cursor.col = 0;
                 self.cursor.pending_wrap = false;
             }
-            ControlCode::LineFeed | ControlCode::VerticalTab | ControlCode::FormFeed => {
+            b'\n' | 0x0b | 0x0c => {
                 self.cursor.pending_wrap = false;
                 self.index();
             }
-            ControlCode::Backspace => {
+            0x08 => {
                 self.cursor.col = self.cursor.col.saturating_sub(1);
                 self.cursor.pending_wrap = false;
             }
-            ControlCode::HorizontalTab => {
+            b'\t' => {
                 let next = (self.cursor.col / TAB_STOP + 1) * TAB_STOP;
                 self.cursor.col = next.min(self.cols() - 1);
                 self.cursor.pending_wrap = false;
@@ -409,70 +389,76 @@ impl TermGrid {
         self.cursor.pending_wrap = false;
     }
 
-    fn csi(&mut self, csi: CSI) {
-        match csi {
-            CSI::Sgr(sgr) => self.sgr(sgr),
-            CSI::Cursor(cursor) => self.csi_cursor(cursor),
-            CSI::Edit(edit) => self.csi_edit(edit),
-            CSI::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(code))) => {
-                self.dec_mode(code, true)
-            }
-            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(code))) => {
-                self.dec_mode(code, false)
-            }
-            _ => {}
-        }
-    }
-
-    fn csi_cursor(&mut self, cursor: Cursor) {
+    fn csi(&mut self, params: &[CsiParam], byte: u8) {
+        let (leader, groups) = split_params(params);
+        let arg = |i: usize| groups.get(i).and_then(|g| g[0]).filter(|&v| v != 0);
+        let count = |i: usize| arg(i).unwrap_or(1).min(i64::from(u16::MAX)) as usize;
         let (row, col) = (self.cursor.row, self.cursor.col);
-        match cursor {
-            Cursor::Up(n) => {
+        match (leader, byte) {
+            (None, b'A') => {
                 let floor = if row >= self.region_top {
                     self.region_top
                 } else {
                     0
                 };
-                self.move_to(row.saturating_sub(n as usize).max(floor), col);
+                self.move_to(row.saturating_sub(count(0)).max(floor), col);
             }
-            Cursor::Down(n) | Cursor::LinePositionForward(n) => {
+            (None, b'B' | b'e') => {
                 let ceil = if row <= self.region_bottom {
                     self.region_bottom
                 } else {
                     self.rows_n() - 1
                 };
-                self.move_to(row.saturating_add(n as usize).min(ceil), col);
+                self.move_to(row.saturating_add(count(0)).min(ceil), col);
             }
-            Cursor::Left(n) | Cursor::CharacterPositionBackward(n) => {
-                self.move_to(row, col.saturating_sub(n as usize));
+            (None, b'C' | b'a') => self.move_to(row, col.saturating_add(count(0))),
+            (None, b'D') => self.move_to(row, col.saturating_sub(count(0))),
+            (None, b'E') => self.move_to(row.saturating_add(count(0)), 0),
+            (None, b'F') => self.move_to(row.saturating_sub(count(0)), 0),
+            (None, b'G' | b'`') => self.move_to(row, count(0) - 1),
+            (None, b'd') => self.move_to(count(0) - 1, col),
+            (None, b'H' | b'f') => self.move_to(count(0) - 1, count(1) - 1),
+            (None, b'J') => self.erase_display(arg(0).unwrap_or(0)),
+            (None, b'K') => self.erase_line(arg(0).unwrap_or(0)),
+            (None, b'X') => {
+                let end = col.saturating_add(count(0)).min(self.cols());
+                let blank = self.blank();
+                self.screen_mut().row_mut(row)[col..end].fill(blank);
             }
-            Cursor::Right(n) | Cursor::CharacterPositionForward(n) => {
-                self.move_to(row, col.saturating_add(n as usize));
+            (None, b'P') => {
+                let (cols, blank) = (self.cols(), self.blank());
+                let n = count(0).min(cols - col);
+                let line = self.screen_mut().row_mut(row);
+                line[col..].rotate_left(n);
+                line[cols - n..].fill(blank);
             }
-            Cursor::LinePositionBackward(n) => {
-                self.move_to(row.saturating_sub(n as usize), col);
+            (None, b'@') => {
+                let blank = self.blank();
+                let n = count(0).min(self.cols() - col);
+                let line = self.screen_mut().row_mut(row);
+                line[col..].rotate_right(n);
+                line[col..col + n].fill(blank);
             }
-            Cursor::Position { line, col } | Cursor::CharacterAndLinePosition { line, col } => {
-                self.move_to(line.as_zero_based() as usize, col.as_zero_based() as usize);
+            (None, b'L' | b'M') => {
+                if (self.region_top..=self.region_bottom).contains(&row) {
+                    let saved_top = std::mem::replace(&mut self.region_top, row);
+                    if byte == b'L' {
+                        self.scroll_down(count(0));
+                    } else {
+                        self.scroll_up(count(0));
+                    }
+                    self.region_top = saved_top;
+                    self.cursor.col = 0;
+                    self.cursor.pending_wrap = false;
+                }
             }
-            Cursor::CharacterAbsolute(c) | Cursor::CharacterPositionAbsolute(c) => {
-                self.move_to(row, c.as_zero_based() as usize);
-            }
-            Cursor::LinePositionAbsolute(r) => {
-                self.move_to((r as usize).saturating_sub(1), col);
-            }
-            Cursor::NextLine(n) => {
-                self.move_to(row.saturating_add(n as usize), 0);
-            }
-            Cursor::PrecedingLine(n) => {
-                self.move_to(row.saturating_sub(n as usize), 0);
-            }
-            Cursor::SaveCursor => self.save_cursor(),
-            Cursor::RestoreCursor => self.restore_cursor(),
-            Cursor::SetTopAndBottomMargins { top, bottom } => {
+            (None, b'S') => self.scroll_up(count(0)),
+            (None, b'T') => self.scroll_down(count(0)),
+            (None, b'm') => self.sgr(&groups),
+            (None, b'r') => {
                 let rows = self.rows_n();
-                let top = (top.as_zero_based() as usize).min(rows - 1);
-                let bottom = (bottom.as_zero_based() as usize).min(rows - 1);
+                let top = (count(0) - 1).min(rows - 1);
+                let bottom = arg(1).map_or(rows, |v| v as usize).clamp(1, rows) - 1;
                 if top < bottom {
                     self.region_top = top;
                     self.region_bottom = bottom;
@@ -482,119 +468,122 @@ impl TermGrid {
                 }
                 self.move_to(0, 0);
             }
+            (None, b's') if groups.is_empty() => self.save_cursor(),
+            (None, b'u') => self.restore_cursor(),
+            (Some(b'?'), b'h' | b'l') => {
+                for g in &groups {
+                    if let Some(code) = g[0] {
+                        self.dec_mode(code, byte == b'h');
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    fn csi_edit(&mut self, edit: Edit) {
-        let (row, col) = (self.cursor.row, self.cursor.col);
-        let cols = self.cols();
+    fn erase_line(&mut self, mode: i64) {
+        let (row, col, cols) = (self.cursor.row, self.cursor.col, self.cols());
         let blank = self.blank();
-        match edit {
-            Edit::EraseInLine(mode) => {
-                let line = self.screen_mut().row_mut(row);
-                let range = match mode {
-                    EraseInLine::EraseToEndOfLine => col..cols,
-                    EraseInLine::EraseToStartOfLine => 0..col + 1,
-                    EraseInLine::EraseLine => 0..cols,
-                };
-                line[range].fill(blank);
-                self.cursor.pending_wrap = false;
-            }
-            Edit::EraseInDisplay(mode) => {
-                let rows = self.rows_n();
-                let screen = self.screen_mut();
-                match mode {
-                    EraseInDisplay::EraseToEndOfDisplay => {
-                        screen.row_mut(row)[col..].fill(blank);
-                        for r in row + 1..rows {
-                            screen.row_mut(r).fill(blank);
-                        }
-                    }
-                    EraseInDisplay::EraseToStartOfDisplay => {
-                        for r in 0..row {
-                            screen.row_mut(r).fill(blank);
-                        }
-                        screen.row_mut(row)[..col + 1].fill(blank);
-                    }
-                    EraseInDisplay::EraseDisplay => {
-                        for r in 0..rows {
-                            screen.row_mut(r).fill(blank);
-                        }
-                    }
-                    EraseInDisplay::EraseScrollback => self.scrollback.clear(),
-                }
-                self.cursor.pending_wrap = false;
-            }
-            Edit::EraseCharacter(n) => {
-                let end = col.saturating_add(n as usize).min(cols);
-                self.screen_mut().row_mut(row)[col..end].fill(blank);
-            }
-            Edit::DeleteCharacter(n) => {
-                let n = (n as usize).min(cols - col);
-                let line = self.screen_mut().row_mut(row);
-                line[col..].rotate_left(n);
-                line[cols - n..].fill(blank);
-            }
-            Edit::InsertCharacter(n) => {
-                let n = (n as usize).min(cols - col);
-                let line = self.screen_mut().row_mut(row);
-                line[col..].rotate_right(n);
-                line[col..col + n].fill(blank);
-            }
-            Edit::InsertLine(n) => {
-                if (self.region_top..=self.region_bottom).contains(&row) {
-                    let saved_top = std::mem::replace(&mut self.region_top, row);
-                    self.scroll_down(n as usize);
-                    self.region_top = saved_top;
-                    self.cursor.col = 0;
-                    self.cursor.pending_wrap = false;
+        let range = match mode {
+            0 => col..cols,
+            1 => 0..col + 1,
+            2 => 0..cols,
+            _ => return,
+        };
+        self.screen_mut().row_mut(row)[range].fill(blank);
+        self.cursor.pending_wrap = false;
+    }
+
+    fn erase_display(&mut self, mode: i64) {
+        let (row, col) = (self.cursor.row, self.cursor.col);
+        let rows = self.rows_n();
+        let blank = self.blank();
+        let screen = self.screen_mut();
+        match mode {
+            0 => {
+                screen.row_mut(row)[col..].fill(blank);
+                for r in row + 1..rows {
+                    screen.row_mut(r).fill(blank);
                 }
             }
-            Edit::DeleteLine(n) => {
-                if (self.region_top..=self.region_bottom).contains(&row) {
-                    let saved_top = std::mem::replace(&mut self.region_top, row);
-                    self.scroll_up(n as usize);
-                    self.region_top = saved_top;
-                    self.cursor.col = 0;
-                    self.cursor.pending_wrap = false;
+            1 => {
+                for r in 0..row {
+                    screen.row_mut(r).fill(blank);
+                }
+                screen.row_mut(row)[..col + 1].fill(blank);
+            }
+            2 => {
+                for r in 0..rows {
+                    screen.row_mut(r).fill(blank);
                 }
             }
-            Edit::ScrollUp(n) => self.scroll_up(n as usize),
-            Edit::ScrollDown(n) => self.scroll_down(n as usize),
-            _ => {}
+            3 => {
+                self.scrollback.clear();
+                return;
+            }
+            _ => return,
+        }
+        self.cursor.pending_wrap = false;
+    }
+
+    fn sgr(&mut self, groups: &[Vec<Option<i64>>]) {
+        if groups.is_empty() {
+            self.pen = CellStyle::default();
+            return;
+        }
+        let mut i = 0;
+        while i < groups.len() {
+            let group = &groups[i];
+            i += 1;
+            let code = group[0].unwrap_or(0);
+            match code {
+                0 => self.pen = CellStyle::default(),
+                1 => {
+                    self.pen.bold = true;
+                    self.pen.dim = false;
+                }
+                2 => {
+                    self.pen.dim = true;
+                    self.pen.bold = false;
+                }
+                3 => self.pen.italic = true,
+                4 => self.pen.underline = group.get(1).copied().flatten() != Some(0),
+                7 => self.pen.reverse = true,
+                21 => self.pen.underline = true,
+                22 => {
+                    self.pen.bold = false;
+                    self.pen.dim = false;
+                }
+                23 => self.pen.italic = false,
+                24 => self.pen.underline = false,
+                27 => self.pen.reverse = false,
+                30..=37 => self.pen.fg = Color::Indexed((code - 30) as u8),
+                39 => self.pen.fg = Color::Default,
+                40..=47 => self.pen.bg = Color::Indexed((code - 40) as u8),
+                49 => self.pen.bg = Color::Default,
+                90..=97 => self.pen.fg = Color::Indexed((code - 90 + 8) as u8),
+                100..=107 => self.pen.bg = Color::Indexed((code - 100 + 8) as u8),
+                38 | 48 => {
+                    let (color, used) = extended_color(group, &groups[i..]);
+                    i += used;
+                    if let Some(color) = color {
+                        if code == 38 {
+                            self.pen.fg = color;
+                        } else {
+                            self.pen.bg = color;
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
-    fn sgr(&mut self, sgr: Sgr) {
-        match sgr {
-            Sgr::Reset => self.pen = CellStyle::default(),
-            Sgr::Intensity(Intensity::Normal) => {
-                self.pen.bold = false;
-                self.pen.dim = false;
-            }
-            Sgr::Intensity(Intensity::Bold) => {
-                self.pen.bold = true;
-                self.pen.dim = false;
-            }
-            Sgr::Intensity(Intensity::Half) => {
-                self.pen.dim = true;
-                self.pen.bold = false;
-            }
-            Sgr::Underline(u) => self.pen.underline = u != Underline::None,
-            Sgr::Italic(on) => self.pen.italic = on,
-            Sgr::Inverse(on) => self.pen.reverse = on,
-            Sgr::Foreground(spec) => self.pen.fg = convert_color(spec),
-            Sgr::Background(spec) => self.pen.bg = convert_color(spec),
-            _ => {}
-        }
-    }
-
-    fn dec_mode(&mut self, code: DecPrivateModeCode, on: bool) {
+    fn dec_mode(&mut self, code: i64, on: bool) {
         match code {
-            DecPrivateModeCode::ShowCursor => self.cursor_visible = on,
-            DecPrivateModeCode::AutoWrap => self.autowrap = on,
-            DecPrivateModeCode::ClearAndEnableAlternateScreen => {
+            25 => self.cursor_visible = on,
+            7 => self.autowrap = on,
+            1049 => {
                 if on {
                     if !self.in_alt {
                         self.save_cursor();
@@ -605,8 +594,7 @@ impl TermGrid {
                     self.restore_cursor();
                 }
             }
-            DecPrivateModeCode::OptEnableAlternateScreen
-            | DecPrivateModeCode::EnableAlternateScreen => {
+            1047 | 47 => {
                 if on {
                     self.enter_alt();
                 } else {
@@ -653,24 +641,24 @@ impl TermGrid {
         }
     }
 
-    fn esc(&mut self, esc: Esc) {
-        match esc {
-            Esc::Code(EscCode::DecSaveCursorPosition) => self.save_cursor(),
-            Esc::Code(EscCode::DecRestoreCursorPosition) => self.restore_cursor(),
-            Esc::Code(EscCode::Index) => {
+    fn esc(&mut self, byte: u8) {
+        match byte {
+            b'7' => self.save_cursor(),
+            b'8' => self.restore_cursor(),
+            b'D' => {
                 self.cursor.pending_wrap = false;
                 self.index();
             }
-            Esc::Code(EscCode::NextLine) => {
+            b'E' => {
                 self.cursor.col = 0;
                 self.cursor.pending_wrap = false;
                 self.index();
             }
-            Esc::Code(EscCode::ReverseIndex) => {
+            b'M' => {
                 self.cursor.pending_wrap = false;
                 self.reverse_index();
             }
-            Esc::Code(EscCode::FullReset) => {
+            b'c' => {
                 let (cols, rows) = (self.cols() as u16, self.rows_n() as u16);
                 let parser = self.parser.take();
                 *self = TermGrid::new(cols, rows);
@@ -679,28 +667,112 @@ impl TermGrid {
             _ => {}
         }
     }
-
-    fn osc(&mut self, osc: OperatingSystemCommand) {
-        match osc {
-            OperatingSystemCommand::SetWindowTitle(t)
-            | OperatingSystemCommand::SetIconNameAndWindowTitle(t) => {
-                self.title = if t.is_empty() { None } else { Some(t) };
-            }
-            _ => {}
-        }
-    }
 }
 
-fn convert_color(spec: ColorSpec) -> Color {
-    match spec {
-        ColorSpec::Default => Color::Default,
-        ColorSpec::PaletteIndex(i) => Color::Indexed(i),
-        ColorSpec::TrueColor(c) => {
-            let (r, g, b, _) = c.to_srgb_u8();
-            let round = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
-            let _ = (r, g, b);
-            Color::Rgb(round(c.0), round(c.1), round(c.2))
+impl VTActor for TermGrid {
+    fn print(&mut self, c: char) {
+        self.put_char(c);
+    }
+
+    fn execute_c0_or_c1(&mut self, control: u8) {
+        self.control(control);
+    }
+
+    fn dcs_hook(&mut self, _: u8, _: &[i64], _: &[u8], _: bool) {}
+
+    fn dcs_put(&mut self, _: u8) {}
+
+    fn dcs_unhook(&mut self) {}
+
+    fn esc_dispatch(&mut self, _: &[i64], intermediates: &[u8], _: bool, byte: u8) {
+        if intermediates.is_empty() {
+            self.esc(byte);
         }
+    }
+
+    fn csi_dispatch(&mut self, params: &[CsiParam], _: bool, byte: u8) {
+        self.csi(params, byte);
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]]) {
+        if let [b"0" | b"2", rest @ ..] = params {
+            let title = rest
+                .iter()
+                .map(|p| String::from_utf8_lossy(p))
+                .collect::<Vec<_>>()
+                .join(";");
+            self.title = if title.is_empty() { None } else { Some(title) };
+        }
+    }
+
+    fn apc_dispatch(&mut self, _: Vec<u8>) {}
+}
+
+/// Splits CSI params into `;`-separated groups of `:`-separated values; a sequence carrying an
+/// intermediate byte (e.g. `CSI SP q`) comes back as a leader of `0xff` so no handler matches it.
+fn split_params(params: &[CsiParam]) -> (Option<u8>, Vec<Vec<Option<i64>>>) {
+    let mut leader = None;
+    let mut groups = Vec::new();
+    let mut group = Vec::new();
+    let mut value = None;
+    let mut seen = false;
+    for (i, param) in params.iter().enumerate() {
+        match param {
+            CsiParam::Integer(v) => {
+                value = Some(*v);
+                seen = true;
+            }
+            CsiParam::P(b';') => {
+                group.push(value.take());
+                groups.push(std::mem::take(&mut group));
+                seen = true;
+            }
+            CsiParam::P(b':') => {
+                group.push(value.take());
+                seen = true;
+            }
+            CsiParam::P(c @ (b'?' | b'<' | b'=' | b'>')) if i == 0 => leader = Some(*c),
+            CsiParam::P(_) => leader = Some(0xff),
+        }
+    }
+    if seen {
+        group.push(value);
+        groups.push(group);
+    }
+    (leader, groups)
+}
+
+/// Decodes the colour after SGR 38/48 in either `38;5;n` / `38;2;r;g;b` or `38:5:n` /
+/// `38:2:[cs:]r:g:b` form, returning how many following groups were consumed.
+fn extended_color(group: &[Option<i64>], rest: &[Vec<Option<i64>>]) -> (Option<Color>, usize) {
+    let byte = |v: Option<i64>| v.unwrap_or(0).clamp(0, 255) as u8;
+    if group.len() > 1 {
+        let color = match group[1] {
+            Some(5) => group.get(2).map(|&v| Color::Indexed(byte(v))),
+            Some(2) if group.len() >= 5 => {
+                let n = group.len();
+                Some(Color::Rgb(
+                    byte(group[n - 3]),
+                    byte(group[n - 2]),
+                    byte(group[n - 1]),
+                ))
+            }
+            _ => None,
+        };
+        return (color, 0);
+    }
+    let first = |i: usize| rest.get(i).map(|g| g[0]);
+    match first(0) {
+        Some(Some(5)) => match first(1) {
+            Some(v) => (Some(Color::Indexed(byte(v))), 2),
+            None => (None, rest.len()),
+        },
+        Some(Some(2)) => match (first(1), first(2), first(3)) {
+            (Some(r), Some(g), Some(b)) => (Some(Color::Rgb(byte(r), byte(g), byte(b))), 4),
+            _ => (None, rest.len()),
+        },
+        Some(_) => (None, 1),
+        None => (None, 0),
     }
 }
 
@@ -798,6 +870,39 @@ mod tests {
         assert_eq!(g.cell(0, 0).style.fg, Color::Indexed(9));
         assert_eq!(g.cell(0, 1).style.fg, Color::Rgb(255, 128, 0));
         assert_eq!(g.cell(0, 2).style.fg, Color::Default);
+    }
+
+    #[test]
+    fn colon_and_semicolon_color_forms() {
+        let g = grid(
+            10,
+            1,
+            "\x1b[38:2::10:20:30mA\x1b[48:5:99mB\x1b[38:2:10:20:30mC\x1b[4:0mD",
+        );
+        assert_eq!(g.cell(0, 0).style.fg, Color::Rgb(10, 20, 30));
+        assert_eq!(g.cell(0, 1).style.bg, Color::Indexed(99));
+        assert_eq!(g.cell(0, 2).style.fg, Color::Rgb(10, 20, 30));
+        assert!(!g.cell(0, 3).style.underline);
+        let g = grid(10, 1, "\x1b[1;38;5;196;48;2;1;2;3;4mA");
+        let s = g.cell(0, 0).style;
+        assert_eq!((s.fg, s.bg), (Color::Indexed(196), Color::Rgb(1, 2, 3)));
+        assert!(s.bold && s.underline);
+    }
+
+    #[test]
+    fn default_params_and_private_markers() {
+        let g = grid(10, 3, "\x1b[;3HX\x1b[0;0HY\x1b[?25;7l");
+        assert_eq!(g.cell(0, 2).ch, 'X');
+        assert_eq!(g.cell(0, 0).ch, 'Y');
+        assert!(!g.cursor().2);
+        let g = grid(10, 2, "ab\x1b[>1;2cc\x1b[ qd\x1b[?Hx");
+        assert_eq!(g.row_text(0), "abcdx");
+    }
+
+    #[test]
+    fn osc_title_with_semicolons() {
+        let g = grid(10, 1, "\x1b]0;a;b\x07");
+        assert_eq!(g.title(), Some("a;b"));
     }
 
     #[test]

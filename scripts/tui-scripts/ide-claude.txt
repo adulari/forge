@@ -1,0 +1,16 @@
+# `C` in the agent panel: continue the session in Claude Code. The daemon prepares the transcript
+# and the terminal tab runs `claude --resume <id>` in the session's folder. Run with
+#   IDE_SCRIPT=ide-claude.txt scripts/ide-flow-e2e.sh
+sleep 1500
+chord F2
+sleep 2500
+chord m
+type hello there
+chord Enter
+sleep 3500
+chord Tab Tab
+sleep 300
+chord C
+sleep 4000
+capture handoff
+expect claude --resume
