@@ -29,6 +29,6 @@ DPID=$!
 for _ in $(seq 1 60); do [[ -s "$XDG_CONFIG_HOME/forge/serve-token" ]] && curl -fs "http://127.0.0.1:$PORT/$(cat "$XDG_CONFIG_HOME/forge/serve-token")/api/sessions" >/dev/null && break; sleep 0.5; done
 TOKEN="$(cat "$XDG_CONFIG_HOME/forge/serve-token")"
 # A live session on the project, so the changes route has an agent to attribute them to.
-curl -fs -X POST -H 'content-type: application/json' -d "{\"cwd\":\"$SCRATCH\"}" "http://127.0.0.1:$PORT/$TOKEN/api/sessions" >/dev/null
-"$REPO/scripts/tui-drive.sh" --cwd "$SCRATCH" --cols "${COLS:-200}" --rows "${ROWS:-50}" "$REPO/scripts/tui-scripts/ide-flow.txt"
+curl -fs -X POST -H 'content-type: application/json' -d "{\"cwd\":\"$SCRATCH\"${IDE_TEMPER:+,\"temper\":\"$IDE_TEMPER\"}}" "http://127.0.0.1:$PORT/$TOKEN/api/sessions" >/dev/null
+"$REPO/scripts/tui-drive.sh" --cwd "$SCRATCH" --cols "${COLS:-200}" --rows "${ROWS:-50}" "$REPO/scripts/tui-scripts/${IDE_SCRIPT:-ide-flow.txt}"
 exit $?
