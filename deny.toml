@@ -31,6 +31,10 @@ ignore = [
   "RUSTSEC-2026-0370",
   "RUSTSEC-2026-0371",
   "RUSTSEC-2026-0372",
+  # `pin-utils` is unmaintained (repository archived 2026-10-01). Pulled by aws-smithy-http /
+  # aws-smithy-runtime / aws-smithy-types via the vendored genai's Bedrock client. No CVE; no safe
+  # upgrade. Added 2026-11-05; drop when the AWS SDK moves to core::pin::pin! / pin-project-lite.
+  "RUSTSEC-2026-0441",
 ]
 
 [licenses]
