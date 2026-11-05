@@ -11,11 +11,14 @@ pub mod edit_buf;
 pub mod hunk;
 pub mod keys;
 pub mod model;
+mod nav;
+mod ops;
 pub mod render;
 pub mod review;
 pub mod state;
 pub mod term_grid;
 pub mod timeline;
+mod types;
 pub mod wire;
 
 #[cfg(test)]
