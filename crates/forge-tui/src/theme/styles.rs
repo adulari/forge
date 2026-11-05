@@ -273,3 +273,14 @@ pub fn cursor() -> Style {
         Style::default().add_modifier(Modifier::REVERSED)
     }
 }
+
+/// A palette index a program in the IDE terminal asked for. Terminal output is data the program
+/// chose, not part of Forge's palette, so the literal lives here with the others.
+pub fn terminal_indexed(n: u8) -> ratatui::style::Color {
+    ratatui::style::Color::Indexed(n)
+}
+
+/// A truecolor value a program in the IDE terminal asked for.
+pub fn terminal_rgb(r: u8, g: u8, b: u8) -> ratatui::style::Color {
+    ratatui::style::Color::Rgb(r, g, b)
+}

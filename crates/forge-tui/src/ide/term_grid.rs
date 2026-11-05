@@ -9,7 +9,7 @@ const SCROLLBACK_CAP: usize = 1000;
 const TAB_STOP: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
-pub enum Color {
+pub enum Hue {
     #[default]
     Default,
     Indexed(u8),
@@ -18,8 +18,8 @@ pub enum Color {
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct CellStyle {
-    pub fg: Color,
-    pub bg: Color,
+    pub fg: Hue,
+    pub bg: Hue,
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
@@ -46,8 +46,8 @@ impl Default for Cell {
 static BLANK: Cell = Cell {
     ch: ' ',
     style: CellStyle {
-        fg: Color::Default,
-        bg: Color::Default,
+        fg: Hue::Default,
+        bg: Hue::Default,
         bold: false,
         dim: false,
         italic: false,
@@ -557,12 +557,12 @@ impl TermGrid {
                 23 => self.pen.italic = false,
                 24 => self.pen.underline = false,
                 27 => self.pen.reverse = false,
-                30..=37 => self.pen.fg = Color::Indexed((code - 30) as u8),
-                39 => self.pen.fg = Color::Default,
-                40..=47 => self.pen.bg = Color::Indexed((code - 40) as u8),
-                49 => self.pen.bg = Color::Default,
-                90..=97 => self.pen.fg = Color::Indexed((code - 90 + 8) as u8),
-                100..=107 => self.pen.bg = Color::Indexed((code - 100 + 8) as u8),
+                30..=37 => self.pen.fg = Hue::Indexed((code - 30) as u8),
+                39 => self.pen.fg = Hue::Default,
+                40..=47 => self.pen.bg = Hue::Indexed((code - 40) as u8),
+                49 => self.pen.bg = Hue::Default,
+                90..=97 => self.pen.fg = Hue::Indexed((code - 90 + 8) as u8),
+                100..=107 => self.pen.bg = Hue::Indexed((code - 100 + 8) as u8),
                 38 | 48 => {
                     let (color, used) = extended_color(group, &groups[i..]);
                     i += used;
@@ -744,14 +744,14 @@ fn split_params(params: &[CsiParam]) -> (Option<u8>, Vec<Vec<Option<i64>>>) {
 
 /// Decodes the colour after SGR 38/48 in either `38;5;n` / `38;2;r;g;b` or `38:5:n` /
 /// `38:2:[cs:]r:g:b` form, returning how many following groups were consumed.
-fn extended_color(group: &[Option<i64>], rest: &[Vec<Option<i64>>]) -> (Option<Color>, usize) {
+fn extended_color(group: &[Option<i64>], rest: &[Vec<Option<i64>>]) -> (Option<Hue>, usize) {
     let byte = |v: Option<i64>| v.unwrap_or(0).clamp(0, 255) as u8;
     if group.len() > 1 {
         let color = match group[1] {
-            Some(5) => group.get(2).map(|&v| Color::Indexed(byte(v))),
+            Some(5) => group.get(2).map(|&v| Hue::Indexed(byte(v))),
             Some(2) if group.len() >= 5 => {
                 let n = group.len();
-                Some(Color::Rgb(
+                Some(Hue::Rgb(
                     byte(group[n - 3]),
                     byte(group[n - 2]),
                     byte(group[n - 1]),
@@ -764,11 +764,11 @@ fn extended_color(group: &[Option<i64>], rest: &[Vec<Option<i64>>]) -> (Option<C
     let first = |i: usize| rest.get(i).map(|g| g[0]);
     match first(0) {
         Some(Some(5)) => match first(1) {
-            Some(v) => (Some(Color::Indexed(byte(v))), 2),
+            Some(v) => (Some(Hue::Indexed(byte(v))), 2),
             None => (None, rest.len()),
         },
         Some(Some(2)) => match (first(1), first(2), first(3)) {
-            (Some(r), Some(g), Some(b)) => (Some(Color::Rgb(byte(r), byte(g), byte(b))), 4),
+            (Some(r), Some(g), Some(b)) => (Some(Hue::Rgb(byte(r), byte(g), byte(b))), 4),
             _ => (None, rest.len()),
         },
         Some(_) => (None, 1),
@@ -852,12 +852,12 @@ mod tests {
             "\x1b[1;31mR\x1b[0m\x1b[38;5;200mI\x1b[48;2;1;2;3mT\x1b[0;3;4;7;2mA\x1b[22;23;24;27mB\x1b[mC",
         );
         let r = g.cell(0, 0).style;
-        assert_eq!(r.fg, Color::Indexed(1));
+        assert_eq!(r.fg, Hue::Indexed(1));
         assert!(r.bold);
-        assert_eq!(g.cell(0, 1).style.fg, Color::Indexed(200));
+        assert_eq!(g.cell(0, 1).style.fg, Hue::Indexed(200));
         assert!(!g.cell(0, 1).style.bold);
-        assert_eq!(g.cell(0, 2).style.bg, Color::Rgb(1, 2, 3));
-        assert_eq!(g.cell(0, 2).style.fg, Color::Indexed(200));
+        assert_eq!(g.cell(0, 2).style.bg, Hue::Rgb(1, 2, 3));
+        assert_eq!(g.cell(0, 2).style.fg, Hue::Indexed(200));
         let a = g.cell(0, 3).style;
         assert!(a.italic && a.underline && a.reverse && a.dim);
         assert_eq!(g.cell(0, 4).style, CellStyle::default());
@@ -867,9 +867,9 @@ mod tests {
     #[test]
     fn bright_and_truecolor_fg() {
         let g = grid(10, 1, "\x1b[91mA\x1b[38;2;255;128;0mB\x1b[39mC");
-        assert_eq!(g.cell(0, 0).style.fg, Color::Indexed(9));
-        assert_eq!(g.cell(0, 1).style.fg, Color::Rgb(255, 128, 0));
-        assert_eq!(g.cell(0, 2).style.fg, Color::Default);
+        assert_eq!(g.cell(0, 0).style.fg, Hue::Indexed(9));
+        assert_eq!(g.cell(0, 1).style.fg, Hue::Rgb(255, 128, 0));
+        assert_eq!(g.cell(0, 2).style.fg, Hue::Default);
     }
 
     #[test]
@@ -879,13 +879,13 @@ mod tests {
             1,
             "\x1b[38:2::10:20:30mA\x1b[48:5:99mB\x1b[38:2:10:20:30mC\x1b[4:0mD",
         );
-        assert_eq!(g.cell(0, 0).style.fg, Color::Rgb(10, 20, 30));
-        assert_eq!(g.cell(0, 1).style.bg, Color::Indexed(99));
-        assert_eq!(g.cell(0, 2).style.fg, Color::Rgb(10, 20, 30));
+        assert_eq!(g.cell(0, 0).style.fg, Hue::Rgb(10, 20, 30));
+        assert_eq!(g.cell(0, 1).style.bg, Hue::Indexed(99));
+        assert_eq!(g.cell(0, 2).style.fg, Hue::Rgb(10, 20, 30));
         assert!(!g.cell(0, 3).style.underline);
         let g = grid(10, 1, "\x1b[1;38;5;196;48;2;1;2;3;4mA");
         let s = g.cell(0, 0).style;
-        assert_eq!((s.fg, s.bg), (Color::Indexed(196), Color::Rgb(1, 2, 3)));
+        assert_eq!((s.fg, s.bg), (Hue::Indexed(196), Hue::Rgb(1, 2, 3)));
         assert!(s.bold && s.underline);
     }
 
@@ -954,7 +954,7 @@ mod tests {
         g.feed(b"\x1b[3");
         g.feed(b"1mX\x1b");
         g.feed(b"[0mY");
-        assert_eq!(g.cell(0, 0).style.fg, Color::Indexed(1));
+        assert_eq!(g.cell(0, 0).style.fg, Hue::Indexed(1));
         assert_eq!(g.cell(0, 1).style, CellStyle::default());
         assert_eq!(g.row_text(0), "XY");
     }
@@ -1153,12 +1153,12 @@ mod tests {
         assert_eq!(g.row_text(0), "$ ls --color");
         assert_eq!(g.row_text(1), "src  run.sh  Cargo.toml  archive.tar");
         assert_eq!(g.row_text(2), "link -> src");
-        assert_eq!(g.cell(1, 0).style.fg, Color::Indexed(4));
+        assert_eq!(g.cell(1, 0).style.fg, Hue::Indexed(4));
         assert!(g.cell(1, 0).style.bold);
         assert_eq!(g.cell(1, 3).style, CellStyle::default());
         assert_eq!(g.cell(1, 3).ch, ' ');
-        assert_eq!(g.cell(1, 7).style.fg, Color::Indexed(2));
-        assert_eq!(g.cell(1, 25).style.fg, Color::Indexed(1));
+        assert_eq!(g.cell(1, 7).style.fg, Hue::Indexed(2));
+        assert_eq!(g.cell(1, 25).style.fg, Hue::Indexed(1));
         assert_eq!(g.cursor(), (3, 2, true));
         g.feed(b"\x1b[2J\x1b[H");
         assert_eq!(g.visible_text(), "");

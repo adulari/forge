@@ -5,12 +5,12 @@ use std::collections::HashSet;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color as RColor, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 
 use super::{cells, clip, fill, put, rule_row};
 use crate::ide::checks::{check_state, refs_in, strip_ansi, CheckState};
 use crate::ide::state::{BottomTab, Hit, IdeApp, Pane};
-use crate::ide::term_grid::{CellStyle, Color};
+use crate::ide::term_grid::{CellStyle, Hue};
 use crate::jobs_overlay::age_label;
 use crate::theme::glyphs::g;
 use crate::theme::styles;
@@ -516,11 +516,11 @@ fn shells(app: &mut IdeApp, buf: &mut Buffer, body: Rect, hits: &mut Vec<(Rect, 
     );
 }
 
-fn term_color(color: Color) -> Option<RColor> {
+fn term_color(color: Hue) -> Option<ratatui::style::Color> {
     match color {
-        Color::Default => None,
-        Color::Indexed(n) => Some(RColor::Indexed(n)),
-        Color::Rgb(r, g, b) => Some(RColor::Rgb(r, g, b)),
+        Hue::Default => None,
+        Hue::Indexed(n) => Some(styles::terminal_indexed(n)),
+        Hue::Rgb(r, g, b) => Some(styles::terminal_rgb(r, g, b)),
     }
 }
 
