@@ -128,7 +128,10 @@ pub(super) fn status_response(
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?)
     .into_owned();
-    let entries = parse_status_z(&status);
+    let entries: Vec<_> = parse_status_z(&status)
+        .into_iter()
+        .filter(|(x, y, path, _)| !(*x == '?' && *y == '?' && super::is_noise_path(path)))
+        .collect();
     let unstaged_stat = parse_numstat_z(&String::from_utf8_lossy(&git_raw(
         &root,
         &["diff", "--numstat", "-z"],

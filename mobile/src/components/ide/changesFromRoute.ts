@@ -2,10 +2,14 @@
 // hashes, the synthetic `unattributed` group) is tested without a daemon.
 import type { ProjectChangesResponse, SessionRow } from "../../lib/api";
 import type { IdeChangedFile, SessionChanges } from "./changesAdapter";
+import { isNoisePath } from "./noisePaths";
 
 type RouteFile = ProjectChangesResponse["sessions"][number]["files"][number];
 
 const STATUS: Record<RouteFile["kind"], string> = { created: "A", modified: "M", deleted: "D", renamed: "R" };
+
+/** Untracked build noise has no marker in the route (it says `created`); older daemons still list it. */
+const visible = (file: RouteFile): boolean => !(file.kind === "created" && isNoisePath(file.path));
 
 export function fileFromRoute(file: RouteFile, worktree: boolean): IdeChangedFile {
   return {
@@ -37,10 +41,10 @@ export function sessionChangesFromRoute(
   for (const group of response.sessions) {
     const target = out.get(group.session_id);
     if (!target) {
-      if (group.session_id === "unattributed") orphans.push(...group.files);
+      if (group.session_id === "unattributed") orphans.push(...group.files.filter(visible));
       continue;
     }
-    target.files = group.files.map((file) => fileFromRoute(file, target.source === "worktree"));
+    target.files = group.files.filter(visible).map((file) => fileFromRoute(file, target.source === "worktree"));
   }
   if (orphans.length > 0) {
     const holder = [...sessions].filter((row) => !row.worktree).sort((a, b) => b.last_activity - a.last_activity)[0];

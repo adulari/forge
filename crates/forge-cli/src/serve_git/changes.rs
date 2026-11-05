@@ -330,6 +330,9 @@ fn tree_files(root: &Path) -> Vec<ChangedFile> {
         if x == '!' || path.starts_with(".forge/") {
             continue;
         }
+        if x == '?' && super::is_noise_path(&path) {
+            continue;
+        }
         let kind = match (x, y) {
             ('?', '?') | ('A', _) | (_, 'A') => "created",
             ('D', _) | (_, 'D') => "deleted",
