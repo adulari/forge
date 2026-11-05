@@ -1,0 +1,3 @@
+[bindings.kotlin]
+package_name = "dev.adulari.forge.core"
+cdylib_name = "forge_mobile_core"

@@ -1,0 +1,3 @@
+-keep class com.sun.jna.** { *; }
+-keep class dev.adulari.forge.core.** { *; }
+-dontwarn java.awt.**
