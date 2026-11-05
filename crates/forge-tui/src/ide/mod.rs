@@ -10,6 +10,7 @@ pub mod checks;
 pub mod edit_buf;
 pub mod hunk;
 pub mod keys;
+mod keys_input;
 pub mod model;
 mod nav;
 mod ops;

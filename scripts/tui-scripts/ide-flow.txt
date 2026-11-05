@@ -66,9 +66,9 @@ chord t
 sleep 1500
 expect Tests
 chord Enter
-sleep 3500
+sleep 5000
 chord o
-sleep 800
+sleep 1200
 expect src/a.txt:3
 capture checks
 chord Escape

@@ -5,7 +5,11 @@
 
 pub use super::types::*;
 
+mod bottom;
+mod editing;
+mod project;
 mod tools;
+mod tracing;
 pub use tools::{
     BlameData, ChecksState, CommentTarget, EditState, FileRow, FilesState, HlCache, JobsState,
     SaveFailure, TermState, Tools, View, WhyPopup, COACH,

@@ -17,6 +17,7 @@ mod agent;
 mod bottom;
 mod edit;
 mod editor;
+mod files;
 mod help;
 mod hints;
 mod rail;
