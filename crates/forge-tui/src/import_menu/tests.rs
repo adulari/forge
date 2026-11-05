@@ -159,7 +159,7 @@ fn it_renders_at_80x24_and_wide_with_the_fallback_hint() {
         let s = screen(&app, w, h);
         assert!(s.contains("Import conversations"), "{s}");
         assert!(s.contains("fix the flaky test"), "{s}");
-        assert!(s.contains("imported"), "{s}");
+        assert!(s.contains("linked"), "{s}");
         assert!(s.contains("1 selected"), "{s}");
         assert!(s.contains("3d ago"), "{s}");
         assert!(s.contains("Enter import"), "{s}");

@@ -428,8 +428,8 @@ pub const COMMANDS: &[Command] = &[
         usage: "/claude",
     },
     Command {
-        name: "continue-claude",
-        desc: "Continue a Claude Code session here: import it, or sync its new turns (alias: /cc)",
+        name: "cc",
+        desc: "continue a Claude Code session here (also /continue-claude)",
         usage: "/continue-claude [session id]",
     },
     Command {
