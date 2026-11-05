@@ -74,7 +74,16 @@ fn row_line(m: &ImportMenu, r: &ImportRow, focused: bool, w: usize, now: i64) ->
     };
     let agent = pad(&r.agent, 7);
     let when = pad(&trunc(&age(now, r.modified), 8), 9);
-    let state = pad(if r.imported { "imported" } else { "" }, 8);
+    let state = pad(
+        if r.linked {
+            "linked"
+        } else if r.imported {
+            "imported"
+        } else {
+            ""
+        },
+        8,
+    );
     let dir_w = (w / 3).clamp(10, 34);
     let fixed = 2 + 2 + 7 + 1 + dir_w + 1 + 9 + 8;
     let title_w = w.saturating_sub(fixed).max(8);
@@ -140,7 +149,7 @@ fn filter_line(m: &ImportMenu) -> Line<'static> {
 fn footer(m: &ImportMenu, max: usize) -> String {
     let mut pairs: Vec<(String, &str)> = vec![
         (g().up_down.to_string(), "move"),
-        ("Enter".into(), "import"),
+        ("Enter".into(), "import/continue"),
         if m.query.is_empty() {
             ("Space".into(), "select")
         } else {

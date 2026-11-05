@@ -114,3 +114,26 @@ written last line is left for the next sync.
   read; otherwise the session is re-imported as a new Forge session.
 * A project path longer than 200 characters needs Claude Code to have created its directory first
   (its name carries a hash this tool does not reproduce).
+
+## From every surface
+
+* **Daemon routes** (`serve_claude_link.rs`; scope `manage-providers` for the writes):
+  `GET /api/sessions/{id}/claude` returns `{linked, cc_session_id, cwd, synced}`.
+  `POST /api/sessions/{id}/claude` is `forge switch --to claude --no-launch`: it creates or extends
+  the linked Claude Code transcript (only new turns after the first time) and returns
+  `{cc_session_id, cwd, command}`, where `command` is `claude --resume <id>` plus the model and
+  permission flags. It answers 409 while the session is busy, waiting, or open in a terminal, or
+  while Claude Code has the transcript open.
+  `POST /api/claude/sessions/{cc_id}/continue` brings a Claude Code session into Forge: a linked one
+  gets only its new turns appended (`mode: "synced"`), an unknown one is imported
+  (`mode: "imported"`); it returns `{session_id, mode, appended}`. Over Forge Anywhere these are the
+  bridge routes `session_claude`, `export_session_claude`, `continue_claude_session`.
+* **Desktop**: "Continue in Claude Code" (session header menu, IDE agent panel header, palette,
+  sidebar context menu) calls the POST, opens the built-in terminal (the IDE bottom panel's Terminal
+  tab in IDE mode, the terminal dock otherwise) on a dedicated `claude` terminal and types the command
+  once the shell is attached; a toast offers "Copy command" (`cd <cwd> && <command>`). "Continue a
+  Claude Code session…" (palette, Home, New session) is a quick picker, newest first; Enter continues
+  and opens the Forge session. On a phone the command is copied and the terminal screen opens.
+* **Terminal chat**: `/continue-claude` (and Enter on a Claude Code row in `/import`) imports or syncs
+  and switches the chat into that session in place. `/claude` ("Continue this session in Claude
+  Code") is the way back.

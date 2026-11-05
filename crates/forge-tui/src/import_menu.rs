@@ -26,6 +26,9 @@ pub struct ImportRow {
     pub modified: i64,
     /// Already in Forge: shown, not selectable.
     pub imported: bool,
+    /// A Claude Code conversation mirrored by a Forge session: Enter syncs its new turns instead
+    /// of refusing it.
+    pub linked: bool,
 }
 
 impl ImportRow {
@@ -96,6 +99,8 @@ pub enum ImportAction {
     Close,
     /// `(agent, id)` of each conversation to import.
     Import(Vec<(String, String)>),
+    /// Import-or-sync this Claude Code conversation (by id) and switch the TUI into its session.
+    Continue(String),
 }
 
 #[derive(Debug, Clone, Default)]
@@ -142,6 +147,12 @@ impl ImportMenu {
         };
     }
 
+    /// Open already narrowed to Claude Code conversations (`/continue-claude`).
+    pub fn open_claude(&mut self, fallback: String) {
+        self.open(fallback);
+        self.agent = AgentFilter::Claude;
+    }
+
     pub fn close(&mut self) {
         self.open = false;
     }
@@ -173,6 +184,13 @@ impl ImportMenu {
         let tone = if failed > 0 { Tone::Warn } else { Tone::Ok };
         self.notify(tone, summary(imported, skipped, failed));
         self.rescan = true;
+    }
+
+    /// A continue finished: the picker closes (the binary switches sessions) with a note kept on
+    /// failure only.
+    pub fn finish_continue(&mut self) {
+        self.importing = false;
+        self.close();
     }
 
     pub fn fail_import(&mut self, error: String) {
@@ -296,8 +314,15 @@ impl ImportMenu {
                     .map(|r| (r.agent.clone(), r.id.clone()))
                     .collect();
                 if picks.is_empty() {
-                    if let Some(r) = self.visible().get(self.cursor).filter(|r| !r.imported) {
-                        picks.push((r.agent.clone(), r.id.clone()));
+                    if let Some(r) = self.visible().get(self.cursor) {
+                        if r.agent == "claude" {
+                            let id = r.id.clone();
+                            self.importing = true;
+                            return ImportAction::Continue(id);
+                        }
+                        if !r.imported {
+                            picks.push((r.agent.clone(), r.id.clone()));
+                        }
                     }
                 }
                 if picks.is_empty() {

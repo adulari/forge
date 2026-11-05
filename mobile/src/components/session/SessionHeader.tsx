@@ -75,6 +75,8 @@ export interface SessionHeaderProps {
   onLattice: () => void;
   onJobs: () => void;
   onManageLifecycle: () => void;
+  /** Hands the conversation to Claude Code in a terminal (daemon: POST /api/sessions/{id}/claude). */
+  onContinueClaude?: () => void;
   /** Expanded workbench controls. Compact layouts use their native navigation instead. */
   onToggleGitReview?: () => void;
   onToggleFiles?: () => void;
@@ -198,6 +200,13 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
           <ListRow title="Start model duel" leading={<Swords size={20} color={tokens.ink2} />} onPress={() => run(props.onDuel)} />
           <ListRow title="Open session replay" leading={<History size={20} color={tokens.ink2} />} onPress={() => run(props.onReplay)} />
           <ListRow title="Rename or archive session" leading={<Settings2 size={20} color={tokens.ink2} />} onPress={() => run(props.onManageLifecycle)} />
+          {props.onContinueClaude ? (
+            <ListRow
+              title="Continue in Claude Code"
+              leading={<SquareTerminal size={20} color={tokens.ink2} />}
+              onPress={() => run(props.onContinueClaude!)}
+            />
+          ) : null}
           <ListRow title="Open workflows" leading={<Workflow size={20} color={tokens.ink2} />} onPress={() => run(props.onWorkflows)} />
           <ListRow title="Create implementation plan" leading={<Map size={20} color={tokens.ink2} />} onPress={() => run(props.onPlan)} />
           <ListRow title="Fork session" leading={<GitFork size={20} color={tokens.ink2} />} onPress={() => run(props.onFork)} />

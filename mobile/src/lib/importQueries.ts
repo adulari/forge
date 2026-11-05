@@ -33,7 +33,7 @@ async function importInBatches(
   return mergeReplies(replies);
 }
 
-const scanKey = (baseUrl: string | null) => ["import-scan", baseUrl] as const;
+export const scanKey = (baseUrl: string | null) => ["import-scan", baseUrl] as const;
 
 /** What can be imported from the host the app is connected to. Always read fresh. */
 export function useImportScan() {

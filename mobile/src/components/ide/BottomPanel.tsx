@@ -11,7 +11,7 @@ import { sansFamilyFor } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
 import { ResizeHandle } from "../shell/ResizeHandle";
 import { useIde } from "./IdeContext";
-import { failingPathsOf, setBottomTab, useBottomTab, useFailingChecks, type BottomTab } from "./ideSignals";
+import { IDE_DEFAULT_TERMINAL, failingPathsOf, setBottomTab, setIdeTerminalId, useBottomTab, useFailingChecks, useIdeTerminalId, type BottomTab } from "./ideSignals";
 import { IdeIconButton } from "./ideUi";
 
 const TerminalDock = React.lazy(() => import("../shell/TerminalDock").then((m) => ({ default: m.TerminalDock })));
@@ -30,6 +30,7 @@ export function BottomPanel() {
   const { bottomOpen, toggleBottom, panelSessionId } = useIde();
   const { bottomHeight } = useIdeModePreferences();
   const tab = useBottomTab();
+  const terminalId = useIdeTerminalId();
   const failing = useFailingChecks();
   const failingCount = panelSessionId ? failingPathsOf(failing, panelSessionId).size : 0;
   const start = useRef(bottomHeight);
@@ -65,6 +66,11 @@ export function BottomPanel() {
             {item.id === "checks" && failingCount > 0 ? <Text style={[styles.badge, { color: tokens.danger }]}>{`${failingCount} failing`}</Text> : null}
           </Pressable>
         ))}
+        {terminalId !== IDE_DEFAULT_TERMINAL && tab === "terminal" ? (
+          <Pressable onPress={() => setIdeTerminalId(IDE_DEFAULT_TERMINAL)} accessibilityRole="button" accessibilityLabel="Back to the shell terminal" style={styles.tab}>
+            <Text style={[styles.title, { color: tokens.ink3 }]}>Back to shell</Text>
+          </Pressable>
+        ) : null}
         <View style={styles.spacer} />
         <IdeIconButton icon={<X size={13} strokeWidth={1.75} color={tokens.ink3} />} label="Close panel" onPress={toggleBottom} />
       </View>
@@ -73,7 +79,7 @@ export function BottomPanel() {
           <EmptyState icon={TerminalIcon} message="Pick an agent and its terminal, checks and shells open here." />
         ) : (
           <Suspense fallback={<View style={styles.body} />}>
-            {tab === "terminal" ? <TerminalDock sessionId={panelSessionId} /> : null}
+            {tab === "terminal" ? <TerminalDock key={terminalId} sessionId={panelSessionId} terminalId={terminalId} /> : null}
             {tab === "checks" ? <ChecksPanel key={panelSessionId} sessionId={panelSessionId} /> : null}
             {tab === "shells" ? <ShellsPanel key={panelSessionId} sessionId={panelSessionId} /> : null}
           </Suspense>

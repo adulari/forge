@@ -6,7 +6,6 @@ import { Check, ChevronDown, Download, RefreshCw } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
-import { Badge } from "../components/ds/Badge";
 import { Button } from "../components/ds/Button";
 import { EmptyState } from "../components/ds/EmptyState";
 import { ListRow } from "../components/ds/ListRow";
@@ -20,7 +19,10 @@ import { Skeleton } from "../components/ds/Skeleton";
 import { useToast } from "../components/ds/ToastHost";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import { ProjectPicker } from "../components/session/ProjectPicker";
+import { continueToast } from "../lib/claudeHandoff";
+import { useContinueClaudeSession } from "../lib/claudeHandoffQueries";
 import { useImportScan, useImportSessions } from "../lib/importQueries";
+import { openSession } from "../lib/nav";
 import {
   type ImportAgentFilter,
   type ImportCandidate,
@@ -70,28 +72,50 @@ function ConversationRow({
   item,
   selected,
   onToggle,
+  onOpen,
+  onSync,
+  syncing,
   last,
   nowMs,
 }: {
   item: ImportCandidate;
   selected: boolean;
   onToggle: () => void;
+  onOpen: (sessionId: string) => void;
+  onSync: (ccId: string) => void;
+  syncing: boolean;
   last: boolean;
   nowMs: number;
 }) {
   const imported = item.imported_session_id !== null;
+  const sessionId = item.imported_session_id;
   const where = item.cwd_exists ? shortFolder(item.cwd) : `${shortFolder(item.cwd)} (missing)`;
   return (
     <ListRow
       title={item.title}
       subtitle={`${agentLabel(item.agent)} · ${where} · ${conversationAge(item.modified, nowMs)}`}
       leading={<CheckBox on={selected} disabled={imported} />}
-      trailing={imported ? <Badge label="Imported" tone="neutral" lowercase /> : undefined}
-      onPress={imported ? undefined : onToggle}
-      disabled={imported}
+      trailing={
+        sessionId ? (
+          <View style={styles.rowActions}>
+            {item.agent === "claude" ? (
+              <Button
+                label="Sync new turns"
+                variant="ghost"
+                onPress={() => onSync(item.id)}
+                loading={syncing}
+                accessibilityLabel={`Sync new turns of ${item.title} from Claude Code`}
+              />
+            ) : null}
+            <Button label="Open" variant="secondary" onPress={() => onOpen(sessionId)} accessibilityLabel={`Open ${item.title} in Forge`} />
+          </View>
+        ) : undefined
+      }
+      hasInteractiveTrailing={imported}
+      onPress={sessionId ? () => onOpen(sessionId) : onToggle}
       showSeparator={!last}
-      accessibilityRole="checkbox"
-      accessibilityLabel={`${item.title}, ${agentLabel(item.agent)}${imported ? ", already imported" : ""}${
+      accessibilityRole={imported ? "button" : "checkbox"}
+      accessibilityLabel={`${item.title}, ${agentLabel(item.agent)}${imported ? ", in Forge, opens the session" : ""}${
         selected ? ", selected" : ""
       }`}
     />
@@ -103,6 +127,8 @@ export default function ImportScreen() {
   const toast = useToast();
   const scan = useImportScan();
   const run = useImportSessions();
+  const sync = useContinueClaudeSession();
+  const [syncingId, setSyncingId] = useState<string | null>(null);
   const [agent, setAgent] = useState<ImportAgentFilter>("all");
   const [folder, setFolder] = useState<string | null>(null);
   const [query, setQuery] = useState("");
@@ -135,10 +161,22 @@ export default function ImportScreen() {
           const t = importToast(reply);
           toast.show(t.message, { tone: t.tone });
           setSelected(new Set());
+          // One conversation chosen: the point was to continue it, so go there.
+          const only = reply.results.length === 1 ? reply.results[0] : null;
+          if (only?.session_id && !only.error) openSession(only.session_id);
         },
         onError: (error) => toast.show(error.message || "Import failed", { tone: "danger" }),
       },
     );
+  };
+
+  const syncRow = (ccId: string) => {
+    setSyncingId(ccId);
+    sync.mutate(ccId, {
+      onSuccess: (reply) => toast.show(continueToast(reply), { tone: "success" }),
+      onError: (error) => toast.show(error.message || "Could not sync this session", { tone: "danger" }),
+      onSettled: () => setSyncingId(null),
+    });
   };
 
   const body = (() => {
@@ -180,6 +218,9 @@ export default function ImportScreen() {
                 return next;
               })
             }
+            onOpen={openSession}
+            onSync={syncRow}
+            syncing={syncingId === item.id}
             last={i === visible.length - 1}
             nowMs={nowMs}
           />
@@ -307,6 +348,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   skeletons: { gap: space.space8 },
+  rowActions: { flexDirection: "row", alignItems: "center", gap: space.space4 },
   none: { padding: space.space24, textAlign: "center" },
   hint: { paddingBottom: space.space8 },
   sheet: { paddingHorizontal: space.space20, paddingBottom: space.space24, gap: space.space8 },

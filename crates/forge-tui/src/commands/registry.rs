@@ -429,8 +429,13 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "claude",
-        desc: "leave Forge and continue this conversation in Claude Code",
+        desc: "Continue this session in Claude Code",
         usage: "/claude",
+    },
+    Command {
+        name: "cc",
+        desc: "continue a Claude Code session here (also /continue-claude)",
+        usage: "/continue-claude [session id]",
     },
     Command {
         name: "statusline",

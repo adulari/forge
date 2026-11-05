@@ -34,3 +34,22 @@ export function requestIdeSendReview(): boolean {
   sendReviewListener();
   return true;
 }
+
+type ClaudeTerminalListener = (sessionId: string) => void;
+
+let claudeTerminalListener: ClaudeTerminalListener | null = null;
+
+/** The IDE shell registers while mounted so "Continue in Claude Code" opens its own terminal tab. */
+export function onIdeClaudeTerminal(listener: ClaudeTerminalListener): () => void {
+  claudeTerminalListener = listener;
+  return () => {
+    if (claudeTerminalListener === listener) claudeTerminalListener = null;
+  };
+}
+
+/** True when the IDE took the request and is showing the Claude Code terminal. */
+export function requestIdeClaudeTerminal(sessionId: string): boolean {
+  if (!claudeTerminalListener) return false;
+  claudeTerminalListener(sessionId);
+  return true;
+}
