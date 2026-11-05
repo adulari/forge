@@ -448,19 +448,13 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "project")]
         all: bool,
     },
-    /// IDE mode: the project review workbench on a full-screen terminal. Every agent on the
-    /// project, what each one changed (needs-you first), a diff with per-hunk stage, revert and
-    /// undo, the agent in view with its permission prompts, and git. Starts the background daemon
-    /// if it is not running. `F2` or Esc leaves.
+    /// IDE mode: review what agents changed, with per-hunk stage and revert (F2 or Esc leaves).
     Ide {
-        /// The project directory. Defaults to the current directory.
-        #[arg(long)]
+        #[arg(long, help = "Project directory (default: here)")]
         cwd: Option<String>,
-        /// Daemon base URL. Defaults to the local daemon.
-        #[arg(long)]
+        #[arg(long, help = "Daemon base URL")]
         url: Option<String>,
-        /// Daemon token. Defaults to the persisted `serve-token`.
-        #[arg(long)]
+        #[arg(long, help = "Daemon token")]
         token: Option<String>,
     },
     /// Plan and dispatch: hand one request to a coordinator session on the running `forge serve`

@@ -9,9 +9,12 @@
 pub mod hunk;
 pub mod keys;
 pub mod model;
+mod nav;
+mod ops;
 pub mod render;
 pub mod state;
 pub mod timeline;
+mod types;
 pub mod wire;
 
 #[cfg(test)]
