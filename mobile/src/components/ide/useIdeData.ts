@@ -74,6 +74,29 @@ export function useProjectChanges(sessions: readonly SessionRow[]): ProjectChang
     [route.data, fallback, sessions, legacy.bySession],
   );
   const loading = fallback ? legacy.loading : route.isPending && sessions.length > 0;
+  // An open diff or file must follow an agent's next edit: when a file's content hash moves, the
+  // per-file queries for that session are stale.
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  const seenHashes = useRef(new Map<string, string>());
+  useEffect(() => {
+    const touched = new Set<string>();
+    const seen = seenHashes.current;
+    for (const [id, changes] of bySession) {
+      for (const file of changes.files) {
+        const key = `${id}\u0000${file.path}`;
+        const before = seen.get(key);
+        if (before !== undefined && before !== file.hash) touched.add(id);
+        seen.set(key, file.hash);
+      }
+    }
+    for (const id of touched) {
+      void queryClient.invalidateQueries({ queryKey: sessionDiffKey(baseUrl, id) });
+      void queryClient.invalidateQueries({ queryKey: ["git", "diff", baseUrl, id] });
+      void queryClient.invalidateQueries({ queryKey: ["git", "status", baseUrl, id] });
+      void queryClient.invalidateQueries({ queryKey: ["workspace", "file", baseUrl, id] });
+    }
+  }, [bySession, baseUrl, queryClient]);
   const value = useMemo<ProjectChanges>(() => ({ bySession, loading }), [bySession, loading]);
 
   // Marks for files that changed again or left the set go away, but only for trees that answered.

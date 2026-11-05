@@ -156,15 +156,17 @@ function GitColumn({ sessionId }: { sessionId: string }) {
               </Text>
             ) : null}
           </View>
-          <IdeTextButton label={manual ? "Hide message box" : "Edit message"} onPress={() => setManual((value) => !value)} />
-          <IdeTextButton
-            label={shipLabel(steps)}
-            tone="accent"
-            icon={<Rocket size={12} strokeWidth={1.75} color={tokens.accent} />}
-            disabled={steps.length === 0}
-            loading={shipping != null}
-            onPress={() => void ship()}
-          />
+          <View style={styles.shipButtons}>
+            <IdeTextButton label={manual ? "Hide message" : "Edit message"} onPress={() => setManual((value) => !value)} />
+            <IdeTextButton
+              label={shipLabel(steps)}
+              tone="accent"
+              icon={<Rocket size={12} strokeWidth={1.75} color={tokens.accent} />}
+              disabled={steps.length === 0}
+              loading={shipping != null}
+              onPress={() => void ship()}
+            />
+          </View>
         </View>
       ) : null}
       {!readOnly && manual ? (
@@ -208,7 +210,8 @@ function GitColumn({ sessionId }: { sessionId: string }) {
 
 const styles = StyleSheet.create({
   fill: { flex: 1, minHeight: 0 },
-  ship: { flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12, paddingVertical: space.space8, borderTopWidth: StyleSheet.hairlineWidth },
-  shipText: { flex: 1, minWidth: 0, gap: 2 },
+  ship: { gap: space.space8, paddingHorizontal: space.space12, paddingVertical: space.space8, borderTopWidth: StyleSheet.hairlineWidth },
+  shipButtons: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: space.space8 },
+  shipText: { minWidth: 0, gap: 2 },
   notice: { paddingHorizontal: space.space12, paddingVertical: space.space16 },
 });

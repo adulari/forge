@@ -582,5 +582,5 @@ const styles = StyleSheet.create({
   half: { flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", gap: space.space8, paddingRight: space.space8 },
   lineNo: { width: 44, textAlign: "right", fontFamily: monoFamily.regular, fontSize: 10.5, lineHeight: DIFF_LINE_HEIGHT, opacity: 0.8 },
   mark: { width: 8, fontFamily: monoFamily.regular, fontSize: 11 },
-  code: { flex: 1, minWidth: 0, fontFamily: monoFamily.regular, fontSize: 11.5, lineHeight: DIFF_LINE_HEIGHT },
+  code: { flex: 1, minWidth: 0, fontFamily: monoFamily.regular, fontSize: 11.5, lineHeight: DIFF_LINE_HEIGHT, ...({ whiteSpace: "pre" } as object) },
 });

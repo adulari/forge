@@ -18,6 +18,7 @@ import { EmptyState } from "../ds/EmptyState";
 import { ProviderGlyph } from "../ds/ProviderGlyph";
 import { useToast } from "../ds/ToastHost";
 import { shortModelLabel } from "../fleet/shortModelLabel";
+import { registerAgentSender } from "./agentBridge";
 import { useIde } from "./IdeContext";
 import { Timeline } from "./Timeline";
 import { AgentDot, SectionLabel } from "./ideUi";
@@ -67,6 +68,10 @@ function Body({ sessionId }: { sessionId: string }) {
       return sent;
     },
     [send, toast],
+  );
+  useEffect(
+    () => registerAgentSender(sessionId, (text) => send({ kind: "prompt", text, attachments: [], client_msg_id: newClientMsgId() })),
+    [sessionId, send],
   );
   const handleInterrupt = useCallback(() => {
     send({ kind: "interrupt" });

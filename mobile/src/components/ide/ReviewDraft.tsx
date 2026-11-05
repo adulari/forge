@@ -16,6 +16,7 @@ import {
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, sansFamilyFor, webInputTextStyle } from "../../theme/typography";
+import { isMacOS, modKey } from "../../lib/platform";
 import { useToast } from "../ds/ToastHost";
 import { sendToAgent } from "./agentBridge";
 import { useIde } from "./IdeContext";
@@ -23,6 +24,8 @@ import { useLatest } from "./useLatest";
 import { onIdeSendReview } from "./ideEvents";
 import { buildReviewPrompt, buildSingleCommentPrompt, draftLabel, groupDraftByFile } from "./reviewDraft";
 import { IdeIconButton, IdeTextButton, Keycap } from "./ideUi";
+
+const SEND_HINT = isMacOS ? "⇧⌘↵" : "Ctrl+Shift+↵";
 
 /** Send text to an agent. If its panel is not showing yet, show it and let the message wait. */
 export function useAgentSend(): (sessionId: string, text: string) => "sent" | "queued" {
@@ -126,8 +129,8 @@ export function CommentComposer({
         style={[styles.input, webInputTextStyle, { color: tokens.ink, borderColor: tokens.borderStrong, backgroundColor: tokens.bg0 }]}
       />
       <View style={styles.actions}>
-        <IdeTextButton label="Add to review" icon={<MessageSquarePlus size={12} strokeWidth={1.75} color={tokens.ink2} />} onPress={add} disabled={!text.trim()} keyHint="⇧⌘↵" />
-        <IdeTextButton label="Send now" icon={<Send size={12} strokeWidth={1.75} color={tokens.ink2} />} onPress={sendNow} disabled={!text.trim()} keyHint="⌘↵" />
+        <IdeTextButton label="Add to review" icon={<MessageSquarePlus size={12} strokeWidth={1.75} color={tokens.ink2} />} onPress={add} disabled={!text.trim()} keyHint={SEND_HINT} />
+        <IdeTextButton label="Send now" icon={<Send size={12} strokeWidth={1.75} color={tokens.ink2} />} onPress={sendNow} disabled={!text.trim()} keyHint={`${modKey}${isMacOS ? "" : "+"}↵`} />
         <View style={styles.grow} />
         <IdeTextButton label="Cancel" onPress={onDone} keyHint="Esc" />
       </View>
@@ -168,13 +171,13 @@ function Bar({ sessionId }: { sessionId: string }) {
           label={open ? "Hide comments" : "Show comments"}
           onPress={() => setOpen((value) => !value)}
         />
-        <Text style={[styles.count, { color: tokens.ink }]}>{draftLabel(comments.length)}</Text>
+        <Text numberOfLines={1} style={[styles.count, { color: tokens.ink }]}>{draftLabel(comments.length)}</Text>
         <Text numberOfLines={1} style={[styles.sub, { color: tokens.ink3 }]}>
           {`for ${agent?.title?.trim() || "this agent"}, sent together as one review`}
         </Text>
         <View style={styles.grow} />
         <IdeTextButton label="Discard" icon={<Trash2 size={12} strokeWidth={1.75} color={tokens.ink2} />} onPress={() => clearReviewComments(sessionId)} />
-        <IdeTextButton label="Send review" tone="accent" icon={<Send size={12} strokeWidth={1.75} color={tokens.accent} />} onPress={sendReview} keyHint="⇧⌘↵" />
+        <IdeTextButton label="Send review" tone="accent" icon={<Send size={12} strokeWidth={1.75} color={tokens.accent} />} onPress={sendReview} keyHint={SEND_HINT} />
       </View>
       {open ? (
         <View style={styles.list}>
@@ -209,7 +212,7 @@ const styles = StyleSheet.create({
   grow: { flex: 1 },
   bar: { borderTopWidth: StyleSheet.hairlineWidth },
   barRow: { minHeight: 36, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space8 },
-  count: { fontFamily: sansFamilyFor(600), fontSize: 12 },
+  count: { fontFamily: sansFamilyFor(600), fontSize: 12, flexShrink: 0 },
   sub: { flexShrink: 1, fontFamily: sansFamilyFor(400), fontSize: 11.5 },
   list: { maxHeight: 180, paddingHorizontal: space.space12, paddingBottom: space.space8, gap: space.space8, overflow: "scroll" as never },
   group: { gap: 2 },

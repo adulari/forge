@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { StyleSheet, Text, View } from "react-native";
 
 import { highlightTokens, type HighlightToken, type TokenKind } from "../../lib/highlightTokens";
+import { isMacOS, modKey } from "../../lib/platform";
 import { useWorkspaceFile, useWriteWorkspaceFile } from "../../lib/queries";
 import { useTheme } from "../../theme/ThemeProvider";
 import { type ColorTokens, space } from "../../theme/tokens";
@@ -286,7 +287,7 @@ function Editor({
         <View style={[styles.status, { borderBottomColor: tokens.hairline }]}>
           <Text style={[styles.statusText, { color: dirty ? tokens.ink : tokens.ink4 }]}>{dirty ? "Unsaved changes" : "Click in and type to edit. Anything bigger, ask the agent."}</Text>
           <View style={styles.grow} />
-          {dirty ? <IdeTextButton label="Save" keyHint="⌘S" onPress={() => void save()} loading={saving} /> : null}
+          {dirty ? <IdeTextButton label="Save" keyHint={`${modKey}${isMacOS ? "" : "+"}S`} onPress={() => void save()} loading={saving} /> : null}
         </View>
       )}
       <div

@@ -1019,13 +1019,13 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                 icon={<ImageIcon size={18} strokeWidth={1.75} color={tokens.ink3} />}
                 onPress={onAttachImage}
                 accessibilityLabel="attach photo"
-                style={styles.metaIcon}
+                style={compact ? styles.metaIconCompact : styles.metaIcon}
               />
               <IconButton
                 icon={<FileText size={18} strokeWidth={1.75} color={tokens.ink3} />}
                 onPress={onAttachDocument}
                 accessibilityLabel="attach file"
-                style={styles.metaIcon}
+                style={compact ? styles.metaIconCompact : styles.metaIcon}
               />
           </View>
           <View
@@ -1288,12 +1288,14 @@ const styles = StyleSheet.create({
     borderRadius: radii.radius4,
     paddingHorizontal: space.space8,
     paddingVertical: 3,
+    overflow: "hidden",
   },
   metaChipFixed: { flexShrink: 0 },
   // A floor, so a crowded row (the IDE agent panel at 1024px) never squeezes a chip to one glyph.
-  metaChipLabel: { flexShrink: 1, minWidth: 40 },
+  metaChipLabel: { flexShrink: 1, minWidth: 28 },
   metaSpacer: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
   metaIcon: { width: 32, height: 32 },
+  metaIconCompact: { width: 26, height: 32 },
   row: {
     position: "relative",
     flexDirection: "row",
