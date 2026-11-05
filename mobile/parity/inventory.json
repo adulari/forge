@@ -669,6 +669,12 @@
     "file": "mobile/src/lib/shortcuts/bindings.ts",
     "platform": "desktop",
     "reason": "Tauri desktop capability boundary",
+    "category": "behavior"
+  },
+  {
+    "file": "mobile/src/lib/shortcuts/nativeMenuSync.test.ts",
+    "platform": "desktop",
+    "reason": "Tauri desktop capability boundary",
     "category": "capability"
   },
   {

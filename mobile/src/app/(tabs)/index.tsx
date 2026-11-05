@@ -16,6 +16,7 @@ import { BoundedList } from "../../components/ds/BoundedList";
 import { Button } from "../../components/ds/Button";
 import { Card } from "../../components/ds/Card";
 import { EmptyState } from "../../components/ds/EmptyState";
+import { openClaudePicker } from "../../lib/claudeHandoff";
 import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
@@ -240,7 +241,12 @@ export function FleetScreen() {
         <EmptyState
           icon={Flame}
           message="No sessions yet. Start with a working directory."
-          action={<Button label="Create your first session" variant="primary" onPress={() => router.push("/new-session")} accessibilityLabel="Create your first session" />}
+          action={
+            <View style={styles.emptyActions}>
+              <Button label="Create your first session" variant="primary" onPress={() => router.push("/new-session")} accessibilityLabel="Create your first session" />
+              <Button label="Continue a Claude Code session" variant="ghost" onPress={() => openClaudePicker()} accessibilityLabel="Continue a Claude Code session" />
+            </View>
+          }
         />
       </View>
     );
@@ -269,6 +275,7 @@ export function FleetScreen() {
               <Text style={[typeScale.monoMeta, tabularNums, { color: tokens.ink4, fontFamily: monoFamily.regular }]}>{newSessionHint}</Text>
             </View>
           </View>
+          <Button label="Continue a Claude Code session" variant="ghost" onPress={() => openClaudePicker()} accessibilityLabel="Continue a Claude Code session" />
         </View>
       </Screen>
     );
@@ -343,6 +350,7 @@ const styles = StyleSheet.create({
   listContent: { paddingTop: space.space12, paddingBottom: 96 },
   summary: { flexDirection: "row", flexWrap: "wrap", marginTop: space.space2, paddingHorizontal: space.space16 },
   emptyWrap: { flex: 1 },
+  emptyActions: { alignItems: "center", gap: 8 },
   emptyAsh: { flexDirection: "row", justifyContent: "center", gap: space.space8, paddingTop: space.space24 },
   ashCoal: { width: 6, height: 6, borderRadius: 3 },
   groupLabel: { paddingTop: space.space16, paddingHorizontal: space.space16 },

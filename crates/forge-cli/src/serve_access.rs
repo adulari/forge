@@ -223,6 +223,9 @@ pub(crate) fn required(method: &Method, path: &str) -> Need {
         || path.starts_with("/api/onboarding")
         // Lists and reads other agents' conversations on the host: never a view-only grant.
         || path.starts_with("/api/import")
+        // Writes a transcript into the host's Claude Code history, or reads one out of it.
+        || path.starts_with("/api/claude/")
+        || (!read && path.starts_with("/api/sessions/") && path.ends_with("/claude"))
         || path == "/api/anywhere/enable"
         || (!read && path.starts_with("/api/agent-installs"))
         || (!read

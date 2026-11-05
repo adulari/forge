@@ -20,6 +20,7 @@ fn row(agent: &str, id: &str, title: &str, cwd: Option<&str>) -> ImportRow {
         cwd_exists: cwd.is_some(),
         modified: now() - 3 * 86_400,
         imported: false,
+        linked: false,
     }
 }
 
@@ -31,6 +32,7 @@ fn menu() -> ImportMenu {
         row("codex", "x1", "list the files", Some("/work/cli")),
         ImportRow {
             imported: true,
+            linked: true,
             ..row("claude", "c2", "already here", Some("/work/api"))
         },
         row("codex", "x2", "port the parser", None),
@@ -113,6 +115,32 @@ fn enter_imports_the_selection_or_else_the_focused_row() {
 }
 
 #[test]
+fn enter_on_a_claude_row_continues_it_and_a_linked_row_syncs_instead_of_refusing() {
+    let mut m = menu();
+    assert_eq!(m.key(KeyKind::Enter), ImportAction::Continue("c1".into()));
+    assert!(m.importing);
+    m.finish_continue();
+    assert!(!m.open);
+
+    let mut m = menu();
+    m.cursor = 2;
+    assert_eq!(m.visible()[2].id, "c2");
+    assert!(m.visible()[2].linked);
+    assert_eq!(m.key(KeyKind::Enter), ImportAction::Continue("c2".into()));
+
+    let mut m = ImportMenu::default();
+    m.open_claude("/home/me".into());
+    assert_eq!(m.agent, AgentFilter::Claude);
+}
+
+#[test]
+fn a_linked_row_is_marked_linked_on_screen() {
+    let mut app = App::default();
+    app.import_menu = menu();
+    assert!(screen(&app, 100, 30).contains("linked"));
+}
+
+#[test]
 fn the_summary_is_plural_aware() {
     assert_eq!(summary(1, 0, 0), "Imported 1 session");
     assert_eq!(summary(3, 1, 0), "Imported 3 sessions, 1 already in Forge");
@@ -131,7 +159,7 @@ fn it_renders_at_80x24_and_wide_with_the_fallback_hint() {
         let s = screen(&app, w, h);
         assert!(s.contains("Import conversations"), "{s}");
         assert!(s.contains("fix the flaky test"), "{s}");
-        assert!(s.contains("imported"), "{s}");
+        assert!(s.contains("linked"), "{s}");
         assert!(s.contains("1 selected"), "{s}");
         assert!(s.contains("3d ago"), "{s}");
         assert!(s.contains("Enter import"), "{s}");

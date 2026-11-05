@@ -142,3 +142,11 @@ export type BottomTab = "terminal" | "checks" | "shells";
 const bottomTabStore = store<BottomTab>("terminal");
 export const useBottomTab = bottomTabStore.use;
 export const setBottomTab = bottomTabStore.set;
+
+// --- which daemon terminal the IDE bottom panel shows ---
+export const IDE_DEFAULT_TERMINAL = "term-1";
+const terminalIdStore = store<string>(IDE_DEFAULT_TERMINAL);
+export const useIdeTerminalId = terminalIdStore.use;
+export function setIdeTerminalId(id: string): void {
+  terminalIdStore.set(id);
+}

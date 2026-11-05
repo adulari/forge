@@ -31,6 +31,7 @@ import {
   type TerminalStatus,
 } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
+import { onInitialCommand, takeInitialCommand } from "../../lib/claudeHandoff";
 import { HOST_CAP_CLOSE_CODE, reportHostCap } from "../../lib/hostStatus";
 import { useTerminalPreferences, terminalLineHeight } from "../../lib/terminalPreferences";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -73,6 +74,8 @@ const PADDING_H = 14;
 /** A reattached full-screen program repaints on a size change, not on a repeated size. */
 const WIGGLE_DELAY_MS = 250;
 const WIGGLE_RESTORE_MS = 80;
+/** A shell needs a moment after attaching before it reads a typed line. */
+const INITIAL_COMMAND_DELAY_MS = 450;
 const COPIED_FLASH_MS = 1_200;
 const WHEEL_LINE_PX = 16;
 
@@ -293,6 +296,7 @@ export function TerminalDock({
     attachedBeforeRef.current.add(effectiveTerminalId);
     let wiggleTimer: ReturnType<typeof setTimeout> | null = null;
     let wiggleRestore: ReturnType<typeof setTimeout> | null = null;
+    let initialTimer: ReturnType<typeof setTimeout> | null = null;
     try {
       socket = openTerminalSocket(
         baseUrl,
@@ -324,6 +328,13 @@ export function TerminalDock({
             connectedRef.current = true;
             setConnectionStatus("connected");
             void refreshTerminals();
+            // A line queued for this terminal ("Continue in Claude Code") is typed once, here.
+            const initial = takeInitialCommand(sessionId, effectiveTerminalId);
+            if (initial) {
+              initialTimer = setTimeout(() => {
+                if (!disposed) socket.send(`${initial}\r`);
+              }, INITIAL_COMMAND_DELAY_MS);
+            }
             if (reattach) {
               // A full-screen agent redraws on a size change, not when the same size arrives
               // again, so nudge the width by one column and put it back.
@@ -390,6 +401,7 @@ export function TerminalDock({
     return () => {
       disposed = true;
       clearTimeout(openDeadline);
+      if (initialTimer != null) clearTimeout(initialTimer);
       if (wiggleTimer != null) clearTimeout(wiggleTimer);
       if (wiggleRestore != null) clearTimeout(wiggleRestore);
       if (reconnectTimerRef.current != null) {
@@ -408,6 +420,21 @@ export function TerminalDock({
     scheduleFlush,
     sessionId,
   ]);
+
+  // A line queued while this terminal is already attached is typed straight away.
+  useEffect(() => {
+    if (!sessionId) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const stop = onInitialCommand((queuedSession, queuedTerminal) => {
+      if (queuedSession !== sessionId || queuedTerminal !== effectiveTerminalId || !connectedRef.current) return;
+      const line = takeInitialCommand(sessionId, effectiveTerminalId);
+      if (line) timer = setTimeout(() => socketRef.current?.send(`${line}\r`), 100);
+    });
+    return () => {
+      stop();
+      if (timer != null) clearTimeout(timer);
+    };
+  }, [sessionId, effectiveTerminalId]);
 
   // A large buffer makes every intermediate size of a drag expensive for the shell to repaint,
   // so a resize waits for the drag to settle.

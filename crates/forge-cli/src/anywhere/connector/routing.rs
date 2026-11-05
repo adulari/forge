@@ -63,6 +63,22 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::AccountSyncStatus => exact(Method::GET, "/api/anywhere/sync"),
         RouteId::AccountSyncUpdate => exact(Method::PUT, "/api/anywhere/sync"),
         RouteId::AccountSyncNow => exact(Method::POST, "/api/anywhere/sync/now"),
+        RouteId::ImportScan => exact(Method::GET, "/api/import/scan"),
+        RouteId::SessionClaude | RouteId::ExportSessionClaude | RouteId::ContinueClaudeSession => {
+            let id = single_path_parameter(request)?;
+            let (method, path) = match request.route {
+                RouteId::SessionClaude => (Method::GET, format!("/api/sessions/{id}/claude")),
+                RouteId::ExportSessionClaude => {
+                    (Method::POST, format!("/api/sessions/{id}/claude"))
+                }
+                _ => (Method::POST, format!("/api/claude/sessions/{id}/continue")),
+            };
+            Ok(RouteTarget {
+                method,
+                path,
+                query: query_parameter(&request.parameters, 1)?,
+            })
+        }
         RouteId::SessionJobTail => {
             if request.parameters.len() < 2 || request.parameters.len() > 3 {
                 bail!("job tail route requires a session id, a job id and an optional query");
@@ -299,6 +315,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn claude_hand_off_routes_are_typed_and_the_writes_are_post_only() {
+        let cases = [
+            (RouteId::ImportScan, "GET", &[][..], "/api/import/scan"),
+            (
+                RouteId::SessionClaude,
+                "GET",
+                &["s_1"][..],
+                "/api/sessions/s_1/claude",
+            ),
+            (
+                RouteId::ExportSessionClaude,
+                "POST",
+                &["s_1"][..],
+                "/api/sessions/s_1/claude",
+            ),
+            (
+                RouteId::ContinueClaudeSession,
+                "POST",
+                &["0a1b-22"][..],
+                "/api/claude/sessions/0a1b-22/continue",
+            ),
+        ];
+        for (route, method, parameters, path) in cases {
+            let target = route_target(&request(route, method, parameters)).unwrap();
+            assert_eq!(target.path, path);
+            assert!(validate_command_request(&request(route, method, parameters)).is_ok());
+        }
+        for route in [RouteId::ExportSessionClaude, RouteId::ContinueClaudeSession] {
+            assert!(validate_command_request(&request(route, "GET", &["s_1"])).is_err());
+        }
+        assert!(
+            validate_command_request(&request(RouteId::SessionClaude, "POST", &["s_1"])).is_err()
+        );
+        assert!(route_target(&request(RouteId::ContinueClaudeSession, "POST", &["../x"])).is_err());
     }
 
     #[test]

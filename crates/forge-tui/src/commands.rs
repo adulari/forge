@@ -150,6 +150,9 @@ pub enum CommandAction {
     Stats(Option<u32>),
     /// Exit the TUI and resume this conversation in Claude Code (`/claude`).
     Claude,
+    /// Bring a Claude Code conversation into Forge and continue it here (`/continue-claude [id]`):
+    /// import it the first time, sync only its new turns after. Empty opens the picker.
+    ContinueClaude(String),
     /// Open the mesh routing inspector; optional prompt to trace (`/mesh [task]`).
     Mesh(Option<String>),
     /// Toggle remote control on/off. When turning on, `mode` selects how the server is exposed.
@@ -561,6 +564,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "execute" | "approve" | "go" => CommandAction::Execute,
         "quit" | "exit" | "q" => CommandAction::Quit,
         "claude" => CommandAction::Claude,
+        "continue-claude" | "cc" => CommandAction::ContinueClaude(arg.trim().to_string()),
         "statusline" | "sl" => {
             let action = match arg.to_lowercase().trim() {
                 "layout" | "show" | "" => StatuslineAction::Layout,

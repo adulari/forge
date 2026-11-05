@@ -115,6 +115,7 @@ mod serve_account_sync;
 mod serve_actions;
 mod serve_agent_installs;
 mod serve_agents;
+mod serve_claude_link;
 mod serve_clients;
 mod serve_clients_cli;
 mod serve_control;

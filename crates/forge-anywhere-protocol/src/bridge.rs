@@ -108,6 +108,17 @@ pub enum RouteId {
     AccountSyncUpdate,
     /// Run an account-sync cycle now (`POST /api/anywhere/sync/now`).
     AccountSyncNow,
+    /// `GET /api/import/scan`: the Claude Code and Codex conversations on the host.
+    ImportScan,
+    /// `GET /api/sessions/{id}/claude`: whether the session is linked to a Claude Code transcript.
+    SessionClaude,
+    /// `POST /api/sessions/{id}/claude`: bring the linked Claude Code transcript up to date
+    /// (writing it under the host's `~/.claude`) and return the command that resumes it.
+    ExportSessionClaude,
+    /// `POST /api/claude/sessions/{id}/continue`: import or sync one Claude Code session into
+    /// Forge. Both of these are writes to the host's own session stores, reachable only with the
+    /// `manage-providers` scope the daemon enforces.
+    ContinueClaudeSession,
     WebSocket,
     TerminalWebSocket,
 }

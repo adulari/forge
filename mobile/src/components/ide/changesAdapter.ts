@@ -5,6 +5,7 @@
 import type { GitDiffFile, GitStatusResponse, SessionRow } from "../../lib/api";
 import { projectName } from "../../lib/sidebarModel";
 import { fingerprint, type ChangedFile } from "./changeQueueModel";
+import { isNoisePath } from "./noisePaths";
 
 export type ChangeBucket = "staged" | "unstaged" | "untracked" | "worktree";
 
@@ -67,7 +68,7 @@ export function filesFromGitStatus(status: GitStatusResponse): IdeChangedFile[] 
   add(status.conflicted ?? [], "unstaged");
   add(status.unstaged, "unstaged");
   add(status.staged, "staged");
-  add(status.untracked, "untracked");
+  add(status.untracked.filter((row) => !isNoisePath(row.path)), "untracked");
   return out;
 }
 

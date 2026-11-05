@@ -555,6 +555,14 @@ async function syncNativeMenuShortcuts(overrides: ShortcutOverrides): Promise<vo
         ? null
         : tauriAccelerator(getResolvedShortcut(action as AppShortcutAction, overrides)),
   }));
-  const { invoke } = await import("@tauri-apps/api/core");
-  await invoke("set_menu_accelerators", { accelerators });
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const skipped = await invoke<string[] | undefined>("set_menu_accelerators", { accelerators });
+    if (__DEV__ && skipped && skipped.length > 0) {
+      console.warn("[shortcuts] native menu skipped ids:", skipped.join(", "));
+    }
+  } catch (error) {
+    // Like syncGlobalQuickComposer: a native menu failure must not roll back the saved binding.
+    console.warn("[shortcuts] native menu sync failed:", error);
+  }
 }
