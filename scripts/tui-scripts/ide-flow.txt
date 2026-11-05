@@ -31,6 +31,61 @@ chord u
 sleep 1500
 expect revert undone
 capture undone
+# edit + save: the light editor, hash-checked save (the reverted file left the queue: reopen one)
+chord j
+sleep 1200
+chord e
+sleep 1500
+capture editor
+expect Ln 1
+type X
+chord C-s
+sleep 1500
+expect saved
+capture saved-file
+chord Escape
+sleep 600
+# two comments on the first file's two hunks, then send them as one review
+chord c
+type first comment
+chord Enter
+sleep 300
+chord n
+chord c
+type second comment
+chord Enter
+sleep 400
+expect 2 comments
+capture draft
+chord S
+sleep 1200
+expect review sent
+capture review-sent
+# checks: run the project's Tests action, read the file:line link
+chord t
+sleep 1500
+expect Tests
+chord Enter
+sleep 3500
+chord o
+sleep 800
+expect src/a.txt:3
+capture checks
+chord Escape
+# terminal: a real shell on the daemon
+chord ] ]
+sleep 2500
+type echo ide-e2e-$((40+2))
+chord Enter
+sleep 1500
+expect ide-e2e-42
+capture terminal
+chord Escape
+sleep 150
+chord Escape
+sleep 400
+chord t
+sleep 400
 chord ?
 sleep 400
 expect IDE keys

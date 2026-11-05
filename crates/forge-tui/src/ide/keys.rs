@@ -189,7 +189,7 @@ pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
         };
     }
     match key.code {
-        KeyCode::Esc => return vec![IdeAction::Close],
+        KeyCode::Esc if !esc_is_local(app) => return vec![IdeAction::Close],
         KeyCode::Tab => {
             app.cycle_pane(false);
             return app.sync_watch();
@@ -247,6 +247,17 @@ pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
         Pane::Editor => editor_key(app, key),
         Pane::Bottom => bottom_key(app, key),
     }
+}
+
+/// Esc backs out of an open check output or followed shell log before it leaves IDE mode.
+fn esc_is_local(app: &IdeApp) -> bool {
+    app.focus == Pane::Bottom
+        && app.bottom_open
+        && match app.bottom_tab {
+            BottomTab::Checks => app.tools.checks.show_output,
+            BottomTab::Shells => app.tools.jobs.viewing.is_some(),
+            BottomTab::Terminal => false,
+        }
 }
 
 fn typing(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {

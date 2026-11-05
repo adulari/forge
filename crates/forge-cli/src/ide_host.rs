@@ -1654,3 +1654,126 @@ mod tests {
         assert_eq!(back.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod tools_tests {
+    use super::*;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use std::sync::{Arc, Mutex};
+
+    const TOKEN: &str = "tok";
+
+    #[derive(Default)]
+    struct Seen {
+        order: Mutex<Vec<String>>,
+        puts: Mutex<Vec<serde_json::Value>>,
+    }
+
+    async fn serve(seen: Arc<Seen>) -> String {
+        let note = |name: &'static str| {
+            move |State(seen): State<Arc<Seen>>| async move {
+                seen.order.lock().unwrap().push(name.to_string());
+                Json(serde_json::json!({"ok": true, "message": "fix(core): tidy"}))
+            }
+        };
+        let app = Router::new()
+            .route(
+                &format!("/{TOKEN}/api/workspace/file"),
+                get(|| async {
+                    Json(serde_json::json!({"content":"one\n","hash":"disk-now","read_only":false}))
+                })
+                .put(
+                    |State(seen): State<Arc<Seen>>, Json(body): Json<serde_json::Value>| async move {
+                        seen.puts.lock().unwrap().push(body.clone());
+                        if body["expected_hash"] == "stale" {
+                            return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"changed"})))
+                                .into_response();
+                        }
+                        Json(serde_json::json!({"hash":"disk-new"})).into_response()
+                    },
+                ),
+            )
+            .route(&format!("/{TOKEN}/api/git/stage"), post(note("stage")))
+            .route(&format!("/{TOKEN}/api/git/commit-message"), post(note("message")))
+            .route(&format!("/{TOKEN}/api/git/commit"), post(note("commit")))
+            .route(&format!("/{TOKEN}/api/git/push"), post(note("push")))
+            .with_state(seen);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn api(base: String) -> (Api, mpsc::UnboundedReceiver<Ev>) {
+        let (ev, rx) = mpsc::unbounded_channel();
+        (
+            Api {
+                http: reqwest::Client::new(),
+                base,
+                token: TOKEN.into(),
+                cwd: "/repo".into(),
+                ev,
+            },
+            rx,
+        )
+    }
+
+    async fn next(rx: &mut mpsc::UnboundedReceiver<Ev>) -> IdeEvent {
+        loop {
+            if let Some(Ev::Ide(event)) = rx.recv().await {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_hash_is_a_conflict_and_overwrite_reads_the_current_one() {
+        let seen = Arc::new(Seen::default());
+        let (api, mut rx) = api(serve(seen.clone()).await);
+        api.save("a", "f.txt", "two\n".into(), Some("stale".into()))
+            .await;
+        match next(&mut rx).await {
+            IdeEvent::Saved { result, .. } => assert_eq!(result, Err(SaveFailure::Conflict)),
+            other => panic!("{other:?}"),
+        }
+        api.save("a", "f.txt", "two\n".into(), None).await;
+        match next(&mut rx).await {
+            IdeEvent::Saved { result, .. } => assert_eq!(result, Ok("disk-new".to_string())),
+            other => panic!("{other:?}"),
+        }
+        let puts = seen.puts.lock().unwrap();
+        assert_eq!(puts[1]["expected_hash"], "disk-now");
+        assert_eq!(puts[1]["content"], "two\n");
+    }
+
+    #[tokio::test]
+    async fn ship_stages_writes_a_message_commits_and_pushes_in_order() {
+        let seen = Arc::new(Seen::default());
+        let (api, mut rx) = api(serve(seen.clone()).await);
+        api.ship("a".into(), vec!["x.rs".into()], None, true).await;
+        match next(&mut rx).await {
+            IdeEvent::GitOp(result) => assert_eq!(result, Ok("committed and pushed".to_string())),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            *seen.order.lock().unwrap(),
+            ["stage", "message", "commit", "push"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ship_with_a_message_and_nothing_to_stage_only_commits() {
+        let seen = Arc::new(Seen::default());
+        let (api, mut rx) = api(serve(seen.clone()).await);
+        api.ship("a".into(), Vec::new(), Some("feat: x".into()), false)
+            .await;
+        assert!(matches!(next(&mut rx).await, IdeEvent::GitOp(Ok(_))));
+        assert_eq!(*seen.order.lock().unwrap(), ["commit"]);
+    }
+}

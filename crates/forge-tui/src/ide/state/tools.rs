@@ -1519,7 +1519,7 @@ impl IdeApp {
                 let subject = parts.next().unwrap_or("").trim().to_string();
                 let body = parts.next().unwrap_or("").trim().to_string();
                 self.commit.text = subject.clone();
-                self.tools.suggested_body = (!body.is_empty()).then(|| (subject, body));
+                self.tools.suggested_body = (!body.is_empty()).then_some((subject, body));
                 self.say(
                     ToastLevel::Ok,
                     "message ready: c edits it, Enter commits".to_string(),

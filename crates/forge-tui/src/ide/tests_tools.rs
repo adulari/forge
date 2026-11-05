@@ -752,3 +752,64 @@ fn app_with_big_diff() -> IdeApp {
     }));
     app
 }
+
+#[test]
+fn opening_a_timeline_edit_lands_on_the_hunk_that_holds_its_line() {
+    use crate::board::HistoryRow;
+    let mut app = app();
+    app.apply(IdeEvent::History(
+        "a".into(),
+        vec![HistoryRow {
+            seq: 4,
+            role: "tool".into(),
+            kind: "tool".into(),
+            tool: Some("edit_file".into()),
+            tool_phase: Some("call".into()),
+            content: r#"{"path":"/repo/src/a.rs","old_string":"x","new_string":"let target = 5;"}"#
+                .into(),
+            ..Default::default()
+        }],
+    ));
+    let mut file = diff_file("src/a.rs", 3);
+    file.hunks[2].lines.push("+let target = 5;".into());
+    app.focus = Pane::Agent;
+    let actions = app.open_timeline(0);
+    let (path, session_id) = actions
+        .iter()
+        .find_map(|a| match a {
+            IdeAction::FetchDiff {
+                path, session_id, ..
+            } => Some((path.clone(), session_id.clone())),
+            _ => None,
+        })
+        .expect("the edit's file is fetched");
+    app.apply(IdeEvent::Diff(DiffLoaded {
+        session_id,
+        path,
+        bucket: hunk::Bucket::Unstaged,
+        file: Ok(Some(file)),
+    }));
+    assert_eq!(app.open.as_ref().unwrap().hunk, 2);
+}
+
+#[test]
+fn esc_closes_a_check_output_before_it_leaves_ide_mode() {
+    let mut app = app();
+    open_diff(&mut app);
+    press(&mut app, 't');
+    app.apply(IdeEvent::Checks(
+        "a".into(),
+        Ok(WireActions {
+            actions: vec![action("test", false, Some(1))],
+            untrusted: false,
+        }),
+    ));
+    press(&mut app, 'o');
+    assert!(app.tools.checks.show_output);
+    assert!(handle_key(&mut app, key(KeyCode::Esc)).is_empty());
+    assert!(!app.tools.checks.show_output);
+    assert_eq!(
+        handle_key(&mut app, key(KeyCode::Esc)),
+        vec![IdeAction::Close]
+    );
+}

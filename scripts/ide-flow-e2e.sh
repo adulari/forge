@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# F2 -> j/k -> accept hunk -> revert + undo -> F2 back, against `forge serve --local --mock` in an
+# F2 -> j/k -> accept hunk -> revert + undo -> edit + save -> 2 comments -> send review -> checks run
+# -> terminal echo -> F2 back, against `forge serve --local --mock` in an
 # isolated HOME with a scratch git repo. Never touches the real daemon or store.
 #   scripts/ide-flow-e2e.sh            (needs target/release/forge, or FORGE_BIN=<path>)
 set -uo pipefail
@@ -8,6 +9,7 @@ export FORGE_BIN="${FORGE_BIN:-$REPO/target/release/forge}"
 ROOT="$(mktemp -d)"
 export HOME="$ROOT/home" XDG_CONFIG_HOME="$ROOT/home/.config" XDG_DATA_HOME="$ROOT/home/.local/share" XDG_CACHE_HOME="$ROOT/home/.cache"
 export FORGE_DB="$ROOT/forge.db"
+export FORGE_TRUST_PROJECT=1
 PORT=$((20000 + RANDOM % 20000))
 mkdir -p "$XDG_CONFIG_HOME/forge" "$HOME/.local/share"
 printf '[remote]\nport = %s\n[keybinds]\npreset = "forge"\n' "$PORT" > "$XDG_CONFIG_HOME/forge/config.toml"
@@ -15,6 +17,8 @@ SCRATCH="$ROOT/repo"
 mkdir -p "$SCRATCH/src" && cd "$SCRATCH" && git init -q && git config user.email t@t && git config user.name t
 printf 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n' > src/a.txt
 printf 'alpha\nbeta\ngamma\n' > src/b.txt
+mkdir -p .forge
+printf '[[actions]]\nid = "test"\nname = "Tests"\ncommand = "echo src/a.txt:3: boom; exit 1"\n' > .forge/config.toml
 git add -A && git commit -qm init
 sed -i 's/two/TWO/; s/eleven/ELEVEN/' src/a.txt
 sed -i 's/beta/BETA/' src/b.txt
