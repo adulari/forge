@@ -5,6 +5,16 @@
 
 pub use super::types::*;
 
+mod bottom;
+mod editing;
+mod project;
+mod tools;
+mod tracing;
+pub use tools::{
+    BlameData, ChecksState, CommentTarget, EditState, FileRow, FilesState, HlCache, JobsState,
+    SaveFailure, TermState, Tools, View, WhyPopup, COACH,
+};
+
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -62,6 +72,7 @@ pub struct IdeApp {
     pub(crate) help_open: bool,
     pub(crate) hits: Vec<(Rect, Hit)>,
     pub(crate) view_h: usize,
+    pub(crate) tools: Tools,
     pub(super) watching: Option<String>,
     pub(super) marks_loaded: bool,
 }
@@ -109,6 +120,7 @@ impl IdeApp {
             help_open: false,
             hits: Vec::new(),
             view_h: 20,
+            tools: Tools::default(),
             watching: None,
             marks_loaded: false,
         }
@@ -242,11 +254,11 @@ impl IdeApp {
 
     /// Something on screen moves with time (a spinner, a toast about to expire).
     pub fn animating(&self) -> bool {
-        self.toast.is_some() || self.agents.iter().any(|a| a.busy)
+        self.toast.is_some() || self.agents.iter().any(|a| a.busy) || self.tools_animating()
     }
 
     pub fn is_typing(&self) -> bool {
-        self.composer.active || self.commit.active
+        self.composer.active || self.commit.active || self.tools.comment.active
     }
 
     // ------------------------------------------------------------------ events
@@ -264,6 +276,7 @@ impl IdeApp {
                 self.rebuild_agents();
                 self.rebuild_queue();
                 actions.extend(self.after_changes());
+                actions.extend(self.tools_after_changes());
             }
             IdeEvent::Changes(Err((missing, message))) => {
                 self.changes_note = Some(if missing {
@@ -292,6 +305,7 @@ impl IdeApp {
             IdeEvent::History(id, rows) => {
                 self.history.insert(id, rows);
                 self.rebuild_timeline();
+                self.apply_pending_turn();
             }
             IdeEvent::Hunk(outcome) => actions.extend(self.apply_hunk(outcome)),
             IdeEvent::GitOp(result) => {
@@ -319,8 +333,10 @@ impl IdeApp {
                 if self.toast.as_ref().is_some_and(|t| self.tick >= t.until) {
                     self.toast = None;
                 }
+                actions.extend(self.tools_tick());
             }
             IdeEvent::Resize(w, h) => self.size = (w, h),
+            other => actions.extend(self.apply_tool_event(other)),
         }
         actions.extend(self.sync_watch());
         actions
@@ -426,7 +442,10 @@ impl IdeApp {
                             "renamed" => "R",
                             _ => "M",
                         };
-                        ChangedFile::new(&f.path, status, f.adds, f.dels, &f.content_hash)
+                        let mut file =
+                            ChangedFile::new(&f.path, status, f.adds, f.dels, &f.content_hash);
+                        file.failing = self.tools.checks.failing.contains(&f.path);
+                        file
                     })
                     .collect(),
             })
@@ -556,6 +575,7 @@ impl IdeApp {
                     open.error = None;
                     open.hunk = open.hunk.min(hunks.saturating_sub(1));
                 }
+                self.seek_hunk();
             }
             Ok(None) => {
                 if let Some(open) = self.open.as_mut() {

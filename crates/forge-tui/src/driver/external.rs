@@ -62,14 +62,14 @@ pub fn edit_in_external_editor(editor: &str, text: &str) -> Result<String, Strin
             .unwrap_or_default()
     ));
     std::fs::write(&path, text).map_err(|e| format!("could not write {}: {e}", path.display()))?;
-    let result = run_editor(editor, &path).and_then(|()| {
+    let result = run_editor_on(editor, &path).and_then(|()| {
         std::fs::read_to_string(&path).map_err(|e| format!("could not read the edited draft: {e}"))
     });
     let _ = std::fs::remove_file(&path);
     result.map(|edited| strip_final_newline(&edited).to_string())
 }
 
-fn run_editor(editor: &str, path: &Path) -> Result<(), String> {
+pub fn run_editor_on(editor: &str, path: &Path) -> Result<(), String> {
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(format!("{editor} \"{}\"", path.display()));

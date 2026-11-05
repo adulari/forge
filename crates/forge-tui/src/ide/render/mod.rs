@@ -15,10 +15,13 @@ use crate::theme::styles;
 
 mod agent;
 mod bottom;
+mod edit;
 mod editor;
+mod files;
 mod help;
 mod hints;
 mod rail;
+mod why;
 
 /// Rail, editor and agent panel side by side from this width.
 pub const WIDE: u16 = 160;
@@ -187,6 +190,10 @@ pub fn draw(app: &mut IdeApp, frame: &mut Frame) {
         }
         hints::draw(app, buf, regions.hints, &mut hits);
     }
+    if app.tools.why_popup.is_some() {
+        why::draw(app, frame, area);
+        hits.push((area, Hit::Overlay));
+    }
     if app.help_open {
         help::draw(frame, area);
         hits.push((area, Hit::Overlay));
@@ -250,7 +257,7 @@ fn draw_header(app: &IdeApp, buf: &mut Buffer, rect: Rect) {
 }
 
 fn draw_tabbar(app: &IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hit)>) {
-    let tabs: [(&str, Hit, bool); 6] = [
+    let tabs: [(&str, Hit, bool); 7] = [
         (
             "Agents",
             Hit::NarrowRail(RailFocus::Agents, app.rail_tab),
@@ -262,6 +269,13 @@ fn draw_tabbar(app: &IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect,
             app.focus == Pane::Rail
                 && app.rail_focus == RailFocus::List
                 && app.rail_tab == RailTab::Changes,
+        ),
+        (
+            "Files",
+            Hit::NarrowRail(RailFocus::List, RailTab::Files),
+            app.focus == Pane::Rail
+                && app.rail_focus == RailFocus::List
+                && app.rail_tab == RailTab::Files,
         ),
         (
             "Git",

@@ -1,6 +1,7 @@
 //! IDE mode's vocabulary: panes, hits, the events the host feeds in, the actions it must perform,
 //! and the cached diff.
 
+use super::state::{SaveFailure, View};
 use std::rc::Rc;
 
 use crate::board::{ConnState, FleetRow, HistoryRow, LiveSnapshot, ToastLevel};
@@ -82,8 +83,17 @@ pub enum Hit {
     CommitInput,
     Commit,
     Push,
+    Ship,
+    Suggest,
     Composer,
     Overlay,
+    File(usize),
+    Check(usize),
+    Job(usize),
+    Draft,
+    /// A line of the text editor: its index and the screen column its text starts at.
+    EditLine(usize, u16),
+    Terminal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +153,49 @@ pub enum IdeEvent {
     Reviewed(ReviewedMarks),
     Tick,
     Resize(u16, u16),
+    File {
+        session_id: String,
+        path: String,
+        result: Result<super::wire::WireFile, String>,
+    },
+    Saved {
+        session_id: String,
+        path: String,
+        result: Result<String, SaveFailure>,
+    },
+    Blame {
+        session_id: String,
+        path: String,
+        result: Result<Vec<super::wire::BlameLine>, String>,
+    },
+    Checks(String, Result<super::checks::WireActions, String>),
+    /// Output of a check's terminal; `reset` starts the buffer over (a new run or a re-attach).
+    CheckOutput {
+        session_id: String,
+        action: String,
+        text: String,
+        reset: bool,
+    },
+    Jobs(String, Result<Vec<super::wire::WireJob>, String>),
+    JobTail {
+        session_id: String,
+        job: u32,
+        result: Result<super::wire::WireTail, String>,
+    },
+    Entries {
+        session_id: String,
+        dir: String,
+        result: Result<super::wire::WireEntries, String>,
+    },
+    Suggested(String, Result<String, String>),
+    TermBytes(Vec<u8>),
+    TermEnded(Option<i64>),
+    /// The hand-off command to run in the terminal tab: `(cwd, command)`.
+    Handoff(Result<(String, String), String>),
+    /// The persisted TUI state, read at start.
+    Prefs {
+        coach_seen: bool,
+    },
 }
 
 /// What the host must do because of user input.
@@ -190,12 +243,82 @@ pub enum IdeAction {
     Watch(Option<String>),
     /// Write the reviewed marks (this JSON) to `tui-ide-reviewed.json`.
     SaveReviewed(String),
+    /// Write the TUI state (this JSON) to `tui-ide-state.json`.
+    SavePrefs(String),
+    FetchFile {
+        session_id: String,
+        path: String,
+    },
+    /// `expected_hash: None` overwrites: the host reads the file's current hash first.
+    SaveFile {
+        session_id: String,
+        path: String,
+        content: String,
+        expected_hash: Option<String>,
+    },
+    /// Hand the file to `$EDITOR` and save the result back.
+    ExternalEdit {
+        session_id: String,
+        path: String,
+    },
+    FetchBlame {
+        session_id: String,
+        path: String,
+    },
+    FetchChecks(String),
+    RunCheck {
+        session_id: String,
+        action: String,
+    },
+    StopCheck {
+        session_id: String,
+        action: String,
+    },
+    StreamCheck {
+        session_id: String,
+        action: String,
+        terminal_id: String,
+    },
+    FetchJobs(String),
+    FetchJobTail {
+        session_id: String,
+        job: u32,
+    },
+    FetchEntries {
+        session_id: String,
+        dir: String,
+    },
+    SuggestMessage(String),
+    Ship {
+        session_id: String,
+        stage: Vec<String>,
+        message: Option<String>,
+        push: bool,
+    },
+    TermOpen {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    TermInput(Vec<u8>),
+    TermResize(u16, u16),
+    TermClose,
+    /// `POST /api/sessions/{id}/claude`, then run the returned command in the terminal tab.
+    ContinueClaude(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
-    RevertHunk { header: String },
+    RevertHunk {
+        header: String,
+    },
     RevertFile,
+    /// Esc in the editor with unsaved edits.
+    DiscardEdits,
+    /// F2 with unsaved edits.
+    QuitDiscard,
+    /// A save found the file changed on disk: `r` reloads, `o` overwrites.
+    SaveConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +412,9 @@ pub struct OpenFile {
     pub error: Option<String>,
     pub hunk: usize,
     pub scroll: usize,
+    pub view: View,
+    /// A line the edit wrote: once the diff loads, the hunk holding it becomes the cursor.
+    pub seek: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

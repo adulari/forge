@@ -27,7 +27,7 @@ mod external;
 mod keymap;
 mod leader;
 mod suspend;
-pub use external::{edit_in_external_editor, external_editor_command};
+pub use external::{edit_in_external_editor, external_editor_command, run_editor_on};
 
 /// Enable mouse reporting: button (`?1000h`) + drag-motion (`?1002h`) + SGR encoding (`?1006h`).
 /// Drag-motion is ON so Forge can do its OWN click-drag text selection (and copy to the clipboard),

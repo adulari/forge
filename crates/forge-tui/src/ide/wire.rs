@@ -137,3 +137,90 @@ pub struct WireDiff {
     #[serde(default)]
     pub files: Vec<WireDiffFile>,
 }
+
+/// One line `GET /api/blame` attributes to an agent turn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct BlameLine {
+    #[serde(default)]
+    pub line: usize,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub turn: i64,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    #[serde(default)]
+    pub prompt_summary: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct BlameResponse {
+    #[serde(default)]
+    pub lines: Vec<BlameLine>,
+}
+
+/// One row of `GET /api/workspace/entries`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct WireEntry {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub path: String,
+    /// `directory` | `file` | `symlink`.
+    #[serde(default)]
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct WireEntries {
+    #[serde(default)]
+    pub entries: Vec<WireEntry>,
+    #[serde(default)]
+    pub truncated: usize,
+}
+
+/// `GET /api/workspace/file`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct WireFile {
+    #[serde(default)]
+    pub content: String,
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// A background shell as `GET /api/sessions/{id}/jobs` lists it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct WireJob {
+    #[serde(default)]
+    pub id: u32,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub started_at: i64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct WireJobs {
+    #[serde(default)]
+    pub jobs: Vec<WireJob>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct WireTail {
+    #[serde(default)]
+    pub running: bool,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub text: String,
+}

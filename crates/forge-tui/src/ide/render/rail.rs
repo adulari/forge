@@ -235,16 +235,7 @@ fn body(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hi
     match app.rail_tab {
         RailTab::Changes => queue(app, buf, rect, hits),
         RailTab::Git => git(app, buf, rect, hits),
-        RailTab::Files => {
-            put(
-                buf,
-                rect.x + 1,
-                rect.y + 1,
-                "The files tree arrives in the next IDE update.",
-                styles::faint(),
-                rect.width.saturating_sub(2),
-            );
-        }
+        RailTab::Files => super::files::draw(app, buf, rect, hits),
     }
 }
 
@@ -557,6 +548,58 @@ fn git(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hit
             Hit::Push,
         ));
     }
+    y += 1;
+    // The ship row: what Ship will do right now, and one click to do it.
+    let steps = app.ship_steps();
+    let ship_label = if status.has_remote {
+        " Ship it "
+    } else {
+        " Commit all "
+    };
+    let sw = cells(ship_label) as u16;
+    put(
+        buf,
+        rect.x + 1,
+        y,
+        ship_label,
+        if steps.is_empty() {
+            styles::faint()
+        } else {
+            styles::brand().bold()
+        },
+        sw,
+    );
+    hits.push((
+        Rect {
+            x: rect.x + 1,
+            y,
+            width: sw,
+            height: 1,
+        },
+        Hit::Ship,
+    ));
+    let hint_room = rect.width.saturating_sub(sw + 3);
+    put(
+        buf,
+        rect.x + sw + 2,
+        y,
+        &clip(&app.ship_hint(), usize::from(hint_room)),
+        styles::faint(),
+        hint_room,
+    );
+    y += 1;
+    let suggest = " write message (g) ";
+    let gw = cells(suggest) as u16;
+    put(buf, rect.x + 1, y, suggest, styles::muted(), gw);
+    hits.push((
+        Rect {
+            x: rect.x + 1,
+            y,
+            width: gw,
+            height: 1,
+        },
+        Hit::Suggest,
+    ));
     y += 2;
     let list = app.git_list();
     if list.is_empty() {

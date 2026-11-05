@@ -4,7 +4,10 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use super::state::{BottomTab, Hit, IdeAction, IdeApp, NeedsHit, Pane, RailFocus, RailTab};
+use super::keys_input::{edit_key, term_key};
+use super::state::{
+    BottomTab, ConfirmKind, Hit, IdeAction, IdeApp, NeedsHit, Pane, RailFocus, RailTab,
+};
 
 /// What `?` shows: `(keys, what it does)`.
 pub const HELP: &[(&str, &str)] = &[
@@ -40,9 +43,61 @@ pub const HELP: &[(&str, &str)] = &[
     ("Up Down PgUp PgDn g G", "scroll the diff"),
     ("v", "unified / side-by-side diff"),
     ("1", "focus the agents list"),
-    ("2 / 4", "Changes / Git tab (3 is Files, coming next)"),
+    ("2 / 3 / 4", "Changes / Files / Git tab"),
     ("s / Space", "Git tab: stage or unstage the file"),
-    ("c / P", "Git tab: write the commit message / push"),
+    (
+        "c / g / P",
+        "Git tab: write the commit message / suggest one / push",
+    ),
+    (
+        "Z",
+        "Git tab: ship it (stage, message, commit, push as needed)",
+    ),
+    (
+        "e",
+        "edit the open file here: type, Tab / Shift+Tab indent, Ctrl+S saves",
+    ),
+    ("Ctrl+Z / Ctrl+Y", "editor: undo / redo"),
+    (
+        "Ctrl+W / Ctrl+T",
+        "editor: why-trace gutter / who wrote this line",
+    ),
+    ("E", "open the file in $VISUAL / $EDITOR"),
+    (
+        "w / W",
+        "why-trace: show who wrote each line / details of the hunk or line",
+    ),
+    (
+        "c",
+        "comment on the hunk (Enter adds it to the draft, Alt+Enter sends just it)",
+    ),
+    (
+        "S / Ctrl+Enter",
+        "send the review draft to the agent as one prompt",
+    ),
+    ("d", "drop the last comment of the draft"),
+    (
+        "b",
+        "explain the hunk: asks the agent as a /btw side question",
+    ),
+    (
+        "C",
+        "agent panel: continue this session in Claude Code (terminal tab)",
+    ),
+    (
+        "[ / ]",
+        "bottom panel: previous / next tab (Checks, Shells, Terminal)",
+    ),
+    (
+        "Checks tab",
+        "Enter run, o output, f ask the agent to fix, x stop; in output Enter opens file:line",
+    ),
+    ("Shells tab", "j/k pick, Enter follows the log"),
+    (
+        "Terminal tab",
+        "keys go to the shell; Esc Esc leaves it, Alt+Left / Right switch tab",
+    ),
+    ("H", "hide the first-visit hints"),
     ("Tab / Shift+Tab", "cycle the panes"),
     ("t", "toggle the bottom panel"),
     ("R", "reload everything from the daemon"),
@@ -57,13 +112,45 @@ fn plain(key: &KeyEvent) -> bool {
 
 pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
     if matches!(key.code, KeyCode::F(2)) {
+        if app.edit_dirty() {
+            app.confirm = Some(super::state::Confirm {
+                kind: ConfirmKind::QuitDiscard,
+                text: "leave with unsaved edits?  y/n   (Ctrl+S saves)".to_string(),
+            });
+            return Vec::new();
+        }
         return vec![IdeAction::Close];
     }
     if app.help_open {
         app.help_open = false;
         return Vec::new();
     }
-    if app.confirm.is_some() {
+    if app.tools.why_popup.is_some() {
+        return match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                app.move_why(1);
+                Vec::new()
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.move_why(-1);
+                Vec::new()
+            }
+            KeyCode::Enter => app.jump_to_turn(),
+            _ => {
+                app.tools.why_popup = None;
+                Vec::new()
+            }
+        };
+    }
+    if let Some(confirm) = &app.confirm {
+        if confirm.kind == ConfirmKind::SaveConflict {
+            app.confirm = None;
+            return match key.code {
+                KeyCode::Char('r' | 'R') => app.reload_edit(),
+                KeyCode::Char('o' | 'O') => app.save_edit(true),
+                _ => Vec::new(),
+            };
+        }
         return match key.code {
             KeyCode::Char('y' | 'Y') | KeyCode::Enter => app.answer_confirm(true),
             _ => app.answer_confirm(false),
@@ -71,6 +158,19 @@ pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
     }
     if app.is_typing() {
         return typing(app, key);
+    }
+    if matches!(key.code, KeyCode::Enter)
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return app.send_review();
+    }
+    if app.term_focused() {
+        return term_key(app, key);
+    }
+    if app.editing() && app.focus == Pane::Editor {
+        return edit_key(app, key);
     }
     if !plain(&key) {
         return if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -90,7 +190,7 @@ pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
         };
     }
     match key.code {
-        KeyCode::Esc => return vec![IdeAction::Close],
+        KeyCode::Esc if !esc_is_local(app) => return vec![IdeAction::Close],
         KeyCode::Tab => {
             app.cycle_pane(false);
             return app.sync_watch();
@@ -110,10 +210,14 @@ pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
         KeyCode::Char('2') => return app.set_rail_tab(RailTab::Changes),
         KeyCode::Char('3') => return app.set_rail_tab(RailTab::Files),
         KeyCode::Char('4') => return app.set_rail_tab(RailTab::Git),
-        KeyCode::Char('t') => {
-            app.toggle_bottom();
-            return Vec::new();
+        KeyCode::Char('t') => return app.toggle_bottom(),
+        KeyCode::Char('[') if app.bottom_open => {
+            return app.set_bottom_tab(prev_bottom(app.bottom_tab));
         }
+        KeyCode::Char(']') if app.bottom_open => {
+            return app.set_bottom_tab(next_bottom(app.bottom_tab));
+        }
+        KeyCode::Char('H') => return app.dismiss_coach(),
         KeyCode::Char('v') => {
             app.split = !app.split;
             if let Some(open) = app.open.as_mut() {
@@ -146,16 +250,39 @@ pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
     }
 }
 
+/// Esc backs out of an open check output or followed shell log before it leaves IDE mode.
+fn esc_is_local(app: &IdeApp) -> bool {
+    app.focus == Pane::Bottom
+        && app.bottom_open
+        && match app.bottom_tab {
+            BottomTab::Checks => app.tools.checks.show_output,
+            BottomTab::Shells => app.tools.jobs.viewing.is_some(),
+            BottomTab::Terminal => false,
+        }
+}
+
 fn typing(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
     let composing = app.composer.active;
+    let commenting = app.tools.comment.active;
+    if commenting
+        && matches!(key.code, KeyCode::Enter)
+        && key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return app.finish_comment(true);
+    }
     match key.code {
         KeyCode::Esc => {
             app.composer.active = false;
             app.commit.active = false;
+            app.cancel_comment();
         }
         KeyCode::Enter => {
             return if composing {
                 app.send_composer()
+            } else if commenting {
+                app.finish_comment(false)
             } else {
                 app.commit_now()
             };
@@ -168,10 +295,15 @@ fn typing(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
     Vec::new()
 }
 
-pub fn handle_paste(app: &mut IdeApp, text: &str) {
+pub fn handle_paste(app: &mut IdeApp, text: &str) -> Vec<IdeAction> {
     if app.is_typing() {
         app.paste(text);
+    } else if app.term_focused() {
+        return vec![IdeAction::TermInput(text.as_bytes().to_vec())];
+    } else if app.editing() && app.focus == Pane::Editor {
+        app.edit_op(true, |b| b.insert_str(text));
     }
+    Vec::new()
 }
 
 /// The keys that review a file, wherever focus is (the agent panel and the rail's lists claim
@@ -188,8 +320,12 @@ fn review_key(app: &mut IdeApp, key: KeyEvent) -> Option<Vec<IdeAction>> {
             app.step_hunk(-1);
             Vec::new()
         }
-        KeyCode::Char('a') => app.accept_hunk(),
+        KeyCode::Char('a') => {
+            app.advance_coach(1);
+            app.accept_hunk()
+        }
         KeyCode::Char('x') => {
+            app.advance_coach(1);
             app.request_revert_hunk();
             Vec::new()
         }
@@ -198,7 +334,27 @@ fn review_key(app: &mut IdeApp, key: KeyEvent) -> Option<Vec<IdeAction>> {
             Vec::new()
         }
         KeyCode::Char('u') => app.undo_last(),
-        KeyCode::Char('r') => app.toggle_reviewed(),
+        KeyCode::Char('r') => {
+            app.advance_coach(1);
+            app.toggle_reviewed()
+        }
+        KeyCode::Char('c') => {
+            app.start_comment();
+            Vec::new()
+        }
+        KeyCode::Char('b') => app.explain_hunk(),
+        KeyCode::Char('e') => app.start_edit(None),
+        KeyCode::Char('E') => app.external_edit(),
+        KeyCode::Char('w') => app.toggle_why(),
+        KeyCode::Char('W') => {
+            app.open_why();
+            Vec::new()
+        }
+        KeyCode::Char('S') => app.send_review(),
+        KeyCode::Char('d') => {
+            app.drop_last_comment();
+            Vec::new()
+        }
         _ => return None,
     })
 }
@@ -263,14 +419,34 @@ fn rail_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
                     return Vec::new();
                 }
                 KeyCode::Char('P') => return app.push_now(),
+                KeyCode::Char('g') => return app.suggest_message(),
+                KeyCode::Char('Z') => return app.ship(),
                 _ => {}
             },
-            RailTab::Files => {}
+            RailTab::Files => match key.code {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    app.move_file(1);
+                    return Vec::new();
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    app.move_file(-1);
+                    return Vec::new();
+                }
+                KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => {
+                    return app.open_file_row(app.tools.files.cursor);
+                }
+                _ => {}
+            },
         },
     }
     // On the Changes list `j/k` walk the files, as everywhere else; elsewhere they are the
     // list's own keys and were handled above.
     let lists_own_jk = !(app.rail_focus == RailFocus::List && app.rail_tab == RailTab::Changes);
+    if app.rail_focus == RailFocus::List && app.rail_tab == RailTab::Git {
+        if let KeyCode::Char('c') = key.code {
+            return Vec::new();
+        }
+    }
     if !(lists_own_jk && matches!(key.code, KeyCode::Char('j' | 'k'))) {
         if let Some(actions) = review_key(app, key) {
             return actions;
@@ -302,6 +478,7 @@ fn agent_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
             app.start_composer();
             return Vec::new();
         }
+        KeyCode::Char('C') => return app.continue_in_claude(),
         KeyCode::Char('j') | KeyCode::Down => {
             app.move_timeline(1);
             return Vec::new();
@@ -321,16 +498,40 @@ fn agent_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
 
 fn bottom_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
     match key.code {
-        KeyCode::Left => app.bottom_tab = prev_bottom(app.bottom_tab),
-        KeyCode::Right => app.bottom_tab = next_bottom(app.bottom_tab),
-        KeyCode::Char('h') => app.bottom_tab = prev_bottom(app.bottom_tab),
-        KeyCode::Char('l') => app.bottom_tab = next_bottom(app.bottom_tab),
-        _ => return review_key(app, key).unwrap_or_default(),
+        KeyCode::Left | KeyCode::Char('h') => {
+            return app.set_bottom_tab(prev_bottom(app.bottom_tab))
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            return app.set_bottom_tab(next_bottom(app.bottom_tab))
+        }
+        _ => {}
+    }
+    match app.bottom_tab {
+        BottomTab::Checks => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => app.move_check(1),
+            KeyCode::Char('k') | KeyCode::Up => app.move_check(-1),
+            KeyCode::Enter => return app.run_selected_check(),
+            KeyCode::Char('o') => return app.view_check_output(),
+            KeyCode::Char('f') => return app.fix_selected_check(),
+            KeyCode::Char('x') if app.selected_check().is_some_and(|c| c.running) => {
+                return app.stop_selected_check();
+            }
+            KeyCode::Esc if app.tools.checks.show_output => app.tools.checks.show_output = false,
+            _ => return review_key(app, key).unwrap_or_default(),
+        },
+        BottomTab::Shells => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => app.move_job(1),
+            KeyCode::Char('k') | KeyCode::Up => app.move_job(-1),
+            KeyCode::Enter => return app.view_job(),
+            KeyCode::Esc if app.tools.jobs.viewing.is_some() => app.tools.jobs.viewing = None,
+            _ => return review_key(app, key).unwrap_or_default(),
+        },
+        BottomTab::Terminal => return review_key(app, key).unwrap_or_default(),
     }
     Vec::new()
 }
 
-fn next_bottom(tab: BottomTab) -> BottomTab {
+pub(super) fn next_bottom(tab: BottomTab) -> BottomTab {
     match tab {
         BottomTab::Checks => BottomTab::Shells,
         BottomTab::Shells => BottomTab::Terminal,
@@ -338,7 +539,7 @@ fn next_bottom(tab: BottomTab) -> BottomTab {
     }
 }
 
-fn prev_bottom(tab: BottomTab) -> BottomTab {
+pub(super) fn prev_bottom(tab: BottomTab) -> BottomTab {
     match tab {
         BottomTab::Checks => BottomTab::Terminal,
         BottomTab::Shells => BottomTab::Checks,
@@ -358,7 +559,7 @@ pub fn handle_mouse(app: &mut IdeApp, mouse: MouseEvent) -> Vec<IdeAction> {
         MouseEventKind::ScrollUp => wheel(app, col, row, -1),
         MouseEventKind::ScrollDown => wheel(app, col, row, 1),
         MouseEventKind::Down(MouseButton::Left) => match app.hit_at(col, row).cloned() {
-            Some(hit) => click(app, hit),
+            Some(hit) => click(app, hit, col),
             None => Vec::new(),
         },
         _ => Vec::new(),
@@ -371,14 +572,27 @@ fn wheel(app: &mut IdeApp, col: u16, row: u16, dir: i32) -> Vec<IdeAction> {
             app.move_timeline(dir);
             Vec::new()
         }
-        Some(Hit::Queue(_) | Hit::Agent(_) | Hit::GitRow(_)) => match app.rail_focus {
+        Some(Hit::Queue(_) | Hit::Agent(_) | Hit::GitRow(_) | Hit::File(_)) => match app.rail_focus
+        {
             RailFocus::Agents => app.move_agent(dir),
             RailFocus::List if app.rail_tab == RailTab::Git => {
                 app.move_git(dir);
                 Vec::new()
             }
+            RailFocus::List if app.rail_tab == RailTab::Files => {
+                app.move_file(dir);
+                Vec::new()
+            }
             RailFocus::List => Vec::new(),
         },
+        Some(Hit::Check(_)) => {
+            app.move_check(dir);
+            Vec::new()
+        }
+        Some(Hit::Job(_)) => {
+            app.move_job(dir);
+            Vec::new()
+        }
         _ => {
             app.scroll_by(dir * 3);
             Vec::new()
@@ -386,9 +600,10 @@ fn wheel(app: &mut IdeApp, col: u16, row: u16, dir: i32) -> Vec<IdeAction> {
     }
 }
 
-fn click(app: &mut IdeApp, hit: Hit) -> Vec<IdeAction> {
+fn click(app: &mut IdeApp, hit: Hit, mouse_col: u16) -> Vec<IdeAction> {
     app.composer.active = false;
     app.commit.active = false;
+    app.cancel_comment();
     match hit {
         Hit::Agent(id) => {
             app.focus_agents();
@@ -400,10 +615,15 @@ fn click(app: &mut IdeApp, hit: Hit) -> Vec<IdeAction> {
         }
         Hit::RailTab(tab) => app.set_rail_tab(tab),
         Hit::NarrowRail(focus, tab) => {
+            let actions = if focus == RailFocus::List {
+                app.set_rail_tab(tab)
+            } else {
+                app.rail_tab = tab;
+                Vec::new()
+            };
             app.focus = Pane::Rail;
             app.rail_focus = focus;
-            app.rail_tab = tab;
-            Vec::new()
+            actions
         }
         Hit::Queue(key) => {
             app.focus = Pane::Editor;
@@ -415,7 +635,11 @@ fn click(app: &mut IdeApp, hit: Hit) -> Vec<IdeAction> {
         }
         Hit::Pane(pane) => {
             app.focus = pane;
-            app.sync_watch()
+            let mut actions = app.sync_watch();
+            if pane == Pane::Bottom {
+                actions.extend(app.activate_bottom());
+            }
+            actions
         }
         Hit::Hunk(index) => {
             app.focus = Pane::Editor;
@@ -429,12 +653,41 @@ fn click(app: &mut IdeApp, hit: Hit) -> Vec<IdeAction> {
         Hit::Needs(NeedsHit::Allow) => app.answer_permission(true),
         Hit::Needs(NeedsHit::Deny) => app.answer_permission(false),
         Hit::Needs(NeedsHit::Option(n)) => app.answer_option(n),
-        Hit::BottomToggle => {
-            app.toggle_bottom();
+        Hit::BottomToggle => app.toggle_bottom(),
+        Hit::BottomTab(tab) => {
+            app.focus = Pane::Bottom;
+            app.set_bottom_tab(tab)
+        }
+        Hit::File(index) => {
+            app.rail_focus = RailFocus::List;
+            app.open_file_row(index)
+        }
+        Hit::Check(index) => {
+            app.focus = Pane::Bottom;
+            let again = app.tools.checks.cursor == index && !app.tools.checks.show_output;
+            app.tools.checks.cursor = index;
+            if again {
+                app.run_selected_check()
+            } else {
+                app.tools.checks.show_output = false;
+                Vec::new()
+            }
+        }
+        Hit::Job(index) => {
+            app.focus = Pane::Bottom;
+            app.tools.jobs.cursor = index;
+            app.view_job()
+        }
+        Hit::Ship => app.ship(),
+        Hit::Suggest => app.suggest_message(),
+        Hit::Draft => app.send_review(),
+        Hit::EditLine(line, text_x) => {
+            app.focus = Pane::Editor;
+            let col = usize::from(mouse_col.saturating_sub(text_x));
+            app.edit_op(false, |b| b.set_cursor(line, col));
             Vec::new()
         }
-        Hit::BottomTab(tab) => {
-            app.bottom_tab = tab;
+        Hit::Terminal => {
             app.focus = Pane::Bottom;
             Vec::new()
         }

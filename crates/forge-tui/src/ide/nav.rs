@@ -1,5 +1,6 @@
 //! Navigation and review: which file and hunk are open, reviewed marks, stage / revert / undo.
 
+use super::state::View;
 use std::rc::Rc;
 
 use crate::board::ToastLevel;
@@ -21,8 +22,9 @@ impl IdeApp {
         self.rebuild_queue();
         let mut actions = Vec::new();
         if let Some(open) = &self.open {
-            if self.scope.as_ref().is_some_and(|s| s != &open.session_id) {
+            if self.scope.as_ref().is_some_and(|s| s != &open.session_id) && !self.edit_dirty() {
                 self.open = None;
+                self.tools.edit = None;
             }
         }
         actions.extend(self.sync_watch());
@@ -65,6 +67,22 @@ impl IdeApp {
     }
 
     pub fn open_file(&mut self, session_id: String, path: String) -> Vec<IdeAction> {
+        let same = self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.session_id == session_id && o.path == path);
+        if self.edit_dirty() && !same {
+            self.say(
+                ToastLevel::Info,
+                "unsaved edits: Ctrl+S saves, Esc discards".to_string(),
+            );
+            return Vec::new();
+        }
+        let tracked = self.tracked(&session_id, &path);
+        if !same {
+            self.tools.edit = None;
+            self.tools.why_popup = None;
+        }
         self.open = Some(OpenFile {
             session_id,
             path,
@@ -72,9 +90,18 @@ impl IdeApp {
             error: None,
             hunk: 0,
             scroll: 0,
+            view: if tracked { View::Diff } else { View::Edit },
+            seek: None,
         });
         self.confirm = None;
-        let mut actions = self.ensure_diff();
+        self.advance_coach(0);
+        let mut actions = if tracked {
+            let mut actions = self.ensure_diff();
+            actions.extend(self.ensure_blame());
+            actions
+        } else {
+            self.start_edit(None)
+        };
         actions.extend(self.sync_watch());
         actions
     }
@@ -113,6 +140,10 @@ impl IdeApp {
     }
 
     pub fn scroll_by(&mut self, delta: i32) {
+        if self.editing() {
+            self.edit_scroll_by(delta);
+            return;
+        }
         let Some((parsed, _)) = self.parsed() else {
             return;
         };
@@ -159,19 +190,24 @@ impl IdeApp {
         self.focus = order[next];
     }
 
-    pub fn toggle_bottom(&mut self) {
+    pub fn toggle_bottom(&mut self) -> Vec<IdeAction> {
         self.bottom_open = !self.bottom_open;
         if !self.bottom_open && self.focus == Pane::Bottom {
             self.focus = Pane::Editor;
         } else if self.bottom_open {
             self.focus = Pane::Bottom;
+            return self.activate_bottom();
         }
+        Vec::new()
     }
 
     pub fn set_rail_tab(&mut self, tab: RailTab) -> Vec<IdeAction> {
         self.rail_tab = tab;
         self.rail_focus = RailFocus::List;
         self.focus = Pane::Rail;
+        if tab == RailTab::Files {
+            return self.ensure_files();
+        }
         if tab == RailTab::Git {
             return self
                 .panel_session()
@@ -320,6 +356,15 @@ impl IdeApp {
             return Vec::new();
         }
         match confirm.kind {
+            ConfirmKind::DiscardEdits => {
+                self.leave_edit();
+                Vec::new()
+            }
+            ConfirmKind::QuitDiscard => {
+                self.tools.edit = None;
+                vec![IdeAction::Close]
+            }
+            ConfirmKind::SaveConflict => Vec::new(),
             ConfirmKind::RevertHunk { header } => {
                 let Some((parsed, _, _)) = self.current_hunk() else {
                     return Vec::new();

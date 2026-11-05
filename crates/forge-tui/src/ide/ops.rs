@@ -128,7 +128,35 @@ impl IdeApp {
             })
             .map_or(agent, |a| a.session_id.clone());
         self.focus = Pane::Editor;
-        self.open_file(session, path)
+        let mut actions = self.open_file(session, path);
+        if let Some(open) = self.open.as_mut() {
+            open.seek = item.needle.clone();
+        }
+        self.seek_hunk();
+        actions.extend(self.sync_watch());
+        actions
+    }
+
+    /// Put the hunk cursor on the hunk that holds the line an edit wrote, once that diff is here.
+    pub(super) fn seek_hunk(&mut self) {
+        let Some(needle) = self.open.as_ref().and_then(|o| o.seek.clone()) else {
+            return;
+        };
+        let Some((parsed, _)) = self.parsed() else {
+            return;
+        };
+        let wanted = needle.trim();
+        let found = parsed.overlay.hunks.iter().position(|h| {
+            h.lines
+                .iter()
+                .any(|l| l.kind != crate::diff_overlay::LineKind::Del && l.text.trim() == wanted)
+        });
+        if let Some(open) = self.open.as_mut() {
+            open.seek = None;
+        }
+        if let Some(index) = found {
+            self.set_hunk(index);
+        }
     }
 
     pub fn move_timeline(&mut self, step: i32) {
@@ -216,7 +244,7 @@ impl IdeApp {
     }
 
     pub fn commit_now(&mut self) -> Vec<IdeAction> {
-        let message = self.commit.text.trim().to_string();
+        let message = self.full_commit_message();
         let Some(session) = self.panel_session() else {
             return Vec::new();
         };
@@ -232,6 +260,7 @@ impl IdeApp {
             return Vec::new();
         }
         self.commit = Input::default();
+        self.tools.suggested_body = None;
         vec![IdeAction::Commit {
             session_id: self.route_session(&session),
             message,
@@ -257,6 +286,8 @@ impl IdeApp {
     pub fn type_char(&mut self, ch: char) {
         if self.composer.active {
             self.composer.push(ch);
+        } else if self.tools.comment.active {
+            self.tools.comment.push(ch);
         } else if self.commit.active {
             self.commit.push(ch);
         }
@@ -265,6 +296,8 @@ impl IdeApp {
     pub fn backspace(&mut self) {
         let input = if self.composer.active {
             &mut self.composer
+        } else if self.tools.comment.active {
+            &mut self.tools.comment
         } else {
             &mut self.commit
         };
@@ -274,6 +307,8 @@ impl IdeApp {
     pub fn clear_input(&mut self) {
         let input = if self.composer.active {
             &mut self.composer
+        } else if self.tools.comment.active {
+            &mut self.tools.comment
         } else {
             &mut self.commit
         };

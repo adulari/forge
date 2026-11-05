@@ -82,7 +82,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "ide",
-        desc: "IDE mode: review what agents changed, stage or revert hunks, answer them (F2)",
+        desc: "IDE mode: review agent changes, edit, comment, run checks, open a terminal (F2)",
         usage: "/ide",
     },
     Command {

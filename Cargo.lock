@@ -2442,6 +2442,7 @@ dependencies = [
  "tokio",
  "unicode-segmentation",
  "unicode-width",
+ "vtparse",
 ]
 
 [[package]]

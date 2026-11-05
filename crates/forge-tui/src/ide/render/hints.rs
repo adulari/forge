@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 
 use super::{cells, clip, put};
 use crate::board::{ConnState, ToastLevel};
-use crate::ide::state::{Hit, IdeApp, Pane, RailFocus, RailTab};
+use crate::ide::state::{BottomTab, Hit, IdeApp, Pane, RailFocus, RailTab};
 use crate::theme::glyphs::g;
 use crate::theme::styles;
 
@@ -41,17 +41,46 @@ pub(super) fn draw(app: &IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(R
         return;
     }
     if app.is_typing() {
+        let pairs: Vec<(&str, &str)> = if app.tools.comment.active {
+            vec![
+                ("Enter", "add to draft"),
+                ("Alt+Enter", "send just this"),
+                ("Esc", "cancel"),
+                ("Ctrl+U", "clear"),
+            ]
+        } else {
+            vec![
+                (
+                    "Enter",
+                    if app.composer.active {
+                        "send"
+                    } else {
+                        "commit"
+                    },
+                ),
+                ("Esc", "cancel"),
+                ("Ctrl+U", "clear"),
+            ]
+        };
+        pairs_row(buf, rect, left_room, &pairs);
+        return;
+    }
+    if app.term_focused() {
         let pairs = [
-            (
-                "Enter",
-                if app.composer.active {
-                    "send"
-                } else {
-                    "commit"
-                },
-            ),
-            ("Esc", "cancel"),
-            ("Ctrl+U", "clear"),
+            ("Esc Esc", "leave terminal"),
+            ("Alt+Left/Right", "tab"),
+            ("F2", "back"),
+        ];
+        pairs_row(buf, rect, left_room, &pairs);
+        return;
+    }
+    if app.editing() && app.focus == Pane::Editor {
+        let pairs = [
+            ("Ctrl+S", "save"),
+            ("Ctrl+Z", "undo"),
+            ("Esc", "back"),
+            ("Ctrl+W", "why"),
+            ("F2", "back to chat"),
         ];
         pairs_row(buf, rect, left_room, &pairs);
         return;
@@ -72,6 +101,20 @@ pub(super) fn draw(app: &IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(R
         );
         return;
     }
+    if app.toast.is_none() {
+        if let Some((step, text)) = app.coach_line() {
+            let line = format!("{}/3  {text}   H hide", step + 1);
+            put(
+                buf,
+                rect.x + 1,
+                rect.y,
+                &clip(&line, usize::from(left_room)),
+                styles::brand(),
+                left_room,
+            );
+            return;
+        }
+    }
     let waiting = app.snapshot().is_some_and(|s| s.waiting());
     let mut pairs: Vec<(&str, &str)> = Vec::new();
     if waiting {
@@ -91,18 +134,45 @@ pub(super) fn draw(app: &IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(R
                 ("j/k", "file"),
                 ("s", "stage"),
                 ("c", "message"),
+                ("g", "suggest"),
+                ("Z", "ship"),
                 ("P", "push"),
                 ("Enter", "diff"),
             ]);
+        }
+        Pane::Rail if app.rail_tab == RailTab::Files => {
+            pairs.extend([("j/k", "file"), ("Enter", "open / expand")]);
         }
         Pane::Agent => {
             pairs.extend([
                 ("j/k", "timeline"),
                 ("Enter", "open edit"),
                 ("i", "message"),
+                ("C", "continue in Claude Code"),
             ]);
         }
-        Pane::Bottom => pairs.extend([("h/l", "tab"), ("t", "close")]),
+        Pane::Bottom => match app.bottom_tab {
+            BottomTab::Checks if app.tools.checks.show_output => pairs.extend([
+                ("j/k", "link"),
+                ("Enter", "open file:line"),
+                ("f", "fix"),
+                ("Esc", "list"),
+            ]),
+            BottomTab::Checks => pairs.extend([
+                ("Enter", "run"),
+                ("o", "output"),
+                ("f", "fix"),
+                ("h/l", "tab"),
+                ("t", "close"),
+            ]),
+            BottomTab::Shells => pairs.extend([
+                ("Enter", "follow log"),
+                ("Esc", "list"),
+                ("h/l", "tab"),
+                ("t", "close"),
+            ]),
+            BottomTab::Terminal => pairs.extend([("h/l", "tab"), ("t", "close")]),
+        },
         _ => pairs.extend([
             ("j/k", "files"),
             ("n/p", "hunks"),
@@ -110,6 +180,10 @@ pub(super) fn draw(app: &IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(R
             ("x", "revert"),
             ("u", "undo"),
             ("r", "reviewed"),
+            ("c", "comment"),
+            ("e", "edit"),
+            ("w", "why"),
+            ("S", "send review"),
             ("m", "message"),
         ]),
     }

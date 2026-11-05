@@ -31,6 +31,8 @@ similar.workspace = true
 # Quote-aware tokenizing for `/loop`/`/goal --gate "<cmd with spaces>"` (already a workspace dep,
 # used by forge-core's shell-command permission parsing).
 shell-words.workspace = true
+# Escape-sequence state machine for the IDE terminal.
+vtparse = "0.6"
 
 [target.'cfg(unix)'.dependencies]
 # Ctrl+Z hands the terminal back and stops the process with SIGTSTP.

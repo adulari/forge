@@ -117,7 +117,47 @@ pub(super) fn draw(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Ve
         tasks.len().min(4) as u16 + 1
     };
     let composer_h = 2u16;
-    let timeline_bottom = rect.bottom().saturating_sub(composer_h + task_rows);
+    let drafts = app.tools.drafts.count(&id);
+    let draft_rows = if drafts > 0 { 2u16 } else { 0 };
+    let timeline_bottom = rect
+        .bottom()
+        .saturating_sub(composer_h + task_rows + draft_rows);
+    if drafts > 0 {
+        let dy = rect.bottom() - composer_h - draft_rows;
+        let label = format!(
+            " Review draft {} {}",
+            g().sep,
+            crate::ide::review::draft_label(drafts)
+        );
+        put(
+            buf,
+            inner.x,
+            dy,
+            &clip(&label, usize::from(inner.width)),
+            styles::brand().bold(),
+            inner.width,
+        );
+        let send = " S send review ";
+        let sw = cells(send) as u16;
+        put(buf, inner.x + 1, dy + 1, send, styles::selected_row(), sw);
+        hits.push((
+            Rect {
+                x: inner.x + 1,
+                y: dy + 1,
+                width: sw,
+                height: 1,
+            },
+            Hit::Draft,
+        ));
+        put(
+            buf,
+            inner.x + sw + 2,
+            dy + 1,
+            "d drop last",
+            styles::faint(),
+            inner.width.saturating_sub(sw + 3),
+        );
+    }
     if y + 2 > timeline_bottom {
         composer(app, buf, inner, rect.bottom() - composer_h, hits);
         return;
@@ -386,7 +426,10 @@ fn composer(app: &IdeApp, buf: &mut Buffer, rect: Rect, y: u16, hits: &mut Vec<(
         };
         (format!("› {shown}▏"), styles::fg())
     } else {
-        ("m  message this agent".to_string(), styles::faint())
+        (
+            "m message   C continue in Claude Code".to_string(),
+            styles::faint(),
+        )
     };
     put(
         buf,

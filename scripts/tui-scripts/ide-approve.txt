@@ -1,0 +1,32 @@
+# Approve and deny a real permission prompt from IDE mode's agent panel. Run with
+#   IDE_SCRIPT=ide-approve.txt scripts/ide-flow-e2e.sh
+# The mock provider writes a file when the prompt says "create a file" and asks permission first.
+sleep 1500
+chord F2
+sleep 2500
+expect IDE
+chord m
+type please create a file
+chord Enter
+sleep 3500
+capture asked
+expect needs you
+# allow it: the agent writes mock-note.txt and the file joins the queue
+chord Y
+sleep 3500
+expect allowed
+capture allowed
+expect mock-note.txt
+# a second write, denied this time
+chord m
+type mock:write again
+chord Enter
+sleep 3500
+expect needs you
+chord N
+sleep 2500
+expect denied
+capture denied
+chord F2
+sleep 1200
+reject IDE keys

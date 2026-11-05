@@ -33,6 +33,10 @@ const FALLBACK_REFRESH: Duration = Duration::from_secs(15);
 const HISTORY_EVERY: Duration = Duration::from_secs(4);
 const HISTORY_LIMIT: usize = 80;
 const MARKS_FILE: &str = "tui-ide-reviewed.json";
+const PREFS_FILE: &str = "tui-ide-state.json";
+const TERMINAL_ID: &str = "term-ide";
+/// A check's output is followed for at most this long.
+const CHECK_FOLLOW: Duration = Duration::from_secs(30 * 60);
 
 // ---------------------------------------------------------------------------
 // Daemon discovery
@@ -101,6 +105,12 @@ fn start_daemon() -> Result<()> {
     Ok(())
 }
 
+mod perform;
+mod streams;
+mod tools_api;
+use perform::perform;
+use streams::{external_edit, stream_check, term_task, Runtime, TermCmd, TermLink};
+
 // ---------------------------------------------------------------------------
 // HTTP
 // ---------------------------------------------------------------------------
@@ -167,6 +177,22 @@ async fn post(
 ) -> Result<serde_json::Value, CallError> {
     finish(
         http.post(api_url(base, token, path))
+            .json(&body)
+            .send()
+            .await,
+    )
+    .await
+}
+
+async fn put(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, CallError> {
+    finish(
+        http.put(api_url(base, token, path))
             .json(&body)
             .send()
             .await,
@@ -388,6 +414,25 @@ fn load_marks() -> forge_tui::ide::model::ReviewedMarks {
         .unwrap_or_default()
 }
 
+fn prefs_path() -> Option<PathBuf> {
+    forge_config::data_dir().map(|dir| dir.join(PREFS_FILE))
+}
+
+fn load_prefs() -> bool {
+    prefs_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .is_some_and(|v| v["coach_seen"].as_bool().unwrap_or(false))
+}
+
+fn save_prefs(json: &str) {
+    let Some(path) = prefs_path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, json);
+}
+
 fn save_marks(json: &str) {
     let Some(path) = marks_path() else { return };
     if let Some(dir) = path.parent() {
@@ -415,6 +460,9 @@ impl IdeHost {
     pub(crate) fn new(cwd: &str, base: String, token: String) -> Self {
         let mut app = IdeApp::new(cwd, now_unix());
         app.apply(IdeEvent::Reviewed(load_marks()));
+        app.apply(IdeEvent::Prefs {
+            coach_seen: load_prefs(),
+        });
         Self { app, base, token }
     }
 
@@ -477,20 +525,36 @@ impl IdeHost {
         }
         let _ = refresh_tx.send(());
         let mut pending: Vec<IdeAction> = self.app.sync_watch();
+        pending.extend(self.app.reconnect_terminal());
         pending.push(IdeAction::RefreshChanges);
+        let mut runtime = Runtime::default();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut history_at = Instant::now();
         let mut dirty = true;
         let mut last_draw = Instant::now() - DRAW_MIN_INTERVAL;
         let mut closing = false;
+        let mut break_err: Option<anyhow::Error> = None;
         let result = loop {
             for action in std::mem::take(&mut pending) {
-                if matches!(action, IdeAction::Close) {
-                    closing = true;
-                } else {
-                    perform(action, &api, &mut pool, &refresh_tx);
+                match action {
+                    IdeAction::Close => closing = true,
+                    IdeAction::ExternalEdit { session_id, path } => {
+                        input.pause().await;
+                        guard.suspend();
+                        external_edit(&api, &session_id, &path, &refresh_tx).await;
+                        if let Err(e) = guard.resume() {
+                            break_err = Some(e);
+                        }
+                        let _ = guard.terminal.clear();
+                        input.resume();
+                        dirty = true;
+                    }
+                    other => perform(other, &api, &mut pool, &refresh_tx, &mut runtime),
                 }
+            }
+            if let Some(e) = break_err.take() {
+                break Err(e);
             }
             if closing {
                 break Ok(());
@@ -535,6 +599,7 @@ impl IdeHost {
             }
         };
         pool.shutdown();
+        runtime.shutdown();
         watcher.abort();
         refresher.abort();
         drop(input);
@@ -565,107 +630,6 @@ fn translate(event: BoardEvent) -> Option<IdeEvent> {
         BoardEvent::Connection(state) => Some(IdeEvent::Connection(state)),
         BoardEvent::Toast(level, text) => Some(IdeEvent::Toast(level, text)),
         _ => None,
-    }
-}
-
-fn perform(
-    action: IdeAction,
-    api: &Api,
-    pool: &mut SocketPool,
-    refresh: &mpsc::UnboundedSender<()>,
-) {
-    let api = api.clone();
-    match action {
-        IdeAction::Close => {}
-        IdeAction::RefreshChanges => {
-            let _ = refresh.send(());
-        }
-        IdeAction::FetchDiff {
-            session_id,
-            path,
-            worktree,
-        } => {
-            tokio::spawn(async move { api.diff(&session_id, &path, worktree).await });
-        }
-        IdeAction::FetchGitStatus(id) => {
-            tokio::spawn(async move { api.status(&id).await });
-        }
-        IdeAction::FetchHistory(id) => {
-            tokio::spawn(async move { api.history(&id).await });
-        }
-        IdeAction::Hunk {
-            session_id,
-            path,
-            header,
-            patch,
-            action,
-            undo,
-            is_undo,
-        } => {
-            tokio::spawn(async move {
-                api.hunk(session_id, path, header, patch, action, undo, is_undo)
-                    .await
-            });
-        }
-        IdeAction::DiscardFile {
-            session_id,
-            path,
-            undo,
-        } => {
-            tokio::spawn(async move { api.discard(session_id, path, undo).await });
-        }
-        IdeAction::StagePaths {
-            session_id,
-            paths,
-            stage,
-        } => {
-            tokio::spawn(async move {
-                let route = if stage {
-                    "api/git/stage"
-                } else {
-                    "api/git/unstage"
-                };
-                let note = format!(
-                    "{} {}",
-                    if stage { "staged" } else { "unstaged" },
-                    paths.join(", ")
-                );
-                api.git_op(
-                    route,
-                    serde_json::json!({ "session": session_id, "paths": paths }),
-                    note,
-                )
-                .await;
-            });
-        }
-        IdeAction::Commit {
-            session_id,
-            message,
-        } => {
-            tokio::spawn(async move {
-                api.git_op(
-                    "api/git/commit",
-                    serde_json::json!({ "session": session_id, "message": message }),
-                    "committed".to_string(),
-                )
-                .await;
-            });
-        }
-        IdeAction::Push { session_id } => {
-            tokio::spawn(async move {
-                api.git_op(
-                    "api/git/push",
-                    serde_json::json!({ "session": session_id }),
-                    "pushed".to_string(),
-                )
-                .await;
-            });
-        }
-        IdeAction::Input(id, json) => pool.send(&id, &json),
-        IdeAction::Watch(id) => pool.sync(&id.into_iter().collect::<Vec<_>>()),
-        IdeAction::SaveReviewed(json) => {
-            tokio::task::spawn_blocking(move || save_marks(&json));
-        }
     }
 }
 
@@ -958,5 +922,129 @@ mod tests {
         std::fs::write(&path, &json).unwrap();
         let back = forge_tui::ide::model::marks_from_json(&std::fs::read_to_string(path).unwrap());
         assert_eq!(back.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tools_tests {
+    use super::*;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use forge_tui::ide::SaveFailure;
+    use std::sync::{Arc, Mutex};
+
+    const TOKEN: &str = "tok";
+
+    #[derive(Default)]
+    struct Seen {
+        order: Mutex<Vec<String>>,
+        puts: Mutex<Vec<serde_json::Value>>,
+    }
+
+    async fn serve(seen: Arc<Seen>) -> String {
+        let note = |name: &'static str| {
+            move |State(seen): State<Arc<Seen>>| async move {
+                seen.order.lock().unwrap().push(name.to_string());
+                Json(serde_json::json!({"ok": true, "message": "fix(core): tidy"}))
+            }
+        };
+        let app = Router::new()
+            .route(
+                &format!("/{TOKEN}/api/workspace/file"),
+                get(|| async {
+                    Json(serde_json::json!({"content":"one\n","hash":"disk-now","read_only":false}))
+                })
+                .put(
+                    |State(seen): State<Arc<Seen>>, Json(body): Json<serde_json::Value>| async move {
+                        seen.puts.lock().unwrap().push(body.clone());
+                        if body["expected_hash"] == "stale" {
+                            return (StatusCode::CONFLICT, Json(serde_json::json!({"error":"changed"})))
+                                .into_response();
+                        }
+                        Json(serde_json::json!({"hash":"disk-new"})).into_response()
+                    },
+                ),
+            )
+            .route(&format!("/{TOKEN}/api/git/stage"), post(note("stage")))
+            .route(&format!("/{TOKEN}/api/git/commit-message"), post(note("message")))
+            .route(&format!("/{TOKEN}/api/git/commit"), post(note("commit")))
+            .route(&format!("/{TOKEN}/api/git/push"), post(note("push")))
+            .with_state(seen);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    fn api(base: String) -> (Api, mpsc::UnboundedReceiver<Ev>) {
+        let (ev, rx) = mpsc::unbounded_channel();
+        (
+            Api {
+                http: reqwest::Client::new(),
+                base,
+                token: TOKEN.into(),
+                cwd: "/repo".into(),
+                ev,
+            },
+            rx,
+        )
+    }
+
+    async fn next(rx: &mut mpsc::UnboundedReceiver<Ev>) -> IdeEvent {
+        loop {
+            if let Some(Ev::Ide(event)) = rx.recv().await {
+                return event;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stale_hash_is_a_conflict_and_overwrite_reads_the_current_one() {
+        let seen = Arc::new(Seen::default());
+        let (api, mut rx) = api(serve(seen.clone()).await);
+        api.save("a", "f.txt", "two\n".into(), Some("stale".into()))
+            .await;
+        match next(&mut rx).await {
+            IdeEvent::Saved { result, .. } => assert_eq!(result, Err(SaveFailure::Conflict)),
+            other => panic!("{other:?}"),
+        }
+        api.save("a", "f.txt", "two\n".into(), None).await;
+        match next(&mut rx).await {
+            IdeEvent::Saved { result, .. } => assert_eq!(result, Ok("disk-new".to_string())),
+            other => panic!("{other:?}"),
+        }
+        let puts = seen.puts.lock().unwrap();
+        assert_eq!(puts[1]["expected_hash"], "disk-now");
+        assert_eq!(puts[1]["content"], "two\n");
+    }
+
+    #[tokio::test]
+    async fn ship_stages_writes_a_message_commits_and_pushes_in_order() {
+        let seen = Arc::new(Seen::default());
+        let (api, mut rx) = api(serve(seen.clone()).await);
+        api.ship("a".into(), vec!["x.rs".into()], None, true).await;
+        match next(&mut rx).await {
+            IdeEvent::GitOp(result) => assert_eq!(result, Ok("committed and pushed".to_string())),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            *seen.order.lock().unwrap(),
+            ["stage", "message", "commit", "push"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ship_with_a_message_and_nothing_to_stage_only_commits() {
+        let seen = Arc::new(Seen::default());
+        let (api, mut rx) = api(serve(seen.clone()).await);
+        api.ship("a".into(), Vec::new(), Some("feat: x".into()), false)
+            .await;
+        assert!(matches!(next(&mut rx).await, IdeEvent::GitOp(Ok(_))));
+        assert_eq!(*seen.order.lock().unwrap(), ["commit"]);
     }
 }
