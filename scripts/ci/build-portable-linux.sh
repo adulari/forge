@@ -66,8 +66,16 @@ docker run --rm \
     printf "deb %s/debian/%s bullseye-updates main\n" "$base" "$snapshot" >> /etc/apt/sources.list
     # A snapshot Release file is deliberately older than apt tolerates by default.
     printf "Acquire::Check-Valid-Until \"false\";\n" > /etc/apt/apt.conf.d/99forge-snapshot
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends cmake libclang-dev
+    # snapshot.debian.org sits behind a CDN that intermittently answers 503 "No healthy backends"
+    # or "first byte timeout"; it failed both Linux targets of v2.27.0 and v2.28.0. Retry per file,
+    # then retry the whole step with a pause, before giving up.
+    printf "Acquire::Retries \"8\";\nAcquire::http::Timeout \"60\";\n" > /etc/apt/apt.conf.d/99forge-retries
+    for attempt in 1 2 3; do
+      apt-get update -qq && apt-get install -y -qq --no-install-recommends cmake libclang-dev && break
+      [ "$attempt" = 3 ] && exit 1
+      echo "apt attempt $attempt failed; retrying in $((attempt * 30))s" >&2
+      sleep $((attempt * 30))
+    done
 
     cargo build --release --locked --bin forge --target "$TARGET"
     "/out/$TARGET/release/forge" --version
