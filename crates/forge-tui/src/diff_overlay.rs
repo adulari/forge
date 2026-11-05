@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use crate::KeyKind;
 
 mod model;
-mod render;
+pub(crate) mod render;
 
 pub use model::{
     from_snapshot, parse_unified, untracked_file, DiffLine, DiffSource, FileStatus, LineKind,

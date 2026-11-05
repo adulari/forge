@@ -16,9 +16,9 @@ use crate::theme::{styles, t};
 const LIST_MIN_WIDTH: u16 = 100;
 const LIST_WIDTH: u16 = 32;
 /// Side-by-side needs two readable columns.
-const SPLIT_MIN_WIDTH: u16 = 70;
+pub(crate) const SPLIT_MIN_WIDTH: u16 = 70;
 
-fn fit(text: &str, width: usize) -> String {
+pub(crate) fn fit(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     for ch in text.chars() {
@@ -35,7 +35,7 @@ fn fit(text: &str, width: usize) -> String {
     out
 }
 
-fn pad(text: String, width: usize) -> String {
+pub(crate) fn pad(text: String, width: usize) -> String {
     let used = text.width();
     if used >= width {
         text
@@ -68,7 +68,7 @@ fn number(n: Option<u32>, width: usize) -> String {
     }
 }
 
-fn unified_row(line: &DiffLine, gutter: usize, width: usize) -> Line<'static> {
+pub(crate) fn unified_row(line: &DiffLine, gutter: usize, width: usize) -> Line<'static> {
     let (mark, mark_style) = sigil(line.kind);
     let body = width.saturating_sub(gutter * 2 + 4);
     let style = line_style(line.kind);
@@ -86,7 +86,12 @@ fn unified_row(line: &DiffLine, gutter: usize, width: usize) -> Line<'static> {
     ])
 }
 
-fn half(line: Option<&DiffLine>, gutter: usize, width: usize, old: bool) -> Vec<Span<'static>> {
+pub(crate) fn half(
+    line: Option<&DiffLine>,
+    gutter: usize,
+    width: usize,
+    old: bool,
+) -> Vec<Span<'static>> {
     let body = width.saturating_sub(gutter + 3);
     let Some(line) = line else {
         return vec![Span::raw(" ".repeat(width))];
