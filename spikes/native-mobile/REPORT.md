@@ -6,7 +6,7 @@ Branch `spike/native-mobile` (not for merge), code in `spikes/native-mobile/`. R
 
 **Do not rewrite the whole app natively now. The measured gains are real but they are on cheap screens; the cost is 20-28 weeks and the loss of OTA plus the web/desktop code sharing.** Two cheaper moves capture most of the benefit:
 
-1. Move the protocol/state/crypto logic (`lib/ws`, `api`, reconciler, streaming accumulation, markdown parsing, Anywhere crypto/replay) into a Rust core now. The spike shows that works end to end (710 lines, 4 tests, bindings generated for Kotlin and Swift, Swift side verified on Linux). The core can be consumed by Tauri today and by RN via a native module, or by native UIs later.
+1. Move the protocol/state/crypto logic (`lib/ws`, `api`, reconciler, streaming accumulation, markdown parsing, Anywhere crypto/replay) into a Rust core now. The spike shows that works end to end (660 lines, 4 tests, bindings generated for Kotlin and Swift, Swift side verified on Linux). The core can be consumed by Tauri today and by RN via a native module, or by native UIs later.
 2. If you want native feel, go native for the one surface where it matters most and RN is weakest, the streaming session screen (RN used 110-117% of a core while streaming vs 15-18% native), as a native view embedded in the RN shell, and keep everything else (settings, IDE, onboarding, Anywhere) in RN with OTA.
 
 Revisit a full rewrite if: RN streaming cost cannot be fixed inside RN (try the same per-block lazy-item splitting and update coalescing first, the native spike gained from it), or OTA is no longer important, or web+desktop are dropped or moved to a shared Rust UI.
@@ -43,7 +43,7 @@ Build times (this machine, no daemon):
 | Dependencies | cargo deps + core first build, 2 ABIs + host + bindgen: 75 s; gradle deps cached | `npm@10 ci` 46 s |
 | Native project generation | none (checked in) | `expo prebuild` 4 s |
 | Release APK | gradle clean build 68 s; Rust core one ABI with LTO from touch 81 s; incremental Rust debug 10 s | gradle release 3 m 13 s (x86_64 only) |
-| Hand-written lines for the two screens | Rust 710 + Kotlin ~410 (+ Swift ~410, not built) | see below |
+| Hand-written lines for the two screens | Rust 660 + Kotlin ~410 (+ Swift ~410, not built) | see below |
 
 Lines of code, RN equivalent (non-test, from the RN tree): `app/(tabs)/index.tsx` 376; `app/session/[id]/*` 2,896; `components/chat` 6,447; `components/fleet` 1,254; `components/session` 6,874; `theme` 1,381; `lib/ws.ts` 653; `lib/api.ts` 1,818; markdown stack 1,336. About 20k lines for the screens the spike covers at roughly 5% of their feature surface. **Not like for like**: the RN screens include tool rows, diffs, plans, queue, attachments, syntax highlighting, tabs, project chips, Respond/Peek actions, a tab bar, and so on. Compare the screenshots.
 
@@ -82,7 +82,7 @@ Hand-written lines in the spike (generated UniFFI bindings excluded: 3.3k lines 
 
 | Part | Lines |
 |---|---|
-| Rust core (`core/src`: HTTP+WS client, snapshot/streaming accumulation, history paging, fleet ordering, markdown to blocks, 4 unit tests) | 710 |
+| Rust core (`core/src`: HTTP+WS client, snapshot/streaming accumulation, history paging, fleet ordering, markdown to blocks, 4 unit tests) | 660 |
 | Kotlin / Compose (fleet, session, markdown renderer, theme, view-model) | ~410 |
 | Swift / SwiftUI (same screens, not compiled here) | ~410 |
 
