@@ -143,6 +143,10 @@ pub struct TermState {
     pub sent: (u16, u16),
     pub esc_tick: Option<u64>,
     pub session: Option<String>,
+    /// Open once the pane has a size (it was asked for before the first draw).
+    pub want_open: Option<String>,
+    /// Typed into the shell as soon as it opens (the Claude Code hand-off command).
+    pub pending_input: Vec<u8>,
 }
 
 #[derive(Default)]
@@ -273,11 +277,9 @@ impl IdeApp {
             }
             IdeEvent::Handoff(Ok((cwd, command))) => {
                 let id = self.panel_session().unwrap_or_default();
-                actions.extend(self.open_terminal_with(&id));
                 let quoted = format!("'{}'", cwd.replace('\'', "'\\''"));
-                actions.push(IdeAction::TermInput(
-                    format!("cd {quoted} && {command}\n").into_bytes(),
-                ));
+                self.tools.term.pending_input = format!("cd {quoted} && {command}\n").into_bytes();
+                actions.extend(self.open_terminal_with(&id));
             }
             IdeEvent::Handoff(Err(message)) => self.say(ToastLevel::Error, message),
             IdeEvent::Prefs { coach_seen } => {

@@ -13,6 +13,9 @@ export FORGE_TRUST_PROJECT=1
 PORT=$((20000 + RANDOM % 20000))
 mkdir -p "$XDG_CONFIG_HOME/forge" "$HOME/.local/share"
 printf '[remote]\nport = %s\n[keybinds]\npreset = "forge"\n' "$PORT" > "$XDG_CONFIG_HOME/forge/config.toml"
+# A stand-in `claude` so the hand-off test never starts a real Claude Code.
+mkdir -p "$ROOT/bin" && printf '#!/bin/sh\necho "claude-stub $*"\n' > "$ROOT/bin/claude" && chmod +x "$ROOT/bin/claude"
+export PATH="$ROOT/bin:$PATH"
 SCRATCH="$ROOT/repo"
 mkdir -p "$SCRATCH/src" && cd "$SCRATCH" && git init -q && git config user.email t@t && git config user.name t
 printf 'one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\ntwelve\n' > src/a.txt

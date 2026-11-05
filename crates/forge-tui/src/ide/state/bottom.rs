@@ -37,20 +37,37 @@ impl IdeApp {
                 if self.tools.term.opened {
                     return Vec::new();
                 }
-                self.tools.term.opened = true;
-                self.tools.term.session = Some(session.clone());
-                let (cols, rows) = self.tools.term.view;
-                let (cols, rows) = (cols.max(20), rows.max(4));
-                self.tools.term.grid = Some(TermGrid::new(cols, rows));
-                self.tools.term.sent = (cols, rows);
-                self.tools.term.ended = None;
-                vec![IdeAction::TermOpen {
-                    session_id: session,
-                    cols,
-                    rows,
-                }]
+                if self.tools.term.view == (0, 0) {
+                    // The pane has not been drawn yet: open at its real size on the next tick, or
+                    // the shell wraps its first lines at a guessed width.
+                    self.tools.term.want_open = Some(session);
+                    return Vec::new();
+                }
+                self.open_terminal_now(session)
             }
         }
+    }
+
+    fn open_terminal_now(&mut self, session: String) -> Vec<IdeAction> {
+        let term = &mut self.tools.term;
+        term.opened = true;
+        term.session = Some(session.clone());
+        let (cols, rows) = term.view;
+        let (cols, rows) = (cols.max(20), rows.max(4));
+        term.grid = Some(TermGrid::new(cols, rows));
+        term.sent = (cols, rows);
+        term.ended = None;
+        let mut actions = vec![IdeAction::TermOpen {
+            session_id: session,
+            cols,
+            rows,
+        }];
+        if !term.pending_input.is_empty() {
+            actions.push(IdeAction::TermInput(std::mem::take(
+                &mut term.pending_input,
+            )));
+        }
+        actions
     }
 
     /// IDE mode was reopened: the terminal's socket is gone, the daemon's shell is not.
@@ -374,6 +391,11 @@ impl IdeApp {
 
     /// Keep the daemon's PTY the size of the pane that shows it.
     pub(super) fn sync_term(&mut self) -> Vec<IdeAction> {
+        if self.tools.term.view != (0, 0) {
+            if let Some(session) = self.tools.term.want_open.take() {
+                return self.open_terminal_now(session);
+            }
+        }
         let term = &mut self.tools.term;
         if !term.opened || term.view == (0, 0) || term.view == term.sent {
             return Vec::new();

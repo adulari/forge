@@ -487,7 +487,9 @@ fn the_terminal_opens_echoes_and_esc_esc_leaves() {
     press(&mut app, 't');
     screen(&mut app, 140, 40);
     press(&mut app, ']');
-    let actions = press(&mut app, ']');
+    press(&mut app, ']');
+    screen(&mut app, 140, 40);
+    let actions = app.apply(IdeEvent::Tick);
     let open = actions
         .iter()
         .find(|a| matches!(a, IdeAction::TermOpen { .. }))
@@ -811,5 +813,31 @@ fn esc_closes_a_check_output_before_it_leaves_ide_mode() {
     assert_eq!(
         handle_key(&mut app, key(KeyCode::Esc)),
         vec![IdeAction::Close]
+    );
+}
+
+#[test]
+fn the_claude_hand_off_opens_the_terminal_at_its_real_size_and_types_the_command() {
+    let mut app = app();
+    open_diff(&mut app);
+    let actions = app.apply(IdeEvent::Handoff(Ok((
+        "/my repo".into(),
+        "claude --resume abc".into(),
+    ))));
+    assert!(
+        !actions
+            .iter()
+            .any(|a| matches!(a, IdeAction::TermOpen { .. })),
+        "nothing opens before the pane has a size: {actions:?}"
+    );
+    screen(&mut app, 200, 50);
+    let actions = app.apply(IdeEvent::Tick);
+    let open = actions
+        .iter()
+        .position(|a| matches!(a, IdeAction::TermOpen { cols, .. } if *cols > 60))
+        .expect("opens at the drawn size");
+    assert_eq!(
+        actions[open + 1],
+        IdeAction::TermInput(b"cd '/my repo' && claude --resume abc\n".to_vec())
     );
 }

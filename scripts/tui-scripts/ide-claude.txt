@@ -8,9 +8,8 @@ chord m
 type hello there
 chord Enter
 sleep 3500
-chord Tab Tab
 sleep 300
 chord C
 sleep 4000
 capture handoff
-expect claude --resume
+expect claude-stub --resume
