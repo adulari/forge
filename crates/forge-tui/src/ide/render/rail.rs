@@ -235,16 +235,118 @@ fn body(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hi
     match app.rail_tab {
         RailTab::Changes => queue(app, buf, rect, hits),
         RailTab::Git => git(app, buf, rect, hits),
-        RailTab::Files => {
+        RailTab::Files => files(app, buf, rect, hits),
+    }
+}
+
+fn files(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hit)>) {
+    if app.panel_session().is_none() {
+        put(
+            buf,
+            rect.x + 1,
+            rect.y + 1,
+            "pick an agent first: its folder is what the tree shows",
+            styles::faint(),
+            rect.width.saturating_sub(2),
+        );
+        return;
+    }
+    let rows = app.files_rows();
+    if rows.is_empty() {
+        let (text, style) = match &app.tools.files.error {
+            Some(e) => (e.clone(), styles::err()),
+            None => ("reading the folder…".to_string(), styles::faint()),
+        };
+        put(
+            buf,
+            rect.x + 1,
+            rect.y + 1,
+            &clip(&text, usize::from(rect.width).saturating_sub(2)),
+            style,
+            rect.width.saturating_sub(2),
+        );
+        return;
+    }
+    let focused = app.focus == Pane::Rail && app.rail_focus == RailFocus::List;
+    let room = usize::from(rect.height);
+    let cursor = app.tools.files.cursor.min(rows.len() - 1);
+    let start = (cursor + 1).saturating_sub(room);
+    for (offset, row) in rows.iter().enumerate().skip(start).take(room) {
+        let y = rect.y + (offset - start) as u16;
+        let row_rect = Rect {
+            y,
+            height: 1,
+            ..rect
+        };
+        let selected = focused && offset == cursor;
+        let base = if selected {
+            styles::selected_row()
+        } else {
+            styles::fg()
+        };
+        if selected {
+            fill(buf, row_rect, base);
+        }
+        let indent = (row.depth * 2) as u16;
+        let marker = if row.dir {
+            if row.open {
+                "v"
+            } else {
+                ">"
+            }
+        } else {
+            " "
+        };
+        put(
+            buf,
+            rect.x + 1 + indent,
+            y,
+            marker,
+            styles::faint().patch(base),
+            1,
+        );
+        let name_style = if row.changed {
+            styles::warn().patch(base)
+        } else if row.dir {
+            styles::muted().patch(base)
+        } else {
+            base
+        };
+        let room_w = usize::from(rect.width).saturating_sub(usize::from(indent) + 5);
+        let name = if row.dir {
+            format!("{}/", row.name)
+        } else {
+            row.name.clone()
+        };
+        put(
+            buf,
+            rect.x + 3 + indent,
+            y,
+            &clip(&name, room_w),
+            name_style,
+            room_w as u16,
+        );
+        if row.changed && !row.dir {
             put(
                 buf,
-                rect.x + 1,
-                rect.y + 1,
-                "The files tree arrives in the next IDE update.",
-                styles::faint(),
-                rect.width.saturating_sub(2),
+                rect.right() - 2,
+                y,
+                g().live_dot,
+                styles::warn().patch(base),
+                1,
             );
         }
+        hits.push((row_rect, Hit::File(offset)));
+    }
+    if app.tools.files.truncated > 0 && room > rows.len() {
+        put(
+            buf,
+            rect.x + 1,
+            rect.y + rows.len() as u16,
+            &format!("{} more not shown", app.tools.files.truncated),
+            styles::faint(),
+            rect.width.saturating_sub(2),
+        );
     }
 }
 
@@ -557,6 +659,58 @@ fn git(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hit
             Hit::Push,
         ));
     }
+    y += 1;
+    // The ship row: what Ship will do right now, and one click to do it.
+    let steps = app.ship_steps();
+    let ship_label = if status.has_remote {
+        " Ship it "
+    } else {
+        " Commit all "
+    };
+    let sw = cells(ship_label) as u16;
+    put(
+        buf,
+        rect.x + 1,
+        y,
+        ship_label,
+        if steps.is_empty() {
+            styles::faint()
+        } else {
+            styles::brand().bold()
+        },
+        sw,
+    );
+    hits.push((
+        Rect {
+            x: rect.x + 1,
+            y,
+            width: sw,
+            height: 1,
+        },
+        Hit::Ship,
+    ));
+    let hint_room = rect.width.saturating_sub(sw + 3);
+    put(
+        buf,
+        rect.x + sw + 2,
+        y,
+        &clip(&app.ship_hint(), usize::from(hint_room)),
+        styles::faint(),
+        hint_room,
+    );
+    y += 1;
+    let suggest = " write message (g) ";
+    let gw = cells(suggest) as u16;
+    put(buf, rect.x + 1, y, suggest, styles::muted(), gw);
+    hits.push((
+        Rect {
+            x: rect.x + 1,
+            y,
+            width: gw,
+            height: 1,
+        },
+        Hit::Suggest,
+    ));
     y += 2;
     let list = app.git_list();
     if list.is_empty() {

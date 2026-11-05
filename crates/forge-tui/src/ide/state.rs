@@ -11,6 +11,7 @@ use crate::board::{project_name, ConnState, FleetRow, HistoryRow, LiveSnapshot, 
 use crate::diff_overlay::{from_snapshot, layout, OverlayFile, Row};
 use crate::{DiffFileSnapshot, DiffHunkSnapshot};
 
+use super::checks::WireActions;
 use super::hunk::{
     actions_for, build_patch, undo_step_for_hunk, undo_steps_for_file, Bucket, HunkAction,
     UndoRecord,
@@ -21,7 +22,16 @@ use super::model::{
     ReviewedMarks, Tier,
 };
 use super::timeline::{build_timeline, resolve_changed_path, TimelineItem, TimelineKind};
-use super::wire::{GitStatus, ProjectChanges, WireDiffFile, WireSessionChanges, UNATTRIBUTED};
+use super::wire::{
+    BlameLine, GitStatus, ProjectChanges, WireDiffFile, WireEntries, WireFile, WireJob,
+    WireSessionChanges, WireTail, UNATTRIBUTED,
+};
+
+mod tools;
+pub use tools::{
+    BlameData, ChecksState, CommentTarget, EditState, FileRow, FilesState, HlCache, JobsState,
+    SaveFailure, TermState, Tools, View, WhyPopup, COACH,
+};
 
 /// Reviewed marks kept in the persisted file.
 pub const MARKS_CAP: usize = 2000;
@@ -95,8 +105,17 @@ pub enum Hit {
     CommitInput,
     Commit,
     Push,
+    Ship,
+    Suggest,
     Composer,
     Overlay,
+    File(usize),
+    Check(usize),
+    Job(usize),
+    Draft,
+    /// A line of the text editor: its index and the screen column its text starts at.
+    EditLine(usize, u16),
+    Terminal,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,6 +175,49 @@ pub enum IdeEvent {
     Reviewed(ReviewedMarks),
     Tick,
     Resize(u16, u16),
+    File {
+        session_id: String,
+        path: String,
+        result: Result<WireFile, String>,
+    },
+    Saved {
+        session_id: String,
+        path: String,
+        result: Result<String, SaveFailure>,
+    },
+    Blame {
+        session_id: String,
+        path: String,
+        result: Result<Vec<BlameLine>, String>,
+    },
+    Checks(String, Result<WireActions, String>),
+    /// Output of a check's terminal; `reset` starts the buffer over (a new run or a re-attach).
+    CheckOutput {
+        session_id: String,
+        action: String,
+        text: String,
+        reset: bool,
+    },
+    Jobs(String, Result<Vec<WireJob>, String>),
+    JobTail {
+        session_id: String,
+        job: u32,
+        result: Result<WireTail, String>,
+    },
+    Entries {
+        session_id: String,
+        dir: String,
+        result: Result<WireEntries, String>,
+    },
+    Suggested(String, Result<String, String>),
+    TermBytes(Vec<u8>),
+    TermEnded(Option<i64>),
+    /// The hand-off command to run in the terminal tab: `(cwd, command)`.
+    Handoff(Result<(String, String), String>),
+    /// The persisted TUI state, read at start.
+    Prefs {
+        coach_seen: bool,
+    },
 }
 
 /// What the host must do because of user input.
@@ -203,12 +265,82 @@ pub enum IdeAction {
     Watch(Option<String>),
     /// Write the reviewed marks (this JSON) to `tui-ide-reviewed.json`.
     SaveReviewed(String),
+    /// Write the TUI state (this JSON) to `tui-ide-state.json`.
+    SavePrefs(String),
+    FetchFile {
+        session_id: String,
+        path: String,
+    },
+    /// `expected_hash: None` overwrites: the host reads the file's current hash first.
+    SaveFile {
+        session_id: String,
+        path: String,
+        content: String,
+        expected_hash: Option<String>,
+    },
+    /// Hand the file to `$EDITOR` and save the result back.
+    ExternalEdit {
+        session_id: String,
+        path: String,
+    },
+    FetchBlame {
+        session_id: String,
+        path: String,
+    },
+    FetchChecks(String),
+    RunCheck {
+        session_id: String,
+        action: String,
+    },
+    StopCheck {
+        session_id: String,
+        action: String,
+    },
+    StreamCheck {
+        session_id: String,
+        action: String,
+        terminal_id: String,
+    },
+    FetchJobs(String),
+    FetchJobTail {
+        session_id: String,
+        job: u32,
+    },
+    FetchEntries {
+        session_id: String,
+        dir: String,
+    },
+    SuggestMessage(String),
+    Ship {
+        session_id: String,
+        stage: Vec<String>,
+        message: Option<String>,
+        push: bool,
+    },
+    TermOpen {
+        session_id: String,
+        cols: u16,
+        rows: u16,
+    },
+    TermInput(Vec<u8>),
+    TermResize(u16, u16),
+    TermClose,
+    /// `POST /api/sessions/{id}/claude`, then run the returned command in the terminal tab.
+    ContinueClaude(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmKind {
-    RevertHunk { header: String },
+    RevertHunk {
+        header: String,
+    },
     RevertFile,
+    /// Esc in the editor with unsaved edits.
+    DiscardEdits,
+    /// F2 with unsaved edits.
+    QuitDiscard,
+    /// A save found the file changed on disk: `r` reloads, `o` overwrites.
+    SaveConflict,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -302,6 +434,9 @@ pub struct OpenFile {
     pub error: Option<String>,
     pub hunk: usize,
     pub scroll: usize,
+    pub view: View,
+    /// A line the edit wrote: once the diff loads, the hunk holding it becomes the cursor.
+    pub seek: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -360,6 +495,7 @@ pub struct IdeApp {
     pub(crate) help_open: bool,
     pub(crate) hits: Vec<(Rect, Hit)>,
     pub(crate) view_h: usize,
+    pub(crate) tools: Tools,
     watching: Option<String>,
     marks_loaded: bool,
 }
@@ -407,6 +543,7 @@ impl IdeApp {
             help_open: false,
             hits: Vec::new(),
             view_h: 20,
+            tools: Tools::default(),
             watching: None,
             marks_loaded: false,
         }
@@ -540,11 +677,11 @@ impl IdeApp {
 
     /// Something on screen moves with time (a spinner, a toast about to expire).
     pub fn animating(&self) -> bool {
-        self.toast.is_some() || self.agents.iter().any(|a| a.busy)
+        self.toast.is_some() || self.agents.iter().any(|a| a.busy) || self.tools_animating()
     }
 
     pub fn is_typing(&self) -> bool {
-        self.composer.active || self.commit.active
+        self.composer.active || self.commit.active || self.tools.comment.active
     }
 
     // ------------------------------------------------------------------ events
@@ -562,6 +699,7 @@ impl IdeApp {
                 self.rebuild_agents();
                 self.rebuild_queue();
                 actions.extend(self.after_changes());
+                actions.extend(self.tools_after_changes());
             }
             IdeEvent::Changes(Err((missing, message))) => {
                 self.changes_note = Some(if missing {
@@ -590,6 +728,7 @@ impl IdeApp {
             IdeEvent::History(id, rows) => {
                 self.history.insert(id, rows);
                 self.rebuild_timeline();
+                self.apply_pending_turn();
             }
             IdeEvent::Hunk(outcome) => actions.extend(self.apply_hunk(outcome)),
             IdeEvent::GitOp(result) => {
@@ -617,8 +756,10 @@ impl IdeApp {
                 if self.toast.as_ref().is_some_and(|t| self.tick >= t.until) {
                     self.toast = None;
                 }
+                actions.extend(self.tools_tick());
             }
             IdeEvent::Resize(w, h) => self.size = (w, h),
+            other => actions.extend(self.apply_tool_event(other)),
         }
         actions.extend(self.sync_watch());
         actions
@@ -724,7 +865,10 @@ impl IdeApp {
                             "renamed" => "R",
                             _ => "M",
                         };
-                        ChangedFile::new(&f.path, status, f.adds, f.dels, &f.content_hash)
+                        let mut file =
+                            ChangedFile::new(&f.path, status, f.adds, f.dels, &f.content_hash);
+                        file.failing = self.tools.checks.failing.contains(&f.path);
+                        file
                     })
                     .collect(),
             })
@@ -854,6 +998,7 @@ impl IdeApp {
                     open.error = None;
                     open.hunk = open.hunk.min(hunks.saturating_sub(1));
                 }
+                self.seek_hunk();
             }
             Ok(None) => {
                 if let Some(open) = self.open.as_mut() {
@@ -958,8 +1103,9 @@ impl IdeApp {
         self.rebuild_queue();
         let mut actions = Vec::new();
         if let Some(open) = &self.open {
-            if self.scope.as_ref().is_some_and(|s| s != &open.session_id) {
+            if self.scope.as_ref().is_some_and(|s| s != &open.session_id) && !self.edit_dirty() {
                 self.open = None;
+                self.tools.edit = None;
             }
         }
         actions.extend(self.sync_watch());
@@ -1002,6 +1148,22 @@ impl IdeApp {
     }
 
     pub fn open_file(&mut self, session_id: String, path: String) -> Vec<IdeAction> {
+        let same = self
+            .open
+            .as_ref()
+            .is_some_and(|o| o.session_id == session_id && o.path == path);
+        if self.edit_dirty() && !same {
+            self.say(
+                ToastLevel::Info,
+                "unsaved edits: Ctrl+S saves, Esc discards".to_string(),
+            );
+            return Vec::new();
+        }
+        let tracked = self.tracked(&session_id, &path);
+        if !same {
+            self.tools.edit = None;
+            self.tools.why_popup = None;
+        }
         self.open = Some(OpenFile {
             session_id,
             path,
@@ -1009,9 +1171,18 @@ impl IdeApp {
             error: None,
             hunk: 0,
             scroll: 0,
+            view: if tracked { View::Diff } else { View::Edit },
+            seek: None,
         });
         self.confirm = None;
-        let mut actions = self.ensure_diff();
+        self.advance_coach(0);
+        let mut actions = if tracked {
+            let mut actions = self.ensure_diff();
+            actions.extend(self.ensure_blame());
+            actions
+        } else {
+            self.start_edit(None)
+        };
         actions.extend(self.sync_watch());
         actions
     }
@@ -1050,6 +1221,10 @@ impl IdeApp {
     }
 
     pub fn scroll_by(&mut self, delta: i32) {
+        if self.editing() {
+            self.edit_scroll_by(delta);
+            return;
+        }
         let Some((parsed, _)) = self.parsed() else {
             return;
         };
@@ -1096,19 +1271,24 @@ impl IdeApp {
         self.focus = order[next];
     }
 
-    pub fn toggle_bottom(&mut self) {
+    pub fn toggle_bottom(&mut self) -> Vec<IdeAction> {
         self.bottom_open = !self.bottom_open;
         if !self.bottom_open && self.focus == Pane::Bottom {
             self.focus = Pane::Editor;
         } else if self.bottom_open {
             self.focus = Pane::Bottom;
+            return self.activate_bottom();
         }
+        Vec::new()
     }
 
     pub fn set_rail_tab(&mut self, tab: RailTab) -> Vec<IdeAction> {
         self.rail_tab = tab;
         self.rail_focus = RailFocus::List;
         self.focus = Pane::Rail;
+        if tab == RailTab::Files {
+            return self.ensure_files();
+        }
         if tab == RailTab::Git {
             return self
                 .panel_session()
@@ -1257,6 +1437,15 @@ impl IdeApp {
             return Vec::new();
         }
         match confirm.kind {
+            ConfirmKind::DiscardEdits => {
+                self.leave_edit();
+                Vec::new()
+            }
+            ConfirmKind::QuitDiscard => {
+                self.tools.edit = None;
+                vec![IdeAction::Close]
+            }
+            ConfirmKind::SaveConflict => Vec::new(),
             ConfirmKind::RevertHunk { header } => {
                 let Some((parsed, _, _)) = self.current_hunk() else {
                     return Vec::new();
@@ -1427,7 +1616,35 @@ impl IdeApp {
             })
             .map_or(agent, |a| a.session_id.clone());
         self.focus = Pane::Editor;
-        self.open_file(session, path)
+        let mut actions = self.open_file(session, path);
+        if let Some(open) = self.open.as_mut() {
+            open.seek = item.needle.clone();
+        }
+        self.seek_hunk();
+        actions.extend(self.sync_watch());
+        actions
+    }
+
+    /// Put the hunk cursor on the hunk that holds the line an edit wrote, once that diff is here.
+    fn seek_hunk(&mut self) {
+        let Some(needle) = self.open.as_ref().and_then(|o| o.seek.clone()) else {
+            return;
+        };
+        let Some((parsed, _)) = self.parsed() else {
+            return;
+        };
+        let wanted = needle.trim();
+        let found = parsed.overlay.hunks.iter().position(|h| {
+            h.lines
+                .iter()
+                .any(|l| l.kind != crate::diff_overlay::LineKind::Del && l.text.trim() == wanted)
+        });
+        if let Some(open) = self.open.as_mut() {
+            open.seek = None;
+        }
+        if let Some(index) = found {
+            self.set_hunk(index);
+        }
     }
 
     pub fn move_timeline(&mut self, step: i32) {
@@ -1515,7 +1732,7 @@ impl IdeApp {
     }
 
     pub fn commit_now(&mut self) -> Vec<IdeAction> {
-        let message = self.commit.text.trim().to_string();
+        let message = self.full_commit_message();
         let Some(session) = self.panel_session() else {
             return Vec::new();
         };
@@ -1531,6 +1748,7 @@ impl IdeApp {
             return Vec::new();
         }
         self.commit = Input::default();
+        self.tools.suggested_body = None;
         vec![IdeAction::Commit {
             session_id: self.route_session(&session),
             message,
@@ -1556,6 +1774,8 @@ impl IdeApp {
     pub fn type_char(&mut self, ch: char) {
         if self.composer.active {
             self.composer.push(ch);
+        } else if self.tools.comment.active {
+            self.tools.comment.push(ch);
         } else if self.commit.active {
             self.commit.push(ch);
         }
@@ -1564,6 +1784,8 @@ impl IdeApp {
     pub fn backspace(&mut self) {
         let input = if self.composer.active {
             &mut self.composer
+        } else if self.tools.comment.active {
+            &mut self.tools.comment
         } else {
             &mut self.commit
         };
@@ -1573,6 +1795,8 @@ impl IdeApp {
     pub fn clear_input(&mut self) {
         let input = if self.composer.active {
             &mut self.composer
+        } else if self.tools.comment.active {
+            &mut self.tools.comment
         } else {
             &mut self.commit
         };

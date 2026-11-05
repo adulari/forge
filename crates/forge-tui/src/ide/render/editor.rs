@@ -9,7 +9,7 @@ use super::{cells, clip, put, put_line, rule_row};
 use crate::diff_overlay::render::{fit, half, pad, unified_row, SPLIT_MIN_WIDTH};
 use crate::diff_overlay::Row;
 use crate::ide::hunk::{actions_for, Bucket, HunkAction};
-use crate::ide::state::{Hit, IdeApp, Pane};
+use crate::ide::state::{Hit, IdeApp, Pane, View};
 use crate::theme::glyphs::g;
 use crate::theme::styles;
 
@@ -22,6 +22,10 @@ pub(super) fn draw(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Ve
         empty(app, buf, rect);
         return;
     };
+    if open.view == View::Edit {
+        super::edit::draw(app, buf, rect, hits);
+        return;
+    }
     let (session_id, path) = (open.session_id.clone(), open.path.clone());
     let loading = open.loading;
     let error = open.error.clone();
@@ -109,6 +113,14 @@ pub(super) fn draw(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Ve
         action_bar(app, buf, bar, None);
         return;
     };
+    let why = app.tools.why;
+    let blame = if why {
+        app.blame_for_open().cloned()
+    } else {
+        None
+    };
+    let drafts_agent = app.review_target_session(&session_id);
+    let shift: u16 = if why { 2 } else { 0 };
     let split = app.split && body.width >= SPLIT_MIN_WIDTH;
     let (rows, starts) = parsed.layout(split);
     let overlay = &parsed.overlay;
@@ -158,15 +170,51 @@ pub(super) fn draw(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Ve
                 } else {
                     styles::brand().patch(styles::surface())
                 };
+                let commented = drafts_agent.as_deref().map_or(0, |id| {
+                    app.tools
+                        .drafts
+                        .count_for(id, &parsed.wire.path, &overlay.hunks[*h].header)
+                });
+                let tag = match commented {
+                    0 => String::new(),
+                    1 => "  1 comment".to_string(),
+                    n => format!("  {n} comments"),
+                };
                 let text = pad(
-                    fit(&format!("{marker}{}", overlay.hunks[*h].header), width),
+                    fit(&format!("{marker}{}{tag}", overlay.hunks[*h].header), width),
                     width,
                 );
                 put(buf, body.x, y, &text, style, body.width);
             }
             Row::Line(h, l) => {
-                let line = unified_row(&overlay.hunks[*h].lines[*l], parsed.gutter, width);
-                put_line(buf, body.x, y, &line, body.width);
+                let src = &overlay.hunks[*h].lines[*l];
+                if let Some(blame) = &blame {
+                    if let Some(info) = src.new_no.and_then(|n| blame.lines.get(&(n as usize))) {
+                        let above = src
+                            .new_no
+                            .and_then(|n| blame.lines.get(&(n as usize).wrapping_sub(1)))
+                            .is_some_and(|a| {
+                                a.tool_call_id == info.tool_call_id && a.turn == info.turn
+                            });
+                        put(
+                            buf,
+                            body.x,
+                            y,
+                            if above { "│" } else { "┃" },
+                            styles::brand(),
+                            1,
+                        );
+                    }
+                }
+                let line =
+                    unified_row(src, parsed.gutter, width.saturating_sub(usize::from(shift)));
+                put_line(
+                    buf,
+                    body.x + shift,
+                    y,
+                    &line,
+                    body.width.saturating_sub(shift),
+                );
             }
             Row::Pair(h, left, right) => {
                 let lines = &overlay.hunks[*h].lines;
@@ -241,6 +289,26 @@ fn action_bar(
     bar: Rect,
     hunk: Option<(&[HunkAction], usize, usize)>,
 ) {
+    if app.tools.comment.active {
+        let target = app
+            .tools
+            .comment_target
+            .as_ref()
+            .map_or(String::new(), |t| t.header.clone());
+        let room = usize::from(bar.width).saturating_sub(2);
+        let shown = format!("comment on {target}: {}▏", app.tools.comment.text);
+        let skip = shown.chars().count().saturating_sub(room);
+        let shown: String = shown.chars().skip(skip).collect();
+        put(
+            buf,
+            bar.x + 1,
+            bar.y,
+            &shown,
+            styles::fg(),
+            bar.width.saturating_sub(2),
+        );
+        return;
+    }
     let mut pairs: Vec<(&str, String)> = Vec::new();
     if let Some((actions, cursor, total)) = hunk {
         if total > 0 {
@@ -267,6 +335,17 @@ fn action_bar(
             }
             .to_string(),
         ));
+        pairs.push(("c", "comment".to_string()));
+        pairs.push(("b", "explain".to_string()));
+        pairs.push(("e", "edit".to_string()));
+        pairs.push((
+            "w",
+            if app.tools.why { "hide why" } else { "why" }.to_string(),
+        ));
+        let drafts = app.draft_count();
+        if drafts > 0 {
+            pairs.push(("S", format!("send review ({drafts})")));
+        }
         pairs.push(("X", "revert file".to_string()));
         pairs.push(("v", if app.split { "unified" } else { "split" }.to_string()));
     }

@@ -27,6 +27,8 @@ pub struct TimelineItem {
     pub dels: usize,
     /// The path an edit touched, as the model wrote it (often absolute).
     pub path: Option<String>,
+    /// First non-blank line the edit wrote, so opening it can land on the hunk that holds it.
+    pub needle: Option<String>,
     pub seq: i64,
 }
 
@@ -126,6 +128,39 @@ fn edit_path(args: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The first meaningful line an edit call wrote (`new_string`, `content`, ...).
+fn edit_needle(args: &str) -> Option<String> {
+    let parsed = parse_args(args)?;
+    [
+        "new_string",
+        "new_str",
+        "new_text",
+        "replacement",
+        "content",
+        "text",
+    ]
+    .iter()
+    .find_map(|key| parsed.get(*key).and_then(|v| v.as_str()))
+    .and_then(|text| {
+        text.lines()
+            .map(str::trim)
+            .find(|l| l.chars().filter(|c| c.is_alphanumeric()).count() >= 3)
+    })
+    .map(str::to_string)
+}
+
+/// The timeline item for assistant turn `turn`: the first item at or after that sequence, else the
+/// last one before it.
+pub fn item_for_turn(items: &[TimelineItem], turn: i64) -> Option<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.seq >= turn)
+        .min_by_key(|(_, i)| i.seq)
+        .or_else(|| items.iter().enumerate().max_by_key(|(_, i)| i.seq))
+        .map(|(index, _)| index)
+}
+
 /// Whether a tool result reads as a failure.
 pub fn result_failed(result: &str) -> bool {
     let head: String = result.trim_start().chars().take(200).collect();
@@ -177,6 +212,7 @@ pub fn build_timeline(rows: &[HistoryRow], limit: usize) -> Vec<TimelineItem> {
                 adds: 0,
                 dels: 0,
                 path: None,
+                needle: None,
                 seq: row.seq,
             });
             continue;
@@ -199,6 +235,9 @@ pub fn build_timeline(rows: &[HistoryRow], limit: usize) -> Vec<TimelineItem> {
                 dels: row.dels.unwrap_or(0),
                 path: (kind == TimelineKind::Edit)
                     .then(|| edit_path(&row.content))
+                    .flatten(),
+                needle: (kind == TimelineKind::Edit)
+                    .then(|| edit_needle(&row.content))
                     .flatten(),
                 seq: row.seq,
             });

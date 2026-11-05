@@ -2439,6 +2439,7 @@ dependencies = [
  "shell-words",
  "similar 3.2.0",
  "syntect",
+ "termwiz",
  "tokio",
  "unicode-segmentation",
  "unicode-width",

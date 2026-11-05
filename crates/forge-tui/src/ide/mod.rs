@@ -6,20 +6,26 @@
 //! [`IdeEvent`]s in, answers key and mouse input with [`IdeAction`]s for the host to perform, and
 //! draws itself into a ratatui frame. `forge-cli`'s `ide_host` talks to the daemon.
 
+pub mod checks;
+pub mod edit_buf;
 pub mod hunk;
 pub mod keys;
 pub mod model;
 pub mod render;
+pub mod review;
 pub mod state;
+pub mod term_grid;
 pub mod timeline;
 pub mod wire;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_tools;
 
 pub use keys::{handle_key, handle_mouse, handle_paste, HELP};
 pub use render::{draw, mode_for, Mode, AGENT_W, MID, RAIL_W, WIDE};
 pub use state::{
     AgentRow, BottomTab, DiffLoaded, Hit, HunkFailure, HunkOutcome, IdeAction, IdeApp, IdeEvent,
-    Pane, RailFocus, RailTab,
+    Pane, RailFocus, RailTab, SaveFailure, View,
 };

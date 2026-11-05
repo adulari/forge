@@ -12,9 +12,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use crossterm::event::{Event as TermEvent, KeyEventKind};
-use forge_tui::board::{BoardEvent, FleetRow, HistoryRow};
+use forge_tui::board::{BoardEvent, FleetRow, HistoryRow, ToastLevel};
+use forge_tui::ide::checks::WireActions;
 use forge_tui::ide::hunk::{Bucket, UndoRecord};
-use forge_tui::ide::wire::{GitStatus, ProjectChanges, WireDiff, WireDiffFile};
+use forge_tui::ide::wire::{
+    BlameResponse, GitStatus, ProjectChanges, WireDiff, WireDiffFile, WireEntries, WireFile,
+    WireJobs, WireTail,
+};
+use forge_tui::ide::SaveFailure;
 use forge_tui::ide::{
     handle_key, handle_mouse, handle_paste, DiffLoaded, HunkFailure, HunkOutcome, IdeAction,
     IdeApp, IdeEvent,
@@ -22,7 +27,7 @@ use forge_tui::ide::{
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 
-use crate::board::client::{api_url, error_message};
+use crate::board::client::{api_url, error_message, ws_url};
 use crate::board::sockets::{fleet_watcher, SocketPool};
 use crate::board::{now_unix, Ev, InputReader, TerminalGuard};
 
@@ -33,6 +38,10 @@ const FALLBACK_REFRESH: Duration = Duration::from_secs(15);
 const HISTORY_EVERY: Duration = Duration::from_secs(4);
 const HISTORY_LIMIT: usize = 80;
 const MARKS_FILE: &str = "tui-ide-reviewed.json";
+const PREFS_FILE: &str = "tui-ide-state.json";
+const TERMINAL_ID: &str = "term-ide";
+/// A check's output is followed for at most this long.
+const CHECK_FOLLOW: Duration = Duration::from_secs(30 * 60);
 
 // ---------------------------------------------------------------------------
 // Daemon discovery
@@ -167,6 +176,22 @@ async fn post(
 ) -> Result<serde_json::Value, CallError> {
     finish(
         http.post(api_url(base, token, path))
+            .json(&body)
+            .send()
+            .await,
+    )
+    .await
+}
+
+async fn put(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, CallError> {
+    finish(
+        http.put(api_url(base, token, path))
             .json(&body)
             .send()
             .await,
@@ -358,6 +383,281 @@ impl Api {
         }));
     }
 
+    async fn file(&self, session: &str, path: &str) {
+        let result = get::<WireFile>(
+            &self.http,
+            &self.base,
+            &self.token,
+            "api/workspace/file",
+            &[("session", session), ("path", path)],
+        )
+        .await;
+        self.send(IdeEvent::File {
+            session_id: session.to_string(),
+            path: path.to_string(),
+            result: result.map_err(|e| e.message),
+        });
+    }
+
+    /// Save with the hash the editor loaded; `None` overwrites, reading the current hash first.
+    async fn save(&self, session: &str, path: &str, content: String, expected: Option<String>) {
+        let result = self.save_inner(session, path, content, expected).await;
+        self.send(IdeEvent::Saved {
+            session_id: session.to_string(),
+            path: path.to_string(),
+            result,
+        });
+    }
+
+    async fn save_inner(
+        &self,
+        session: &str,
+        path: &str,
+        content: String,
+        expected: Option<String>,
+    ) -> Result<String, SaveFailure> {
+        let other = |e: CallError| SaveFailure::Other(e.message);
+        let hash = match expected {
+            Some(hash) => hash,
+            None => {
+                get::<WireFile>(
+                    &self.http,
+                    &self.base,
+                    &self.token,
+                    "api/workspace/file",
+                    &[("session", session), ("path", path)],
+                )
+                .await
+                .map_err(other)?
+                .hash
+            }
+        };
+        let body = serde_json::json!({
+            "session": session,
+            "path": path,
+            "content": content,
+            "expected_hash": hash,
+        });
+        match put(
+            &self.http,
+            &self.base,
+            &self.token,
+            "api/workspace/file",
+            body,
+        )
+        .await
+        {
+            Ok(value) => Ok(value["hash"].as_str().unwrap_or_default().to_string()),
+            Err(e) => Err(match e.status {
+                409 => SaveFailure::Conflict,
+                403 => SaveFailure::ReadOnly,
+                413 => SaveFailure::TooLarge,
+                _ => SaveFailure::Other(e.message),
+            }),
+        }
+    }
+
+    async fn blame(&self, session: &str, path: &str) {
+        let result = get::<BlameResponse>(
+            &self.http,
+            &self.base,
+            &self.token,
+            "api/blame",
+            &[("session", session), ("path", path)],
+        )
+        .await;
+        self.send(IdeEvent::Blame {
+            session_id: session.to_string(),
+            path: path.to_string(),
+            result: result.map(|r| r.lines).map_err(|e| e.message),
+        });
+    }
+
+    async fn checks(&self, session: &str) {
+        let result = get::<WireActions>(
+            &self.http,
+            &self.base,
+            &self.token,
+            "api/terminals/actions",
+            &[("session", session)],
+        )
+        .await;
+        self.send(IdeEvent::Checks(
+            session.to_string(),
+            result.map_err(|e| e.message),
+        ));
+    }
+
+    async fn jobs(&self, session: &str) {
+        let result = get::<WireJobs>(
+            &self.http,
+            &self.base,
+            &self.token,
+            &format!("api/sessions/{session}/jobs"),
+            &[],
+        )
+        .await;
+        self.send(IdeEvent::Jobs(
+            session.to_string(),
+            result.map(|r| r.jobs).map_err(|e| e.message),
+        ));
+    }
+
+    async fn job_tail(&self, session: &str, job: u32) {
+        let result = get::<WireTail>(
+            &self.http,
+            &self.base,
+            &self.token,
+            &format!("api/sessions/{session}/jobs/{job}/tail"),
+            &[("lines", "300")],
+        )
+        .await;
+        self.send(IdeEvent::JobTail {
+            session_id: session.to_string(),
+            job,
+            result: result.map_err(|e| e.message),
+        });
+    }
+
+    async fn entries(&self, session: &str, dir: &str) {
+        let result = get::<WireEntries>(
+            &self.http,
+            &self.base,
+            &self.token,
+            "api/workspace/entries",
+            &[("session", session), ("path", dir)],
+        )
+        .await;
+        self.send(IdeEvent::Entries {
+            session_id: session.to_string(),
+            dir: dir.to_string(),
+            result: result.map_err(|e| e.message),
+        });
+    }
+
+    async fn suggest(&self, session: &str) {
+        let result = post(
+            &self.http,
+            &self.base,
+            &self.token,
+            "api/git/commit-message",
+            serde_json::json!({ "session": session }),
+        )
+        .await
+        .map(|v| v["message"].as_str().unwrap_or_default().to_string())
+        .map_err(|e| e.message);
+        self.send(IdeEvent::Suggested(session.to_string(), result));
+    }
+
+    /// Stage, write a message, commit and push as asked; stops at the first failure.
+    async fn ship(&self, session: String, stage: Vec<String>, message: Option<String>, push: bool) {
+        let run = async {
+            if !stage.is_empty() {
+                post(
+                    &self.http,
+                    &self.base,
+                    &self.token,
+                    "api/git/stage",
+                    serde_json::json!({ "session": session, "paths": stage }),
+                )
+                .await
+                .map_err(|e| format!("stage failed: {}", e.message))?;
+            }
+            let message = match message {
+                Some(message) => message,
+                None => post(
+                    &self.http,
+                    &self.base,
+                    &self.token,
+                    "api/git/commit-message",
+                    serde_json::json!({ "session": session }),
+                )
+                .await
+                .map_err(|e| format!("could not write a message: {}", e.message))?["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            };
+            if message.trim().is_empty() {
+                return Err("no commit message".to_string());
+            }
+            post(
+                &self.http,
+                &self.base,
+                &self.token,
+                "api/git/commit",
+                serde_json::json!({ "session": session, "message": message }),
+            )
+            .await
+            .map_err(|e| format!("commit failed: {}", e.message))?;
+            if push {
+                post(
+                    &self.http,
+                    &self.base,
+                    &self.token,
+                    "api/git/push",
+                    serde_json::json!({ "session": session }),
+                )
+                .await
+                .map_err(|e| format!("committed, but the push failed: {}", e.message))?;
+            }
+            Ok(if push {
+                "committed and pushed"
+            } else {
+                "committed"
+            }
+            .to_string())
+        };
+        self.send(IdeEvent::GitOp(run.await));
+    }
+
+    async fn run_check(&self, session: &str, action: &str) -> Option<String> {
+        match post(
+            &self.http,
+            &self.base,
+            &self.token,
+            "api/terminals/actions/run",
+            serde_json::json!({ "session": session, "action": action }),
+        )
+        .await
+        {
+            Ok(value) => value["terminal_id"].as_str().map(str::to_string),
+            Err(e) => {
+                self.send(IdeEvent::Toast(ToastLevel::Error, e.message));
+                None
+            }
+        }
+    }
+
+    async fn continue_claude(&self, session: &str) {
+        let result = post(
+            &self.http,
+            &self.base,
+            &self.token,
+            &format!("api/sessions/{session}/claude"),
+            serde_json::json!({}),
+        )
+        .await
+        .map_err(|e| {
+            if matches!(e.status, 404 | 405) {
+                "this daemon cannot hand a session to Claude Code yet: update and restart `forge serve`"
+                    .to_string()
+            } else {
+                e.message
+            }
+        })
+        .and_then(|v| {
+            let cwd = v["cwd"].as_str().unwrap_or_default().to_string();
+            let command = v["command"].as_str().unwrap_or_default().to_string();
+            if command.is_empty() {
+                Err("the daemon returned no command to run".to_string())
+            } else {
+                Ok((cwd, command))
+            }
+        });
+        self.send(IdeEvent::Handoff(result));
+    }
+
     async fn git_op(&self, route: &str, body: serde_json::Value, ok: String) {
         let result = post(&self.http, &self.base, &self.token, route, body).await;
         self.send(IdeEvent::GitOp(result.map(|_| ok).map_err(|e| e.message)));
@@ -388,6 +688,25 @@ fn load_marks() -> forge_tui::ide::model::ReviewedMarks {
         .unwrap_or_default()
 }
 
+fn prefs_path() -> Option<PathBuf> {
+    forge_config::data_dir().map(|dir| dir.join(PREFS_FILE))
+}
+
+fn load_prefs() -> bool {
+    prefs_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .is_some_and(|v| v["coach_seen"].as_bool().unwrap_or(false))
+}
+
+fn save_prefs(json: &str) {
+    let Some(path) = prefs_path() else { return };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(path, json);
+}
+
 fn save_marks(json: &str) {
     let Some(path) = marks_path() else { return };
     if let Some(dir) = path.parent() {
@@ -415,6 +734,9 @@ impl IdeHost {
     pub(crate) fn new(cwd: &str, base: String, token: String) -> Self {
         let mut app = IdeApp::new(cwd, now_unix());
         app.apply(IdeEvent::Reviewed(load_marks()));
+        app.apply(IdeEvent::Prefs {
+            coach_seen: load_prefs(),
+        });
         Self { app, base, token }
     }
 
@@ -477,20 +799,36 @@ impl IdeHost {
         }
         let _ = refresh_tx.send(());
         let mut pending: Vec<IdeAction> = self.app.sync_watch();
+        pending.extend(self.app.reconnect_terminal());
         pending.push(IdeAction::RefreshChanges);
+        let mut runtime = Runtime::default();
         let mut tick = tokio::time::interval(TICK);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut history_at = Instant::now();
         let mut dirty = true;
         let mut last_draw = Instant::now() - DRAW_MIN_INTERVAL;
         let mut closing = false;
+        let mut break_err: Option<anyhow::Error> = None;
         let result = loop {
             for action in std::mem::take(&mut pending) {
-                if matches!(action, IdeAction::Close) {
-                    closing = true;
-                } else {
-                    perform(action, &api, &mut pool, &refresh_tx);
+                match action {
+                    IdeAction::Close => closing = true,
+                    IdeAction::ExternalEdit { session_id, path } => {
+                        input.pause().await;
+                        guard.suspend();
+                        external_edit(&api, &session_id, &path, &refresh_tx).await;
+                        if let Err(e) = guard.resume() {
+                            break_err = Some(e);
+                        }
+                        let _ = guard.terminal.clear();
+                        input.resume();
+                        dirty = true;
+                    }
+                    other => perform(other, &api, &mut pool, &refresh_tx, &mut runtime),
                 }
+            }
+            if let Some(e) = break_err.take() {
+                break Err(e);
             }
             if closing {
                 break Ok(());
@@ -535,6 +873,7 @@ impl IdeHost {
             }
         };
         pool.shutdown();
+        runtime.shutdown();
         watcher.abort();
         refresher.abort();
         drop(input);
@@ -573,6 +912,7 @@ fn perform(
     api: &Api,
     pool: &mut SocketPool,
     refresh: &mpsc::UnboundedSender<()>,
+    runtime: &mut Runtime,
 ) {
     let api = api.clone();
     match action {
@@ -666,6 +1006,360 @@ fn perform(
         IdeAction::SaveReviewed(json) => {
             tokio::task::spawn_blocking(move || save_marks(&json));
         }
+        IdeAction::SavePrefs(json) => {
+            tokio::task::spawn_blocking(move || save_prefs(&json));
+        }
+        IdeAction::FetchFile { session_id, path } => {
+            tokio::spawn(async move { api.file(&session_id, &path).await });
+        }
+        IdeAction::SaveFile {
+            session_id,
+            path,
+            content,
+            expected_hash,
+        } => {
+            tokio::spawn(async move { api.save(&session_id, &path, content, expected_hash).await });
+        }
+        IdeAction::ExternalEdit { .. } => {}
+        IdeAction::FetchBlame { session_id, path } => {
+            tokio::spawn(async move { api.blame(&session_id, &path).await });
+        }
+        IdeAction::FetchChecks(session) => {
+            tokio::spawn(async move { api.checks(&session).await });
+        }
+        IdeAction::RunCheck { session_id, action } => {
+            let key = (session_id.clone(), action.clone());
+            if let Some(old) = runtime.checks.remove(&key) {
+                old.abort();
+            }
+            let handle = tokio::spawn(async move {
+                let Some(terminal_id) = api.run_check(&session_id, &action).await else {
+                    return;
+                };
+                api.checks(&session_id).await;
+                stream_check(&api, &session_id, &action, &terminal_id).await;
+            });
+            runtime.checks.insert(key, handle);
+        }
+        IdeAction::StopCheck { session_id, action } => {
+            tokio::spawn(async move {
+                let _ = post(
+                    &api.http,
+                    &api.base,
+                    &api.token,
+                    "api/terminals/actions/stop",
+                    serde_json::json!({ "session": session_id, "action": action }),
+                )
+                .await;
+                api.checks(&session_id).await;
+            });
+        }
+        IdeAction::StreamCheck {
+            session_id,
+            action,
+            terminal_id,
+        } => {
+            let key = (session_id.clone(), action.clone());
+            if let Some(old) = runtime.checks.remove(&key) {
+                old.abort();
+            }
+            let handle = tokio::spawn(async move {
+                stream_check(&api, &session_id, &action, &terminal_id).await;
+            });
+            runtime.checks.insert(key, handle);
+        }
+        IdeAction::FetchJobs(session) => {
+            tokio::spawn(async move { api.jobs(&session).await });
+        }
+        IdeAction::FetchJobTail { session_id, job } => {
+            tokio::spawn(async move { api.job_tail(&session_id, job).await });
+        }
+        IdeAction::FetchEntries { session_id, dir } => {
+            tokio::spawn(async move { api.entries(&session_id, &dir).await });
+        }
+        IdeAction::SuggestMessage(session) => {
+            tokio::spawn(async move { api.suggest(&session).await });
+        }
+        IdeAction::Ship {
+            session_id,
+            stage,
+            message,
+            push,
+        } => {
+            tokio::spawn(async move { api.ship(session_id, stage, message, push).await });
+        }
+        IdeAction::ContinueClaude(session) => {
+            tokio::spawn(async move { api.continue_claude(&session).await });
+        }
+        IdeAction::TermOpen {
+            session_id,
+            cols,
+            rows,
+        } => {
+            let restart = runtime.term.is_some();
+            runtime.close_terminal();
+            let (cmds, rx) = mpsc::unbounded_channel();
+            let task = tokio::spawn(term_task(
+                api.base.clone(),
+                api.token.clone(),
+                session_id,
+                (cols, rows),
+                restart,
+                api.ev.clone(),
+                rx,
+            ));
+            runtime.term = Some(TermLink { cmds, task });
+        }
+        IdeAction::TermInput(bytes) => runtime.term_cmd(TermCmd::Input(bytes)),
+        IdeAction::TermResize(cols, rows) => runtime.term_cmd(TermCmd::Resize(cols, rows)),
+        IdeAction::TermClose => runtime.term_cmd(TermCmd::Close),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Terminal and check streams
+// ---------------------------------------------------------------------------
+
+enum TermCmd {
+    Input(Vec<u8>),
+    Resize(u16, u16),
+    Close,
+}
+
+struct TermLink {
+    cmds: mpsc::UnboundedSender<TermCmd>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+/// What the host keeps between actions: the terminal socket and the check output followers.
+#[derive(Default)]
+struct Runtime {
+    term: Option<TermLink>,
+    checks: std::collections::HashMap<(String, String), tokio::task::JoinHandle<()>>,
+}
+
+impl Runtime {
+    fn term_cmd(&mut self, cmd: TermCmd) {
+        if let Some(link) = &self.term {
+            let _ = link.cmds.send(cmd);
+        }
+    }
+
+    fn close_terminal(&mut self) {
+        if let Some(link) = self.term.take() {
+            let _ = link.cmds.send(TermCmd::Close);
+            let task = link.task;
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                task.abort();
+            });
+        }
+    }
+
+    /// Leaving IDE mode: the shell keeps running on the daemon, only the sockets go.
+    fn shutdown(&mut self) {
+        if let Some(link) = self.term.take() {
+            link.task.abort();
+        }
+        for (_, handle) in self.checks.drain() {
+            handle.abort();
+        }
+    }
+}
+
+fn text_frame(value: serde_json::Value) -> tokio_tungstenite::tungstenite::Message {
+    tokio_tungstenite::tungstenite::Message::Text(value.to_string().into())
+}
+
+async fn term_task(
+    base: String,
+    token: String,
+    session: String,
+    size: (u16, u16),
+    restart: bool,
+    ev: mpsc::UnboundedSender<Ev>,
+    mut cmds: mpsc::UnboundedReceiver<TermCmd>,
+) {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let send = |event: IdeEvent| {
+        let _ = ev.send(Ev::Ide(event));
+    };
+    let path = format!(
+        "ws/terminal?session={session}&terminal={TERMINAL_ID}&cols={}&rows={}{}",
+        size.0,
+        size.1,
+        if restart { "&restart=true" } else { "" }
+    );
+    let url = match ws_url(&base, &token, &path) {
+        Ok(url) => url,
+        Err(e) => {
+            send(IdeEvent::Toast(ToastLevel::Error, e.to_string()));
+            send(IdeEvent::TermEnded(None));
+            return;
+        }
+    };
+    let socket = match tokio_tungstenite::connect_async(&url).await {
+        Ok((socket, _)) => socket,
+        Err(e) => {
+            send(IdeEvent::Toast(
+                ToastLevel::Error,
+                format!("could not open a terminal on the daemon: {e}"),
+            ));
+            send(IdeEvent::TermEnded(None));
+            return;
+        }
+    };
+    let (mut tx, mut rx) = socket.split();
+    loop {
+        tokio::select! {
+            message = rx.next() => match message {
+                Some(Ok(Message::Binary(bytes))) => send(IdeEvent::TermBytes(bytes.to_vec())),
+                Some(Ok(Message::Text(text))) => {
+                    let Ok(frame) = serde_json::from_str::<serde_json::Value>(&text) else { continue };
+                    match frame["kind"].as_str() {
+                        Some("status") if frame["status"].as_str() == Some("exited") => {
+                            send(IdeEvent::TermEnded(frame["exit_code"].as_i64()));
+                        }
+                        Some("cleared") => send(IdeEvent::TermBytes(b"\x1b[2J\x1b[H".to_vec())),
+                        _ => {}
+                    }
+                }
+                Some(Ok(_)) => {}
+                _ => {
+                    send(IdeEvent::TermEnded(None));
+                    return;
+                }
+            },
+            command = cmds.recv() => match command {
+                None => return,
+                Some(TermCmd::Input(bytes)) => {
+                    let data = String::from_utf8_lossy(&bytes).into_owned();
+                    if tx.send(text_frame(serde_json::json!({ "kind": "input", "data": data }))).await.is_err() {
+                        return;
+                    }
+                }
+                Some(TermCmd::Resize(cols, rows)) => {
+                    let _ = tx.send(text_frame(serde_json::json!({ "kind": "resize", "cols": cols, "rows": rows }))).await;
+                }
+                Some(TermCmd::Close) => {
+                    let _ = tx.send(text_frame(serde_json::json!({ "kind": "close" }))).await;
+                    return;
+                }
+            },
+        }
+    }
+}
+
+/// Follow a check's terminal: its history first, then live output, until the run ends.
+async fn stream_check(api: &Api, session: &str, action: &str, terminal_id: &str) {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    let path = format!("ws/terminal?session={session}&terminal={terminal_id}");
+    let Ok(url) = ws_url(&api.base, &api.token, &path) else {
+        return;
+    };
+    let Ok((mut socket, _)) = tokio_tungstenite::connect_async(&url).await else {
+        return;
+    };
+    let mut first = true;
+    let deadline = tokio::time::Instant::now() + CHECK_FOLLOW;
+    loop {
+        let next = tokio::time::timeout_at(deadline, socket.next()).await;
+        let Ok(Some(Ok(message))) = next else { break };
+        match message {
+            Message::Binary(bytes) => {
+                api.send(IdeEvent::CheckOutput {
+                    session_id: session.to_string(),
+                    action: action.to_string(),
+                    text: String::from_utf8_lossy(&bytes).into_owned(),
+                    reset: std::mem::take(&mut first),
+                });
+            }
+            Message::Text(text) => {
+                let exited = serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .is_some_and(|v| v["kind"] == "status" && v["status"] == "exited");
+                if exited {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    break;
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    api.checks(session).await;
+}
+
+/// `E`: leave the screen, run the user's editor on a copy of the file, and save the result back
+/// with the same hash check the built-in editor uses.
+async fn external_edit(api: &Api, session: &str, path: &str, refresh: &mpsc::UnboundedSender<()>) {
+    let toast = |level: ToastLevel, text: String| api.send(IdeEvent::Toast(level, text));
+    let loaded = match get::<WireFile>(
+        &api.http,
+        &api.base,
+        &api.token,
+        "api/workspace/file",
+        &[("session", session), ("path", path)],
+    )
+    .await
+    {
+        Ok(file) => file,
+        Err(e) => return toast(ToastLevel::Error, e.message),
+    };
+    if loaded.read_only {
+        return toast(ToastLevel::Info, "this file is read-only".to_string());
+    }
+    let dir = std::env::temp_dir().join(format!("forge-ide-{}", std::process::id()));
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map_or_else(|| "file".into(), |n| n.to_os_string());
+    let temp = dir.join(name);
+    if std::fs::create_dir_all(&dir)
+        .and_then(|()| std::fs::write(&temp, &loaded.content))
+        .is_err()
+    {
+        return toast(
+            ToastLevel::Error,
+            "could not write a temporary copy".to_string(),
+        );
+    }
+    let editor = forge_tui::external_editor_command();
+    let run_path = temp.clone();
+    let ran = tokio::task::spawn_blocking(move || forge_tui::run_editor_on(&editor, &run_path))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+    let edited = std::fs::read_to_string(&temp);
+    let _ = std::fs::remove_dir_all(&dir);
+    if let Err(e) = ran {
+        return toast(ToastLevel::Error, e);
+    }
+    let Ok(edited) = edited else {
+        return toast(
+            ToastLevel::Error,
+            "could not read the edited file".to_string(),
+        );
+    };
+    if edited == loaded.content {
+        return toast(ToastLevel::Info, "no changes".to_string());
+    }
+    match api
+        .save_inner(session, path, edited, Some(loaded.hash))
+        .await
+    {
+        Ok(_) => {
+            toast(ToastLevel::Ok, format!("saved {path}"));
+            api.file(session, path).await;
+            let _ = refresh.send(());
+        }
+        Err(SaveFailure::Conflict) => toast(
+            ToastLevel::Error,
+            "agent changed this file while you edited: your copy was not saved".to_string(),
+        ),
+        Err(SaveFailure::Other(message)) => toast(ToastLevel::Error, message),
+        Err(_) => toast(ToastLevel::Error, "could not save the file".to_string()),
     }
 }
 

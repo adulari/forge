@@ -126,7 +126,7 @@ impl JobsOverlay {
     }
 }
 
-fn age(secs: u64) -> String {
+pub(crate) fn age_label(secs: u64) -> String {
     match secs {
         0..=59 => format!("{secs}s"),
         60..=3599 => format!("{}m", secs / 60),
@@ -215,7 +215,7 @@ pub fn render_jobs_overlay(frame: &mut Frame, overlay: &JobsOverlay, tick: usize
                 " {:<7} {:<10} {:>4}  ",
                 row.id,
                 row.status,
-                age(row.age_secs)
+                age_label(row.age_secs)
             );
             let room = width.saturating_sub(head.width() + 4);
             lines.push(Line::from(vec![
