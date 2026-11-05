@@ -34,10 +34,18 @@ describe("buildDiffRows", () => {
 
   it("handles a 5,000 line file quickly", () => {
     const lines = Array.from({ length: 5000 }, (_, i) => (i % 3 === 0 ? `+line ${i}` : ` line ${i}`));
-    const started = performance.now();
-    const { rows } = buildDiffRows([{ header: "@@ -1,5000 +1,5000 @@", lines }], "unified");
-    const elapsed = performance.now() - started;
-    expect(rows).toHaveLength(5001);
-    expect(elapsed).toBeLessThan(50);
+    const hunks = [{ header: "@@ -1,5000 +1,5000 @@", lines }];
+    // The fastest of several runs after a warm-up: a loaded CI runner inflates single runs,
+    // while a real regression slows every run.
+    buildDiffRows(hunks, "unified");
+    let fastest = Infinity;
+    let count = 0;
+    for (let run = 0; run < 5; run += 1) {
+      const started = performance.now();
+      count = buildDiffRows(hunks, "unified").rows.length;
+      fastest = Math.min(fastest, performance.now() - started);
+    }
+    expect(count).toBe(5001);
+    expect(fastest).toBeLessThan(50);
   });
 });
