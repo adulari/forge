@@ -1,8 +1,8 @@
 // What the agent did, newest first: prompts, reads, edits, commands. Clicking an edit opens the
 // file it touched. Reads the history page the chat already loads, so it adds no socket.
 import { FileEdit, FileText, MessageSquare, Terminal, Wrench, CornerDownRight } from "lucide-react-native";
-import React, { useCallback, useMemo } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { useHistory } from "../../lib/queries";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -12,9 +12,10 @@ import { BoundedList } from "../ds/BoundedList";
 import { EmptyState } from "../ds/EmptyState";
 import { Skeleton } from "../ds/Skeleton";
 import { useIde } from "./IdeContext";
+import { useTurnFocus } from "./ideSignals";
 import { LineDelta } from "./ideUi";
 import { rowBackground } from "./rowStyle";
-import { buildTimeline, resolveChangedPath, type TimelineItem, type TimelineKind } from "./timelineModel";
+import { buildTimeline, findTurnItem, resolveChangedPath, type TimelineItem, type TimelineKind } from "./timelineModel";
 
 const ROW = 26;
 
@@ -30,9 +31,11 @@ const ICONS: Record<TimelineKind, React.ComponentType<{ size?: number; color?: s
 const Row = React.memo(function Row({
   item,
   onOpen,
+  highlighted,
 }: {
   item: TimelineItem;
   onOpen: (item: TimelineItem) => void;
+  highlighted: boolean;
 }) {
   const tokens = useTokens();
   const Icon = ICONS[item.kind];
@@ -54,13 +57,13 @@ const Row = React.memo(function Row({
       {item.kind === "edit" ? <LineDelta adds={item.adds} dels={item.dels} /> : null}
     </>
   );
-  if (!clickable) return <View style={styles.row}>{content}</View>;
+  if (!clickable) return <View style={[styles.row, highlighted && { backgroundColor: tokens.bg3 }]}>{content}</View>;
   return (
     <Pressable
       onPress={open}
       accessibilityRole="button"
       accessibilityLabel={`Open ${item.label}`}
-      style={({ hovered }: { hovered?: boolean; pressed: boolean }) => [styles.row, { backgroundColor: rowBackground(tokens, { hovered }) }]}
+      style={({ hovered }: { hovered?: boolean; pressed: boolean }) => [styles.row, { backgroundColor: highlighted ? tokens.bg3 : rowBackground(tokens, { hovered }) }]}
     >
       {content}
     </Pressable>
@@ -72,6 +75,20 @@ export function Timeline({ sessionId }: { sessionId: string }) {
   const history = useHistory(sessionId, { includeTools: true });
   const rows = useMemo(() => history.data?.pages.flat() ?? [], [history.data]);
   const items = useMemo(() => buildTimeline(rows), [rows]);
+  const listRef = useRef<FlatList<TimelineItem>>(null);
+  const [highlight, setHighlight] = useState<string | null>(null);
+  const focus = useTurnFocus();
+  useEffect(() => {
+    if (!focus || focus.sessionId !== sessionId) return;
+    const index = findTurnItem(items, focus.turn, focus.path);
+    if (index < 0) return;
+    setHighlight(items[index].key);
+    listRef.current?.scrollToIndex({ index, animated: false, viewPosition: 0.3 });
+    const timer = setTimeout(() => setHighlight(null), 2500);
+    return () => clearTimeout(timer);
+    // Only a new jump request moves the list; live updates to `items` must not re-scroll it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
   const changedPaths = useMemo(() => changes.get(sessionId)?.files.map((file) => file.path) ?? [], [changes, sessionId]);
 
   const onOpen = useCallback(
@@ -95,9 +112,11 @@ export function Timeline({ sessionId }: { sessionId: string }) {
   }
   return (
     <BoundedList<TimelineItem>
+      ref={listRef}
       data={items}
+      extraData={highlight}
       keyExtractor={(item) => item.key}
-      renderItem={({ item }) => <Row item={item} onOpen={onOpen} />}
+      renderItem={({ item }) => <Row item={item} onOpen={onOpen} highlighted={item.key === highlight} />}
       getItemLayout={(_, index) => ({ length: ROW, offset: ROW * index, index })}
       ListEmptyComponent={<EmptyState icon={MessageSquare} message="Nothing yet. Message this agent to give it work." />}
     />

@@ -976,7 +976,7 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                   // The daemon sends the literal sentinel "—" for an Automatic session (no
                   // model pinned yet) — same value StatusStrip already special-cases. A raw
                   // dash on the chip reads as broken/missing data, not as "automatic".
-                  label={modelChipLabel(model, modelPinned, isCompact)}
+                  label={modelChipLabel(model, modelPinned, isCompact || compact)}
                   icon={<ProviderGlyph provider={model} size={12} color={tokens.ink3} accessibilityLabel={null} />}
                   color={tokens.ink2}
                   accessibilityLabel={`model: ${modelChipLabel(model, modelPinned)} — change model`}
@@ -1019,13 +1019,13 @@ function ComposerImpl({ sessionId, busy, online, suggestedPrompt, model, modelPi
                 icon={<ImageIcon size={18} strokeWidth={1.75} color={tokens.ink3} />}
                 onPress={onAttachImage}
                 accessibilityLabel="attach photo"
-                style={styles.metaIcon}
+                style={compact ? styles.metaIconCompact : styles.metaIcon}
               />
               <IconButton
                 icon={<FileText size={18} strokeWidth={1.75} color={tokens.ink3} />}
                 onPress={onAttachDocument}
                 accessibilityLabel="attach file"
-                style={styles.metaIcon}
+                style={compact ? styles.metaIconCompact : styles.metaIcon}
               />
           </View>
           <View
@@ -1288,11 +1288,14 @@ const styles = StyleSheet.create({
     borderRadius: radii.radius4,
     paddingHorizontal: space.space8,
     paddingVertical: 3,
+    overflow: "hidden",
   },
   metaChipFixed: { flexShrink: 0 },
-  metaChipLabel: { flexShrink: 1, minWidth: 0 },
+  // A floor, so a crowded row (the IDE agent panel at 1024px) never squeezes a chip to one glyph.
+  metaChipLabel: { flexShrink: 1, minWidth: 28 },
   metaSpacer: { flexGrow: 1, flexShrink: 1, minWidth: 0 },
   metaIcon: { width: 32, height: 32 },
+  metaIconCompact: { width: 26, height: 32 },
   row: {
     position: "relative",
     flexDirection: "row",

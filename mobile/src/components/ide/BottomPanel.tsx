@@ -1,8 +1,8 @@
-// The collapsible bottom panel. Terminal is the first tenant (the existing dock, loaded on first
-// open); Checks and Shells join it as tabs in the next change.
-import { Terminal as TerminalIcon, X } from "lucide-react-native";
+// The collapsible bottom panel: Terminal (the existing dock), Checks and Shells. Each tab is its own
+// chunk, loaded the first time it is shown.
+import { ListChecks, Terminal as TerminalIcon, X } from "lucide-react-native";
 import React, { Suspense, useCallback, useRef } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { IDE_BOTTOM_HEIGHT, persistIdeModePreferences, setIdeBottomHeight, useIdeModePreferences } from "../../lib/ideModePrefs";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -11,14 +11,27 @@ import { sansFamilyFor } from "../../theme/typography";
 import { EmptyState } from "../ds/EmptyState";
 import { ResizeHandle } from "../shell/ResizeHandle";
 import { useIde } from "./IdeContext";
+import { failingPathsOf, setBottomTab, useBottomTab, useFailingChecks, type BottomTab } from "./ideSignals";
 import { IdeIconButton } from "./ideUi";
 
 const TerminalDock = React.lazy(() => import("../shell/TerminalDock").then((m) => ({ default: m.TerminalDock })));
+
+const ChecksPanel = React.lazy(() => import("./ChecksPanel"));
+const ShellsPanel = React.lazy(() => import("./ShellsPanel"));
+
+const TABS: { id: BottomTab; label: string }[] = [
+  { id: "terminal", label: "Terminal" },
+  { id: "checks", label: "Checks" },
+  { id: "shells", label: "Shells" },
+];
 
 export function BottomPanel() {
   const tokens = useTokens();
   const { bottomOpen, toggleBottom, panelSessionId } = useIde();
   const { bottomHeight } = useIdeModePreferences();
+  const tab = useBottomTab();
+  const failing = useFailingChecks();
+  const failingCount = panelSessionId ? failingPathsOf(failing, panelSessionId).size : 0;
   const start = useRef(bottomHeight);
   const onStart = useCallback(() => {
     start.current = bottomHeight;
@@ -37,19 +50,33 @@ export function BottomPanel() {
         onReset={() => setIdeBottomHeight(IDE_BOTTOM_HEIGHT.default)}
         onNudge={(delta) => setIdeBottomHeight(bottomHeight - delta)}
       />
-      <View style={[styles.header, { borderBottomColor: tokens.hairline }]}>
-        <TerminalIcon size={12} strokeWidth={1.75} color={tokens.ink2} />
-        <Text style={[styles.title, { color: tokens.ink }]}>Terminal</Text>
+      <View style={[styles.header, { borderBottomColor: tokens.hairline }]} accessibilityRole="tablist">
+        {TABS.map((item) => (
+          <Pressable
+            key={item.id}
+            onPress={() => setBottomTab(item.id)}
+            accessibilityRole="tab"
+            accessibilityState={{ selected: tab === item.id }}
+            style={[styles.tab, tab === item.id && { borderBottomColor: tokens.ink }]}
+          >
+            {item.id === "terminal" ? <TerminalIcon size={12} strokeWidth={1.75} color={tab === item.id ? tokens.ink : tokens.ink3} /> : null}
+            {item.id === "checks" ? <ListChecks size={12} strokeWidth={1.75} color={tab === item.id ? tokens.ink : tokens.ink3} /> : null}
+            <Text style={[styles.title, { color: tab === item.id ? tokens.ink : tokens.ink3 }]}>{item.label}</Text>
+            {item.id === "checks" && failingCount > 0 ? <Text style={[styles.badge, { color: tokens.danger }]}>{`${failingCount} failing`}</Text> : null}
+          </Pressable>
+        ))}
         <View style={styles.spacer} />
-        <IdeIconButton icon={<X size={13} strokeWidth={1.75} color={tokens.ink3} />} label="Close terminal" onPress={toggleBottom} />
+        <IdeIconButton icon={<X size={13} strokeWidth={1.75} color={tokens.ink3} />} label="Close panel" onPress={toggleBottom} />
       </View>
       <View style={styles.body}>
-        {panelSessionId ? (
-          <Suspense fallback={<View style={styles.body} />}>
-            <TerminalDock sessionId={panelSessionId} />
-          </Suspense>
+        {!panelSessionId ? (
+          <EmptyState icon={TerminalIcon} message="Pick an agent and its terminal, checks and shells open here." />
         ) : (
-          <EmptyState icon={TerminalIcon} message="Pick an agent and its terminal opens here." />
+          <Suspense fallback={<View style={styles.body} />}>
+            {tab === "terminal" ? <TerminalDock sessionId={panelSessionId} /> : null}
+            {tab === "checks" ? <ChecksPanel key={panelSessionId} sessionId={panelSessionId} /> : null}
+            {tab === "shells" ? <ShellsPanel key={panelSessionId} sessionId={panelSessionId} /> : null}
+          </Suspense>
         )}
       </View>
     </View>
@@ -58,8 +85,10 @@ export function BottomPanel() {
 
 const styles = StyleSheet.create({
   root: { borderTopWidth: StyleSheet.hairlineWidth },
-  header: { height: 30, flexDirection: "row", alignItems: "center", gap: space.space8, paddingHorizontal: space.space12, borderBottomWidth: StyleSheet.hairlineWidth },
+  header: { height: 30, flexDirection: "row", alignItems: "center", gap: space.space4, paddingHorizontal: space.space8, borderBottomWidth: StyleSheet.hairlineWidth },
   title: { fontFamily: sansFamilyFor(500), fontSize: 12 },
+  tab: { height: 30, flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: space.space8, borderBottomWidth: 1.5, borderBottomColor: "transparent" },
+  badge: { fontFamily: sansFamilyFor(600), fontSize: 10.5 },
   spacer: { flex: 1 },
   body: { flex: 1, minHeight: 0 },
 });

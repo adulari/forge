@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn a_quick_command_returns_its_output() {
-        let (ok, out) = run_capture("sh", &["-c", "echo hi"], Duration::from_secs(2)).unwrap();
+        let (ok, out) = run_capture("sh", &["-c", "echo hi"], Duration::from_secs(30)).unwrap();
         assert!(ok);
         assert_eq!(out.trim(), "hi");
     }

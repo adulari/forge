@@ -17,6 +17,8 @@ export interface TimelineItem {
   dels: number;
   /** The path an edit touched, as the model wrote it (often absolute). */
   path: string | null;
+  /** Store sequence of the row, to line a why-trace turn up with the timeline. */
+  seq: number;
 }
 
 const EDIT = /(^|_)(write|edit|patch|apply|create|replace|multiedit)/i;
@@ -64,6 +66,7 @@ export function buildTimeline(rowsNewestFirst: readonly HistoryRow[], limit = 60
         adds: invocation.adds ?? 0,
         dels: invocation.dels ?? 0,
         path: kind === "edit" ? editPath(invocation.args) : null,
+        seq: invocation.seq,
       });
       continue;
     }
@@ -71,9 +74,9 @@ export function buildTimeline(rowsNewestFirst: readonly HistoryRow[], limit = 60
     const text = firstLine(row.content);
     if (!text) continue;
     if (row.role === "user" && (row.kind == null || row.kind === "user")) {
-      out.push({ key: entry.key, kind: "prompt", label: text, tool: null, failed: false, adds: 0, dels: 0, path: null });
+      out.push({ key: entry.key, kind: "prompt", label: text, tool: null, failed: false, adds: 0, dels: 0, path: null, seq: row.seq });
     } else if (row.role === "assistant" && row.visibility !== "ui") {
-      out.push({ key: entry.key, kind: "reply", label: text, tool: null, failed: false, adds: 0, dels: 0, path: null });
+      out.push({ key: entry.key, kind: "reply", label: text, tool: null, failed: false, adds: 0, dels: 0, path: null, seq: row.seq });
     }
   }
   return out;
@@ -86,6 +89,27 @@ export function resolveChangedPath(written: string, changed: readonly string[]):
   let best: string | null = null;
   for (const candidate of changed) {
     if (normalized.endsWith(`/${candidate}`) && (best == null || candidate.length > best.length)) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * The timeline row a why-trace turn points at: the edit at or after the assistant message `turn`
+ * (the call row is stored right behind it), preferring one on `path`. Items are newest first.
+ */
+export function findTurnItem(items: readonly TimelineItem[], turn: number, path: string | null): number {
+  let best = -1;
+  let bestRank = Infinity;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.seq < turn) continue;
+    const onPath = path != null && item.kind === "edit" && item.path != null && (item.path === path || item.path.endsWith(`/${path}`));
+    // On-path edits always beat anything else; within a class the closest row after the turn wins.
+    const rank = (onPath ? 0 : 1e9) + item.seq;
+    if (rank < bestRank) {
+      best = index;
+      bestRank = rank;
+    }
   }
   return best;
 }

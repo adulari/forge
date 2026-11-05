@@ -17,3 +17,20 @@ export function requestIdeTerminalToggle(): boolean {
   terminalListener();
   return true;
 }
+
+let sendReviewListener: Listener | null = null;
+
+/** The review draft bar registers while it has comments to send. */
+export function onIdeSendReview(listener: Listener): () => void {
+  sendReviewListener = listener;
+  return () => {
+    if (sendReviewListener === listener) sendReviewListener = null;
+  };
+}
+
+/** True when a review was waiting and went out. */
+export function requestIdeSendReview(): boolean {
+  if (!sendReviewListener) return false;
+  sendReviewListener();
+  return true;
+}

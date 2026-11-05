@@ -1,11 +1,12 @@
 // The centre: editor tabs (a single click previews, a double click or an edit pins), the file
 // header with its review actions, and the diff or file below it.
-import { Check, ClipboardCheck, MessageSquare, Undo2, X } from "lucide-react-native";
+import { Check, ClipboardCheck, History, MessageSquare, Pencil, Undo2, X } from "lucide-react-native";
 import React, { Suspense, useCallback, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import Animated, { FadeIn } from "react-native-reanimated";
 
 import { useDiscardPaths } from "../../lib/gitActions";
+import { useGitHunk } from "../../lib/queries";
 import { durations } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
@@ -16,9 +17,14 @@ import { EmptyState } from "../ds/EmptyState";
 import { useToast } from "../ds/ToastHost";
 import { FileTypeIcon } from "../git/FileTypeIcon";
 import { discardMessage } from "../git/gitReviewSupport";
+import { classifyHunkError } from "../git/hunkActions";
 import type { EditorTab } from "./editorTabsModel";
 import { useIde } from "./IdeContext";
+import { requestEditorFocus, setWhyTrace, useDirtyFiles, useWhyTraceOn, dirtyKey } from "./ideSignals";
 import { IdeIconButton } from "./ideUi";
+import { ReviewDraftBar } from "./ReviewDraft";
+import { undoRequests, undoStepsForFile } from "./hunkUndo";
+import { useFileDiff } from "./useFileDiff";
 import { rowBackground } from "./rowStyle";
 import type { DiffMode } from "./diffRows";
 
@@ -41,6 +47,7 @@ const Tab = React.memo(function Tab({
   onClose: (id: string) => void;
 }) {
   const tokens = useTokens();
+  const dirty = useDirtyFiles().has(dirtyKey(tab.sessionId, tab.path));
   const name = tab.path.slice(tab.path.lastIndexOf("/") + 1);
   const press = useCallback(() => onActivate(tab.id), [onActivate, tab.id]);
   const pin = useMemo(() => ({ onDoubleClick: () => onPin(tab.id) }) as object, [onPin, tab.id]);
@@ -65,6 +72,7 @@ const Tab = React.memo(function Tab({
         {name}
       </Text>
       {tab.kind === "diff" ? <Text style={[styles.tabKind, { color: tokens.ink4 }]}>diff</Text> : null}
+      {dirty ? <View accessibilityLabel="Unsaved changes" style={[styles.dirty, { backgroundColor: tokens.ink }]} /> : null}
       <Pressable
         onPress={() => onClose(tab.id)}
         hitSlop={4}
@@ -109,19 +117,36 @@ function Crumbs({ path }: { path: string }) {
 function FileHeader({ tab, mode, onMode }: { tab: EditorTab; mode: DiffMode | "auto"; onMode: (mode: DiffMode | "auto") => void }) {
   const tokens = useTokens();
   const toast = useToast();
-  const { activeRow, toggleReviewed, setScope, focusComposer, sessions, openChange, changes } = useIde();
+  const { activeRow, toggleReviewed, setScope, focusComposer, sessions, openChange, openFile, changes } = useIde();
   const discard = useDiscardPaths();
+  const hunkMutation = useGitHunk();
   const [confirming, setConfirming] = useState(false);
   const agent = sessions.find((row) => row.id === tab.sessionId);
   const reviewed = activeRow?.tier === "reviewed";
   const changedFile = changes.get(tab.sessionId)?.files.find((file) => file.path === tab.path);
   const untracked = changedFile?.bucket === "untracked";
+  const worktree = !!agent?.worktree;
+  const traceOn = useWhyTraceOn();
+  const { file: diffFile, bucket } = useFileDiff(tab.sessionId, tab.path, worktree);
+  // A revert can be put back only when the diff is the working tree's own and rebuilds from its hunks.
+  const undoSteps = !worktree && bucket === "unstaged" && diffFile ? undoStepsForFile(diffFile) : [];
+  const undoable = undoSteps.length > 0;
 
+  const undo = async () => {
+    try {
+      for (const request of undoRequests(tab.sessionId, tab.path, undoSteps)) await hunkMutation.mutateAsync(request);
+      toast.show("Restored", { tone: "success" });
+    } catch (error) {
+      toast.show(`Could not undo: ${classifyHunkError(error).message}`, { tone: "danger" });
+    }
+  };
   const revert = async () => {
     setConfirming(false);
     try {
       const result = await discard.mutateAsync({ session: tab.sessionId, paths: [tab.path] });
-      toast.show(`Reverted ${tab.path.slice(tab.path.lastIndexOf("/") + 1)}`, { tone: result.discarded > 0 ? "neutral" : "danger" });
+      const name = tab.path.slice(tab.path.lastIndexOf("/") + 1);
+      if (result.discarded > 0 && undoable) toast.show(`Reverted ${name}`, { duration: 9000, action: { label: "Undo", onPress: () => void undo() } });
+      else toast.show(`Reverted ${name}`, { tone: result.discarded > 0 ? "neutral" : "danger" });
     } catch (error) {
       toast.show(error instanceof Error ? error.message : "Could not revert this file.", { tone: "danger" });
     }
@@ -141,6 +166,12 @@ function FileHeader({ tab, mode, onMode }: { tab: EditorTab; mode: DiffMode | "a
         ) : null}
       </View>
       <View style={styles.actions}>
+        <IdeIconButton
+          icon={<History size={14} strokeWidth={1.75} color={traceOn ? tokens.ink : tokens.ink2} />}
+          label={traceOn ? "Hide why-trace (w)" : "Why-trace: which turn wrote each line (w)"}
+          active={traceOn}
+          onPress={() => setWhyTrace(!traceOn)}
+        />
         {tab.kind === "diff" ? (
           <>
             <View style={[styles.modes, { borderColor: tokens.border }]}>
@@ -156,7 +187,15 @@ function FileHeader({ tab, mode, onMode }: { tab: EditorTab; mode: DiffMode | "a
                 </Pressable>
               ))}
             </View>
-            <IdeIconButton icon={<Undo2 size={14} strokeWidth={1.75} color={tokens.ink2} />} label="Revert this file" onPress={() => setConfirming(true)} />
+            <IdeIconButton icon={<Undo2 size={14} strokeWidth={1.75} color={tokens.ink2} />} label="Revert this file" onPress={() => (undoable ? void revert() : setConfirming(true))} />
+            <IdeIconButton
+              icon={<Pencil size={14} strokeWidth={1.75} color={tokens.ink2} />}
+              label="Edit this file (e)"
+              onPress={() => {
+                openFile(tab.sessionId, tab.path, true);
+                requestEditorFocus();
+              }}
+            />
             <IdeIconButton
               icon={<MessageSquare size={14} strokeWidth={1.75} color={tokens.ink2} />}
               label="Open in agent"
@@ -249,6 +288,7 @@ export function EditorArea() {
               )}
             </Suspense>
           </Animated.View>
+          <ReviewDraftBar sessionId={active.sessionId} />
         </>
       ) : (
         <EmptyEditor />
@@ -265,10 +305,11 @@ const styles = StyleSheet.create({
   tabTop: { position: "absolute", top: 0, left: 0, right: 0, height: 1.5 },
   tabName: { flexShrink: 1, fontFamily: sansFamilyFor(500), fontSize: 12 },
   preview: { fontStyle: "italic" },
+  dirty: { width: 6, height: 6, borderRadius: 3 },
   tabKind: { fontFamily: monoFamily.regular, fontSize: 9.5 },
   tabClose: { width: 16, height: 16, borderRadius: radii.radius4, alignItems: "center", justifyContent: "center" },
-  header: { minHeight: 40, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: space.space12, paddingHorizontal: space.space16, borderBottomWidth: StyleSheet.hairlineWidth },
-  crumbWrap: { flex: 1, minWidth: 0, overflow: "hidden", flexDirection: "row", alignItems: "center", gap: space.space8 },
+  header: { minHeight: 40, flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", columnGap: space.space12, rowGap: space.space4, paddingVertical: space.space4, paddingHorizontal: space.space16, borderBottomWidth: StyleSheet.hairlineWidth },
+  crumbWrap: { flexGrow: 1, flexShrink: 1, flexBasis: 180, minWidth: 0, overflow: "hidden", flexDirection: "row", alignItems: "center", gap: space.space8 },
   crumbs: { flexShrink: 1, fontFamily: monoFamily.regular, fontSize: 11.5 },
   chip: { flexShrink: 1, minWidth: 0, maxWidth: 160, borderWidth: 1, borderRadius: radii.radius4, paddingHorizontal: 6, paddingVertical: 1 },
   chipText: { fontFamily: sansFamilyFor(500), fontSize: 10.5 },

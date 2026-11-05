@@ -1020,6 +1020,7 @@ export function useWriteWorkspaceFile() {
       });
       queryClient.invalidateQueries({ queryKey: keys(baseUrl).gitStatus(body.session) });
       queryClient.invalidateQueries({ queryKey: ["git", "diff", baseUrl, body.session] });
+      queryClient.invalidateQueries({ queryKey: ["ide", "changes", baseUrl] });
     },
   });
 }

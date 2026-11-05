@@ -24,7 +24,7 @@ describe("composer model chip", () => {
     // The label itself (sentinel → "auto", unpinned → "auto · model") is unit-tested in
     // modelChipLabel.test.ts; this pins that the chip still goes through it.
     expectSource(
-      /label=\{modelChipLabel\(model, modelPinned, isCompact\)\}/,
+      /label=\{modelChipLabel\(model, modelPinned, isCompact( \|\| compact)?\)\}/,
       "the model chip must render through modelChipLabel so the \"—\" sentinel reads as \"auto\"",
     );
   });
