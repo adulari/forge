@@ -72,6 +72,8 @@ pub(crate) enum Ev {
     Term(TermEvent),
     /// `POST /api/sessions` created this session; its first prompt is waiting for a socket.
     Created(String, String),
+    /// News for IDE mode's state machine.
+    Ide(forge_tui::ide::IdeEvent),
 }
 
 pub(crate) async fn board_cmd(
@@ -121,7 +123,7 @@ pub(crate) async fn board_cmd(
     outcome
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -155,13 +157,13 @@ pub(crate) fn preselect_project(rows: &[FleetRow], cwd: Option<&str>) -> Option<
 /// Owns the raw-mode alternate screen for the board's lifetime. Every exit path — a clean quit, an
 /// error, an unwind — goes through `Drop`, and [`suspend`](Self::suspend) hands the terminal back
 /// mid-run so a child `forge attach` can have it.
-struct TerminalGuard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+pub(crate) struct TerminalGuard {
+    pub(crate) terminal: Terminal<CrosstermBackend<Stdout>>,
     entered: bool,
 }
 
 impl TerminalGuard {
-    fn enter() -> Result<Self> {
+    pub(crate) fn enter() -> Result<Self> {
         install_panic_restore();
         enter_screen()?;
         let terminal = Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
@@ -171,13 +173,13 @@ impl TerminalGuard {
         })
     }
 
-    fn suspend(&mut self) {
+    pub(crate) fn suspend(&mut self) {
         if std::mem::take(&mut self.entered) {
             leave_screen();
         }
     }
 
-    fn resume(&mut self) -> Result<()> {
+    pub(crate) fn resume(&mut self) -> Result<()> {
         if !self.entered {
             enter_screen()?;
             self.entered = true;
@@ -246,14 +248,14 @@ fn install_panic_restore() {
 /// identical to the chat TUI's, and gives the one thing the board needs that a stream can't do
 /// cheaply: [`pause`](Self::pause), which parks the reader so a child `forge attach` gets the
 /// keyboard to itself instead of racing us for every keystroke.
-struct InputReader {
+pub(crate) struct InputReader {
     paused: Arc<AtomicBool>,
     parked: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 }
 
 impl InputReader {
-    fn spawn(tx: mpsc::UnboundedSender<Ev>) -> Self {
+    pub(crate) fn spawn(tx: mpsc::UnboundedSender<Ev>) -> Self {
         let reader = Self {
             paused: Arc::new(AtomicBool::new(false)),
             parked: Arc::new(AtomicBool::new(false)),
@@ -294,7 +296,7 @@ impl InputReader {
 
     /// Park the reader and wait (briefly) for it to confirm, so the child process starts with a
     /// terminal nobody else is reading.
-    async fn pause(&self) {
+    pub(crate) async fn pause(&self) {
         self.paused.store(true, Ordering::Relaxed);
         for _ in 0..25 {
             if self.parked.load(Ordering::Relaxed) {
@@ -304,7 +306,7 @@ impl InputReader {
         }
     }
 
-    fn resume(&self) {
+    pub(crate) fn resume(&self) {
         self.parked.store(false, Ordering::Relaxed);
         self.paused.store(false, Ordering::Relaxed);
     }
@@ -385,6 +387,7 @@ async fn run_board(
                 dirty = true;
                 match event {
                     Ev::Term(term) => actions = apply_term(app, term),
+                    Ev::Ide(_) => {}
                     Ev::Created(id, prompt) => {
                         // The socket usually opens a moment later (the session shows up in the
                         // next fleet); if it is already there, the prompt goes now.
@@ -420,6 +423,27 @@ async fn run_board(
             match actions::perform(action, &mut host) {
                 actions::After::None => {}
                 actions::After::Quit => quit = true,
+                actions::After::OpenIde => {
+                    input.pause().await;
+                    guard.suspend();
+                    let cwd = app.board_cwd();
+                    if let Err(e) = crate::ide_host::open_over(&cwd, base, token).await {
+                        let _ = ev_tx.send(Ev::Board(BoardEvent::Toast(
+                            ToastLevel::Error,
+                            format!("IDE mode: {e}"),
+                        )));
+                    }
+                    let restored = guard.resume();
+                    input.resume();
+                    if let Err(e) = restored {
+                        let _ = ev_tx.send(Ev::Board(BoardEvent::Toast(
+                            ToastLevel::Error,
+                            format!("terminal could not be restored: {e}"),
+                        )));
+                    }
+                    let _ = refresh_tx.send(());
+                    last_draw = Instant::now() - DRAW_MIN_INTERVAL;
+                }
                 actions::After::Attach(id) => {
                     attach_child(guard, &input, base, token, &id, &ev_tx, &refresh_tx).await;
                     last_draw = Instant::now() - DRAW_MIN_INTERVAL;

@@ -23,6 +23,8 @@ pub(crate) enum After {
     None,
     Quit,
     Attach(String),
+    /// F2: hand the terminal to IDE mode, come back when it closes.
+    OpenIde,
 }
 
 pub(crate) struct Host<'a> {
@@ -39,6 +41,7 @@ pub(crate) fn perform(action: BoardAction, host: &mut Host<'_>) -> After {
     match action {
         BoardAction::Quit => return After::Quit,
         BoardAction::Attach(id) => return After::Attach(id),
+        BoardAction::OpenIde => return After::OpenIde,
         BoardAction::Input(id, json) => host.pool.send(&id, &json),
         BoardAction::Interrupt(id) => host.post(
             &format!("api/sessions/{id}/interrupt"),

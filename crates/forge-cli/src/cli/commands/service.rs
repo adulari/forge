@@ -334,6 +334,11 @@ pub(crate) fn service_is_running() -> bool {
     query_service_status().is_ok_and(|s| s.installed && s.running)
 }
 
+/// Start the installed background service (no-op if it is already running).
+pub(crate) fn start_service() -> Result<()> {
+    control_service(ServiceControl::Start)
+}
+
 /// Restart the background service (an update only reaches a daemon that restarts).
 pub(crate) fn restart_service() -> Result<()> {
     control_service(ServiceControl::Restart)

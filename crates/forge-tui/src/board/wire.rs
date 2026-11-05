@@ -401,4 +401,9 @@ pub struct HistoryRow {
     /// `"call"` | `"result"` on tool rows.
     #[serde(default)]
     pub tool_phase: Option<String>,
+    /// Lines an edit call added and removed, as the daemon counted them (call rows only).
+    #[serde(default)]
+    pub adds: Option<usize>,
+    #[serde(default)]
+    pub dels: Option<usize>,
 }

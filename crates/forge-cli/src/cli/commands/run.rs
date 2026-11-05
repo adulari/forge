@@ -799,6 +799,7 @@ pub(crate) async fn run_chat_tui(
     let mut anywhere_driver = anywhere_menu::AnywhereMenuDriver::new(mock);
     let mut notes_driver = notes_menu::NotesMenuDriver::new();
     let mut pane_host = panes::PaneHost::new();
+    let mut ide_slot: Option<crate::ide_host::IdeHost> = None;
     let mut run_menu_driver = run_menu::RunMenuDriver::new();
     let mut import_driver = import_menu::ImportMenuDriver::new();
     let mut agents_driver = agents_menu::AgentsMenuDriver::new(mock);
@@ -1141,6 +1142,10 @@ pub(crate) async fn run_chat_tui(
         if child_feed.poll(&mut app) {
             dirty = true;
         }
+        if std::mem::take(&mut app.ide_requested) {
+            crate::ide_host::open_from_chat(&mut ide_slot, &mut app, &mut tui);
+            dirty = true;
+        }
         if dirty {
             app.busy = busy;
             app.set_autonomy_chips(
@@ -1184,6 +1189,13 @@ pub(crate) async fn run_chat_tui(
                 continue;
             }
             if matches!(ev, forge_tui::InputEvent::Key(KeyKind::Pending)) {
+                dirty = true;
+                continue;
+            }
+            if matches!(ev, forge_tui::InputEvent::Key(KeyKind::OpenIde))
+                && !host_only_modal_open(&app)
+            {
+                crate::ide_host::open_from_chat(&mut ide_slot, &mut app, &mut tui);
                 dirty = true;
                 continue;
             }

@@ -143,6 +143,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             project,
             all,
         } => crate::board::board_cmd(url, token, project, all).await,
+        Command::Ide { cwd, url, token } => crate::ide_host::ide_cmd(cwd, url, token).await,
         Command::Dispatch { cmd, url, token } => {
             crate::cli::commands::dispatch::dispatch_cmd(cmd, url, token).await
         }

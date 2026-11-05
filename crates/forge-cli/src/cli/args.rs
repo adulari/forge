@@ -448,6 +448,15 @@ pub(crate) enum Command {
         #[arg(long, conflicts_with = "project")]
         all: bool,
     },
+    /// IDE mode: review what agents changed, with per-hunk stage and revert (F2 or Esc leaves).
+    Ide {
+        #[arg(long, help = "Project directory (default: here)")]
+        cwd: Option<String>,
+        #[arg(long, help = "Daemon base URL")]
+        url: Option<String>,
+        #[arg(long, help = "Daemon token")]
+        token: Option<String>,
+    },
     /// Plan and dispatch: hand one request to a coordinator session on the running `forge serve`
     /// daemon, which reads the project and proposes a split into work items. Nothing starts until
     /// you approve the split (all of it, or `--only` some items), ask for a revision, or cancel;

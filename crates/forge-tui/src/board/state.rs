@@ -74,6 +74,11 @@ pub struct BoardApp {
 }
 
 impl BoardApp {
+    /// The directory the board was started in (`.` when unknown).
+    pub fn board_cwd(&self) -> String {
+        self.board_cwd.clone().unwrap_or_else(|| ".".to_string())
+    }
+
     pub fn new(board_cwd: Option<String>, now: i64) -> Self {
         Self {
             rows: Vec::new(),

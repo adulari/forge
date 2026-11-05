@@ -45,6 +45,7 @@ pub mod goal_status;
 mod headless;
 mod heartbeat_args;
 mod help;
+pub mod ide;
 mod json_result;
 mod keybind_configurator;
 pub mod keybinds;

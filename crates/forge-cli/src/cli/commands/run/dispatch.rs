@@ -999,6 +999,8 @@ and keep going."
         CommandAction::Home => super::workspace_menu::home_command(session, app).await,
         CommandAction::Strip(arg) => super::panes::toggle(app, "strip", &arg),
         CommandAction::Sidebar(arg) => super::panes::toggle(app, "sidebar", &arg),
+        CommandAction::Ide if tui.is_some() => app.ide_requested = true,
+        CommandAction::Ide => app.note("/ide needs the interactive chat; run `forge ide`"),
         CommandAction::Jobs if tui.is_some() => app.jobs_overlay.open(),
         CommandAction::Jobs => app.note("/jobs needs the interactive chat"),
         CommandAction::Diff(path) if tui.is_some() && app.fullscreen && path.trim().is_empty() => {

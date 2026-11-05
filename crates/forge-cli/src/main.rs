@@ -87,6 +87,7 @@ mod host_add;
 mod host_caps;
 mod host_lock;
 mod hosts;
+mod ide_host;
 mod image_input;
 pub(crate) mod live_observer;
 mod local;

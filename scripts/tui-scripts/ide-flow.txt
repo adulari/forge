@@ -1,0 +1,43 @@
+# F2 -> j/k -> accept hunk -> revert + undo -> F2 back. Run through scripts/ide-flow-e2e.sh, which
+# starts an isolated `forge serve --mock` and a scratch repo with two changed files first.
+sleep 1500
+chord F2
+sleep 2500
+capture ide-open
+expect IDE
+expect Agents
+expect src/a.txt
+expect src/b.txt
+chord j
+sleep 1200
+capture first-file
+expect hunk 1/
+# accept (stage) the first hunk
+chord a
+sleep 1500
+capture staged
+expect hunk staged
+# next file, then revert its hunk and undo it
+chord j
+sleep 1200
+chord x
+sleep 400
+expect revert hunk
+chord y
+sleep 1500
+expect hunk reverted
+capture reverted
+chord u
+sleep 1500
+expect revert undone
+capture undone
+chord ?
+sleep 400
+expect IDE keys
+chord Escape
+sleep 300
+chord F2
+sleep 1200
+capture back-in-chat
+reject IDE keys
+reject Agents

@@ -114,6 +114,7 @@ pub fn action_to_key_kind(action: &str) -> Option<KeyKind> {
         "effort_cycle" => Some(KeyKind::EffortCycle),
         "temper_cycle" => Some(KeyKind::TemperCycle),
         "keybind_config" => Some(KeyKind::OpenKeybindConfig),
+        "ide" => Some(KeyKind::OpenIde),
         "new_session" => Some(KeyKind::NewSession),
         "copy_last" => Some(KeyKind::CopyLast),
         "scroll_up" => Some(KeyKind::PageUp),

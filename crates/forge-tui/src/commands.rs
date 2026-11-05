@@ -69,6 +69,8 @@ pub enum CommandAction {
     Keys,
     ListSessions,
     Board,
+    /// Open IDE mode (`/ide`): the project review workbench.
+    Ide,
     /// Start a plan-and-dispatch on the daemon for this workspace (`/dispatch <request>`).
     Dispatch(String),
     Resume(String),
@@ -427,6 +429,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "keys" | "keybinds" | "shortcuts" => CommandAction::Keys,
         "sessions" | "ls" => CommandAction::ListSessions,
         "board" => CommandAction::Board,
+        "ide" => CommandAction::Ide,
         "dispatch" => CommandAction::Dispatch(arg),
         "resume" | "r" => {
             if arg.is_empty() {

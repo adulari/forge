@@ -225,6 +225,9 @@ impl Default for KeybindsConfig {
         binds.insert("voice".into(), bind("v", true, false, false));
         binds.insert("kill_line_forward".into(), bind("k", false, true, false));
         binds.insert("stash".into(), bind("x", true, false, false));
+        // F2: free in the default keymap (the claude-code preset gives F2 to the command center
+        // and moves this to F3).
+        binds.insert("ide".into(), bind("f2", false, false, false));
         Self {
             preset: KeybindPreset::Forge,
             binds,
@@ -238,7 +241,7 @@ impl Default for KeybindsConfig {
 /// The actions the `claude-code` preset moves, and where to. Every other action keeps its Forge
 /// default. The freed chords fall through to the composer's readline keys (Ctrl+K kill to end of
 /// line, Ctrl+N history) or are ignored (Ctrl+Z, Ctrl+S, Ctrl+R), never typed as a letter.
-fn claude_code_moves() -> [(&'static str, KeyCombo); 6] {
+fn claude_code_moves() -> [(&'static str, KeyCombo); 7] {
     [
         ("command_center", KeyCombo::new("f2", false, false, false)),
         ("new_session", KeyCombo::new("n", false, true, false)),
@@ -246,6 +249,7 @@ fn claude_code_moves() -> [(&'static str, KeyCombo); 6] {
         ("toggle_reasoning", KeyCombo::new("t", false, true, false)),
         ("model_picker", KeyCombo::new("p", false, true, false)),
         ("temper_cycle", KeyCombo::new("m", false, true, false)),
+        ("ide", KeyCombo::new("f3", false, false, false)),
     ]
 }
 
@@ -495,7 +499,7 @@ mod tests {
     #[test]
     fn keybinds_default_has_all_actions() {
         let kb = KeybindsConfig::default();
-        assert_eq!(kb.binds.len(), 30);
+        assert_eq!(kb.binds.len(), 31);
         assert_eq!(kb.preset, KeybindPreset::Forge);
         assert_eq!(kb.binds["interrupt"], combo("c", true, false, false));
         assert_eq!(kb.binds["copy_last"], combo("c", true, false, true));
@@ -511,7 +515,7 @@ mod tests {
     fn partial_keybind_override_deep_merges_over_defaults() {
         let kb = load("[keybinds.binds.toggle_reasoning]\nkey = \"x\"\nctrl = true\n");
         assert_eq!(kb.binds["toggle_reasoning"].key, "x");
-        assert_eq!(kb.binds.len(), 30);
+        assert_eq!(kb.binds.len(), 31);
         assert_eq!(kb.binds["interrupt"].key, "c");
         assert_eq!(kb.binds["help"].key, "f1");
     }
@@ -557,13 +561,13 @@ mod tests {
         assert_eq!(kb.binds["temper_cycle"], combo("m", false, true, false));
         assert_eq!(
             taken.len(),
-            30,
+            31,
             "the preset moves actions, it never drops one"
         );
         let mut unique = taken.clone();
         unique.sort_by_key(|c| (c.key.clone(), c.ctrl, c.alt, c.shift));
         unique.dedup();
-        assert_eq!(unique.len(), 30, "no two actions share a chord: {kb:?}");
+        assert_eq!(unique.len(), 31, "no two actions share a chord: {kb:?}");
     }
 
     #[test]
