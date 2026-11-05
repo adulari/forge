@@ -52,6 +52,12 @@ pub(crate) fn fallback_dir() -> String {
         .map_or_else(|| "/".into(), |d| d.display().to_string())
 }
 
+/// `/continue-claude [query]`: open the Claude Code session picker, filtered by `query`.
+pub(crate) fn cont_claude(app: &mut forge_tui::App, query: String) {
+    app.import_menu.open_claude(fallback_dir());
+    app.import_menu.query = query;
+}
+
 impl ImportMenuDriver {
     pub(crate) fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
