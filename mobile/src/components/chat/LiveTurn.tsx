@@ -2,7 +2,7 @@
 // saying what the turn is doing while no text is coming in ("Thinking · 12s", "Run cargo test ·
 // 4s"). It replaced a bare "thinking…" beside the pull-to-refresh spinner, which is absolutely
 // positioned and rendered as a large ember arc floating over the composer's chips.
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import Animated, {
   useAnimatedStyle,
@@ -93,41 +93,13 @@ function TurnActivityImpl({ activity, toolLine, startedAt }: TurnActivityProps) 
 
 export const TurnActivity = React.memo(TurnActivityImpl);
 
-/** At most one committed render per frame while streaming; reduce-motion commits every update. */
-function useFrameText(text: string, reduced: boolean): string {
-  const [displayText, setDisplayText] = useState(text);
-  const latestRef = useRef(text);
-  const rafRef = useRef<number | null>(null);
-  useEffect(() => {
-    latestRef.current = text;
-    if (reduced) {
-      setDisplayText(text);
-      return;
-    }
-    if (rafRef.current == null) {
-      rafRef.current = requestAnimationFrame(() => {
-        rafRef.current = null;
-        setDisplayText(latestRef.current);
-      });
-    }
-  }, [text, reduced]);
-  useEffect(
-    () => () => {
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-    },
-    [],
-  );
-  return displayText;
-}
-
 /** The reply as it streams, through the same Markdown the finished row uses, so finalizing is a
- * visual no-op. Markdown memoizes finished blocks, so a token re-renders only the open block. */
+ * visual no-op. `text` already changes at most once per frame (the stream store commits per paint). Markdown memoizes finished blocks, so a token re-renders only the open block. */
 export function StreamingAnswer({ text, streaming }: { text: string; streaming: boolean }) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const prose = useChatProseStyle();
-  const displayText = useFrameText(text, reduced);
-  const { head, tail } = useMemo(() => splitStreamedText(displayText, streaming), [displayText, streaming]);
+  const { head, tail } = useMemo(() => splitStreamedText(text, streaming), [text, streaming]);
 
   const caretOpacity = useSharedValue(1);
   useEffect(() => {

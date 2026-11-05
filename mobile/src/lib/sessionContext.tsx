@@ -17,6 +17,7 @@ import { consumeComposerFocus, onComposerFocusRequest } from "./alertTargets";
 import { useAuth } from "./auth";
 import { useSessions } from "./queries";
 import { EMPTY_DRAFT, type DraftMap, withDraftAttachments, withDraftText } from "./sessionDrafts";
+import type { StreamStore } from "./streamStore";
 import { type ConnectionState, type RemoteInput, type Snapshot, useSessionSocket } from "./ws";
 
 const REOPEN_WINDOW_MS = 60_000;
@@ -54,6 +55,8 @@ export interface SessionLiveCtxValue {
 export interface SessionStableCtxValue {
   sessionId: string;
   baseUrl: string | null;
+  /** The reply being written; read it with `useStreamText` so only the row that draws it re-renders. */
+  streamStore: StreamStore;
   send: (input: RemoteInput) => boolean;
   pendingAnswer: PendingAnswer | null;
   setPendingAnswer: (answer: PendingAnswer) => void;
@@ -111,7 +114,7 @@ export function SessionProvider({
   children: React.ReactNode;
 }) {
   const { baseUrl } = useAuth();
-  const { snapshot, connectionState, send, reopen } = useSessionSocket(baseUrl, sessionId);
+  const { snapshot, streamStore, connectionState, send, reopen } = useSessionSocket(baseUrl, sessionId);
   // The daemon sends `closed` whenever a session's driver stops — including when the daemon
   // itself restarts (an update, a crash), after which it resumes the session. Treating every
   // `closed` as final left each open screen read-only ("session ended") until the user left and
@@ -200,6 +203,7 @@ export function SessionProvider({
     () => ({
       sessionId,
       baseUrl,
+      streamStore,
       send,
       pendingAnswer,
       setPendingAnswer,
@@ -219,6 +223,7 @@ export function SessionProvider({
     [
       sessionId,
       baseUrl,
+      streamStore,
       send,
       pendingAnswer,
       setPendingAnswer,

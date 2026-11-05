@@ -9,6 +9,9 @@ import { AppState, type AppStateStatus, Platform } from "react-native";
 
 import { createFrameCoalescer } from "./frameCoalescer";
 import { requestHostRediscovery } from "./hostDiscovery";
+import { stabilizeSnapshot } from "./snapshotStable";
+import { createStreamPacer } from "./streamPacer";
+import { createStreamStore, type StreamStore } from "./streamStore";
 import { accumulateStreaming, EMPTY_STREAMING, streamingDisplayText, type StreamingAccumulator } from "./streamingText";
 import {
   clearHostRestarting,
@@ -213,8 +216,10 @@ export interface Snapshot {
   cost_usd: number;
   context_tokens: number;
   context_limit: number | null;
-  /** The in-flight reply. The wire carries only its last 2 KiB; `useSessionSocket` rebuilds the
-   * whole reply from `streaming_offset`, so consumers always see the full text so far. */
+  /** The in-flight reply as the wire sends it (its last 2 KiB). The snapshot `useSessionSocket`
+   * hands out always carries "" here: the whole reply, rebuilt from `streaming_offset`, lives in
+   * `UseSessionSocketResult.streamStore` so a token does not re-render everything that reads the
+   * snapshot. */
   streaming: string;
   /** Additive: UTF-16 units of the reply before the wire's `streaming` tail (0/absent: none). */
   streaming_offset?: number;
@@ -333,6 +338,8 @@ function wsUrl(baseUrl: string, sessionId: string, rev: number): string {
 
 export interface UseSessionSocketResult {
   snapshot: Snapshot | null;
+  /** The reply being written, rebuilt from every frame. Subscribe with `useStreamText`. */
+  streamStore: StreamStore;
   connectionState: ConnectionState;
   send: (input: RemoteInput) => boolean;
   /** Reconnect a socket the daemon marked `closed`, from a fresh revision. */
@@ -349,10 +356,26 @@ export function useSessionSocket(
   sessionId: string | null,
 ): UseSessionSocketResult {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [streamStore] = useState(createStreamStore);
   const [connectionState, setConnectionState] = useState<ConnectionState>("idle");
   // One committed snapshot per paint (lib/frameCoalescer.ts); the streamed reply is rebuilt from
   // every frame first, so coalescing never loses text.
-  const [frames] = useState(() => createFrameCoalescer<Snapshot>(setSnapshot));
+  const [committed] = useState<{ snapshot: Snapshot | null }>(() => ({ snapshot: null }));
+  const [streamPacer] = useState(() => createStreamPacer<string>((text) => streamStore.set(text)));
+  const [frames] = useState(() =>
+    createFrameCoalescer<Snapshot>((frame) => {
+      const next = stabilizeSnapshot(committed.snapshot, { ...frame, streaming: "" });
+      const changed = next !== committed.snapshot;
+      // Only the reply text moved: pace it. Anything else (a turn edge, a tool, a cleared reply)
+      // commits the text at once, first, so the render the snapshot causes already reads it.
+      if (changed || frame.streaming === "" || frame.closed) streamPacer.flush(frame.streaming);
+      else streamPacer.push(frame.streaming);
+      if (changed) {
+        committed.snapshot = next;
+        setSnapshot(next);
+      }
+    }),
+  );
   const streamingRef = useRef<StreamingAccumulator>(EMPTY_STREAMING);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -559,6 +582,10 @@ export function useSessionSocket(
     if (!resuming) {
       revRef.current = 0;
       streamingRef.current = EMPTY_STREAMING;
+      streamPacer.cancel();
+      streamStore.set("");
+      streamStore.rememberCurrent();
+      committed.snapshot = null;
       setSnapshot(null);
       setConnectionState("idle");
     }
@@ -566,6 +593,7 @@ export function useSessionSocket(
     return () => {
       shouldRunRef.current = false;
       frames.cancel();
+      streamPacer.cancel();
       teardown();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -649,5 +677,5 @@ export function useSessionSocket(
     connect();
   }, [connect]);
 
-  return { snapshot, connectionState, send, reopen };
+  return { snapshot, streamStore, connectionState, send, reopen };
 }

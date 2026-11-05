@@ -31,8 +31,9 @@ import { ComposerDocks } from "../../../components/chat/ComposerDocks";
 import { Composer } from "../../../components/chat/Composer";
 import { MessageActionsMenu } from "../../../components/chat/MessageActionsMenu";
 import { MessageActionsSheet } from "../../../components/chat/MessageActionsSheet";
-import { StreamingAnswer, TurnActivity } from "../../../components/chat/LiveTurn";
-import { displayMessageText, MessageRow, SpeakerTag } from "../../../components/chat/MessageRow";
+import { StreamingRow } from "../../../components/chat/StreamingRow";
+import { useHasStreamText } from "../../../lib/useStreamText";
+import { displayMessageText, MessageRow } from "../../../components/chat/MessageRow";
 import { ToolCallRow } from "../../../components/chat/ToolCallRow";
 import { ToolGroupRow } from "../../../components/chat/ToolGroupRow";
 import { TurnFooter } from "../../../components/chat/TurnFooter";
@@ -52,7 +53,6 @@ import { requestMessageJump } from "../../../lib/messageJump";
 import { railVisible } from "../../../lib/promptRail";
 import { stickyPromptFor, type PromptEntry } from "../../../lib/stickyPrompt";
 import { useFinePointer } from "../../../lib/useFinePointer";
-import { ReasoningDisclosure } from "../../../components/chat/ReasoningDisclosure";
 import { buildTranscript, type ToolInvocation } from "../../../lib/toolRows";
 import { foldToolGroups, GroupMemo, type FoldedEntry, type ToolGroupEntry } from "../../../lib/toolGroups";
 import { withTurnFooters } from "../../../lib/turnFooter";
@@ -76,7 +76,6 @@ import { haptics } from "../../../lib/haptics";
 import { useHistory, useLiveHistoryRefresh, useSessionAgents, useSessions } from "../../../lib/queries";
 import { rewindDisabledReason, sessionsSharingDirectory, sharedWorktreeWarning } from "../../../lib/forkRequest";
 import { useConnectionAccess } from "../../../lib/queriesAccess";
-import { parseReasoning } from "../../../lib/reasoning";
 import { AgentIndexProvider } from "../../../lib/agentLinks";
 import { usePaneNav } from "../../../components/shell/paneNav";
 import { useSessionCtx } from "../../../lib/sessionContext";
@@ -96,7 +95,7 @@ const HISTORY_RECOVERY_POLL_MS = 5_000;
 const TRANSCRIPT_MOUNT_FALLBACK_MS = 1_200;
 
 type TimelineItem =
-  | { kind: "streaming"; id: string; text: string; streaming: boolean }
+  | { kind: "streaming"; id: string; fallbackText: string; streaming: boolean }
   | { kind: "history"; id: string; row: HistoryRow }
   | { kind: "tool"; id: string; invocation: ToolInvocation }
   | { kind: "toolGroup"; id: string; group: ToolGroupEntry }
@@ -127,7 +126,7 @@ export function SessionChat() {
   const tokens = useTokens();
   const paneNav = usePaneNav();
   const toast = useToast();
-  const { sessionId, baseUrl, snapshot, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer, getDraftText, setDraftText, focusComposer } = useSessionCtx();
+  const { sessionId, baseUrl, snapshot, streamStore, snapshotTimedOut, connectionState, send, headerHeight, pendingAnswer, clearPendingAnswer, getDraftText, setDraftText, focusComposer } = useSessionCtx();
 
   // The chat opts into tool rows so a turn's tool activity renders inline (ToolCallRow),
   // instead of the tool-less stream the fork picker and turn watcher still use.
@@ -463,7 +462,11 @@ export function SessionChat() {
     return () => clearInterval(timer);
   }, [historyContradicted, historyRefetch]);
 
-  const streamingText = snapshot?.busy ? snapshot.streaming : "";
+  // Whether reply text is arriving, not the text itself: the text changes every frame and is
+  // drawn by StreamingRow alone (lib/streamStore.ts), so a token never re-renders this screen.
+  const streamHasText = useHasStreamText(streamStore);
+  const streamingPresent = Boolean(snapshot?.busy) && streamHasText;
+  const liveText = streamingPresent ? streamStore.get() : "";
 
   // ---------------------------------------------------------------------
   // Bridge the busy(true)->false gap (see module doc above): the instant `busy` flips false,
@@ -504,36 +507,33 @@ export function SessionChat() {
   const [track, setTrack] = useState(() => ({
     sessionId,
     busy,
-    retainedText: streamingText,
+    retainedText: liveText,
     finalizing: null as { text: string; baselineSeq: number } | null,
   }));
 
   if (track.sessionId !== sessionId) {
     // Session switch: nothing carries over.
-    setTrack({ sessionId, busy, retainedText: streamingText, finalizing: null });
+    setTrack({ sessionId, busy, retainedText: liveText, finalizing: null });
   } else if (busy !== track.busy) {
+    // A new turn forgets the last turn's text; the end of one keeps the newest text it wrote.
+    if (busy) streamStore.rememberCurrent();
     setTrack(
       busy
-        ? { sessionId, busy, retainedText: streamingText, finalizing: null }
+        ? { sessionId, busy, retainedText: liveText, finalizing: null }
         : {
             sessionId,
             busy,
-            retainedText: track.retainedText,
-            finalizing: track.retainedText
-              ? { text: track.retainedText, baselineSeq: historyRows[0]?.seq ?? -1 }
+            retainedText: streamStore.last(),
+            finalizing: streamStore.last()
+              ? { text: streamStore.last(), baselineSeq: historyRows[0]?.seq ?? -1 }
               : null,
           },
     );
-  } else if (busy && streamingText && streamingText !== track.retainedText) {
-    // `streamingText` guard: the real daemon can (and does — verified live) send a snapshot
-    // with `streaming` already cleared to "" one tick BEFORE the `busy` true->false edge
-    // itself, not atomically with it. Without this guard that empty tick would blow away
-    // `retainedText` right before the edge, so `finalizing` below (`track.retainedText ? … :
-    // null`) would never arm and the just-finished reply would render as nothing at all —
-    // not a brief flicker but a real gap until the history refetch resolves. Only ever
-    // replace the retained text with another real chunk; a transient empty one is ignored.
-    setTrack({ ...track, retainedText: streamingText });
   }
+  // The real daemon can (and does — verified live) send a snapshot with `streaming` already
+  // cleared to "" one tick BEFORE the `busy` true->false edge itself, not atomically with it.
+  // `streamStore.last()` keeps the newest non-empty chunk through that empty tick, so
+  // `finalizing` still arms and the just-finished reply never renders as nothing.
 
   const { finalizing } = track;
 
@@ -594,7 +594,7 @@ export function SessionChat() {
   // only recomputes when history actually changes — not on every ~30ms WS snapshot that
   // re-renders SessionChat while streaming.
   const historyTranscript = useMemo(() => buildTranscript(shownRows), [shownRows]);
-  const inFlight = busy || streamingText.length > 0 || pendingSent.length > 0;
+  const inFlight = busy || streamingPresent || pendingSent.length > 0;
   const fillerTranscript = useMemo(() => {
     if (!transcriptRows?.length) return [];
     const rows = fillerHistoryRows(transcriptRows, inFlight) ?? [];
@@ -616,8 +616,9 @@ export function SessionChat() {
     [foldEnabled, fillerTranscript, busy, fillerGroupMemo],
   );
   const timelineHistory = useMemo(() => withTurnFooters(foldedHistory, busy), [foldedHistory, busy]);
-  const retained = busy && !answerAlreadyShown(useTranscriptFiller ? foldedFiller : foldedHistory, track.retainedText);
-  const displayText = streamingText || (retained ? track.retainedText : "") || (finalizingActive ? finalizing!.text : "");
+  const retainedText = busy && !streamingPresent ? streamStore.last() : "";
+  const retained = retainedText !== "" && !answerAlreadyShown(useTranscriptFiller ? foldedFiller : foldedHistory, retainedText);
+  const fallbackText = (retained ? retainedText : "") || (finalizingActive ? finalizing!.text : "");
   // Open groups by id (the id of the group's first call), so they stay open while the list
   // re-renders, virtualises cells away and grows.
   const [openGroups, setOpenGroups] = useState<ReadonlyMap<string, boolean>>(() => new Map());
@@ -631,8 +632,8 @@ export function SessionChat() {
     // submit and the first token (previously nothing rendered here at all until `displayText`
     // was non-empty, which read as "stuck").
     const atLive = !view.detached;
-    if (atLive && (displayText || busy)) {
-      list.push({ kind: "streaming", id: "streaming", text: displayText, streaming: busy || Boolean(streamingText) });
+    if (atLive && (streamingPresent || fallbackText || busy)) {
+      list.push({ kind: "streaming", id: "streaming", fallbackText, streaming: busy || streamingPresent });
     }
     // Notes (turn-end notices, e.g. "compacting", "turn failed") are the NEWEST events — they must
     // sit at the newest slot (just under the streaming reply / above the composer in the inverted
@@ -687,7 +688,7 @@ export function SessionChat() {
       // (pendingSent bubble + streaming reply + TurnActivity) already render — keeping
       // them here painted the same exchange twice, once as plain lines. Cut the filler at
       // the current turn's start (the last "you" marker) while a turn is in flight.
-      if (busy || streamingText || shownPending.length > 0) {
+      if (busy || streamingPresent || shownPending.length > 0) {
         const lastYou = filler.map((l) => l.trim()).lastIndexOf("you");
         if (lastYou >= 0) filler = filler.slice(0, lastYou);
       }
@@ -696,10 +697,10 @@ export function SessionChat() {
       }
     }
     return list;
-  }, [view.detached, displayText, streamingText, busy, shownPending, useTranscriptFiller, historyRows, timelineHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
+  }, [view.detached, fallbackText, streamingPresent, busy, shownPending, useTranscriptFiller, historyRows, timelineHistory, foldedFiller, snapshot?.transcript, transcriptRows, snapshot?.notes]);
 
   // Pin to the latest item when a NEW item lands at the newest slot — not on every streaming
-  // text tick (same item id, StreamingAnswer owns its own rAF coalescing), and not when an older
+  // text tick (same item id, StreamingRow reads the text from the stream store), and not when an older
   // page is appended at the far end (that only changes the last item, not the first).
   const newestKeyRef = useRef<string | null>(null);
   const detachedRef = useRef(view.detached);
@@ -783,31 +784,18 @@ export function SessionChat() {
               onLongPress={onMessageLongPress}
             />
           );
-        case "streaming": {
-          // Split inline `<think>…</think>` out of the live text: reasoning goes to the collapsed
-          // disclosure, only the answer streams in the main slot (never the raw thinking log).
-          const parsed = parseReasoning(item.text);
-          const hasReasoning = parsed.reasoning.length > 0 || parsed.thinking;
-          // What the turn is doing, while no answer text is arriving: before the first token,
-          // and between steps (a tool running after some prose). Never a bare spinner.
-          const showActivity = item.streaming && busy && (!parsed.answer || (activity != null && activity !== "streaming response"));
-          if (!hasReasoning && !parsed.answer && !showActivity) return null;
+        case "streaming":
           return (
-            <View style={styles.streamingRow}>
-              {parsed.answer ? <SpeakerTag speaker="forge" /> : null}
-              {hasReasoning ? (
-                <ReasoningDisclosure
-                  reasoning={parsed.reasoning}
-                  active={parsed.thinking && item.streaming}
-                />
-              ) : null}
-              {parsed.answer ? (
-                <StreamingAnswer text={parsed.answer} streaming={item.streaming && !showActivity} />
-              ) : null}
-              {showActivity ? <TurnActivity activity={activity} toolLine={activityToolLine} startedAt={turnStartedAt} /> : null}
-            </View>
+            <StreamingRow
+              store={streamStore}
+              fallbackText={item.fallbackText}
+              streaming={item.streaming}
+              busy={busy}
+              activity={activity}
+              toolLine={activityToolLine}
+              startedAt={turnStartedAt}
+            />
           );
-        }
         case "note":
           return (
             <View style={styles.noteRow}>
@@ -823,7 +811,7 @@ export function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, tokens.selection, findSeq, busy, activity, activityToolLine, turnStartedAt, onMessageLongPress, openGroups, toggleGroup],
+    [tokens.ink2, tokens.ink3, tokens.selection, findSeq, streamStore, busy, activity, activityToolLine, turnStartedAt, onMessageLongPress, openGroups, toggleGroup],
   );
 
   // Each row reports its height so the sticky prompt bar can tell which row is at the top.

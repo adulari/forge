@@ -18,6 +18,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { SessionRow } from "../../lib/api";
 import { useAuth } from "../../lib/auth";
 import { useSessionSocket, type Snapshot, type TranscriptRow } from "../../lib/ws";
+import { useStreamText } from "../../lib/useStreamText";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
@@ -79,7 +80,8 @@ function FloorTileBase({ row, active }: FloorTileProps) {
   const tokens = useTokens();
   const { baseUrl, servers, activeServerId } = useAuth();
   const hostLabel = servers.find((s) => s.id === activeServerId)?.name ?? null;
-  const { snapshot, connectionState, send } = useSessionSocket(baseUrl, active ? row.id : null);
+  const { snapshot, streamStore, connectionState, send } = useSessionSocket(baseUrl, active ? row.id : null);
+  const streamText = useStreamText(streamStore);
   const [actionsVisible, setActionsVisible] = useState(false);
   const title = snapshot?.title || row.title || `session ${row.id.slice(0, 8)}`;
   const waiting = snapshot?.permission_prompt != null || snapshot?.question != null || row.waiting;
@@ -90,7 +92,7 @@ function FloorTileBase({ row, active }: FloorTileProps) {
   // *about*. The connecting/waiting filler is only for a tile with nothing at all to show: a
   // turn that opens on tool activity has a real tail already, just not a prose one.
   const tail =
-    snapshot?.streaming || prose || (tool ? null : connectionState === "open" ? "waiting for output…" : "connecting…");
+    streamText || prose || (tool ? null : connectionState === "open" ? "waiting for output…" : "connecting…");
   const tasksDone = snapshot?.tasks.filter((task) => task.status === "done").length ?? 0;
   const taskCount = snapshot?.tasks.length ?? 0;
   const state = waiting ? "waiting" : busy ? "busy" : "idle";
