@@ -6,6 +6,8 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.27.0] - 2026-11-05
+
 ### Added
 
 - Routes for the desktop IDE mode: `POST /api/git/hunk` stages, unstages or reverts a single hunk (409 when the file moved on), `GET /api/blame` maps lines to the turn that wrote them, `GET /api/sessions/{id}/jobs` (+ `/{job}/tail`) exposes background shell jobs, and `GET /api/projects/changes` lists every live session's changed files with a content hash. The mobile and desktop review dock gains per-hunk Stage/Revert and a Background jobs sheet; the TUI diff overlay reverts a hunk with `x` then `y` (`crates/forge-cli/src/serve_git/{hunk,changes}.rs`, `serve_ide.rs`).
@@ -5565,7 +5567,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.26.4...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.27.0...HEAD
+[2.27.0]: https://github.com/Adulari/forge/compare/v2.26.4...v2.27.0
 [2.26.4]: https://github.com/Adulari/forge/compare/v2.26.3...v2.26.4
 [2.26.3]: https://github.com/Adulari/forge/compare/v2.26.2...v2.26.3
 [2.26.2]: https://github.com/Adulari/forge/compare/v2.26.1...v2.26.2
