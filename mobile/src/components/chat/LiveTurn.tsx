@@ -126,7 +126,7 @@ export function StreamingAnswer({ text, streaming }: { text: string; streaming: 
             {head}
           </Text>
         ) : null}
-        <Markdown content={tail} style={prose} />
+        <Markdown content={tail} style={prose} incremental />
       </View>
       {streaming ? (
         <Animated.View

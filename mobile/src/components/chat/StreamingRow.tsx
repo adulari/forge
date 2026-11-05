@@ -23,7 +23,8 @@ export interface StreamingRowProps {
 }
 
 function StreamingRowImpl({ store, fallbackText, streaming, busy, activity, toolLine, startedAt }: StreamingRowProps) {
-  const text = useStreamText(store) || fallbackText;
+  const live = useStreamText(store);
+  const text = (busy ? live : "") || fallbackText;
   // Split inline `<think>…</think>` out of the live text: reasoning goes to the collapsed
   // disclosure, only the answer streams in the main slot (never the raw thinking log).
   const parsed = parseReasoning(text);
