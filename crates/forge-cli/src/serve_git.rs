@@ -62,6 +62,7 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(&format!("{base}/api/git/push"), post(sync::git_push))
         .route(&format!("{base}/api/git/discard"), post(sync::git_discard))
         .merge(crate::serve_pr::routes(base))
+        .merge(crate::serve_issues::routes(base))
         .merge(crate::serve_ide::routes(base))
         .merge(crate::serve_actions::routes(base))
 }

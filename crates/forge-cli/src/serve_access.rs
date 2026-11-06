@@ -240,9 +240,15 @@ pub(crate) fn required(method: &Method, path: &str) -> Need {
     if read || path.starts_with("/api/push/") || path == "/api/ws-ticket" {
         return Need::Scope(Scope::View);
     }
-    if ["/api/git/", "/api/pr/", "/api/actions/", "/api/workspace/"]
-        .iter()
-        .any(|prefix| path.starts_with(prefix))
+    if [
+        "/api/git/",
+        "/api/pr/",
+        "/api/actions/",
+        "/api/workspace/",
+        "/api/issues/",
+    ]
+    .iter()
+    .any(|prefix| path.starts_with(prefix))
     {
         return Need::Scope(Scope::WorkspaceWrite);
     }

@@ -121,6 +121,15 @@ pub enum RouteId {
     /// Forge. Both of these are writes to the host's own session stores, reachable only with the
     /// `manage-providers` scope the daemon enforces.
     ContinueClaudeSession,
+    /// `GET /api/issues?session=`: the repository's GitHub issues, through the host's `gh`.
+    ListIssues,
+    /// `GET /api/issues/detail?session=&number=`: one issue's body and comments.
+    IssueDetail,
+    /// `POST /api/issues/start`: start a session on an issue and arm PR Watch for it. The host
+    /// builds the prompt from the issue text itself; the caller supplies only the issue number,
+    /// so the bridge cannot be used to hand the agent arbitrary text beyond what it could already
+    /// send with `SessionInput`.
+    StartIssue,
     WebSocket,
     TerminalWebSocket,
 }

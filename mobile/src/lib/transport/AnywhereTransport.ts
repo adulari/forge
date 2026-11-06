@@ -73,7 +73,11 @@ export type BridgeRoute =
   | "import_scan"
   | "session_claude"
   | "export_session_claude"
-  | "continue_claude_session";
+  | "continue_claude_session"
+  // GitHub issues through the host's `gh`; `start_issue` opens a session and arms PR Watch.
+  | "list_issues"
+  | "issue_detail"
+  | "start_issue";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -310,6 +314,9 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/anywhere/sync": { GET: "account_sync_status", PUT: "account_sync_update" },
     "/api/anywhere/sync/now": { POST: "account_sync_now" },
     "/api/import/scan": { GET: "import_scan" },
+    "/api/issues": { GET: "list_issues" },
+    "/api/issues/detail": { GET: "issue_detail" },
+    "/api/issues/start": { POST: "start_issue" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };

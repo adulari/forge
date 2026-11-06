@@ -134,6 +134,7 @@ mod serve_hosts;
 mod serve_ide;
 mod serve_import;
 mod serve_input_gate;
+mod serve_issues;
 mod serve_keybindings;
 mod serve_lifecycle;
 mod serve_media;

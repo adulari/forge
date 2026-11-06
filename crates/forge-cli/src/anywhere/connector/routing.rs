@@ -65,6 +65,9 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::AccountSyncUpdate => exact(Method::PUT, "/api/anywhere/sync"),
         RouteId::AccountSyncNow => exact(Method::POST, "/api/anywhere/sync/now"),
         RouteId::ImportScan => exact(Method::GET, "/api/import/scan"),
+        RouteId::ListIssues => exact(Method::GET, "/api/issues"),
+        RouteId::IssueDetail => exact(Method::GET, "/api/issues/detail"),
+        RouteId::StartIssue => exact(Method::POST, "/api/issues/start"),
         RouteId::SessionClaude | RouteId::ExportSessionClaude | RouteId::ContinueClaudeSession => {
             let id = single_path_parameter(request)?;
             let (method, path) = match request.route {
@@ -315,6 +318,22 @@ mod tests {
                     "{route:?} must refuse {method}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn issue_routes_are_typed_and_only_start_writes() {
+        for (route, method, path) in [
+            (RouteId::ListIssues, "GET", "/api/issues"),
+            (RouteId::IssueDetail, "GET", "/api/issues/detail"),
+            (RouteId::StartIssue, "POST", "/api/issues/start"),
+        ] {
+            let target = route_target(&request(route, method, &[])).unwrap();
+            assert_eq!(target.path, path);
+            assert!(validate_command_request(&request(route, method, &[])).is_ok());
+            let wrong = if method == "GET" { "POST" } else { "GET" };
+            assert!(validate_command_request(&request(route, wrong, &[])).is_err());
+            assert!(validate_command_request(&request(route, "DELETE", &[])).is_err());
         }
     }
 

@@ -262,16 +262,27 @@ async fn watch_set(
     if let Err((status, message)) = session_repo_root(&state, &request.session).await {
         return err_response(status, &message);
     }
-    if request.mode != Mode::Off {
-        if let Some(handle) = state.registry.get(&request.session).await {
+    let watch = arm_watch(&state, &request.session, request.mode, method).await;
+    json_response(&serde_json::json!({ "watch": watch }))
+}
+
+/// Arm (or, for `off`, clear) a session's watch; a watched session runs in the Auto profile.
+pub(crate) async fn arm_watch(
+    state: &DaemonState,
+    session: &str,
+    mode: Mode,
+    method: &str,
+) -> Option<Watch> {
+    if mode != Mode::Off {
+        if let Some(handle) = state.registry.get(session).await {
             let _ = handle
                 .set_permission_mode(forge_types::PermissionMode::Auto)
                 .await;
         }
     }
-    let watch = registry().arm(&request.session, request.mode, method, now_secs());
+    let watch = registry().arm(session, mode, method, now_secs());
     state.registry.notify_fleet();
-    json_response(&serde_json::json!({ "watch": watch }))
+    watch
 }
 
 pub(crate) fn start(state: &Arc<DaemonState>) {
