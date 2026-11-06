@@ -524,6 +524,23 @@ pub(crate) async fn git_diff(
 // Stage / unstage / commit
 // ---------------------------------------------------------------------------
 
+/// Stage or unstage `paths`, touching only the index.
+fn update_index(root: &std::path::Path, paths: &[String], unstage: bool) -> Result<(), String> {
+    let mut args: Vec<&str> = if !unstage {
+        vec!["add", "--"]
+    } else if git_raw(root, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok() {
+        // `restore --staged` (not `reset`) so an unstage never moves HEAD or touches the
+        // working tree — the dock only ever changes what is in the index.
+        vec!["restore", "--staged", "--"]
+    } else {
+        // No commit yet, so nothing to restore from: unstaging means dropping the paths from
+        // the index again, leaving the files on disk.
+        vec!["rm", "--cached", "-r", "-q", "--ignore-unmatch", "--"]
+    };
+    args.extend(paths.iter().map(String::as_str));
+    git_raw(root, &args).map(|_| ())
+}
+
 async fn stage_impl(state: Arc<DaemonState>, request: GitPathsRequest, unstage: bool) -> Response {
     let Some(dir) = session_dir(&state, &request.session).await else {
         return no_such_session();
@@ -534,15 +551,7 @@ async fn stage_impl(state: Arc<DaemonState>, request: GitPathsRequest, unstage: 
     };
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let root = repo_root_of(&dir)?;
-        let mut args: Vec<&str> = if unstage {
-            // `restore --staged` (not `reset`) so an unstage never moves HEAD or touches the
-            // working tree — the dock only ever changes what is in the index.
-            vec!["restore", "--staged", "--"]
-        } else {
-            vec!["add", "--"]
-        };
-        args.extend(paths.iter().map(String::as_str));
-        git_raw(&root, &args).map(|_| ())
+        update_index(&root, &paths, unstage)
     })
     .await;
     match result {
@@ -751,6 +760,35 @@ mod tests {
     use super::branches::{is_forge_managed_worktree, parse_branch_rows, parse_worktree_branches};
     use super::status::{parse_numstat_z, parse_status_z};
     use super::*;
+
+    #[test]
+    fn unstage_works_before_the_first_commit_and_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| git_raw(root, args).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        update_index(root, &["a.txt".to_string()], false).unwrap();
+        update_index(root, &["a.txt".to_string()], true).unwrap();
+        let status = String::from_utf8(git(&["status", "--porcelain"])).unwrap();
+        assert_eq!(status.trim(), "?? a.txt", "unstaged, still on disk");
+
+        update_index(root, &["a.txt".to_string()], false).unwrap();
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "first",
+        ]);
+        std::fs::write(root.join("a.txt"), "changed\n").unwrap();
+        update_index(root, &["a.txt".to_string()], false).unwrap();
+        update_index(root, &["a.txt".to_string()], true).unwrap();
+        let status = String::from_utf8(git(&["status", "--porcelain"])).unwrap();
+        assert_eq!(status.trim(), "M a.txt");
+    }
 
     #[test]
     fn worktree_porcelain_maps_local_branches_to_paths() {
