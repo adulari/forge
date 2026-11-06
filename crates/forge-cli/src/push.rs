@@ -57,7 +57,7 @@ const DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 const TTL_DECISION: u32 = 300;
 
 /// TTL for completion pushes (turn done / failed): still worth seeing an hour later.
-const TTL_COMPLETION: u32 = 3600;
+pub(crate) const TTL_COMPLETION: u32 = 3600;
 
 /// Notification body cap — push services reject large payloads (~4KB) and lock screens show
 /// roughly two lines anyway.

@@ -411,6 +411,8 @@ struct DriverState {
     /// Progress of the worktree's background copy + `setup`, and the state the agent was last told.
     worktree_setup: crate::serve_worktree_start::SetupCell,
     setup_told: Option<String>,
+    /// Where a user interrupt records itself, so a restart can tell it from a crash.
+    interrupt_record: Option<(std::sync::Arc<forge_store::Store>, String)>,
 }
 
 /// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
@@ -540,6 +542,7 @@ async fn drive_session(
         && !forge_config::project_auto_setup_attempted(std::path::Path::new(&cwd));
 
     let steer = session.lock().await.steer_handle();
+    let interrupt_store = session.lock().await.store.clone();
     let mut st = DriverState {
         session,
         steer,
@@ -582,6 +585,7 @@ async fn drive_session(
         daemon_shutdown,
         worktree_setup: worktree_setup.clone(),
         setup_told: None,
+        interrupt_record: Some((interrupt_store, session_id.clone())),
     };
 
     let mut last_snap: Option<remote::Snapshot> = None;
@@ -975,6 +979,11 @@ impl DriverState {
         if let Some(h) = self.turn_handle.take() {
             h.abort();
         }
+        if let Some((store, id)) = &self.interrupt_record {
+            if let Err(error) = store.note_user_interrupt(id) {
+                tracing::warn!(session = %id, %error, "could not record the interrupt");
+            }
+        }
         self.turn_gen += 1;
         self.busy = false;
         self.loop_state = None;
@@ -1361,6 +1370,7 @@ pub(super) mod tests {
             daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
             worktree_setup: Default::default(),
             setup_told: None,
+            interrupt_record: None,
         }
     }
 
@@ -1447,6 +1457,26 @@ pub(super) mod tests {
             .lock()
             .expect("driver task lock poisoned")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn user_interrupt_is_recorded_so_a_restart_does_not_re_drive_it() {
+        let mut state = test_driver_state().await;
+        let store = state.session.lock().await.store.clone();
+        let id = state.session.lock().await.session_id().to_string();
+        store
+            .add_message(&id, 0, forge_types::Role::User, "go", None)
+            .unwrap();
+        state.interrupt_record = Some((store.clone(), id.clone()));
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        state.interrupt_turn();
+
+        assert_eq!(
+            store.session_tail_state(&id).unwrap(),
+            forge_store::TailState::UserInterrupted
+        );
     }
 
     #[tokio::test]

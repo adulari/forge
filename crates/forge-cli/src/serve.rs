@@ -2029,6 +2029,7 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
             );
             continue;
         }
+        let interrupted = crate::serve_restart_redrive::mark_interrupted(&state.store, &id);
         let request = CreateSessionReq {
             resume: Some(id.clone()),
             ..Default::default()
@@ -2037,6 +2038,9 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
         let status = response.status();
         if status.is_success() {
             attempted += 1;
+            if interrupted {
+                crate::serve_restart_redrive::announce(state.clone(), id.clone());
+            }
             continue;
         }
         // Stop retrying a session the daemon can no longer open — otherwise every restart repeats
