@@ -382,9 +382,10 @@ impl DriverState {
                 self.prompt_history.record(&line);
                 queue_command(&mut self.queued_prompts, &mut self.app, &line);
             }
-            BusyRoute::Refuse => self
-                .app
-                .note("⏳ commands run when the turn is idle — finish or Stop first"),
+            BusyRoute::Refuse => self.app.note(
+                refuse_note(&line)
+                    .unwrap_or("⏳ commands run when the turn is idle — finish or Stop first"),
+            ),
             BusyRoute::RefuseAutonomous => self.app.note(REFUSE_AUTONOMOUS_NOTE),
         }
         Ok(())

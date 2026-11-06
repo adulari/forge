@@ -3562,9 +3562,9 @@ pub(crate) async fn run_chat_tui(
                                 prompt_history.record(&line);
                                 queue_command(&mut queued_prompts, &mut app, &line);
                             }
-                            BusyRoute::Refuse => app.note(
+                            BusyRoute::Refuse => app.note(refuse_note(&line).unwrap_or(
                                 "⏳ that command can't run mid-turn and was not queued — finish or Esc, then retype it",
-                            ),
+                            )),
                             BusyRoute::RefuseAutonomous => app.note(REFUSE_AUTONOMOUS_NOTE),
                         }
                     } else {

@@ -536,6 +536,33 @@ async fn a_preview_returns_the_commit_set_and_changes_nothing() {
 }
 
 #[tokio::test]
+async fn a_terminal_session_that_is_mid_turn_is_refused() {
+    let fx = fixture("worktree", "WRITE", NO_PRS);
+    fx.state
+        .store
+        .set_session_local_live(&fx.session, true)
+        .unwrap();
+    fx.state
+        .store
+        .touch_session_local_presence(&fx.session, true)
+        .unwrap();
+    let head = sh(&fx.work, &["rev-parse", "HEAD"]);
+
+    let response = ship(&fx, ShipRequest::default()).await;
+    let refused = response.refused.unwrap();
+    assert_eq!(refused.step, "branch");
+    assert!(refused.reason.contains("turn"), "{}", refused.reason);
+    assert_eq!(sh(&fx.work, &["rev-parse", "HEAD"]), head);
+    assert!(sh(&fx.work, &["diff", "--cached", "--name-only"]).is_empty());
+
+    fx.state
+        .store
+        .touch_session_local_presence(&fx.session, false)
+        .unwrap();
+    assert!(ship(&fx, ShipRequest::default()).await.ok);
+}
+
+#[tokio::test]
 async fn a_refused_commit_hook_leaves_the_index_as_it_was() {
     let fx = fixture("worktree", "WRITE", NO_PRS);
     install_failing_hook(&fx);

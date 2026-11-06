@@ -516,6 +516,12 @@ pub(crate) async fn ship_session(
         }
     }
     let live = super::changes::live_sessions(state).await;
+    if live.iter().any(|s| s.id == session && s.busy) {
+        return Ok(out.refuse(
+            "branch",
+            "the session is running a turn in a terminal; ship when the turn finishes",
+        ));
+    }
 
     let probe_root = root.clone();
     let requested_base = request.base.clone();
