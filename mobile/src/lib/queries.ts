@@ -30,7 +30,9 @@ import {
   type WorkflowRow,
   getWorkflows,
   type ModelsResponse,
+  type ModelReportResponse,
   getModels,
+  getModelReport,
   type ProvidersResponse,
   type StoreProviderKeyRequest,
   type SetProviderEnabledRequest,
@@ -216,6 +218,7 @@ function keys(baseUrl: string | null) {
     skills: ["skills", baseUrl] as const,
     workflows: (sessionId?: string) => ["workflows", baseUrl, sessionId ?? null] as const,
     models: ["models", baseUrl] as const,
+    modelReport: (days: number) => ["models", "report", baseUrl, days] as const,
     providers: ["providers", baseUrl] as const,
     hooks: ["hooks", baseUrl] as const,
     crews: ["crews", baseUrl] as const,
@@ -618,6 +621,20 @@ export function useModels() {
     staleTime: 30_000,
     refetchOnMount: true,
     refetchOnReconnect: true,
+    refetchOnWindowFocus: isFocused,
+  });
+}
+
+/** Per-model report card. Older hosts answer an error, which the Models page treats as "no data". */
+export function useModelReport(days: number) {
+  const { baseUrl } = useAuth();
+  const isFocused = useIsFocused();
+  return useQuery<ModelReportResponse>({
+    queryKey: keys(baseUrl).modelReport(days),
+    queryFn: () => getModelReport(baseUrl as string, days),
+    enabled: baseUrl != null,
+    staleTime: 60_000,
+    retry: false,
     refetchOnWindowFocus: isFocused,
   });
 }

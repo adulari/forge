@@ -2,9 +2,58 @@
 //! leaderboard score. One builder feeds `forge models --report`, the daemon's
 //! `/api/models/report` route and (through the daemon) the app and TUI Models views.
 
+use std::sync::Arc;
+
+use axum::extract::{Query, State};
+use axum::response::Response;
+use axum::routing::get;
+use axum::Router;
 use forge_store::{ModelReportRow, Store};
 
+use crate::serve::{err_response, json_response, DaemonState};
+
+pub(crate) const DEFAULT_DAYS: u32 = 30;
 pub(crate) const MAX_DAYS: u32 = 365;
+
+pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
+    Router::new().route(&format!("{base}/api/models/report"), get(model_report))
+}
+
+#[derive(serde::Deserialize, Default)]
+struct ReportParams {
+    days: Option<u32>,
+    /// Limit to one repository (a session `cwd` or worktree path).
+    repo: Option<String>,
+}
+
+async fn model_report(
+    State(state): State<Arc<DaemonState>>,
+    Query(params): Query<ReportParams>,
+) -> Response {
+    let store = state.store.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let catalog =
+            crate::cli::commands::models::load_cached_catalog_aged().map(|(catalog, _, _)| catalog);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        build(
+            &store,
+            &|model| catalog.as_ref().and_then(|c| c.benchmark_for(model)),
+            params.days.unwrap_or(DEFAULT_DAYS),
+            params.repo.as_deref().filter(|r| !r.is_empty()),
+            now,
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(report)) => json_response(&report),
+        _ => err_response(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "could not build the model report",
+        ),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ReportEntry {

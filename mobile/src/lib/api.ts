@@ -968,6 +968,29 @@ export function getModels(baseUrl: string, refresh = false): Promise<ModelsRespo
   return request(baseUrl, refresh ? "/api/models?refresh=true" : "/api/models");
 }
 
+export interface ModelReportEntry {
+  model: string;
+  calls: number;
+  completed: number;
+  failed: number;
+  failed_over: number;
+  median_latency_ms: number | null;
+  median_cost_usd: number | null;
+  cost_samples: number;
+  tool_calls: number;
+  tool_errors: number;
+  completion_rate: number | null;
+  tool_error_rate: number | null;
+  benchmark_intelligence: number | null;
+  benchmark_coding: number | null;
+}
+export interface ModelReportResponse { days: number; repo: string | null; generated_at: number; models: ModelReportEntry[] }
+
+/** How each model did for this user over the last `days` days, from the host's local counts. */
+export function getModelReport(baseUrl: string, days = 30, repo?: string): Promise<ModelReportResponse> {
+  return request(baseUrl, `/api/models/report${qs({ days, repo })}`);
+}
+
 export interface UpdateModelRequest { model: string; favorite?: boolean; hidden?: boolean }
 export function updateModel(baseUrl: string, body: UpdateModelRequest): Promise<{ ok: boolean }> {
   return request(baseUrl, "/api/models", { method: "PATCH", body: JSON.stringify(body) });

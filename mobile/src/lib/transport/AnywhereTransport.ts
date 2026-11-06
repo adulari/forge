@@ -24,6 +24,7 @@ export type BridgeRoute =
   | "voice_transcribe"
   | "list_skills"
   | "list_models"
+  | "model_report"
   | "read_config"
   | "update_config"
   | "list_hooks"
@@ -283,6 +284,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/voice/transcribe": { POST: "voice_transcribe" },
     "/api/skills": { GET: "list_skills" },
     "/api/models": { GET: "list_models" },
+    "/api/models/report": { GET: "model_report" },
     "/api/config": { GET: "read_config", PUT: "update_config" },
     "/api/hooks": { GET: "list_hooks" },
     "/api/plans": { GET: "list_plans" },

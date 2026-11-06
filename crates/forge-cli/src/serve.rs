@@ -1043,6 +1043,7 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_keybindings::routes(&base))
         .merge(crate::serve_import::routes(&base))
         .merge(crate::serve_brief::routes(&base))
+        .merge(crate::model_report::routes(&base))
         .merge(crate::serve_claude_link::routes(&base))
         .merge(crate::serve_crews::routes(&base))
         .merge(crate::serve_skills::routes(&base))

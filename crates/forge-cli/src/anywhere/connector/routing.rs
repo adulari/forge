@@ -23,6 +23,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::VoiceTranscribe => exact(Method::POST, "/api/voice/transcribe"),
         RouteId::ListSkills => exact(Method::GET, "/api/skills"),
         RouteId::ListModels => exact(Method::GET, "/api/models"),
+        RouteId::ModelReport => exact(Method::GET, "/api/models/report"),
         RouteId::ReadConfig => exact(Method::GET, "/api/config"),
         RouteId::UpdateConfig => exact(Method::PUT, "/api/config"),
         RouteId::ListHooks => exact(Method::GET, "/api/hooks"),
@@ -376,7 +377,7 @@ mod tests {
 
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 23] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 24] = [
             (
                 RouteId::Blame,
                 "GET",
@@ -461,6 +462,13 @@ mod tests {
                 &["?since=100"],
                 Method::GET,
                 "/api/brief",
+            ),
+            (
+                RouteId::ModelReport,
+                "GET",
+                &["?days=7"],
+                Method::GET,
+                "/api/models/report",
             ),
             (RouteId::Identity, "GET", &[], Method::GET, "/api/identity"),
             (

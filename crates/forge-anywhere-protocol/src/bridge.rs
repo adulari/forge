@@ -35,6 +35,8 @@ pub enum RouteId {
     VoiceTranscribe,
     ListSkills,
     ListModels,
+    /// `GET /api/models/report?days=<n>&repo=<path>`: per-model report card from local counts. Read-only.
+    ModelReport,
     ReadConfig,
     UpdateConfig,
     ListHooks,
