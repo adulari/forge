@@ -447,8 +447,6 @@ pub(crate) fn push_is_current(msg: &PushMessage, cur: &Snapshot) -> bool {
     }
 }
 
-/// The most recent pushable event that was suppressed because a client was attached. Delivered
-/// once, when the last client detaches, if it is still current; never delivered stale.
 /// `text` with every `http(s)://…` run replaced by `<url>`.
 fn without_urls(text: &str) -> String {
     text.split_inclusive(char::is_whitespace)
@@ -472,6 +470,8 @@ fn without_urls(text: &str) -> String {
         .collect()
 }
 
+/// The most recent pushable event that was suppressed because a client was attached. Delivered
+/// once, when the last client detaches, if it is still current; never delivered stale.
 #[derive(Debug, Default)]
 pub(crate) struct DeferredPush(Option<PushMessage>);
 

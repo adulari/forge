@@ -479,7 +479,7 @@ impl IdeHost {
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Ev>();
         let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
         let api = Api {
-            http: reqwest::Client::new(),
+            http: crate::attach::local_http_client(&self.base),
             base: self.base.clone(),
             token: self.token.clone(),
             cwd: self.app.cwd().to_string(),
