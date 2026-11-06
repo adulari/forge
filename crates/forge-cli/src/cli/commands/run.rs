@@ -1872,12 +1872,13 @@ pub(crate) async fn run_chat_tui(
                 }
             }
 
-            // A session in a non-repo directory that keeps cd-ing into one repository: m moves
-            // it there, d stops asking. Only while the composer is empty, like the update card.
+            // A session in a non-repo directory that keeps cd-ing into one repository: Alt+G moves
+            // it there, Alt+D stops asking. Alt chords cannot start a message, so they work with
+            // a draft in the composer too.
             if pending.is_none()
                 && pending_question.is_none()
                 && !update_flow::other_modal_open(&app)
-                && app.project_offer.captures_keys(busy, app.input.is_empty())
+                && app.project_offer.captures_keys(busy)
                 && workspace_menu::project_offer_key(&session, &mut app, key)
             {
                 dirty = true;

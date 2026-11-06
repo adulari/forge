@@ -2402,6 +2402,25 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    async fn plain_m_and_d_never_answer_the_project_offer() {
+        use super::super::workspace_menu::project_offer_key;
+        let (mut state, _repo, _dir) = state_offering_a_project().await;
+        for ch in ['m', 'M', 'd', 'D'] {
+            assert!(
+                !project_offer_key(&state.session, &mut state.app, KeyKind::Char(ch)),
+                "{ch} is typing, not an answer"
+            );
+        }
+        assert!(state.app.remote_snapshot().project_suggestion.is_some());
+        assert!(project_offer_key(
+            &state.session,
+            &mut state.app,
+            KeyKind::ProjectDismiss
+        ));
+        assert!(state.app.remote_snapshot().project_suggestion.is_none());
+    }
+
+    #[tokio::test]
     async fn dismissing_the_project_offer_hides_it_for_good() {
         let (mut state, repo, dir) = state_offering_a_project().await;
 

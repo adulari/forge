@@ -17,8 +17,9 @@ The detector is `forge_tui::project_offer` (pure, unit-tested); the `App` counts
 
 ## Surfaces
 
-- **TUI**: a card above the composer (it shares the update card's slot): `m` moves the session,
-  `d` dismisses. Moving is the same switch `/project` performs (`Session::switch_project`).
+- **TUI**: a card above the composer (it shares the update card's slot): `Alt+G` moves the session,
+  `Alt+D` dismisses. Alt chords never type a letter, so a message starting with m or d is safe, even
+  with the card on screen. Moving is the same switch `/project` performs (`Session::switch_project`).
 - **Desktop and phone**: `ProjectOfferCard` above the composer, from the snapshot field
   `project_suggestion: {path, name, calls}`. Buttons send `project_move` / `project_dismiss`
   with the offered `path`; a stale path is dropped with a note. A moved daemon session reports

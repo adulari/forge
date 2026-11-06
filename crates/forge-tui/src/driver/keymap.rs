@@ -78,6 +78,8 @@ pub(super) fn static_key(k: &KeyEvent, ctrl_r_reasoning: bool) -> Option<KeyKind
         KeyCode::Char('b') if alt_only(k) => KeyKind::WordLeft,
         KeyCode::Char('f') if alt_only(k) => KeyKind::WordRight,
         KeyCode::Char('y') if alt_only(k) => KeyKind::YankPop,
+        KeyCode::Char('g') if alt_only(k) => KeyKind::ProjectMove,
+        KeyCode::Char('d') if alt_only(k) => KeyKind::ProjectDismiss,
         KeyCode::Char(c @ '1'..='9') if alt_only(k) => KeyKind::SessionSlot(c as u8 - b'0'),
         // An unbound Alt chord must not type its letter into the draft.
         KeyCode::Char(_) if alt_only(k) => return None,
@@ -135,6 +137,26 @@ mod tests {
         for c in ['q', 'v', 's', 'z', 'l'] {
             assert_eq!(ctrl_char(c), None, "Ctrl+{c} is unbound by default");
         }
+    }
+
+    #[test]
+    fn project_card_keys_are_alt_chords_so_plain_g_and_d_still_type() {
+        assert_eq!(
+            press(KeyCode::Char('g'), KeyModifiers::ALT),
+            Some(KeyKind::ProjectMove)
+        );
+        assert_eq!(
+            press(KeyCode::Char('d'), KeyModifiers::ALT),
+            Some(KeyKind::ProjectDismiss)
+        );
+        assert_eq!(
+            press(KeyCode::Char('g'), KeyModifiers::NONE),
+            Some(KeyKind::Char('g'))
+        );
+        assert_eq!(
+            press(KeyCode::Char('d'), KeyModifiers::NONE),
+            Some(KeyKind::Char('d'))
+        );
     }
 
     #[test]

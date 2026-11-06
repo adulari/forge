@@ -164,19 +164,15 @@ fn project_card(app: &App, width: u16, room: u16) -> Vec<TextLine<'static>> {
         ),
         styles::warn().add_modifier(Modifier::BOLD),
     );
-    let keys = if app.input.is_empty() {
-        TextLine::from(
-            [Span::raw("  ")]
-                .into_iter()
-                .chain(styles::hint_row(&[("m", "Move there"), ("d", "Not now")]))
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        row(
-            "  finish or clear your message, then press m / d".to_string(),
-            styles::faint(),
-        )
-    };
+    let keys = TextLine::from(
+        [Span::raw("  ")]
+            .into_iter()
+            .chain(styles::hint_row(&[
+                ("Alt+G", "Move there"),
+                ("Alt+D", "Not now"),
+            ]))
+            .collect::<Vec<_>>(),
+    );
     let mut out = vec![title, keys];
     out.truncate((room as usize).max(1));
     out

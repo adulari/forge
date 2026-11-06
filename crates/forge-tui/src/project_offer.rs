@@ -34,10 +34,10 @@ impl ProjectOffer {
         self.offer.as_ref()
     }
 
-    /// Whether the card owns the `m` / `d` keys: it is on screen (idle, no turn running) and the
-    /// composer is empty, so the letters cannot be part of a message.
-    pub fn captures_keys(&self, turn_busy: bool, composer_empty: bool) -> bool {
-        self.offer.is_some() && !turn_busy && composer_empty
+    /// Whether the card owns the Alt+G / Alt+D chords: it is on screen (idle, no turn running).
+    /// The chords never type a character, so a draft in the composer does not matter.
+    pub fn captures_keys(&self, turn_busy: bool) -> bool {
+        self.offer.is_some() && !turn_busy
     }
 
     /// "Not this repo in this session": it is never offered again, but another repo still can be.
@@ -512,16 +512,15 @@ mod tests {
     }
 
     #[test]
-    fn the_keys_belong_to_the_card_only_when_idle_with_an_empty_composer() {
+    fn the_keys_belong_to_the_card_only_while_idle() {
         let fx = fixture("keys");
         let mut offer = ProjectOffer::default();
-        assert!(!offer.captures_keys(false, true));
+        assert!(!offer.captures_keys(false));
         for _ in 0..3 {
             observe(&mut offer, &fx, &fx.home, "cd code/forge && ls");
         }
-        assert!(offer.captures_keys(false, true));
-        assert!(!offer.captures_keys(true, true));
-        assert!(!offer.captures_keys(false, false));
+        assert!(offer.captures_keys(false));
+        assert!(!offer.captures_keys(true));
     }
 
     #[test]

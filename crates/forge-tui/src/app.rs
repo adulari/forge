@@ -960,6 +960,10 @@ pub enum KeyKind {
     NextToolGroup,
     /// Alt+O — open every tool group, or fold them all again.
     ToggleToolGroups,
+    /// Alt+G — accept the "move this session into the repo" card (shell-handled).
+    ProjectMove,
+    /// Alt+D — dismiss the "move this session into the repo" card (shell-handled).
+    ProjectDismiss,
     /// Ctrl+R — toggle the effort-level slider popup above the input bar.
     ToggleEffortSlider,
     /// Mid-turn: abort + retry with next mesh model.
@@ -1228,6 +1232,8 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::PrevToolGroup
         | KeyKind::NextToolGroup
         | KeyKind::ToggleToolGroups
+        | KeyKind::ProjectMove
+        | KeyKind::ProjectDismiss
         | KeyKind::ToggleEffortSlider
         | KeyKind::PageUp
         | KeyKind::PageDown
