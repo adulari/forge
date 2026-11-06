@@ -346,7 +346,18 @@ fn read_file_or_locate(
     raw_path: &str,
     allow_outside: bool,
 ) -> Result<WorkspaceFileResponse, WorkspaceFailure> {
-    let error = match read_file(root, raw_path) {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    // `allow_outside` is exactly "may write the workspace". A view-only device sees source and
+    // transcript, never the keys a workspace keeps next to its code.
+    let read_inside = |relative: &str| {
+        if !allow_outside && sensitive::is_sensitive(&root.join(relative), home.as_deref()) {
+            return Err(WorkspaceFailure::forbidden(
+                "this device is view-only; secret files (.env, keys, credentials) are not shown",
+            ));
+        }
+        read_file(root, relative)
+    };
+    let error = match read_inside(raw_path) {
         Ok(response) => return Ok(response),
         Err(error)
             if matches!(
@@ -358,7 +369,6 @@ fn read_file_or_locate(
         }
         Err(error) => return Err(error),
     };
-    let home = std::env::var_os("HOME").map(PathBuf::from);
     let evidence = || {
         let messages = store
             .load_path_evidence_tail(session, PATH_EVIDENCE_MESSAGES)
@@ -366,7 +376,7 @@ fn read_file_or_locate(
         locate::evidence_texts(&messages)
     };
     match locate::locate(root, raw_path, allow_outside, evidence, home.as_deref()) {
-        Some(locate::Located::Inside(relative)) => read_file(root, &relative),
+        Some(locate::Located::Inside(relative)) => read_inside(&relative),
         Some(locate::Located::Outside(path)) => read_outside(&path),
         None if error.status == StatusCode::NOT_FOUND
             || Path::new(raw_path.trim()).is_absolute() =>
@@ -467,7 +477,9 @@ fn search_workspace(
     raw_query: &str,
     raw_mode: &str,
     requested_limit: Option<usize>,
+    hide_secrets: bool,
 ) -> Result<WorkspaceSearchResponse, WorkspaceFailure> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
     let query = raw_query.trim();
     if query.is_empty() {
         return Err(WorkspaceFailure::bad("search query is required"));
@@ -537,6 +549,9 @@ fn search_workspace(
             continue;
         }
 
+        if hide_secrets && sensitive::is_sensitive(entry.path(), home.as_deref()) {
+            continue;
+        }
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
@@ -686,14 +701,17 @@ pub(crate) async fn workspace_file(
 
 pub(crate) async fn workspace_search(
     State(state): State<Arc<DaemonState>>,
+    auth: Option<axum::Extension<crate::serve_clients::ClientAuth>>,
     Query(params): Query<WorkspaceSearchQuery>,
 ) -> Response {
+    let hide_secrets =
+        !auth.is_some_and(|auth| auth.0.allows(crate::serve_clients::Scope::WorkspaceWrite));
     let root = match session_root(&state, &params.session).await {
         Ok(root) => root,
         Err(error) => return failure_response(error),
     };
     match tokio::task::spawn_blocking(move || {
-        search_workspace(&root, &params.q, &params.mode, params.limit)
+        search_workspace(&root, &params.q, &params.mode, params.limit, hide_secrets)
     })
     .await
     {
@@ -776,11 +794,13 @@ mod tests {
         .unwrap();
         fs::write(directory.path().join("workspace.md"), "needle again\n").unwrap();
 
-        let files = search_workspace(directory.path(), "workspace", "files", Some(10)).unwrap();
+        let files =
+            search_workspace(directory.path(), "workspace", "files", Some(10), false).unwrap();
         assert_eq!(files.results.len(), 2);
         assert_eq!(files.results[0].path, "workspace.md");
 
-        let content = search_workspace(directory.path(), "needle", "content", Some(10)).unwrap();
+        let content =
+            search_workspace(directory.path(), "needle", "content", Some(10), false).unwrap();
         assert_eq!(content.results.len(), 2);
         let source_match = content
             .results
@@ -789,6 +809,27 @@ mod tests {
             .unwrap();
         assert_eq!(source_match.line, Some(2));
         assert_eq!(source_match.column, Some(10));
+    }
+
+    #[test]
+    fn view_only_callers_never_see_workspace_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::write(directory.path().join(".env"), "API_KEY=needle-secret\n").unwrap();
+        fs::write(directory.path().join("main.rs"), "// needle\n").unwrap();
+        let store = forge_store::Store::open_in_memory().unwrap();
+
+        let denied = read_file_or_locate(&store, "s", directory.path(), ".env", false).unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+        assert!(read_file_or_locate(&store, "s", directory.path(), "main.rs", false).is_ok());
+        assert!(read_file_or_locate(&store, "s", directory.path(), ".env", true).is_ok());
+
+        let viewer =
+            search_workspace(directory.path(), "needle", "content", Some(10), true).unwrap();
+        assert_eq!(viewer.results.len(), 1);
+        assert_eq!(viewer.results[0].path, "main.rs");
+        let owner =
+            search_workspace(directory.path(), "needle", "content", Some(10), false).unwrap();
+        assert_eq!(owner.results.len(), 2);
     }
 
     #[cfg(unix)]
