@@ -334,7 +334,20 @@ async fn list_custom_models_at(
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let message = format!("{namespace} `/models` returned HTTP {status}");
+            // The provider's own sentence ("This API key has expired") is what tells an expired key
+            // from a revoked one; bounded so a HTML error page cannot flood a status line.
+            let body = resp.text().await.unwrap_or_default();
+            let body: String = body.trim().chars().take(300).collect();
+            let message = if body.is_empty() {
+                format!("{namespace} `/models` returned HTTP {status}")
+            } else {
+                format!("{namespace} `/models` returned HTTP {status}: {body}")
+            };
+            if status == reqwest::StatusCode::PAYMENT_REQUIRED {
+                return Err(ProviderError::Capability(format!(
+                    "{message} (payment required)"
+                )));
+            }
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {

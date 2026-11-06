@@ -83,13 +83,14 @@ pub fn classify_key_failure(text: &str) -> Option<(KeyFailure, String)> {
 /// The provider's own sentence, not Forge's wrapping of it: `{"error":"This API key has expired"}`
 /// inside `provider auth failed: HttpError status: 401, body: {...}` reads as the inner message.
 fn short_reason(text: &str) -> String {
-    let inner = ["\"message\":\"", "\"error\":\"", "\"detail\":\""]
+    let inner = ["\"message\"", "\"error\"", "\"detail\""]
         .iter()
         .find_map(|key| {
-            let start = text.find(key)? + key.len();
-            let rest = &text[start..];
-            let end = rest.find('"').unwrap_or(rest.len());
-            Some(rest[..end].trim().to_string())
+            let after = &text[text.find(key)? + key.len()..];
+            let value = after.trim_start().strip_prefix(':')?.trim_start();
+            let value = value.strip_prefix('"')?;
+            let end = value.find('"').unwrap_or(value.len());
+            Some(value[..end].trim().to_string())
         })
         .filter(|s| !s.is_empty());
     let base = inner.unwrap_or_else(|| {
@@ -134,6 +135,15 @@ mod tests {
         let (kind, reason) = classify_key_failure(text).unwrap();
         assert_eq!(kind, KeyFailure::Expired);
         assert_eq!(reason, "This API key has expired");
+    }
+
+    #[test]
+    fn pretty_printed_json_bodies_read_the_same() {
+        let text = r#"demoexp `/models` returned HTTP 401: {"error": "This API key has expired"}"#;
+        assert_eq!(
+            classify_key_failure(text).unwrap().1,
+            "This API key has expired"
+        );
     }
 
     #[test]
