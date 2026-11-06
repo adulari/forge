@@ -20,6 +20,7 @@ mod m0047_session_lifecycle;
 mod m0048_schedule_runs;
 mod m0049_account_sync_item;
 mod m0050_project_notes;
+mod m0051_message_activity_index;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
@@ -40,6 +41,7 @@ use m0047_session_lifecycle::migration_0047;
 use m0048_schedule_runs::migration_0048;
 use m0049_account_sync_item::migration_0049;
 use m0050_project_notes::migration_0050;
+use m0051_message_activity_index::migration_0051;
 mod usage;
 pub(super) use usage::migrate_subscription_usage;
 use usage::migration_0030;
@@ -697,6 +699,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0048,
     migration_0049,
     migration_0050,
+    migration_0051,
 ];
 
 /// Migration #31: give existing stores the `model_pricing.cache_read_per_1k` column.

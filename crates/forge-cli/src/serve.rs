@@ -2294,12 +2294,13 @@ async fn past_sessions(
         if let Ok(local) = store.local_live_sessions() {
             running.extend(local.into_iter().map(|row| row.id));
         }
+        // Running ids can occupy at most `running.len()` of the fetched rows, so this many extra
+        // rows always leaves a full page after they are dropped.
         let page: Vec<_> = store
-            .list_sessions_for_resume()
+            .list_sessions_for_resume_page(before, limit + running.len())
             .unwrap_or_default()
             .into_iter()
             .filter(|s| !running.contains(&s.id))
-            .filter(|s| before.is_none_or(|b| s.last_activity < b))
             .take(limit)
             .collect();
         let ids: Vec<String> = page.iter().map(|s| s.id.clone()).collect();
