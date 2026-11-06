@@ -505,7 +505,7 @@ fn persist_outgoing_envelope(
 
 async fn require_idle_local_session(needle: &str) -> Result<LocalSession> {
     let (base, token) = local_daemon()?;
-    let response = client()?
+    let response = crate::attach::local_http_client(&base)
         .get(format!("{base}/{token}/api/sessions"))
         .send()
         .await
@@ -535,17 +535,17 @@ async fn require_idle_local_session(needle: &str) -> Result<LocalSession> {
     Ok(session.clone())
 }
 
+/// The running daemon's base URL (its own port and scheme; a default LAN daemon is HTTPS) and token.
 fn local_daemon() -> Result<(String, String)> {
-    let port = forge_config::load()?.remote.serve_port();
     Ok((
-        format!("http://127.0.0.1:{port}"),
-        crate::serve::daemon_token(false)?,
+        crate::attach::resolve_base_url(None),
+        crate::serve::read_daemon_token()?,
     ))
 }
 
 async fn archive_source_session(session_id: &str) -> Result<()> {
     let (base, token) = local_daemon()?;
-    let response = client()?
+    let response = crate::attach::local_http_client(&base)
         .post(format!("{base}/{token}/api/sessions/{session_id}/archive"))
         .send()
         .await

@@ -124,13 +124,13 @@ pub(crate) fn view_of(
 
 /// The daemon's sync worker answers `GET /api/anywhere/sync`; `Some(last_error)` means it is up.
 async fn probe_worker() -> Option<Option<String>> {
-    let port = forge_config::load().ok()?.remote.serve_port();
+    let base = crate::attach::resolve_base_url(None);
     let token = crate::serve::read_daemon_token().ok()?;
-    let response = reqwest::Client::builder()
+    let response = crate::attach::local_http_builder(&base)
         .timeout(Duration::from_millis(1500))
         .build()
         .ok()?
-        .get(format!("http://127.0.0.1:{port}/{token}/api/anywhere/sync"))
+        .get(format!("{base}/{token}/api/anywhere/sync"))
         .send()
         .await
         .ok()?;
@@ -284,19 +284,14 @@ pub(crate) async fn sync_now(mock: bool) -> Result<(), String> {
     if mock {
         return Ok(());
     }
-    let port = forge_config::load()
-        .map_err(|e| e.to_string())?
-        .remote
-        .serve_port();
+    let base = crate::attach::resolve_base_url(None);
     let token = crate::serve::read_daemon_token()
         .map_err(|_| "No sync worker is running. Start `forge serve`.".to_string())?;
-    let response = reqwest::Client::builder()
+    let response = crate::attach::local_http_builder(&base)
         .timeout(Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?
-        .post(format!(
-            "http://127.0.0.1:{port}/{token}/api/anywhere/sync/now"
-        ))
+        .post(format!("{base}/{token}/api/anywhere/sync/now"))
         .send()
         .await
         .map_err(|_| "No sync worker is running. Start `forge serve`.".to_string())?;
