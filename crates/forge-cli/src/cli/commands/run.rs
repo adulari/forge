@@ -264,26 +264,61 @@ pub(crate) fn emit_text(tui: Option<&mut forge_tui::Tui>, app: &mut forge_tui::A
     }
 }
 
+/// A freshly typed key voids the verdict about the old one; the next discovery re-sets it.
+pub(crate) fn clear_key_verdict(provider: &str) {
+    if let Ok(store) = crate::open_store() {
+        let _ = store.clear_provider_verdict(provider);
+    }
+}
+
+fn verdict_headline(v: &forge_store::ProviderVerdict) -> &'static str {
+    forge_provider::KeyFailure::from_word(&v.status)
+        .map_or("Key rejected", forge_provider::KeyFailure::headline)
+}
+
+fn verdict_sentence(v: &forge_store::ProviderVerdict) -> String {
+    format!(
+        "{}: {}.",
+        verdict_headline(v),
+        v.reason.trim_end_matches('.')
+    )
+}
+
 /// Every editable setting as `/config` editor rows.
 pub(crate) fn config_editor_rows() -> Vec<forge_tui::SettingRow> {
+    let verdicts: std::collections::HashMap<String, forge_store::ProviderVerdict> =
+        crate::open_store()
+            .ok()
+            .and_then(|store| store.provider_verdicts().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| (v.provider.clone(), v))
+            .collect();
     let mut rows: Vec<forge_tui::SettingRow> = forge_config::known_key_providers()
-        .map(|provider| forge_tui::SettingRow {
-            path: format!("key.{provider}"),
-            group: "Providers & Keys".to_string(),
-            label: format!("{} API key", provider_label(provider)),
-            help: Some(format!(
+        .map(|provider| {
+            let has_key = forge_config::has_api_key(provider);
+            let verdict = verdicts.get(provider).filter(|_| has_key);
+            let base_help = format!(
                 "API key for {provider}, stored in the OS keyring. Enter to set; empty to remove."
-            )),
-            kind: forge_tui::RowKind::Secret,
-            value: if forge_config::has_api_key(provider) {
-                "● set"
-            } else {
-                "○ not set"
+            );
+            forge_tui::SettingRow {
+                path: format!("key.{provider}"),
+                group: "Providers & Keys".to_string(),
+                label: format!("{} API key", provider_label(provider)),
+                help: Some(match verdict {
+                    Some(v) => format!("{} Enter to replace the key.", verdict_sentence(v)),
+                    None => base_help,
+                }),
+                kind: forge_tui::RowKind::Secret,
+                value: match verdict {
+                    Some(v) => format!("✗ {}", verdict_headline(v)),
+                    None if has_key => "● set".to_string(),
+                    None => "○ not set".to_string(),
+                },
+                default: String::new(),
+                modified: has_key,
+                source: "keyring".to_string(),
             }
-            .to_string(),
-            default: String::new(),
-            modified: forge_config::has_api_key(provider),
-            source: "keyring".to_string(),
         })
         .collect();
     rows.extend(
@@ -1745,6 +1780,7 @@ pub(crate) async fn run_chat_tui(
                                     .map_err(|e| e.to_string())
                             } else {
                                 forge_config::store_api_key(provider, value.trim())
+                                    .map(|()| clear_key_verdict(provider))
                                     .map_err(|e| e.to_string())
                             }
                         } else {

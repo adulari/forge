@@ -54,6 +54,9 @@ fn value_spans(r: &SettingRow, selected: bool) -> Vec<Span<'static>> {
             };
             vec![Span::styled(format!("{l} {} {rr}", r.value), plain)]
         }
+        RowKind::Secret if r.value.starts_with('✗') => {
+            vec![Span::styled(r.value.clone(), styles::err())]
+        }
         RowKind::Secret => {
             let set = r.value.contains("set") && !r.value.contains("not");
             if set {

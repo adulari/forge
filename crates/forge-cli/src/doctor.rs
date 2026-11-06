@@ -124,7 +124,9 @@ pub async fn run(fix: bool) -> anyhow::Result<usize> {
             || local::ollama_installed() && !local::ollama_installed_models().is_empty()
     };
     provider_v.extend(routing);
+    let verdict_rows = key_verdict_checks(&reachability);
     provider_v.extend(reachability);
+    provider_v.extend(verdict_rows);
     sections.push(("Providers", provider_v));
     if !bridge_live.is_empty() {
         sections.push(("Bridge liveness", bridge_live));
@@ -671,11 +673,17 @@ async fn provider_reachability_checks() -> Vec<Check> {
     // Probe every keyed provider CONCURRENTLY — each is an independent network call, so a sequential
     // loop made doctor pay the SUM of every provider's timeout (N keyed providers × 8s). join_all
     // collapses that to the slowest single probe; results stay in provider order.
+    let store = crate::open_store().ok().map(std::sync::Arc::new);
     let probes = forge_config::known_key_providers()
         .filter(|p| forge_config::has_api_key(p))
-        .map(|p| async move {
-            let res = tokio::time::timeout(REACH_TIMEOUT, forge_provider::list_models(p)).await;
-            match res {
+        .map(|p| {
+            let store = store.clone();
+            async move {
+                let res = tokio::time::timeout(REACH_TIMEOUT, forge_provider::list_models(p)).await;
+                if let Some(store) = &store {
+                    record_probe_verdict(store, p, &res);
+                }
+                match res {
             Ok(Ok(list)) if !list.is_empty() => check(
                 Status::Ok,
                 &format!("{p} reachability"),
@@ -698,7 +706,15 @@ async fn provider_reachability_checks() -> Vec<Check> {
                 Some(code) => check(
                     Status::Fail,
                     &format!("{p} reachability"),
-                    auth_rejected_detail(p, code),
+                    match e.key_failure() {
+                        Some((kind, reason)) => {
+                            format!("{} — {reason}", auth_rejected_detail(p, code).replace(
+                                "the stored key is invalid",
+                                kind.headline(),
+                            ))
+                        }
+                        None => auth_rejected_detail(p, code),
+                    },
                     Some(&format!("`forge auth {p}` to replace the stored key")),
                 ),
                 None => check(
@@ -719,8 +735,82 @@ async fn provider_reachability_checks() -> Vec<Check> {
                 ),
             ),
             }
+            }
         });
     futures::future::join_all(probes).await
+}
+
+/// A live listing is the freshest evidence of whether a key works, so it updates the persisted
+/// verdict the providers screens show: refused sets it, a listing clears it, a blip leaves it.
+fn record_probe_verdict(
+    store: &forge_store::Store,
+    provider: &str,
+    result: &Result<
+        Result<Vec<String>, forge_provider::ProviderError>,
+        tokio::time::error::Elapsed,
+    >,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    match result {
+        Ok(Ok(list)) if !list.is_empty() => {
+            let _ = store.clear_provider_verdict(provider);
+        }
+        Ok(Err(e)) => {
+            if let Some((kind, reason)) = e.key_failure() {
+                let _ = store.set_provider_verdict(provider, kind.as_str(), &reason, now);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The persisted key verdicts, one red row each, so a key refused weeks ago is still named here
+/// even when this run's probe was skipped or timed out.
+fn key_verdict_checks(reachability: &[Check]) -> Vec<Check> {
+    let Ok(store) = crate::open_store() else {
+        return Vec::new();
+    };
+    store
+        .provider_verdicts()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|v| forge_config::has_api_key(&v.provider))
+        // This run's own probe already said so, in its own words.
+        .filter(|v| {
+            let label = format!("{} reachability", v.provider);
+            !reachability
+                .iter()
+                .any(|c| c.label == label && c.status == Status::Fail)
+        })
+        .map(|v| {
+            let headline = forge_provider::KeyFailure::from_word(&v.status)
+                .map_or("Key rejected", forge_provider::KeyFailure::headline);
+            check(
+                Status::Fail,
+                &format!("{} key verdict", v.provider),
+                format!(
+                    "{headline}: {} (since {})",
+                    v.reason,
+                    short_age(v.first_seen)
+                ),
+                Some(&format!("`forge auth {}` to replace the key", v.provider)),
+            )
+        })
+        .collect()
+}
+
+fn short_age(epoch: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let secs = (now - epoch).max(0);
+    match secs {
+        0..=3599 => format!("{}m ago", secs / 60),
+        3600..=86_399 => format!("{}h ago", secs / 3600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
 }
 
 /// LIVE: for each AVAILABLE CLI bridge, actually launch it with a tiny prompt and confirm it

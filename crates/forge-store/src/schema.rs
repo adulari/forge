@@ -384,6 +384,16 @@ CREATE TABLE IF NOT EXISTS permission_decision (
 );
 CREATE INDEX IF NOT EXISTS idx_permission_decision_shape ON permission_decision(project, tool, shape, id);
 
+-- Key verdicts: a provider whose credential the provider itself refused (expired, revoked,
+-- out of quota), kept until a discovery or a call succeeds. Also created in migration_0054.
+CREATE TABLE IF NOT EXISTS provider_verdict (
+    provider   TEXT PRIMARY KEY,
+    status     TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL
+);
+
 -- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
 -- queued headless task; a drain executes them in isolated worktrees and records the outcome
 -- back onto the row. Local machine state only — deliberately not in PORTABLE_METADATA_TABLES

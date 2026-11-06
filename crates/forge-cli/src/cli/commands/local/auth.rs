@@ -30,6 +30,9 @@ fn clear_auth_exclusion(provider: &str) {
 /// would resurrect a model that is genuinely still 429ing.
 pub(crate) fn clear_auth_exclusion_in(store: &Store, provider: &str) {
     let _ = store.clear_provider_health(provider);
+    // A replaced key invalidates the verdict about the old one; the next discovery re-sets it if
+    // the new key is refused too.
+    let _ = store.clear_provider_verdict(provider);
     let prefix = format!("{provider}::");
     for (model, _, reason) in store.current_benched_report().unwrap_or_default() {
         if model.starts_with(&prefix) && reason.contains("auth failed") {

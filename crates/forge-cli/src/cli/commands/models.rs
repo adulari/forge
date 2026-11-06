@@ -133,6 +133,16 @@ fn discovery_status_line(status: &ProviderDiscoveryStatus) -> String {
             status.provider,
             status.detail.as_deref().unwrap_or("not listable")
         ),
+        DiscoveryStatusKind::Failed if discovery::key_rejection(status).is_some() => {
+            let (kind, reason) = discovery::key_rejection(status)
+                .unwrap_or((forge_provider::KeyFailure::Rejected, String::new()));
+            format!(
+                "  ✗ {:<18} {}: {reason} (`forge auth {}` to replace)",
+                status.provider,
+                kind.headline(),
+                status.provider
+            )
+        }
         DiscoveryStatusKind::Failed => format!(
             "  ⚠ {:<18} discovery failed: {}",
             status.provider,

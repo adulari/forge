@@ -42,6 +42,7 @@ impl DriverState {
                                 .map_err(|e| e.to_string())
                         } else {
                             forge_config::store_api_key(provider, value.trim())
+                                .map(|()| clear_key_verdict(provider))
                                 .map_err(|e| e.to_string())
                         }
                     } else {

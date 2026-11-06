@@ -45,7 +45,9 @@ mod path_evidence_store;
 mod permission_decision_store;
 mod project_notes_store;
 mod provider_items_store;
+mod provider_verdict_store;
 mod queued_prompt_store;
+pub use provider_verdict_store::{ProviderVerdict, VerdictChange};
 pub use queued_prompt_store::QueuedPrompt;
 mod schedule_run_store;
 use migrations::{
@@ -116,7 +118,7 @@ pub use usage_store::ModelUsageRow;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 53;
+const SCHEMA_VERSION: i64 = 54;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
