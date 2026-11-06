@@ -23,11 +23,16 @@ use crate::ToolError;
 /// new file, or the file is an owner-read-only one the rename cannot replace, it falls back to an
 /// in-place write, lifting an owner-read-only bit for the duration of it. The mode is restored.
 pub fn write_through(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let error = match write_atomic(path, bytes) {
+    let atomic = if keeps_identity_in_place(path) {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    } else {
+        write_atomic(path, bytes)
+    };
+    let error = match atomic {
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
-    if !is_blocked(&error) {
+    if !is_blocked(&error) && !rename_unsupported(&error) {
         return Err(error);
     }
     match std::fs::write(path, bytes) {
@@ -139,6 +144,32 @@ fn write_atomic_with(
         let _ = std::fs::remove_file(&temp);
     }
     finish
+}
+
+/// A file whose identity a rename would change in a way the user can see: hard links would split
+/// into a separate copy, and a file owned by someone else would become ours. Those keep the old
+/// in-place write.
+fn keeps_identity_in_place(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let me = unsafe { libc::geteuid() };
+            return meta.is_file() && (meta.nlink() > 1 || meta.uid() != me);
+        }
+    }
+    let _ = path;
+    false
+}
+
+/// Renames some places refuse (a bind-mounted single file, filesystems without rename-over):
+/// the in-place write still works there, as it did before writes became atomic.
+fn rename_unsupported(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ResourceBusy | io::ErrorKind::Unsupported | io::ErrorKind::CrossesDevices
+    )
 }
 
 fn is_blocked(error: &io::Error) -> bool {
@@ -307,6 +338,18 @@ mod tests {
             .is_symlink());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
         assert_eq!(mode(&target), 0o444);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_file_is_updated_in_place_so_its_links_stay_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        let link = dir.path().join("b.txt");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::hard_link(&file, &link).unwrap();
+        write_through(&file, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
     }
 
     #[test]
