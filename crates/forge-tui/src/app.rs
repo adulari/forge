@@ -600,6 +600,8 @@ pub struct App {
     pub goal_chip: Option<String>,
     /// The `/goal` run, live or ended, as the surfaces report it (`goal_status.rs`).
     pub goal: Option<crate::goal_status::GoalStatus>,
+    /// The envelope a `/goal --budget` just baselined, waiting for the run to adopt it.
+    pub pending_envelope: Option<forge_types::goal_envelope::EnvelopeState>,
     /// Loop chip text (`5m`), shown on the composer border while a `/loop` runs.
     pub loop_chip: Option<String>,
     /// Fold each run of tool calls into one summary row (`[tui] fold_tool_groups`, full-screen).

@@ -158,3 +158,51 @@ fn an_interrupted_run_is_cancelled_not_paused() {
     assert!(state.is_none());
     assert_eq!(app.goal.as_ref().unwrap().phase, GoalPhase::Cancelled);
 }
+
+fn paused_at_cap(app: &mut forge_tui::App) {
+    use forge_types::goal_envelope::{EnvelopeSpec, EnvelopeState};
+    let mut envelope = EnvelopeState::new(
+        EnvelopeSpec::parse("claude:20%w", None).unwrap(),
+        40.0,
+        Some(chrono::Utc::now().timestamp() + 3600),
+    );
+    envelope.used = 20.0;
+    envelope.spent = true;
+    app.pending_envelope = Some(envelope);
+    app.goal_begin("ship it", &[], None, None);
+    app.goal_paused_by_envelope("Envelope spent (20% of Claude weekly).");
+}
+
+#[tokio::test]
+async fn resume_is_refused_while_the_envelope_is_spent_until_it_is_raised() {
+    let session = test_session().await;
+    let mut app = forge_tui::App::default();
+    paused_at_cap(&mut app);
+
+    let outcome = goal_control_outcome(&session, &mut app, GoalControl::Resume)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DispatchOutcome::Handled));
+    assert_eq!(
+        app.goal.as_ref().unwrap().phase,
+        forge_tui::goal_status::GoalPhase::Paused
+    );
+
+    goal_control_outcome(&session, &mut app, GoalControl::Budget("30%w".into()))
+        .await
+        .unwrap();
+    let outcome = goal_control_outcome(&session, &mut app, GoalControl::Resume)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DispatchOutcome::StartGoal { .. }));
+}
+
+#[tokio::test]
+async fn a_budget_with_no_envelope_goal_explains_itself() {
+    let session = test_session().await;
+    let mut app = forge_tui::App::default();
+    goal_control_outcome(&session, &mut app, GoalControl::Budget("30%w".into()))
+        .await
+        .unwrap();
+    assert!(app.goal.is_none());
+}

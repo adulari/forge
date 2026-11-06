@@ -33,6 +33,7 @@ pub(crate) fn parse_goal_prompt(prompt: &str) -> Option<GoalRunSpec> {
             gates,
             max_tokens,
             max_minutes,
+            ..
         } => Some(GoalRunSpec {
             goal: objective.trim().to_string(),
             gates,
@@ -113,7 +114,9 @@ pub(crate) async fn run_goal_headless(
         let facts = GoalTurnFacts::read(session, cwd);
         match settle_goal(&mut gs, facts).await {
             GoalStep::Stop { met: true, .. } => return Ok(GoalRunEnd::Met),
-            GoalStep::Stop { reason, .. } => return Ok(GoalRunEnd::NotMet(reason)),
+            GoalStep::Stop { reason, .. } | GoalStep::Pause { reason } => {
+                return Ok(GoalRunEnd::NotMet(reason))
+            }
             GoalStep::Turn(next) | GoalStep::Continue(next) => {
                 gs.iter += 1;
                 prompt = next;

@@ -671,9 +671,18 @@ and keep going."
             gates,
             max_tokens,
             max_minutes,
+            budget,
         } => {
-            return gates::goal_outcome(session, app, objective, gates, max_tokens, max_minutes)
-                .await;
+            return gates::goal_outcome(
+                session,
+                app,
+                objective,
+                gates,
+                max_tokens,
+                max_minutes,
+                budget,
+            )
+            .await;
         }
         CommandAction::GoalControl(control) => {
             return goal_control_outcome(session, app, control).await;

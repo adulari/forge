@@ -50,7 +50,11 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Jobs
         | CommandAction::Ide
         | CommandAction::GoalControl(
-            GoalControl::Pause | GoalControl::Clear | GoalControl::Status | GoalControl::Edit(_),
+            GoalControl::Pause
+                | GoalControl::Clear
+                | GoalControl::Status
+                | GoalControl::Edit(_)
+                | GoalControl::Budget(_),
         )
         | CommandAction::Thinking
         | CommandAction::ToolOutput

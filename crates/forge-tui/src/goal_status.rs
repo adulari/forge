@@ -7,6 +7,7 @@
 //! still running cannot block them.
 
 use crate::app::App;
+use forge_types::goal_envelope::{EnvelopeSpec, EnvelopeState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalPhase {
@@ -74,6 +75,10 @@ pub struct GoalStatus {
     pub reason: Option<String>,
     pub request: Option<GoalRequest>,
     pub edit: Option<String>,
+    /// The spend envelope (`/goal --budget`), when the goal has one.
+    pub envelope: Option<EnvelopeState>,
+    /// A new envelope a `/goal budget` typed mid-run left for the loop to apply.
+    pub envelope_edit: Option<EnvelopeSpec>,
     /// Wall clock of the last sync, Unix ms, so a client can keep the elapsed time ticking.
     pub synced_at_ms: u64,
     carry: bool,
@@ -109,6 +114,10 @@ impl GoalStatus {
             .max_tokens
             .map(|max| format!(" · {}/{} tok", compact(self.tokens_used), compact(max)));
         let budget = budget.unwrap_or_default();
+        let budget = match &self.envelope {
+            Some(envelope) => format!("{budget} · {}", envelope.meter()),
+            None => budget,
+        };
         match self.phase {
             GoalPhase::Active => match self.request {
                 Some(GoalRequest::Pause) => format!("{progress} · pausing{budget}"),
@@ -133,6 +142,9 @@ impl GoalStatus {
         out.push_str(&format!(" · {}s", self.elapsed_secs));
         if let Some(max) = self.max_minutes {
             out.push_str(&format!(" of {max}m"));
+        }
+        if let Some(envelope) = &self.envelope {
+            out.push_str(&format!("\n   {}", envelope.meter()));
         }
         if !self.gates.is_empty() {
             out.push_str(&format!("\n   gates: {}", self.gates.join(", ")));
@@ -162,6 +174,12 @@ impl App {
         max_tokens: Option<u64>,
         max_minutes: Option<u64>,
     ) -> Option<GoalCarry> {
+        let kept_envelope = self
+            .goal
+            .as_ref()
+            .filter(|g| g.carry && g.objective == objective)
+            .and_then(|g| g.envelope.clone());
+        let envelope = self.pending_envelope.take().or(kept_envelope);
         let carry = self
             .goal
             .as_ref()
@@ -188,10 +206,85 @@ impl App {
             reason: None,
             request: None,
             edit: None,
+            envelope,
+            envelope_edit: None,
             synced_at_ms: now_ms(),
             carry: false,
         });
         carry
+    }
+
+    /// Record the envelope's latest accounting so every surface shows the same meter.
+    pub fn goal_envelope_sync(&mut self, envelope: &EnvelopeState) {
+        if let Some(goal) = self.goal.as_mut() {
+            goal.envelope = Some(envelope.clone());
+        }
+    }
+
+    /// Ask a live goal to move its envelope; a paused goal takes it at once. `false` when there
+    /// is no goal with an envelope to move.
+    pub fn goal_request_envelope(&mut self, spec: EnvelopeSpec) -> bool {
+        let Some(goal) = self.goal.as_mut().filter(|g| g.envelope.is_some()) else {
+            return false;
+        };
+        match goal.phase {
+            GoalPhase::Active => {
+                goal.envelope_edit = Some(spec);
+                true
+            }
+            GoalPhase::Paused => {
+                if let Some(envelope) = goal.envelope.as_mut() {
+                    envelope.retarget(spec);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Bring back a goal a restart interrupted, as a paused goal that `/goal resume` continues.
+    #[allow(clippy::too_many_arguments)]
+    pub fn goal_restore(
+        &mut self,
+        objective: &str,
+        gates: &[String],
+        max_tokens: Option<u64>,
+        max_minutes: Option<u64>,
+        carry: GoalCarry,
+        reason: Option<String>,
+        envelope: EnvelopeState,
+    ) {
+        self.goal = Some(GoalStatus {
+            objective: objective.to_string(),
+            phase: GoalPhase::Paused,
+            iteration: carry.iteration,
+            tokens_used: carry.tokens_used,
+            max_tokens,
+            max_minutes,
+            elapsed_secs: carry.elapsed_secs,
+            gates: gates.to_vec(),
+            reason,
+            request: None,
+            edit: None,
+            envelope: Some(envelope),
+            envelope_edit: None,
+            synced_at_ms: now_ms(),
+            carry: false,
+        });
+    }
+
+    pub fn goal_take_envelope_edit(&mut self) -> Option<EnvelopeSpec> {
+        self.goal.as_mut()?.envelope_edit.take()
+    }
+
+    /// The goal stopped because its envelope is spent (or cannot be verified): paused, so it can
+    /// be resumed, with the reason on the record.
+    pub fn goal_paused_by_envelope(&mut self, reason: &str) {
+        if let Some(goal) = self.goal.as_mut() {
+            goal.phase = GoalPhase::Paused;
+            goal.request = None;
+            goal.reason = Some(reason.to_string());
+        }
     }
 
     /// Record the run's progress; called whenever the loop's own counters move.

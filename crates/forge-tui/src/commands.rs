@@ -37,6 +37,8 @@ pub enum GoalControl {
     Status,
     /// Reword the goal; a running one takes the new wording at its next turn.
     Edit(String),
+    /// Raise (or set) the spend envelope: `/goal budget 30%w`, `/goal budget $10`.
+    Budget(String),
 }
 
 /// `/workflow` sub-actions (docs/rfcs/forge-workflow.md).
@@ -121,6 +123,9 @@ pub enum CommandAction {
         gates: Vec<String>,
         max_tokens: Option<u64>,
         max_minutes: Option<u64>,
+        /// The validated `--budget` envelope text (`claude:20%w`, `$5`); see
+        /// `forge_types::goal_envelope`.
+        budget: Option<String>,
     },
     /// Steer the goal that is running or paused (`/goal pause|resume|clear|status|edit <text>`).
     GoalControl(GoalControl),
@@ -701,6 +706,7 @@ mod tests {
                 gates: Vec::new(),
                 max_tokens: None,
                 max_minutes: None,
+                budget: None,
             }
         );
         assert_eq!(
@@ -710,6 +716,7 @@ mod tests {
                 gates: Vec::new(),
                 max_tokens: None,
                 max_minutes: None,
+                budget: None,
             }
         );
         assert_eq!(
@@ -767,6 +774,7 @@ mod tests {
             gates: Vec::new(),
             max_tokens: None,
             max_minutes: None,
+            budget: None,
         };
         assert_eq!(
             parse_command("/goal pause"),
@@ -800,6 +808,60 @@ mod tests {
     }
 
     #[test]
+    fn goal_budget_flag_is_validated_and_the_verb_needs_a_real_spec() {
+        let goal = |objective: &str, budget: &str| CommandAction::Goal {
+            objective: objective.into(),
+            gates: Vec::new(),
+            max_tokens: None,
+            max_minutes: None,
+            budget: Some(budget.into()),
+        };
+        assert_eq!(
+            parse_command("/goal harden the importer --budget claude:20%w"),
+            goal("harden the importer", "claude:20%w")
+        );
+        assert_eq!(
+            parse_command("/goal --budget $5 harden the importer"),
+            goal("harden the importer", "$5")
+        );
+        assert_eq!(
+            parse_command("/goal harden it --budget codex:15%w --max-minutes 30"),
+            CommandAction::Goal {
+                objective: "harden it".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: Some(30),
+                budget: Some("codex:15%w".into()),
+            }
+        );
+        for bad in ["--budget", "--budget nonsense", "--budget claude:0%w"] {
+            let action = parse_command(&format!("/goal harden it {bad}"));
+            assert!(
+                matches!(&action, CommandAction::Unknown(msg) if msg.contains("nothing was started")),
+                "{bad}: {action:?}"
+            );
+        }
+        assert_eq!(
+            parse_command("/goal budget 30%w"),
+            CommandAction::GoalControl(GoalControl::Budget("30%w".into()))
+        );
+        assert_eq!(
+            parse_command("/goal budget $10"),
+            CommandAction::GoalControl(GoalControl::Budget("$10".into()))
+        );
+        assert_eq!(
+            parse_command("/goal budget the importer"),
+            CommandAction::Goal {
+                objective: "budget the importer".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+                budget: None,
+            }
+        );
+    }
+
+    #[test]
     fn parses_loop_and_goal_gate_and_budget_options() {
         // A single quoted gate, before the prompt.
         assert_eq!(
@@ -830,6 +892,7 @@ mod tests {
                 gates: vec!["npm run lint".into()],
                 max_tokens: None,
                 max_minutes: None,
+                budget: None,
             }
         );
         // Bare form (no options) must be untouched — exact prior behavior, whitespace and all.

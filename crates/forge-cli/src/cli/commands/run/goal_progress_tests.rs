@@ -233,3 +233,106 @@ fn the_evaluator_request_carries_the_previous_list_and_gate_failure() {
     assert!(request.last_gate_failure.unwrap().contains("pytest"));
     assert!(request.started_unix > 0);
 }
+
+mod envelope {
+    use super::*;
+    use forge_types::goal_envelope::{EnvelopeSpec, EnvelopeState};
+
+    fn facts(windows: Vec<forge_store::SubscriptionWindow>, now: i64) -> GoalTurnFacts {
+        GoalTurnFacts {
+            done: 0,
+            total: 3,
+            said_complete: false,
+            budget_refused: false,
+            run_budget_hit: false,
+            root: std::env::temp_dir(),
+            sources: EnvelopeSources {
+                windows,
+                session_usd: 0.0,
+                now,
+            },
+        }
+    }
+
+    fn weekly(pct: f64, updated_at: i64) -> forge_store::SubscriptionWindow {
+        forge_store::SubscriptionWindow {
+            provider: "claude-cli".into(),
+            window_kind: "weekly".into(),
+            status: "ok".into(),
+            resets_at: Some(updated_at + 86_400),
+            fraction: Some(pct / 100.0),
+            updated_at,
+        }
+    }
+
+    fn enveloped(start: f64) -> GoalState {
+        let mut gs = state(&[]);
+        gs.envelope = Some(EnvelopeState::new(
+            EnvelopeSpec::parse("claude:20%w", None).unwrap(),
+            start,
+            None,
+        ));
+        gs
+    }
+
+    #[tokio::test]
+    async fn readings_rising_past_the_slice_pause_the_goal() {
+        let mut gs = enveloped(40.0);
+        let step = settle_goal(&mut gs, facts(vec![weekly(50.0, 1000)], 1000)).await;
+        assert!(matches!(step, GoalStep::Continue(_) | GoalStep::Turn(_)));
+        assert_eq!(
+            gs.envelope.as_ref().unwrap().meter(),
+            "envelope 10/20% claude weekly"
+        );
+
+        let step = settle_goal(&mut gs, facts(vec![weekly(60.0, 2000)], 2000)).await;
+        let GoalStep::Pause { reason } = step else {
+            panic!("expected a pause at the cap");
+        };
+        assert!(
+            reason.starts_with("Envelope spent (20% of Claude weekly)."),
+            "{reason}"
+        );
+        assert!(gs.envelope.as_ref().unwrap().spent);
+    }
+
+    #[tokio::test]
+    async fn a_stale_reading_pauses_instead_of_spending_blind() {
+        let mut gs = enveloped(40.0);
+        let step = settle_goal(&mut gs, facts(vec![weekly(41.0, 0)], 100_000)).await;
+        let GoalStep::Pause { reason } = step else {
+            panic!("expected a pause without a fresh reading");
+        };
+        assert!(reason.contains("can't be verified"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_goal_without_an_envelope_is_untouched() {
+        let mut gs = state(&[]);
+        let step = settle_goal(&mut gs, facts(Vec::new(), 1000)).await;
+        assert!(matches!(step, GoalStep::Continue(_) | GoalStep::Turn(_)));
+    }
+
+    #[tokio::test]
+    async fn a_usd_envelope_counts_session_cost_since_the_goal_started() {
+        let mut gs = state(&[]);
+        gs.envelope = Some(EnvelopeState::new(
+            EnvelopeSpec::parse("$2", None).unwrap(),
+            10.0,
+            None,
+        ));
+        let mut f = facts(Vec::new(), 1000);
+        f.sources.session_usd = 11.0;
+        assert!(matches!(
+            settle_goal(&mut gs, f).await,
+            GoalStep::Continue(_)
+        ));
+        assert_eq!(gs.budget.usd_remaining, Some(1.0));
+        let mut f = facts(Vec::new(), 1000);
+        f.sources.session_usd = 12.5;
+        assert!(matches!(
+            settle_goal(&mut gs, f).await,
+            GoalStep::Pause { .. }
+        ));
+    }
+}

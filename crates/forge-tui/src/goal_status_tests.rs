@@ -127,3 +127,69 @@ fn the_summary_names_state_budget_and_gates() {
     );
     assert!(text.contains("gates: cargo test"), "{text}");
 }
+
+fn enveloped() -> App {
+    use forge_types::goal_envelope::{EnvelopeSpec, EnvelopeState};
+    let mut app = App::default();
+    app.pending_envelope = Some(EnvelopeState::new(
+        EnvelopeSpec::parse("claude:20%w", None).unwrap(),
+        40.0,
+        None,
+    ));
+    app.goal_begin("harden the importer", &[], None, None);
+    app
+}
+
+#[test]
+fn the_envelope_meter_rides_the_chip_and_the_summary() {
+    let mut app = enveloped();
+    let mut envelope = app.goal.as_ref().unwrap().envelope.clone().unwrap();
+    envelope.used = 12.0;
+    app.goal_envelope_sync(&envelope);
+    let goal = app.goal.clone().unwrap();
+    assert_eq!(
+        goal.chip(0, 0),
+        "iteration 1 · envelope 12/20% claude weekly"
+    );
+    assert!(goal.summary().contains("envelope 12/20% claude weekly"));
+    assert!(app.pending_envelope.is_none(), "the run adopted it");
+}
+
+#[test]
+fn a_goal_paused_at_its_cap_keeps_the_reason_and_resume_keeps_the_envelope() {
+    let mut app = enveloped();
+    app.goal_paused_by_envelope("Envelope spent (20% of Claude weekly).");
+    let goal = app.goal.clone().unwrap();
+    assert_eq!(goal.phase, GoalPhase::Paused);
+    assert_eq!(
+        goal.reason.as_deref(),
+        Some("Envelope spent (20% of Claude weekly).")
+    );
+    app.goal_prepare_resume().unwrap();
+    app.goal_begin("harden the importer", &[], None, None);
+    assert!(app.goal.as_ref().unwrap().envelope.is_some());
+}
+
+#[test]
+fn raising_a_paused_envelope_takes_at_once_and_a_live_one_waits_for_the_loop() {
+    use forge_types::goal_envelope::EnvelopeSpec;
+    let raise = EnvelopeSpec::parse("30%w", Some("claude")).unwrap();
+    let mut app = enveloped();
+    assert!(app.goal_request_envelope(raise.clone()));
+    assert_eq!(app.goal_take_envelope_edit(), Some(raise.clone()));
+    app.goal_paused();
+    assert!(app.goal_request_envelope(raise));
+    assert_eq!(
+        app.goal
+            .as_ref()
+            .unwrap()
+            .envelope
+            .as_ref()
+            .unwrap()
+            .spec
+            .slice,
+        30.0
+    );
+    let mut bare = started();
+    assert!(!bare.goal_request_envelope(EnvelopeSpec::parse("$5", None).unwrap()));
+}

@@ -18,6 +18,9 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use forge_core::{GoalEvalRequest, GoalVerdict};
+use forge_types::goal_envelope::EnvelopeCheck;
+
+use super::goal_envelope::{self, pause_message, EnvelopeSources};
 
 use super::*;
 
@@ -279,6 +282,8 @@ pub(crate) struct GoalTurnFacts {
     /// Gates check the checkout the session is working in, which a `worktree enter` moves away
     /// from the directory Forge was launched in.
     root: std::path::PathBuf,
+    /// What the spend envelope is measured against: subscription readings and session cost.
+    sources: EnvelopeSources,
 }
 
 impl GoalTurnFacts {
@@ -299,6 +304,7 @@ impl GoalTurnFacts {
             } else {
                 root.to_path_buf()
             },
+            sources: EnvelopeSources::read(s),
         }
     }
 }
@@ -312,6 +318,11 @@ pub(crate) enum GoalStep {
     },
     Turn(String),
     Continue(String),
+    /// The spend envelope is spent (or cannot be verified): the goal pauses, resumable, instead
+    /// of starting another turn.
+    Pause {
+        reason: String,
+    },
 }
 
 /// Fold the evaluation left in `gs.eval.slot` (if any) into the next step. Shared by the
@@ -326,7 +337,20 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
             met: false,
         };
     }
-    if facts.run_budget_hit {
+    let envelope_check = gs.envelope.as_mut().map(|envelope| {
+        let mut check = facts.sources.check(envelope);
+        if facts.run_budget_hit && envelope.is_usd() && check == EnvelopeCheck::Within {
+            envelope.spent = true;
+            check = EnvelopeCheck::Spent;
+        }
+        check
+    });
+    gs.sync_envelope_budget();
+    let envelope_hit = matches!(
+        envelope_check,
+        Some(EnvelopeCheck::Spent | EnvelopeCheck::Unverified)
+    );
+    if facts.run_budget_hit && !envelope_hit {
         let reason = if gs
             .budget
             .max_elapsed
@@ -351,6 +375,15 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
         &facts.root,
     )
     .await;
+    if let (true, Some(envelope), Some(check)) =
+        (envelope_hit, gs.envelope.as_ref(), envelope_check)
+    {
+        if !matches!(decision, GoalDecision::Stop(_)) {
+            return GoalStep::Pause {
+                reason: pause_message(envelope, check),
+            };
+        }
+    }
     match decision {
         GoalDecision::Stop(reason) => GoalStep::Stop {
             met: is_goal_complete_reason(&reason),
@@ -384,8 +417,21 @@ pub(crate) async fn advance_goal(
             return GoalNext::Evaluate(gs.eval_request());
         }
     }
+    if let Some(envelope) = &gs.envelope {
+        goal_envelope::refresh_quota(session, &envelope.spec).await;
+    }
     let facts = GoalTurnFacts::read(&*session.lock().await, cwd);
-    match settle_goal(gs, facts).await {
+    let step = settle_goal(gs, facts).await;
+    if let Some(envelope) = &gs.envelope {
+        app.goal_envelope_sync(envelope);
+    }
+    match step {
+        GoalStep::Pause { reason } => {
+            app.note(&format!("⏸ {reason}"));
+            app.goal_paused_by_envelope(&reason);
+            session.lock().await.set_active_goal(None);
+            GoalNext::Stop
+        }
         GoalStep::Stop { reason, met } => {
             if !met {
                 app.note(&reason);

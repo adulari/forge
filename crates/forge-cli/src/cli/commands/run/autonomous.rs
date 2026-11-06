@@ -47,6 +47,8 @@ pub(crate) struct AutonomyBudget {
     pub(crate) max_elapsed: Option<Duration>,
     pub(crate) tokens_used: u64,
     pub(crate) started_at: Instant,
+    /// Dollars left in a `/goal --budget $N` envelope, enforced inside the turn.
+    pub(crate) usd_remaining: Option<f64>,
 }
 
 impl AutonomyBudget {
@@ -56,6 +58,7 @@ impl AutonomyBudget {
             max_elapsed: max_minutes.map(|m| Duration::from_secs(m.saturating_mul(60))),
             tokens_used: 0,
             started_at: Instant::now(),
+            usd_remaining: None,
         }
     }
 }
@@ -64,7 +67,7 @@ impl AutonomyBudget {
     /// What is left of this run's budget, in the form the session enforces INSIDE a turn. `None`
     /// when the run is unbounded.
     pub(crate) fn remaining(&self) -> Option<forge_core::RunBudget> {
-        if self.max_tokens.is_none() && self.max_elapsed.is_none() {
+        if self.max_tokens.is_none() && self.max_elapsed.is_none() && self.usd_remaining.is_none() {
             return None;
         }
         Some(forge_core::RunBudget {
@@ -72,7 +75,7 @@ impl AutonomyBudget {
                 .max_tokens
                 .map(|max| max.saturating_sub(self.tokens_used)),
             deadline: self.max_elapsed.map(|max| self.started_at + max),
-            usd_remaining: None,
+            usd_remaining: self.usd_remaining,
         })
     }
 }
@@ -229,6 +232,8 @@ pub(crate) struct GoalState {
     pub(crate) started_unix: i64,
     /// Progress-evaluator state (docs/features/goal-evaluator.md).
     pub(crate) eval: GoalEvalTrack,
+    /// The spend envelope (`/goal --budget`), when the goal has one.
+    pub(crate) envelope: Option<forge_types::goal_envelope::EnvelopeState>,
 }
 
 impl GoalState {
@@ -255,7 +260,17 @@ impl GoalState {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64),
             eval: GoalEvalTrack::default(),
+            envelope: None,
         }
+    }
+
+    /// Hand a USD envelope's remaining dollars to the in-turn budget guard.
+    pub(crate) fn sync_envelope_budget(&mut self) {
+        self.budget.usd_remaining = self
+            .envelope
+            .as_ref()
+            .filter(|e| e.is_usd())
+            .map(|e| (e.spec.slice - e.used).max(0.0));
     }
 }
 
@@ -272,6 +287,8 @@ impl GoalState {
     ) -> Self {
         let carry = app.goal_begin(&goal, &gate_cmds, max_tokens, max_minutes);
         let mut state = Self::new(gen, goal, gate_cmds, max_tokens, max_minutes);
+        state.envelope = app.goal.as_ref().and_then(|g| g.envelope.clone());
+        state.sync_envelope_budget();
         if let Some(carry) = carry {
             state.iter = carry.iteration;
             state.budget.tokens_used = carry.tokens_used;

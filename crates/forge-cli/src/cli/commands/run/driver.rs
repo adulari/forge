@@ -635,6 +635,9 @@ async fn drive_session(
         }
     }
 
+    goal_envelope::restore(&mut st.app, &queue_store, &session_id);
+    let mut persisted_goal: Option<String> = GoalRecord::of(&st.app);
+
     if auto_setup {
         let _ = forge_config::mark_project_auto_setup_attempted(std::path::Path::new(&cwd));
         st.app
@@ -809,6 +812,15 @@ async fn drive_session(
                 Ok(()) => persisted_queue = queue_now,
                 Err(error) => {
                     tracing::warn!(session = %session_id, %error, "could not persist queued prompts");
+                }
+            }
+        }
+        let goal_now = GoalRecord::of(&st.app);
+        if goal_now != persisted_goal {
+            match queue_store.set_session_goal_state(&session_id, goal_now.as_deref()) {
+                Ok(()) => persisted_goal = goal_now,
+                Err(error) => {
+                    tracing::warn!(session = %session_id, %error, "could not persist the goal envelope");
                 }
             }
         }

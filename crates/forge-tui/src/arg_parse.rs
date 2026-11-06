@@ -60,20 +60,49 @@ pub(crate) fn mcp_action(arg: String) -> CommandAction {
     }
 }
 
-/// `/goal <objective> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`
+/// `/goal <objective> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N] [--budget <spec>]`
 pub(crate) fn goal_action(arg: &str) -> CommandAction {
     if let Some(control) = goal_control(arg) {
         return CommandAction::GoalControl(control);
     }
-    let Ok((objective, gates, max_tokens, max_minutes)) = parse_autonomy_options(arg) else {
-        return bad_budget("/goal", arg);
+    let (arg, budget) = match take_budget(arg) {
+        Ok(taken) => taken,
+        Err(why) => {
+            return CommandAction::Unknown(format!("/goal {arg} ({why}; nothing was started)"))
+        }
+    };
+    let Ok((objective, gates, max_tokens, max_minutes)) = parse_autonomy_options(&arg) else {
+        return bad_budget("/goal", &arg);
     };
     CommandAction::Goal {
         objective,
         gates,
         max_tokens,
         max_minutes,
+        budget,
     }
+}
+
+/// Pull `--budget <spec>` out of a goal's arguments, validating the spec. Without the flag the
+/// text comes back untouched.
+fn take_budget(arg: &str) -> Result<(String, Option<String>), String> {
+    if !arg.contains("--budget") {
+        return Ok((arg.to_string(), None));
+    }
+    let Ok(tokens) = shell_words::split(arg) else {
+        return Ok((arg.to_string(), None));
+    };
+    let Some(at) = tokens.iter().position(|t| t == "--budget") else {
+        return Ok((arg.to_string(), None));
+    };
+    let spec = tokens.get(at + 1).ok_or_else(|| {
+        "--budget needs a value: claude:20%w, codex:15%w, claude:30%5h or $5".to_string()
+    })?;
+    forge_types::goal_envelope::EnvelopeSpec::parse(spec, None)?;
+    let mut rest = tokens.clone();
+    let spec = rest.remove(at + 1);
+    rest.remove(at);
+    Ok((shell_words::join(&rest), Some(spec)))
 }
 
 /// The steering verbs are whole-word matches, so a goal that merely starts with one of them
@@ -89,8 +118,18 @@ fn goal_control(arg: &str) -> Option<GoalControl> {
     }
     let (verb, rest) = arg.split_once(char::is_whitespace)?;
     let rest = rest.trim();
-    (verb.eq_ignore_ascii_case("edit") && !rest.is_empty())
-        .then(|| GoalControl::Edit(rest.to_string()))
+    if rest.is_empty() {
+        return None;
+    }
+    if verb.eq_ignore_ascii_case("edit") {
+        Some(GoalControl::Edit(rest.to_string()))
+    } else if verb.eq_ignore_ascii_case("budget")
+        && forge_types::goal_envelope::EnvelopeSpec::parse(rest, Some("claude")).is_ok()
+    {
+        Some(GoalControl::Budget(rest.to_string()))
+    } else {
+        None
+    }
 }
 
 /// `/loop <task> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`

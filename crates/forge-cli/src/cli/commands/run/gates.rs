@@ -295,6 +295,7 @@ pub(crate) async fn goal_outcome(
     gates: Vec<String>,
     max_tokens: Option<u64>,
     max_minutes: Option<u64>,
+    budget: Option<String>,
 ) -> anyhow::Result<super::dispatch::DispatchOutcome> {
     use super::dispatch::DispatchOutcome;
     let text = objective.trim().to_string();
@@ -306,9 +307,29 @@ pub(crate) async fn goal_outcome(
         }
         app.note(
             "usage: /goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
-             — sets the goal and breaks it into tasks",
+             [--budget claude:20%w|$5] — sets the goal and breaks it into tasks",
         );
         return Ok(DispatchOutcome::Handled);
+    }
+    app.pending_envelope = None;
+    if let Some(budget) = budget {
+        let spec = forge_types::goal_envelope::EnvelopeSpec::parse(&budget, None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        match super::goal_envelope::baseline(session, spec).await {
+            Ok(envelope) => {
+                app.note(&format!(
+                    "▤ {} — the goal pauses when it is spent",
+                    envelope.meter()
+                ));
+                app.pending_envelope = Some(envelope);
+            }
+            Err(why) => {
+                app.note(&format!(
+                    "goal not started — {why}. Try again once a reading is available."
+                ));
+                return Ok(DispatchOutcome::Handled);
+            }
+        }
     }
     {
         let mut s = session.lock().await;

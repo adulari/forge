@@ -159,6 +159,9 @@ pub(crate) async fn build_session_with_self_mcp(
     session_cwd: Option<&str>,
 ) -> Result<Session> {
     let mut clock = StartupClock::start();
+    if mock {
+        super::goal_envelope::MOCK_SESSION.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     // The first turn's routing reads both before its first token: the tokenizer vocabulary
     // (~150 ms to build) and the Codex plan (an OS keyring round trip). Start them now so they
     // overlap the rest of startup instead of adding to the first token.
