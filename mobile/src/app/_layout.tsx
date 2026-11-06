@@ -391,16 +391,29 @@ export default function RootLayout() {
 
   useEffect(() => {
     void initHaptics();
-    // The always-on sampler only has a consumer on Tauri (the 1s `dumpDesktopPerformanceSnapshot`
-    // dump below) — everywhere else it would just burn battery for a snapshot nobody reads.
-    // diagnostics.tsx and perf-fixture.tsx start/stop it themselves on demand for their own
-    // display needs.
-    if (isTauri) startDesktopPerformanceMonitor();
-    const perfDump = isTauri ? window.setInterval(() => void dumpDesktopPerformanceSnapshot(), 1_000) : null;
-    if (isTauri) void checkDesktopUpdate().catch(() => undefined);
+    // The sampler (a requestAnimationFrame loop at the display's refresh rate) and the 1s snapshot
+    // dump only have a consumer when the shell was started with FORGE_PERF_OUT. Running them for
+    // everyone kept the web process awake on every frame and rebuilt a snapshot every second.
+    // diagnostics.tsx and perf-fixture.tsx start/stop the sampler themselves for their own display.
+    let perfDump: number | null = null;
+    let cancelled = false;
+    if (isTauri) {
+      void import("@tauri-apps/api/core")
+        .then(({ invoke }) => invoke<boolean>("perf_enabled"))
+        .then((enabled) => {
+          if (!enabled || cancelled) return;
+          startDesktopPerformanceMonitor();
+          perfDump = window.setInterval(() => void dumpDesktopPerformanceSnapshot(), 1_000);
+        })
+        .catch(() => undefined);
+      void checkDesktopUpdate().catch(() => undefined);
+    }
     return () => {
-      if (perfDump != null) window.clearInterval(perfDump);
-      if (isTauri) stopDesktopPerformanceMonitor();
+      cancelled = true;
+      if (perfDump != null) {
+        window.clearInterval(perfDump);
+        stopDesktopPerformanceMonitor();
+      }
     };
   }, []);
 

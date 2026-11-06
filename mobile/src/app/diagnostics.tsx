@@ -26,7 +26,7 @@ import {
   useDesktopOtaStatus,
 } from "../lib/desktopOta";
 import { assessCompatibility, buildSupportSummary } from "../lib/diagnostics";
-import { getDesktopPerformanceSnapshot, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor, type DesktopPerformanceSnapshot } from "../lib/performance";
+import { getDesktopPerformanceSnapshot, isDesktopPerformanceMonitorRunning, startDesktopPerformanceMonitor, stopDesktopPerformanceMonitor, type DesktopPerformanceSnapshot } from "../lib/performance";
 import { isTauri } from "../lib/platform";
 import { useDiagnostics } from "../lib/queries";
 import { PROTOCOL_VERSION } from "../lib/remoteProtocol";
@@ -110,10 +110,11 @@ export default function DiagnosticsScreen() {
   );
 
   useEffect(() => {
-    // On Tauri the global monitor is already running (started in _layout.tsx) — this screen
-    // just reads it. Elsewhere nobody else starts it, so this screen owns it for the time it's
-    // on screen and stops it again on unmount rather than leaving it sampling in the background.
-    if (!isTauri) startDesktopPerformanceMonitor();
+    // The shell only samples when started with FORGE_PERF_OUT (_layout.tsx). Otherwise this screen
+    // owns the sampler for the time it's on screen and stops it again on unmount rather than
+    // leaving it sampling in the background.
+    const ownsMonitor = !isDesktopPerformanceMonitorRunning();
+    if (ownsMonitor) startDesktopPerformanceMonitor();
     const timer = setInterval(() => {
       setPerformanceSnapshot(getDesktopPerformanceSnapshot());
       setRelayMetrics(getRelayMetrics());
@@ -121,7 +122,7 @@ export default function DiagnosticsScreen() {
     }, 1000);
     return () => {
       clearInterval(timer);
-      if (!isTauri) stopDesktopPerformanceMonitor();
+      if (ownsMonitor) stopDesktopPerformanceMonitor();
     };
   }, []);
 
