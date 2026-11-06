@@ -147,12 +147,8 @@ pub(crate) fn daemon_token_at(path: &std::path::Path, rotate: bool) -> Result<St
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating token directory {}", parent.display()))?;
     }
-    std::fs::write(path, &token).with_context(|| format!("writing {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
+    // Created 0600, never world-readable for even a moment on a shared host.
+    crate::serve_pairing::write_private(path, token.as_bytes())?;
     Ok(token)
 }
 

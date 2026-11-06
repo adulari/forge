@@ -78,7 +78,7 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
     options.open(path)
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let mut file = create_private(path).with_context(|| format!("writing {}", path.display()))?;
     #[cfg(unix)]
