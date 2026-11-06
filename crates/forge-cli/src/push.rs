@@ -434,6 +434,71 @@ pub(crate) fn detect_trigger(
     None
 }
 
+/// True while `msg` still describes the live state of `cur`: the prompt it announced is still
+/// pending (same `prompt_seq`), or the turn it announced is still finished with nothing newer.
+pub(crate) fn push_is_current(msg: &PushMessage, cur: &Snapshot) -> bool {
+    if cur.closed || cur.prompt_seq != msg.seq {
+        return false;
+    }
+    match msg.kind {
+        "question" => cur.question.is_some(),
+        "permission" => cur.permission_prompt.is_some(),
+        _ => !cur.busy && cur.permission_prompt.is_none() && cur.question.is_none(),
+    }
+}
+
+/// The most recent pushable event that was suppressed because a client was attached. Delivered
+/// once, when the last client detaches, if it is still current; never delivered stale.
+/// `text` with every `http(s)://…` run replaced by `<url>`.
+fn without_urls(text: &str) -> String {
+    text.split_inclusive(char::is_whitespace)
+        .map(|word| {
+            let trimmed = word.trim_start_matches(['(', '"', '\'']);
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                let lead = &word[..word.len() - trimmed.len()];
+                let tail: String = word
+                    .chars()
+                    .rev()
+                    .take_while(|c| matches!(c, ')' | '"' | '\'' | ',' | ':' | ';' | ' ' | '\n'))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                format!("{lead}<url>{tail}")
+            } else {
+                word.to_string()
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DeferredPush(Option<PushMessage>);
+
+impl DeferredPush {
+    pub(crate) fn hold(&mut self, msg: PushMessage) {
+        self.0 = Some(msg);
+    }
+
+    /// Drops the held event once stale; releases it when no client is attached and it is current.
+    pub(crate) fn release(
+        &mut self,
+        connected_ws_clients: usize,
+        cur: Option<&Snapshot>,
+    ) -> Option<PushMessage> {
+        let msg = self.0.as_ref()?;
+        if !cur.is_some_and(|c| push_is_current(msg, c)) {
+            self.0 = None;
+            return None;
+        }
+        if should_push(connected_ws_clients) {
+            self.0.take()
+        } else {
+            None
+        }
+    }
+}
+
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -454,6 +519,8 @@ pub(crate) struct PushNotifier {
     client: reqwest::Client,
     /// Off only in tests that post to a loopback stand-in for a push service.
     strict_endpoints: bool,
+    /// Delivery-failure kinds already logged at warn, so a dead endpoint warns once, not per push.
+    warned: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl PushNotifier {
@@ -473,6 +540,7 @@ impl PushNotifier {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             strict_endpoints: true,
+            warned: Default::default(),
             vapid,
             store,
             client: reqwest::Client::builder()
@@ -496,6 +564,25 @@ impl PushNotifier {
         });
     }
 
+    fn log_failure(&self, endpoint: &str, error: &anyhow::Error) {
+        // Push endpoints are capability URLs (anyone holding one can push to the device), and
+        // reqwest puts the URL in its error text: keep it out of the warn-level log.
+        let text = without_urls(&error.to_string());
+        let kind: String = text.chars().take(80).collect();
+        let first = self
+            .warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(kind);
+        if first {
+            tracing::warn!(
+                "push delivery failed (further failures of this kind logged at debug): {text}"
+            );
+        } else {
+            tracing::debug!("push to {endpoint} failed: {error}");
+        }
+    }
+
     async fn send_all(&self, msg: PushMessage) {
         let store = self.store.clone();
         let subs = tokio::task::spawn_blocking(move || {
@@ -517,7 +604,7 @@ impl PushNotifier {
                     .await;
                 }
                 Ok(_) => {}
-                Err(e) => tracing::debug!("push to {} failed: {e}", sub.endpoint),
+                Err(e) => self.log_failure(&sub.endpoint, &e),
             }
         }
     }
@@ -731,6 +818,67 @@ mod tests {
         assert!(should_push(0));
         assert!(!should_push(1), "a connected client debounces the push");
         assert!(!should_push(3));
+    }
+
+    #[test]
+    fn push_failures_never_log_the_endpoint_url() {
+        let text = without_urls(
+            "error sending request for url (https://fcm.googleapis.com/fcm/send/abc123): timed out",
+        );
+        assert_eq!(text, "error sending request for url (<url>): timed out");
+    }
+
+    fn attention() -> (Snapshot, PushMessage) {
+        let cur = Snapshot {
+            busy: true,
+            permission_prompt: Some("allow shell [y/n]".into()),
+            prompt_seq: 4,
+            ..snap()
+        };
+        let msg = detect_trigger(Some(&snap()), &cur, None).unwrap();
+        (cur, msg)
+    }
+
+    #[test]
+    fn a_suppressed_prompt_is_sent_once_when_the_last_client_drops() {
+        let (cur, msg) = attention();
+        let mut held = DeferredPush::default();
+        held.hold(msg.clone());
+        assert_eq!(held.release(1, Some(&cur)), None, "client still attached");
+        assert_eq!(held.release(0, Some(&cur)), Some(msg));
+        assert_eq!(held.release(0, Some(&cur)), None, "sent exactly once");
+    }
+
+    #[test]
+    fn a_prompt_answered_before_the_drop_is_never_sent() {
+        let (cur, msg) = attention();
+        let mut held = DeferredPush::default();
+        held.hold(msg);
+        let answered = Snapshot {
+            permission_prompt: None,
+            ..cur
+        };
+        assert_eq!(held.release(1, Some(&answered)), None);
+        assert_eq!(
+            held.release(0, Some(&answered)),
+            None,
+            "stale event stays dropped"
+        );
+    }
+
+    #[test]
+    fn a_suppressed_done_is_dropped_once_a_new_turn_starts() {
+        let busy = Snapshot {
+            busy: true,
+            ..snap()
+        };
+        let finished = snap();
+        let msg = detect_trigger(Some(&busy), &finished, None).unwrap();
+        let mut held = DeferredPush::default();
+        held.hold(msg.clone());
+        assert_eq!(held.release(0, Some(&finished)), Some(msg.clone()));
+        held.hold(msg);
+        assert_eq!(held.release(0, Some(&busy)), None);
     }
 
     fn snap() -> Snapshot {

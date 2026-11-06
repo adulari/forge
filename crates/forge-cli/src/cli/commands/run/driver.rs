@@ -427,6 +427,41 @@ impl Drop for DriverState {
     }
 }
 
+/// Fire-and-forget delivery of one actionable notification across every configured channel
+/// (Web Push + native APNs), plus the Live Activity nudge at the same discrete moment.
+fn dispatch_push(
+    apns: &Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
+    push: &Option<std::sync::Arc<crate::push::PushNotifier>>,
+    session_id: &str,
+    snap: &remote::Snapshot,
+    msg: crate::push::PushMessage,
+) {
+    if let Some(notifier) = apns {
+        notifier.dispatch_live_activity(
+            session_id.to_string(),
+            crate::apns::LiveActivityContentState {
+                busy: snap.busy,
+                waiting: snap.permission_prompt.is_some() || snap.question.is_some(),
+                cost_usd: snap.cost_usd,
+                context_tokens: snap.context_tokens,
+                context_limit: snap.context_limit.unwrap_or(200_000) as u64,
+                question: snap
+                    .permission_prompt
+                    .clone()
+                    .or_else(|| snap.question.clone()),
+                prompt_seq: Some(snap.prompt_seq),
+                tasks_done: Some(snap.tasks.iter().filter(|t| t.status == "done").count() as u64),
+                tasks_total: Some(snap.tasks.len() as u64),
+                state_since: Some(now_secs().max(0) as u64),
+            },
+        );
+        notifier.dispatch_alert(msg.clone());
+    }
+    if let Some(notifier) = push {
+        notifier.dispatch(msg);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_session(
     session: std::sync::Arc<tokio::sync::Mutex<Session>>,
@@ -559,6 +594,7 @@ async fn drive_session(
     // The most recent genuine turn failure (PresenterEvent::Error), latched so the busy falling
     // edge pushes "failed" instead of "done". Cleared when the next turn starts.
     let mut turn_error: Option<String> = None;
+    let mut deferred_push = crate::push::DeferredPush::default();
 
     let queue_store = st.session.lock().await.store.clone();
     let mut persisted_queue: Vec<forge_store::QueuedPrompt> = Vec::new();
@@ -800,43 +836,17 @@ async fn drive_session(
                 // across every configured channel (Web Push + native APNs) — the broadcast below
                 // never waits on delivery. Computed once regardless of which channels are
                 // configured, so native-only (no Web Push) deployments still notify.
-                if crate::push::should_push(ws_clients.load(std::sync::atomic::Ordering::Relaxed)) {
-                    if let Some(msg) = crate::push::detect_trigger(
-                        last_snap.as_ref(),
-                        &snap,
-                        turn_error.as_deref(),
+                if let Some(msg) =
+                    crate::push::detect_trigger(last_snap.as_ref(), &snap, turn_error.as_deref())
+                {
+                    // A client that is attached but unattended (phone just locked, tab left open)
+                    // would swallow this for good, so hold it for when the last client drops.
+                    if crate::push::should_push(
+                        ws_clients.load(std::sync::atomic::Ordering::Relaxed),
                     ) {
-                        if let Some(notifier) = &apns {
-                            // Also nudge this session's Live Activity (if any) at the same
-                            // discrete moments rather than on every streaming-token snapshot
-                            // tick — Apple throttles overly-frequent remote updates.
-                            notifier.dispatch_live_activity(
-                                session_id.clone(),
-                                crate::apns::LiveActivityContentState {
-                                    busy: snap.busy,
-                                    waiting: snap.permission_prompt.is_some()
-                                        || snap.question.is_some(),
-                                    cost_usd: snap.cost_usd,
-                                    context_tokens: snap.context_tokens,
-                                    context_limit: snap.context_limit.unwrap_or(200_000) as u64,
-                                    question: snap
-                                        .permission_prompt
-                                        .clone()
-                                        .or_else(|| snap.question.clone()),
-                                    prompt_seq: Some(snap.prompt_seq),
-                                    tasks_done: Some(
-                                        snap.tasks.iter().filter(|t| t.status == "done").count()
-                                            as u64,
-                                    ),
-                                    tasks_total: Some(snap.tasks.len() as u64),
-                                    state_since: Some(now_secs().max(0) as u64),
-                                },
-                            );
-                            notifier.dispatch_alert(msg.clone());
-                        }
-                        if let Some(notifier) = &push {
-                            notifier.dispatch(msg);
-                        }
+                        dispatch_push(&apns, &push, &session_id, &snap, msg);
+                    } else {
+                        deferred_push.hold(msg);
                     }
                 }
                 last_snap = Some(snap.clone());
@@ -847,6 +857,14 @@ async fn drive_session(
                 let _ = snapshot_tx.send(frame);
             }
             dirty = false;
+        }
+        if let Some(msg) = deferred_push.release(
+            ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+            last_snap.as_ref(),
+        ) {
+            if let Some(snap) = &last_snap {
+                dispatch_push(&apns, &push, &session_id, snap, msg);
+            }
         }
         // Headless pacing: ~30ms keeps streaming snappy at a fraction of the TUI's frame work.
         tokio::select! {
