@@ -76,8 +76,10 @@ function Body({ sessionId }: { sessionId: string }) {
     [sessionId, send],
   );
   const handleInterrupt = useCallback(() => {
-    send({ kind: "interrupt" });
-  }, [send]);
+    if (!send({ kind: "interrupt" })) {
+      toast.show("Stop not sent: not connected to this agent. Try again in a moment.", { tone: "danger" });
+    }
+  }, [send, toast]);
 
   const waiting = snapshot?.permission_prompt != null || snapshot?.question != null || !!panelSession?.waiting;
   const busy = snapshot?.busy ?? panelSession?.busy ?? false;
