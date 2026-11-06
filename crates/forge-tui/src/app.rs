@@ -1500,9 +1500,13 @@ impl App {
                 self.interaction_ui.note_tool_call(&name, &args);
                 self.open_tool_card(origin, name, args);
             }
-            PresenterEvent::ToolOutputDelta { name, lines, .. } => {
+            PresenterEvent::ToolOutputDelta {
+                name,
+                lines,
+                elapsed_ms,
+            } => {
                 let name = tool_cards::bare_tool_name(&name).to_string();
-                self.update_card_live_tail(&name, lines);
+                self.update_card_live_tail(&name, lines, elapsed_ms);
             }
             PresenterEvent::ToolResult {
                 name,

@@ -138,6 +138,7 @@ impl App {
             diff: self.remote_diff(),
             plan: self.plan.clone(),
             suggested_prompt: self.suggested_prompt.clone(),
+            live_tail: self.live_tail_remote(),
         }
     }
 
@@ -770,6 +771,16 @@ pub struct RemoteSnapshot {
     pub suggested_prompt: Option<String>,
     /// The live (or just-finished) workflow run this turn (v8.1) — see [`WorkflowRemote`].
     pub workflow: Option<WorkflowRemote>,
+    /// The rolling output of the foreground tool call in flight, if one is reporting.
+    pub live_tail: Option<LiveTailRemote>,
+}
+
+/// Remote projection of a running call's live output tail (ANSI already stripped).
+#[derive(Debug, Clone, Default)]
+pub struct LiveTailRemote {
+    pub tool: String,
+    pub lines: Vec<String>,
+    pub elapsed_ms: u64,
 }
 
 /// Remote projection of the dedicated workflow view (v8.1): phases + narration + finish state.

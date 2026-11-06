@@ -593,6 +593,7 @@ export function SessionChat() {
   // An older host sends no `activity`; a tool line is then the only sign of what the turn does.
   const activity = snapshot?.activity || undefined;
   const turnStartedAt = snapshot?.turn_started_at ?? 0;
+  const liveTail = snapshot?.live_tail ?? null;
   const activityToolLine = !activity || activity === "running tool" ? liveToolLine : null;
 
   const transcriptRows = snapshot?.transcript_rows;
@@ -800,6 +801,7 @@ export function SessionChat() {
               activity={activity}
               toolLine={activityToolLine}
               startedAt={turnStartedAt}
+              liveTail={liveTail}
             />
           );
         case "note":
@@ -817,7 +819,7 @@ export function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, tokens.selection, findSeq, streamStore, busy, activity, activityToolLine, turnStartedAt, onMessageLongPress, openGroups, toggleGroup],
+    [tokens.ink2, tokens.ink3, tokens.selection, findSeq, streamStore, busy, activity, activityToolLine, turnStartedAt, liveTail, onMessageLongPress, openGroups, toggleGroup],
   );
 
   // Each row reports its height so the sticky prompt bar can tell which row is at the top.

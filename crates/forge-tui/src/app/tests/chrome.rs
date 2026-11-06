@@ -1010,6 +1010,10 @@ fn a_running_shell_card_shows_its_live_tail_until_the_result_lands() {
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let remote = app.remote_snapshot().live_tail.expect("remote live tail");
+    assert_eq!(remote.tool, "shell");
+    assert_eq!(remote.lines.len(), 2);
+    assert_eq!(remote.elapsed_ms, 1500);
     let text = card_text(&app);
     assert!(text.contains("running 4 tests"), "{text}");
     assert!(text.contains("test a ... ok"), "{text}");
@@ -1020,6 +1024,7 @@ fn a_running_shell_card_shows_its_live_tail_until_the_result_lands() {
         summary: "exit 0".into(),
         detail: None,
     });
+    assert!(app.remote_snapshot().live_tail.is_none());
     let text = card_text(&app);
     assert!(!text.contains("running 4 tests"), "{text}");
 }

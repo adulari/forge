@@ -112,6 +112,9 @@ pub(crate) struct ToolCard {
     pub(crate) live_tail: Vec<String>,
     /// Set once the first live sample arrived, so a running header can show a ticking clock.
     pub(crate) live: bool,
+    /// The session's elapsed clock at the last live sample, shown to remote clients (a clock read
+    /// at snapshot time would change every frame).
+    pub(crate) live_elapsed_ms: u64,
 }
 
 /// A diagnosis attached to a failed call.
@@ -146,6 +149,7 @@ impl ToolCard {
             note: None,
             live_tail: Vec::new(),
             live: false,
+            live_elapsed_ms: 0,
         }
     }
 

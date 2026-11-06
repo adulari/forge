@@ -725,6 +725,18 @@ pub struct Snapshot {
     /// whose worktree needed no provisioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_setup: Option<SnapWorktreeSetup>,
+    /// The rolling output of the foreground tool call in flight (additive): the last few lines,
+    /// ANSI stripped, plus how long it has run. Absent when no call is reporting; a client that
+    /// does not know the key ignores it. Never part of the transcript or the model's context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_tail: Option<SnapLiveTail>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapLiveTail {
+    pub tool: String,
+    pub lines: Vec<String>,
+    pub elapsed_ms: u64,
 }
 
 /// `state` is `running`, `done` or `failed`; `message` is the summary or the failure with the
@@ -837,6 +849,7 @@ impl Default for Snapshot {
             thread_error: None,
             history_gap: None,
             worktree_setup: None,
+            live_tail: None,
         }
     }
 }
@@ -2042,6 +2055,26 @@ pub(crate) fn manifest_json(base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_tail_is_an_optional_additive_wire_field() {
+        let idle = serde_json::to_value(Snapshot::default()).unwrap();
+        assert!(
+            idle.get("live_tail").is_none(),
+            "absent when nothing reports"
+        );
+        let running = Snapshot {
+            live_tail: Some(SnapLiveTail {
+                tool: "shell".into(),
+                lines: vec!["line 1".into()],
+                elapsed_ms: 1200,
+            }),
+            ..Snapshot::default()
+        };
+        let wire = serde_json::to_value(&running).unwrap();
+        assert_eq!(wire["live_tail"]["lines"][0], "line 1");
+        assert_eq!(wire["live_tail"]["elapsed_ms"], 1200);
+    }
 
     #[test]
     fn stream_pacer_holds_only_token_frames_inside_the_interval() {

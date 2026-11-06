@@ -165,7 +165,12 @@ impl App {
     }
 
     /// Show a running call's rolling output tail under its header. False when no such card runs.
-    pub(super) fn update_card_live_tail(&mut self, name: &str, lines: Vec<String>) -> bool {
+    pub(super) fn update_card_live_tail(
+        &mut self,
+        name: &str,
+        lines: Vec<String>,
+        elapsed_ms: u64,
+    ) -> bool {
         let Some(card) = self
             .tool_cards
             .iter_mut()
@@ -175,12 +180,26 @@ impl App {
             return false;
         };
         card.live = true;
+        card.live_elapsed_ms = elapsed_ms;
         card.live_tail = lines.iter().map(|l| sanitize_terminal_text(l)).collect();
         let (id, interactive) = (card.id, card.interactive);
         if interactive {
             self.redraw_tool_card(id);
         }
         true
+    }
+
+    /// The newest running call that is reporting live output, for the remote snapshot.
+    pub(crate) fn live_tail_remote(&self) -> Option<crate::app_remote::LiveTailRemote> {
+        self.tool_cards
+            .iter()
+            .rev()
+            .find(|c| c.fold.is_none() && c.live && c.status == CardStatus::Running)
+            .map(|c| crate::app_remote::LiveTailRemote {
+                tool: c.name.clone(),
+                lines: c.live_tail.clone(),
+                elapsed_ms: c.live_elapsed_ms,
+            })
     }
 
     /// Finish the newest still-running card for `name`. Returns false when there is no such

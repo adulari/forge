@@ -303,6 +303,15 @@ export interface Snapshot {
   history_gap?: { count: number; reason: string } | null;
   /** Progress of the worktree's background copy + `setup`; absent when nothing was provisioned. */
   worktree_setup?: { state: "running" | "done" | "failed" | "interrupted"; message: string } | null;
+  /** Additive: the rolling output of the foreground tool call in flight (last few lines, ANSI
+   * stripped) and how long it has run. Absent from an older host and when nothing is reporting. */
+  live_tail?: SnapshotLiveTail | null;
+}
+
+export interface SnapshotLiveTail {
+  tool: string;
+  lines: string[];
+  elapsed_ms: number;
 }
 
 export interface ThreadError {

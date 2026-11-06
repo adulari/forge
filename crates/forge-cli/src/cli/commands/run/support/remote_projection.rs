@@ -178,6 +178,11 @@ pub(crate) fn build_snapshot_frame(
         thread_error: None,
         history_gap: None,
         worktree_setup: ident.worktree_setup,
+        live_tail: view.live_tail.map(|t| remote::SnapLiveTail {
+            tool: t.tool,
+            lines: t.lines,
+            elapsed_ms: t.elapsed_ms,
+        }),
     }
 }
 
