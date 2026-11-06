@@ -2012,6 +2012,7 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
         println!("  restoring {restoring} session(s) from the previous run");
     }
     let mut attempted = 0;
+    let mut redrive = crate::serve_restart_redrive::RedriveLedger::default();
     for id in live {
         if attempted >= RESURRECT_LIMIT {
             break;
@@ -2029,7 +2030,8 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
             );
             continue;
         }
-        let interrupted = crate::serve_restart_redrive::mark_interrupted(&state.store, &id);
+        let interrupted =
+            crate::serve_restart_redrive::mark_interrupted(&state.store, &mut redrive, &id);
         let request = CreateSessionReq {
             resume: Some(id.clone()),
             ..Default::default()
@@ -2039,7 +2041,7 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
         if status.is_success() {
             attempted += 1;
             if interrupted {
-                crate::serve_restart_redrive::announce(state.clone(), id.clone());
+                crate::serve_restart_redrive::announce_and_schedule(state.clone(), id.clone());
             }
             continue;
         }
@@ -7896,6 +7898,100 @@ pub(crate) mod tests {
             gone_ws.to_str().unwrap()
         );
         assert!(store.session_worktree(&wt_sess).unwrap().is_some());
+
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A restart that finds a transcript cut off mid-turn says so in the history and re-drives the
+    /// session once; a finished session and one the user stopped on purpose are left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restore_redrives_a_cut_off_turn_but_not_finished_or_user_stopped_ones() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_DB", dir.path().join("restore-redrive.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let mk = |prompt: &str| {
+            let id = store
+                .create_session(ws.to_str().unwrap(), "default")
+                .unwrap();
+            store
+                .add_message(&id, 0, forge_types::Role::User, prompt, None)
+                .unwrap();
+            store.set_session_daemon_live(&id, true).unwrap();
+            id
+        };
+        let cut_off = mk("long task");
+        let finished = mk("short task");
+        store
+            .add_message(&finished, 1, forge_types::Role::Assistant, "done", None)
+            .unwrap();
+        let stopped = mk("stopped task");
+        store.note_user_interrupt(&stopped).unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.path().display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        resurrect_fleet(state.clone()).await;
+
+        let continued = |id: &str| {
+            store.load_all_messages(id).unwrap().iter().any(|m| {
+                m.role == forge_types::Role::User
+                    && m.content == crate::serve_restart_redrive::CONTINUE_PROMPT
+            })
+        };
+        let noted = |id: &str| {
+            store
+                .load_all_messages(id)
+                .unwrap()
+                .iter()
+                .any(|m| m.content.starts_with(forge_store::RESTART_INTERRUPT_NOTE))
+        };
+        assert!(
+            noted(&cut_off),
+            "the history says a restart cut the turn off"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !continued(&cut_off) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cut-off session was never re-driven: {:?}",
+                store
+                    .load_all_messages(&cut_off)
+                    .unwrap()
+                    .iter()
+                    .map(|m| (
+                        m.role,
+                        m.visibility,
+                        m.content.chars().take(60).collect::<String>()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        for id in [&finished, &stopped] {
+            assert!(!noted(id) && !continued(id), "left alone");
+        }
+        let count = store
+            .load_all_messages(&cut_off)
+            .unwrap()
+            .iter()
+            .filter(|m| m.content == crate::serve_restart_redrive::CONTINUE_PROMPT)
+            .count();
+        assert_eq!(count, 1, "re-driven exactly once");
 
         std::env::remove_var("FORGE_DB");
         let _ = std::fs::remove_dir_all(&dir);
