@@ -250,6 +250,58 @@ pub fn fork_point(repo: &Path, branch: &str) -> Option<String> {
     }
 }
 
+/// Make the checkout a valid place to merge a session branch forked at `fork` back into.
+///
+/// A fresh-base session forks from `origin/<default>`, which can be ahead of the checkout. A
+/// `fork..branch` patch applied onto a checkout that lacks `fork` fails on files upstream added
+/// and 3-way-merges against a base that undoes upstream's changes. `Ok(None)`: `fork` is already
+/// in the checkout's history. `Ok(Some(note))`: the checkout was clean, on the default branch and
+/// strictly behind `fork`, so it was fast-forwarded to it. `Err(message)`: refused, nothing
+/// touched. The caller guarantees the checkout has no uncommitted tracked changes.
+pub fn sync_checkout_to_fork(repo: &Path, fork: &str) -> Result<Option<String>, String> {
+    if is_ancestor(repo, fork, "HEAD") {
+        return Ok(None);
+    }
+    let short = |rev: &str| git(repo, &["rev-parse", "--short", rev]).unwrap_or_else(|| rev.into());
+    let behind = git(repo, &["rev-list", "--count", &format!("HEAD..{fork}")])
+        .unwrap_or_else(|| "some".into());
+    let default = git(
+        repo,
+        &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
+    )
+    .and_then(|r| r.strip_prefix("origin/").map(str::to_string));
+    let current = git(repo, &["symbolic-ref", "--short", "-q", "HEAD"]);
+    let refuse = |why: &str| {
+        Err(format!(
+            "this session started from origin @{}; your checkout is {behind} commit(s) behind it{why} — pull, then merge",
+            short(fork)
+        ))
+    };
+    if !is_ancestor(repo, "HEAD", fork) {
+        return refuse(" and has diverged from it");
+    }
+    if default.is_none() || current != default {
+        return refuse(", and it is not on the default branch so it was not fast-forwarded");
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["merge", "--ff-only", "-q", fork])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return refuse(&format!(
+            " and could not be fast-forwarded ({})",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(Some(format!(
+        "fast-forwarded your checkout {behind} commit(s) to {} (where this session started) before merging",
+        short(fork)
+    )))
+}
+
 fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
     Command::new("git")
         .arg("-C")

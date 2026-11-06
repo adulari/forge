@@ -2474,6 +2474,8 @@ enum MergeOutcome {
     Conflicts(Vec<String>),
     /// A hard git error (not a conflict); state left intact.
     Error(String),
+    /// The checkout is behind where the session started and could not be fast-forwarded.
+    BaseBehind(String),
 }
 
 /// Run `git -C <root> <args>`, returning trimmed stdout on success.
@@ -2507,6 +2509,12 @@ fn parse_apply_conflicts(stderr: &str) -> Vec<String> {
             if let Some(rest) = line.strip_prefix("error: patch failed: ") {
                 return rest.rsplit_once(':').map(|(p, _)| p.to_string());
             }
+            if let Some(file) = line.strip_prefix("error: ").and_then(|r| {
+                r.strip_suffix(": does not exist in index")
+                    .or_else(|| r.strip_suffix(": already exists in index"))
+            }) {
+                return Some(file.to_string());
+            }
             None
         })
         .collect()
@@ -2518,13 +2526,38 @@ fn parse_apply_conflicts(stderr: &str) -> Vec<String> {
 /// On a clean apply the changes are staged and the worktree + branch removed. On conflict the base
 /// tree is restored to its pre-merge state (`reset --hard`, safe because the caller guaranteed it
 /// was clean) so nothing is left half-applied, and the worktree + branch are kept for manual work.
+#[cfg(test)]
 fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> MergeOutcome {
+    run_merge_noted(repo_root, worktree, branch).0
+}
+
+/// [`run_merge`] plus a line for the result when the checkout was fast-forwarded first.
+fn run_merge_noted(
+    repo_root: &std::path::Path,
+    worktree: &str,
+    branch: &str,
+) -> (MergeOutcome, Option<String>) {
+    let mut note = None;
+    let outcome = run_merge_inner(repo_root, worktree, branch, &mut note);
+    (outcome, note)
+}
+
+fn run_merge_inner(
+    repo_root: &std::path::Path,
+    worktree: &str,
+    branch: &str,
+    note: &mut Option<String>,
+) -> MergeOutcome {
     if let Err(e) = forge_core::worktree::commit_worktree(std::path::Path::new(worktree)) {
         return MergeOutcome::Error(format!("snapshotting the worktree failed: {e}"));
     }
     let Some(mergebase) = forge_core::worktree_base::fork_point(repo_root, branch) else {
         return MergeOutcome::Error(format!("finding the fork point of {branch} failed"));
     };
+    match forge_core::worktree_base::sync_checkout_to_fork(repo_root, &mergebase) {
+        Ok(n) => *note = n,
+        Err(msg) => return MergeOutcome::BaseBehind(msg),
+    }
     let diff = std::process::Command::new("git")
         .args([
             "-C",
@@ -2637,9 +2670,14 @@ async fn merge_session(
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     match merge_session_core(&state, &id, true).await {
-        SessionMerge::Clean { branch, base } => json_response(&serde_json::json!({
-            "ok": true, "merged": true, "branch": branch, "base": base,
+        SessionMerge::Clean { branch, base, note } => json_response(&serde_json::json!({
+            "ok": true, "merged": true, "branch": branch, "base": base, "note": note,
         })),
+        SessionMerge::BaseBehind(message) => err_response_coded(
+            axum::http::StatusCode::CONFLICT,
+            "base_behind_session",
+            &message,
+        ),
         SessionMerge::Refused(status, message) => err_response(status, &message),
         SessionMerge::Dirty(dirty) => conflict_json(serde_json::json!({
             "error": "the base branch has uncommitted changes — commit or stash them, then merge",
@@ -2674,7 +2712,14 @@ pub(crate) fn conflict_json(body: serde_json::Value) -> Response {
 /// What [`merge_session_core`] did with one session.
 pub(crate) enum SessionMerge {
     /// Applied and staged; the worktree, branch and session are gone.
-    Clean { branch: String, base: String },
+    Clean {
+        branch: String,
+        base: String,
+        /// Set when the checkout was fast-forwarded to the session's start before merging.
+        note: Option<String>,
+    },
+    /// The checkout is behind where the session started; nothing merged, session left running.
+    BaseBehind(String),
     /// Refused before anything was touched (unknown session, no worktree, already claimed).
     Refused(axum::http::StatusCode, String),
     /// Refused because the base repo has uncommitted tracked changes; the session is untouched.
@@ -2761,10 +2806,11 @@ pub(crate) async fn merge_session_core(
     stop_and_join(handle).await;
     let outcome = {
         let (root, br, wt) = (repo_root.clone(), branch.clone(), worktree.clone());
-        tokio::task::spawn_blocking(move || run_merge(&root, &wt, &br))
+        tokio::task::spawn_blocking(move || run_merge_noted(&root, &wt, &br))
             .await
-            .unwrap_or_else(|e| MergeOutcome::Error(format!("merge task failed: {e}")))
+            .unwrap_or_else(|e| (MergeOutcome::Error(format!("merge task failed: {e}")), None))
     };
+    let (outcome, note) = outcome;
     // Conflicts and hard errors both mean nothing was merged — the worktree + branch are still
     // there (run_merge either never applied anything or reset --hard'd the base back). Both must
     // respawn the driver and re-register the session so it stays visible in the fleet instead of
@@ -2792,6 +2838,13 @@ pub(crate) async fn merge_session_core(
             (MergeOutcome::Error(msg), Err(e)) => SessionMerge::Failed(format!(
                 "merge failed: {msg}; additionally the session failed to restart: {e}"
             )),
+            (MergeOutcome::BaseBehind(msg), Ok(handle)) => {
+                state.registry.insert(handle, &state.store).await;
+                SessionMerge::BaseBehind(msg)
+            }
+            (MergeOutcome::BaseBehind(msg), Err(e)) => SessionMerge::Failed(format!(
+                "{msg}; additionally the session failed to restart: {e}"
+            )),
             (MergeOutcome::Clean, _) => unreachable!("Clean is filtered out above"),
         };
     }
@@ -2803,6 +2856,7 @@ pub(crate) async fn merge_session_core(
     SessionMerge::Clean {
         branch,
         base: repo_root.display().to_string(),
+        note,
     }
 }
 
@@ -5517,6 +5571,112 @@ pub(crate) mod tests {
         edit(&wt);
         let outcome = run_merge(&repo, wt.to_str().unwrap(), "forge/merge-test");
         (dir, outcome)
+    }
+
+    /// A bare origin with `main`, the user's checkout (`mine`) and a clone (`other`) that pushes
+    /// three commits (one adds `up.txt`) the checkout has not pulled. A session worktree is cut
+    /// from the fetched `origin/main` tip, as a fresh-base daemon session is.
+    fn stale_checkout_with_fresh_session(
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let run = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let seed = root.join("seed");
+        std::fs::create_dir(&seed).unwrap();
+        let _ = init_repo(&seed, &[("README.md", "hi\n")]);
+        run(&seed, &["branch", "-M", "main"]);
+        run(&root, &["clone", "-q", "--bare", "seed", "origin.git"]);
+        run(&root, &["clone", "-q", "origin.git", "mine"]);
+        run(&root, &["clone", "-q", "origin.git", "other"]);
+        let (mine, other) = (root.join("mine"), root.join("other"));
+        std::fs::write(other.join("up.txt"), "one\n").unwrap();
+        run(&other, &["add", "."]);
+        run(&other, &["commit", "-qm", "up"]);
+        for n in ["a", "b"] {
+            std::fs::write(other.join(n), n).unwrap();
+            run(&other, &["add", "."]);
+            run(&other, &["commit", "-qm", n]);
+        }
+        run(&other, &["push", "-q", "origin", "main"]);
+        run(&mine, &["fetch", "-q", "origin"]);
+        let wt = root.join("wt");
+        run(
+            &mine,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "forge/fresh",
+                wt.to_str().unwrap(),
+                "origin/main",
+            ],
+        );
+        std::fs::write(wt.join("up.txt"), "one\nmine\n").unwrap();
+        (dir, mine, wt)
+    }
+
+    #[test]
+    fn a_fresh_base_session_merges_into_a_stale_checkout_by_fast_forwarding_it() {
+        let (_dir, mine, wt) = stale_checkout_with_fresh_session();
+        let (outcome, note) = run_merge_noted(&mine, wt.to_str().unwrap(), "forge/fresh");
+        assert!(
+            matches!(outcome, MergeOutcome::Clean),
+            "got a non-clean outcome"
+        );
+        assert!(note.unwrap().contains("fast-forwarded"));
+        assert_eq!(
+            std::fs::read_to_string(mine.join("up.txt")).unwrap(),
+            "one\nmine\n"
+        );
+        assert!(
+            mine.join("a").exists(),
+            "upstream commits are in the checkout"
+        );
+    }
+
+    #[test]
+    fn a_fresh_base_session_is_refused_when_the_stale_checkout_cannot_be_fast_forwarded() {
+        let (_dir, mine, wt) = stale_checkout_with_fresh_session();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&mine)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["checkout", "-q", "-b", "side"]);
+        let before = git_stdout(&mine, &["rev-parse", "HEAD"]).unwrap();
+        let (outcome, _) = run_merge_noted(&mine, wt.to_str().unwrap(), "forge/fresh");
+        let MergeOutcome::BaseBehind(msg) = outcome else {
+            panic!("expected a base-behind refusal");
+        };
+        assert!(
+            msg.contains("3 commit(s) behind") && msg.contains("pull, then merge"),
+            "{msg}"
+        );
+        assert_eq!(git_stdout(&mine, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert!(!mine.join("up.txt").exists());
+    }
+
+    #[test]
+    fn index_refusals_from_git_apply_are_conflicts_not_server_errors() {
+        let stderr =
+            "error: up.txt: does not exist in index\nerror: new.txt: already exists in index\n";
+        assert_eq!(parse_apply_conflicts(stderr), vec!["up.txt", "new.txt"]);
     }
 
     #[test]

@@ -217,7 +217,9 @@ async fn merge_locked(state: &DaemonState, id: &str) -> Result<(Report, Dispatch
                 ));
                 break;
             }
-            SessionMerge::Refused(_, message) | SessionMerge::Failed(message) => {
+            SessionMerge::Refused(_, message)
+            | SessionMerge::BaseBehind(message)
+            | SessionMerge::Failed(message) => {
                 report.stopped_at = Some(stop(&title, message, Vec::new()));
                 break;
             }
