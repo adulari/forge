@@ -25,7 +25,11 @@ describe("desktop updater coordination", () => {
     mocks.downloadAndInstall.mockReset();
     mocks.relaunch.mockReset();
     mocks.invoke.mockReset();
-    mocks.invoke.mockResolvedValue(true);
+    mocks.invoke.mockImplementation(async (command: string) => {
+      if (command === "desktop_update_installing") return false;
+      if (command === "desktop_update_installed_version") return null;
+      return true;
+    });
   });
 
   it("publishes one discovered update and installs that exact signed artifact", async () => {
@@ -52,6 +56,25 @@ describe("desktop updater coordination", () => {
 
     await installDesktopUpdate();
     expect(mocks.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(mocks.relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not install over a background install that is already writing the update", async () => {
+    mocks.check.mockResolvedValue({ version: "3.1.0", body: "", downloadAndInstall: mocks.downloadAndInstall });
+    await checkDesktopUpdate();
+    mocks.invoke.mockImplementation(async (command: string) => command === "desktop_update_installing");
+    await expect(installDesktopUpdate()).rejects.toThrow("already installing");
+    expect(mocks.downloadAndInstall).not.toHaveBeenCalled();
+  });
+
+  it("relaunches straight into a release the background install already put on disk", async () => {
+    mocks.check.mockResolvedValue({ version: "3.2.0", body: "", downloadAndInstall: mocks.downloadAndInstall });
+    await checkDesktopUpdate();
+    mocks.invoke.mockImplementation(async (command: string) =>
+      command === "desktop_update_installed_version" ? "3.2.0" : command === "desktop_update_installing" ? false : true,
+    );
+    await installDesktopUpdate();
+    expect(mocks.downloadAndInstall).not.toHaveBeenCalled();
     expect(mocks.relaunch).toHaveBeenCalledTimes(1);
   });
 

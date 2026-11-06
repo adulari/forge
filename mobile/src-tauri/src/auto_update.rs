@@ -15,6 +15,16 @@ pub const INSTALLED_EVENT: &str = "forge://desktop-update-installed";
 
 /// The version installed in the background, kept so a UI that mounts after the event still sees it.
 static INSTALLED_VERSION: Mutex<Option<String>> = Mutex::new(None);
+/// A native background install is writing the update right now. The in-app Install button checks
+/// it, so the two never overwrite the same AppImage at once.
+static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A background download that stalls must not hold the six-hourly loop forever.
+const BACKGROUND_INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+#[tauri::command]
+pub fn desktop_update_installing() -> bool {
+    INSTALLING.load(std::sync::atomic::Ordering::Acquire)
+}
 
 #[tauri::command]
 pub fn desktop_update_installed_version() -> Option<String> {
@@ -362,11 +372,21 @@ async fn launch_update(app: &AppHandle, opened: &mut bool) -> Result<(), String>
 
 /// Download and install `update` for the next launch and tell the UI a restart is all that is left.
 async fn install_in_background(app: &AppHandle, update: tauri_plugin_updater::Update) {
+    use std::sync::atomic::Ordering;
+    if INSTALLING.swap(true, Ordering::AcqRel) {
+        return;
+    }
     eprintln!(
         "forge: installing update {} in the background",
         update.version
     );
-    match update.download_and_install(|_, _| {}, || {}).await {
+    let result = tokio::time::timeout(
+        BACKGROUND_INSTALL_TIMEOUT,
+        update.download_and_install(|_, _| {}, || {}),
+    )
+    .await;
+    INSTALLING.store(false, Ordering::Release);
+    match result.unwrap_or_else(|_| Err(tauri_plugin_updater::Error::Network("timed out".into()))) {
         Ok(()) => {
             #[cfg(target_os = "linux")]
             crate::appimage_launcher::neutralize_current();
