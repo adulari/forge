@@ -17,7 +17,7 @@ Exactly one of `--every` / `--at` / `--cron` selects the schedule:
 
 | Flag | Format | Meaning |
 |------|--------|---------|
-| `--every` | `<N><unit>`, unit `s`/`m`/`h`/`d` (`30m`, `1h`, `1d`) | fixed interval |
+| `--every` | `<N><unit>`, unit `s`/`m`/`h`/`d` (`30m`, `1h`, `1d`) | fixed interval, at least `60s` |
 | `--at` | `HH:MM` | once a day at that local time |
 | `--cron` | 5-field cron (`0 3 * * 1-5`), translated to systemd / launchd / Task Scheduler; a raw `OnCalendar=` string still works on Linux | calendar schedule |
 
@@ -29,7 +29,7 @@ Policy flags on `add` (all optional, also editable in the app):
 | Flag | Meaning |
 |------|---------|
 | `--tz Europe/Amsterdam` | read `--at` / `--cron` on that zone's clock (systemd `OnCalendar=... <zone>`; Linux only) |
-| `--max-runtime <min>` | kill a tick that runs longer |
+| `--max-runtime <min>` | kill a tick (and its whole process tree) that runs longer; defaults to 60 minutes |
 | `--max-runs <n>` | pause the schedule after n ticks (a one-time schedule is a dated cron with `--max-runs 1`) |
 | `--retries <0-5>` | re-run a failed tick with doubling backoff (60s base) |
 | `--stop-on-error` | pause the schedule when a tick fails |
