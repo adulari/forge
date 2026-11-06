@@ -136,7 +136,11 @@ pub(crate) fn export_to_claude_in(
 
     let mut leaf = link.cc_last_uuid.clone();
     let mut cc_gained = false;
-    if len > link.cc_synced_bytes as u64 {
+    if len < link.cc_synced_bytes as u64 {
+        // Rewritten or truncated since the last sync (a rewind, an edit): the recorded leaf may
+        // be gone, and appending under it would orphan Forge's turns. Anchor to what is there now.
+        leaf = Transcript::scan_from(&path, 0)?.last_uuid;
+    } else if len > link.cc_synced_bytes as u64 {
         let tail = Transcript::scan_from(&path, link.cc_synced_bytes as u64)?;
         if tail.last_uuid.is_some() {
             leaf = tail.last_uuid.clone();
