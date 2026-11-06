@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use crate::cli::commands::run::goal_envelope as envelope;
 use crate::cli::commands::run::goal_envelope::EnvelopeSources;
 use crate::serve::{err_response, json_response, DaemonState};
-use crate::serve_issues::{request_root, start_in, StartRequest};
+use crate::serve_issues::{project_root, request_root, start_in, StartRequest};
 use crate::serve_pr::Gh;
 use crate::serve_pr_watch::{Mode, Phase, Watch};
 
@@ -389,7 +389,9 @@ async fn create(
     let root = request_root(state, request.session.as_deref(), request.cwd.as_deref())
         .await
         .map_err(|(status, message)| Box::new(err_response(status, &message)))?;
-    let cwd = root.display().to_string();
+    // A session in a worktree answers with the worktree; items start from the main checkout, the
+    // only path `request_root(cwd)` accepts as a project.
+    let cwd = project_root(&root).display().to_string();
     for other in reg
         .all()
         .iter()

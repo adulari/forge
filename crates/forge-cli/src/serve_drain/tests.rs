@@ -517,3 +517,87 @@ async fn a_drain_over_mock_sessions_starts_two_then_the_rest_as_they_finish() {
 
     std::env::remove_var("FORGE_DB");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_seeded_from_a_worktree_session_stores_the_main_checkout_and_starts_its_items() {
+    let _env = FORGE_DB_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("FORGE_DB", dir.path().join("drain.db"));
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let state = mock_state(&repo);
+    let seed = start_session(
+        &state,
+        CreateSessionReq {
+            cwd: Some(repo.display().to_string()),
+            worktree: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .ok()
+    .unwrap();
+    let handle = state.registry.get(&seed.session_id).await.unwrap();
+    let worktree = handle.worktree.clone().expect("a worktree session");
+    assert_ne!(
+        std::fs::canonicalize(&worktree).unwrap(),
+        std::fs::canonicalize(&repo).unwrap()
+    );
+    let gh_dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(gh_dir.path());
+    let reg = DrainRegistry::new(None);
+
+    let created = create(
+        &state,
+        &reg,
+        CreateRequest {
+            session: Some(seed.session_id.clone()),
+            cwd: None,
+            numbers: vec![1],
+            parallel: Some(1),
+            budget: None,
+            worktree: true,
+            mode: Mode::Fix,
+            method: None,
+        },
+    )
+    .await
+    .ok()
+    .unwrap();
+    assert_eq!(
+        std::fs::canonicalize(&created.cwd).unwrap(),
+        std::fs::canonicalize(&repo).unwrap(),
+        "the drain belongs to the main checkout, not the worktree"
+    );
+
+    let src = EnvelopeSources::from_store(&state.store, 0.0);
+    sweep(&state, &gh, &reg, &src).await;
+    let item = &reg.get(&created.id).unwrap().items[0];
+    assert!(
+        item.session_id.is_some(),
+        "item failed to start: {:?}",
+        item.outcome
+    );
+
+    std::env::remove_var("FORGE_DB");
+}
+
+fn mock_state(repo: &Path) -> Arc<DaemonState> {
+    Arc::new(DaemonState {
+        registry: Arc::new(SessionRegistry::new()),
+        terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+        store: Arc::new(crate::open_store().unwrap()),
+        base: "/tok".into(),
+        mock: true,
+        default_cwd: repo.display().to_string(),
+        project_roots: Vec::new(),
+        push: None,
+        apns: None,
+        voice: crate::voice::VoiceState::new(),
+        anywhere_enable: tokio::sync::watch::channel(false).0,
+    })
+}

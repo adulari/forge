@@ -393,7 +393,7 @@ async fn issue_start(
 
 /// The checkout a new worktree should branch from: the repository's main checkout even when the
 /// session that asked runs in one of its worktrees.
-fn project_root(root: &Path) -> PathBuf {
+pub(crate) fn project_root(root: &Path) -> PathBuf {
     git_stdout(
         root,
         &["rev-parse", "--path-format=absolute", "--git-common-dir"],
