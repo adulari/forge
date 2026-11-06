@@ -21,18 +21,20 @@ import { useToast } from "../ds/ToastHost";
 import { haptics } from "../../lib/haptics";
 import { allowInput } from "../../lib/permissionNote";
 import { useHotkey } from "../../lib/shortcuts";
-import { type Diff, type RemoteInput } from "../../lib/ws";
+import { type Diff, type PermissionSuggestion, type RemoteInput } from "../../lib/ws";
 import { durations, easings } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space } from "../../theme/tokens";
 import { formatRelativeTime, type as typeScale } from "../../theme/typography";
 import { DiffCard } from "../review/DiffCard";
-import { offersSessionAllow, permissionPromptParts } from "../../lib/permissionPrompt";
+import { offersSessionAllow, permissionPromptParts, suggestionCopy } from "../../lib/permissionPrompt";
 
 export interface PermissionCardProps {
   prompt: string;
   diff: Diff | null;
   promptSeq: number;
+  /** A project rule the host offers because this shape was allowed several times here. */
+  suggestion?: PermissionSuggestion | null;
   send: (input: RemoteInput) => boolean;
   onQueueAnswer?: (input: Extract<RemoteInput, { kind: "allow" | "answer" }>) => void;
 }
@@ -48,7 +50,7 @@ const DIFF_MAX_HEIGHT_RATIO = 0.25;
 // up and re-enabling them.
 const ACK_TIMEOUT_MS = 5_000;
 
-export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }: PermissionCardProps) {
+export function PermissionCard({ prompt, diff, promptSeq, suggestion, send, onQueueAnswer }: PermissionCardProps) {
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const toast = useToast();
@@ -110,7 +112,7 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
   const locked = lockedSeq === promptSeq;
   const parts = permissionPromptParts(prompt);
 
-  const respond = (yes: boolean, scope?: "session") => {
+  const respond = (yes: boolean, scope?: "session" | "rule") => {
     if (locked) return;
     setLockedSeq(promptSeq);
     setCommitted(yes ? "allow" : "deny");
@@ -195,6 +197,21 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
           ) : null}
           {noteOpen ? <Text style={[typeScale.sub, { color: tokens.ink3 }, styles.noteHint]}>Sent with Allow or Deny</Text> : null}
           {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
+          {suggestion ? (
+            <View style={styles.suggestion}>
+              <Button
+                label={suggestionCopy(suggestion).label}
+                variant="secondary"
+                onPress={() => respond(true, "rule")}
+                disabled={locked}
+                accessibilityLabel={`Always allow ${suggestion.rule} in this project`}
+                testID="permission-accept-rule"
+              />
+              <Text style={[typeScale.sub, { color: tokens.ink3 }, styles.suggestionHint]}>
+                {suggestionCopy(suggestion).detail}
+              </Text>
+            </View>
+          ) : null}
           {offersSessionAllow(prompt) ? (
             <Button
               label="Allow for session"
@@ -267,4 +284,6 @@ const styles = StyleSheet.create({
   allowBtn: { flex: 1.4 },
   denyBtn: { flex: 1 },
   sessionBtn: { marginBottom: space.space8 },
+  suggestion: { marginBottom: space.space8 },
+  suggestionHint: { marginTop: space.space4 },
 });

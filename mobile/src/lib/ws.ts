@@ -193,6 +193,13 @@ export interface SnapshotGoal {
   pending: "pause" | "clear" | null;
 }
 
+/** A rule a permission prompt offers: `rule` exactly as it would be written (`cargo test *`),
+ * `allows` how many times the shape was allowed in this project. */
+export interface PermissionSuggestion {
+  rule: string;
+  allows: number;
+}
+
 export interface Snapshot {
   protocol: number;
   session_id: string;
@@ -237,6 +244,9 @@ export interface Snapshot {
   goal?: SnapshotGoal | null;
   queued: string[];
   permission_prompt: string | null;
+  /** Additive: a standing rule the pending permission prompt offers because this command shape
+   * was allowed several times in the project and never refused. Absent from an older host. */
+  permission_suggestion?: PermissionSuggestion | null;
   question: string | null;
   question_options: QuestionOption[];
   question_allow_other: boolean;
@@ -299,7 +309,9 @@ export type RemoteInput =
   // Reorders / promotes one server-queued prompt; index+text echo Snapshot.queued like dequeue.
   | { kind: "queue_move"; index: number; text: string; to: number }
   | { kind: "queue_send_now"; index: number; text: string }
-  | { kind: "allow"; yes: boolean; seq: number; note?: string; scope?: "session" }
+  // scope "session" = allow for this session; "rule" = allow and accept the offered
+  // `permission_suggestion` (writes a project always-allow rule).
+  | { kind: "allow"; yes: boolean; seq: number; note?: string; scope?: "session" | "rule" }
   | { kind: "answer"; text: string; seq: number }
   | { kind: "interrupt" }
   // Cancels one server-queued prompt; index+text echo Snapshot.queued so a shifted queue is

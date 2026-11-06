@@ -940,6 +940,30 @@ mod blocks {
     }
 
     #[test]
+    fn an_offered_rule_is_the_fifth_choice_with_its_exact_text_and_key() {
+        let mut app = App::default();
+        app.open_permission("shell", "Shell");
+        let plain = screen_rows(&app, 120, 28).join("\n");
+        assert!(!plain.contains("Always allow in this project"), "{plain}");
+        app.set_permission_suggestion(Some(crate::RuleSuggestion {
+            rule: "cargo test *".into(),
+            allows: 3,
+        }));
+        for (w, h) in [(120u16, 28u16), (60, 24)] {
+            let text = screen_rows(&app, w, h).join("\n");
+            assert!(text.contains("5  "), "{w}x{h}: {text}");
+            assert!(text.contains("`cargo test *`"), "{w}x{h}: {text}");
+            assert!(text.contains("3 "), "{w}x{h}: {text}");
+        }
+        let wide = screen_rows(&app, 120, 28).join("\n");
+        assert!(
+            wide.contains("You've allowed `cargo test *` 3× here. Always allow in this project?"),
+            "{wide}"
+        );
+        assert!(wide.contains("r always allow this rule"), "{wide}");
+    }
+
+    #[test]
     fn this_session_is_the_fourth_choice_and_tab_opens_a_note_row() {
         let mut app = App::default();
         app.open_permission("write_file", "Write");

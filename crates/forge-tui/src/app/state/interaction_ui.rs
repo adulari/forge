@@ -39,6 +39,10 @@ pub(crate) struct PendingPermission {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct InteractionUi {
     pub permission: Option<PendingPermission>,
+    /// A standing rule the open prompt offers because this command shape was allowed several times
+    /// here: `r` (or `5`) accepts it. Kept apart from `permission` because the daemon's headless
+    /// loop arms a prompt without one.
+    pub suggestion: Option<crate::RuleSuggestion>,
     /// Most recently run commands, newest first.
     pub recent_commands: Vec<String>,
     /// The newest call of each tool, so a permission prompt can show what it is about even where
@@ -99,6 +103,11 @@ impl App {
         let outcome = match key {
             KeyKind::Char('a') | KeyKind::Char('A') | KeyKind::Char('2') => {
                 ConfirmOutcome::AlwaysAllow
+            }
+            KeyKind::Char('r') | KeyKind::Char('R') | KeyKind::Char('5')
+                if self.interaction_ui.suggestion.is_some() =>
+            {
+                return Some(ConfirmReply::accepting_rule());
             }
             KeyKind::Char('y') | KeyKind::Char('Y') | KeyKind::Char('1') => ConfirmOutcome::Allow,
             KeyKind::Char('s') | KeyKind::Char('S') | KeyKind::Char('4') => {
@@ -201,6 +210,17 @@ impl App {
             }
             ConfirmOutcome::Allow | ConfirmOutcome::Deny => {}
         }
+        if answer.accept_rule {
+            let rule = self
+                .interaction_ui
+                .suggestion
+                .as_ref()
+                .map(|s| s.rule.clone())
+                .unwrap_or_default();
+            self.note(&format!(
+                "✓ `{rule}` always allowed in this project — saved to .forge/config.toml"
+            ));
+        }
         if answer.note.is_some() {
             self.note("✎ your note goes to the model with the tool result");
         }
@@ -216,6 +236,11 @@ impl App {
             note: None,
             trust_hint: None,
         });
+    }
+
+    /// Offer a standing rule at the open prompt. `None` clears it.
+    pub fn set_permission_suggestion(&mut self, suggestion: Option<crate::RuleSuggestion>) {
+        self.interaction_ui.suggestion = suggestion;
     }
 
     /// The raw JSON arguments of the call the open permission prompt is about.
@@ -318,6 +343,41 @@ mod tests {
 
     fn outcome(app: &mut App, key: KeyKind) -> Option<ConfirmOutcome> {
         app.permission_key(key).map(|reply| reply.outcome)
+    }
+
+    #[test]
+    fn r_accepts_the_offered_rule_only_while_one_is_offered() {
+        let mut app = app_with_prompt();
+        assert_eq!(app.permission_key(KeyKind::Char('r')), None);
+        app.set_permission_suggestion(Some(crate::RuleSuggestion {
+            rule: "cargo test *".into(),
+            allows: 3,
+        }));
+        for key in [KeyKind::Char('r'), KeyKind::Char('5')] {
+            let reply = app.permission_key(key).expect("accepts");
+            assert!(reply.accept_rule && reply.outcome == ConfirmOutcome::Allow);
+        }
+        assert_eq!(
+            outcome(&mut app, KeyKind::Char('y')),
+            Some(ConfirmOutcome::Allow)
+        );
+    }
+
+    #[test]
+    fn the_remote_snapshot_offers_the_rule_with_the_prompt_and_not_without_one() {
+        let mut app = App::default();
+        let offer = crate::RuleSuggestion {
+            rule: "cargo test *".into(),
+            allows: 4,
+        };
+        app.set_permission_suggestion(Some(offer.clone()));
+        assert_eq!(
+            app.remote_snapshot().permission_suggestion,
+            None,
+            "no prompt open"
+        );
+        app.prompt = Some("allow shell (Shell) [y/n]".into());
+        assert_eq!(app.remote_snapshot().permission_suggestion, Some(offer));
     }
 
     #[test]

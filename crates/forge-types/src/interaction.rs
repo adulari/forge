@@ -356,6 +356,20 @@ impl ConfirmOutcome {
 pub struct ConfirmReply {
     pub outcome: ConfirmOutcome,
     pub note: Option<String>,
+    /// The person accepted the rule the prompt offered (see [`RuleSuggestion`]): the call is
+    /// allowed and the rule is written to the project. Only meaningful after `offer_rule`
+    /// returned `true`.
+    pub accept_rule: bool,
+}
+
+/// A standing rule a permission prompt offers after the person approved the same command shape
+/// several times in a project and never refused it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuleSuggestion {
+    /// The rule exactly as it would be written, e.g. `cargo test *`.
+    pub rule: String,
+    /// How many times the shape was allowed in this project.
+    pub allows: u32,
 }
 
 impl ConfirmReply {
@@ -365,6 +379,16 @@ impl ConfirmReply {
         Self {
             outcome,
             note: (!note.is_empty()).then(|| note.to_string()),
+            accept_rule: false,
+        }
+    }
+
+    /// An allow that also accepts the offered rule.
+    pub fn accepting_rule() -> Self {
+        Self {
+            outcome: ConfirmOutcome::Allow,
+            note: None,
+            accept_rule: true,
         }
     }
 }
@@ -374,6 +398,7 @@ impl From<ConfirmOutcome> for ConfirmReply {
         Self {
             outcome,
             note: None,
+            accept_rule: false,
         }
     }
 }
@@ -386,6 +411,11 @@ pub trait Presenter: Send {
     /// way to type one keep this default.
     fn confirm_reply(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmReply {
         self.confirm(tool, side_effect).into()
+    }
+    /// Show `suggestion` on the next [`Presenter::confirm_reply`] prompt. Returns whether this
+    /// surface can: only then does the session count an answer without it as turning it down.
+    fn offer_rule(&mut self, _suggestion: &RuleSuggestion) -> bool {
+        false
     }
     fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String;
     /// Ask several questions as one form (multi-select, free text, notes). Surfaces without a

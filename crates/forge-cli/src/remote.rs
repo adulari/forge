@@ -635,6 +635,11 @@ pub struct Snapshot {
     pub queued: Vec<String>,
     /// A pending permission prompt, if the turn is blocked on a y/n.
     pub permission_prompt: Option<String>,
+    /// The standing rule the pending permission prompt offers (additive): this command shape was
+    /// allowed several times in the project and never refused. A client shows it as a secondary
+    /// button and answers `allow` with `scope: "rule"` to accept; absent from older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_suggestion: Option<forge_types::RuleSuggestion>,
     /// A pending AskUserQuestion, if the turn is blocked on a choice.
     pub question: Option<String>,
     /// The options for a pending AskUserQuestion (tappable buttons on the page).
@@ -793,6 +798,7 @@ impl Default for Snapshot {
             subagents: Vec::new(),
             queued: Vec::new(),
             permission_prompt: None,
+            permission_suggestion: None,
             question: None,
             question_options: Vec::new(),
             question_allow_other: false,
@@ -905,8 +911,9 @@ pub enum RemoteInput {
     /// typed; it reaches the model with the tool result. Absent from older clients.
     ///
     /// `scope` widens an allow: `"session"` is the TUI's "allow for this session" (a grant scoped
-    /// to what the prompt showed, not saved). Absent or unknown means allow once, so an older
-    /// client or daemon degrades to the plain allow.
+    /// to what the prompt showed, not saved); `"rule"` accepts the rule the snapshot's
+    /// `permission_suggestion` offered (a project-scoped always-allow). Absent or unknown means
+    /// allow once, so an older client or daemon degrades to the plain allow.
     Allow {
         yes: bool,
         seq: u64,
@@ -1024,6 +1031,11 @@ pub fn allow_reply(
     note: Option<&str>,
     scope: Option<&str>,
 ) -> forge_types::ConfirmReply {
+    if yes && scope == Some("rule") {
+        let mut reply = forge_types::ConfirmReply::accepting_rule();
+        reply.note = bounded_note(note);
+        return reply;
+    }
     let outcome = if yes && scope == Some("session") {
         forge_types::ConfirmOutcome::AllowSession
     } else if yes {
@@ -1031,6 +1043,10 @@ pub fn allow_reply(
     } else {
         forge_types::ConfirmOutcome::Deny
     };
+    forge_types::ConfirmReply::with_note(outcome, &bounded_note(note).unwrap_or_default())
+}
+
+fn bounded_note(note: Option<&str>) -> Option<String> {
     let note: String = note
         .unwrap_or("")
         .lines()
@@ -1039,7 +1055,8 @@ pub fn allow_reply(
         .chars()
         .take(MAX_REMOTE_NOTE_CHARS)
         .collect();
-    forge_types::ConfirmReply::with_note(outcome, &note)
+    let note = note.trim();
+    (!note.is_empty()).then(|| note.to_string())
 }
 
 /// True when a remote Allow/Answer's echoed `seq` targets the prompt that is pending NOW (see
@@ -3894,5 +3911,32 @@ mod tests {
             outcome(false, Some("session")),
             forge_types::ConfirmOutcome::Deny
         );
+    }
+
+    #[test]
+    fn the_rule_scope_accepts_the_offered_rule_only_on_an_allow() {
+        let accepted = allow_reply(true, Some("ship it"), Some("rule"));
+        assert!(accepted.accept_rule);
+        assert_eq!(accepted.outcome, forge_types::ConfirmOutcome::Allow);
+        assert_eq!(accepted.note.as_deref(), Some("ship it"));
+        assert!(!allow_reply(false, None, Some("rule")).accept_rule);
+        assert!(!allow_reply(true, None, Some("session")).accept_rule);
+        assert!(!allow_reply(true, None, None).accept_rule);
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_suggestion_only_when_there_is_one() {
+        let mut snap = Snapshot::default();
+        assert!(serde_json::to_value(&snap)
+            .unwrap()
+            .get("permission_suggestion")
+            .is_none());
+        snap.permission_suggestion = Some(forge_types::RuleSuggestion {
+            rule: "cargo test *".into(),
+            allows: 3,
+        });
+        let v = serde_json::to_value(&snap).unwrap();
+        assert_eq!(v["permission_suggestion"]["rule"], "cargo test *");
+        assert_eq!(v["permission_suggestion"]["allows"], 3);
     }
 }

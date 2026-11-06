@@ -100,6 +100,8 @@ pub enum UiMsg {
         tool: String,
         side_effect: SideEffect,
         reply: Sender<crate::ConfirmReply>,
+        /// A standing rule to offer with this prompt (approvals learn).
+        suggestion: Option<crate::RuleSuggestion>,
     },
     /// An interactive `ask_user` form: the loop shows the questions and replies with one
     /// [`forge_types::Answer`] per question (empty when dismissed).
@@ -112,11 +114,15 @@ pub enum UiMsg {
 /// A presenter that forwards everything over a channel; safe to move onto a task.
 pub struct ChannelPresenter {
     tx: Sender<UiMsg>,
+    suggestion: Option<crate::RuleSuggestion>,
 }
 
 impl ChannelPresenter {
     pub fn new(tx: Sender<UiMsg>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            suggestion: None,
+        }
     }
 }
 
@@ -141,9 +147,7 @@ impl Presenter for ChannelPresenter {
     fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
         // The sender is clonable and forwards to the render loop, so a detached recap task can emit
         // through it after the turn task has ended.
-        Some(Box::new(ChannelPresenter {
-            tx: self.tx.clone(),
-        }))
+        Some(Box::new(ChannelPresenter::new(self.tx.clone())))
     }
 
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> crate::ConfirmOutcome {
@@ -151,6 +155,11 @@ impl Presenter for ChannelPresenter {
     }
 
     fn can_answer_elicitation(&self) -> bool {
+        true
+    }
+
+    fn offer_rule(&mut self, suggestion: &crate::RuleSuggestion) -> bool {
+        self.suggestion = Some(suggestion.clone());
         true
     }
 
@@ -162,6 +171,7 @@ impl Presenter for ChannelPresenter {
                 tool: tool.to_string(),
                 side_effect,
                 reply,
+                suggestion: self.suggestion.take(),
             })
             .is_err()
         {

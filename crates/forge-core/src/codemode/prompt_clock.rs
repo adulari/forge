@@ -69,6 +69,9 @@ impl Presenter for Timed {
         let clock = self.clock.clone();
         clock.timed(|| self.inner().confirm_reply(tool, side_effect))
     }
+    fn offer_rule(&mut self, suggestion: &forge_types::RuleSuggestion) -> bool {
+        self.inner().offer_rule(suggestion)
+    }
     fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String {
         let clock = self.clock.clone();
         clock.timed(|| self.inner().ask(question, options, allow_other))

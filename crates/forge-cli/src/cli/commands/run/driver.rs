@@ -699,7 +699,9 @@ async fn drive_session(
                     tool,
                     side_effect,
                     reply,
+                    suggestion,
                 } => {
+                    st.app.set_permission_suggestion(suggestion);
                     st.app.prompt = Some(
                         st.app
                             .wire_permission_prompt(&tool, &format!("{side_effect:?}")),

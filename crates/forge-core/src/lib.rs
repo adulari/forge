@@ -5131,6 +5131,9 @@ mod tests {
     #[path = "prompt_answers.rs"]
     mod prompt_answers_tests;
 
+    #[path = "approvals_learn.rs"]
+    mod approvals_learn_tests;
+
     #[path = "tool_marks.rs"]
     mod tool_marks_tests;
 

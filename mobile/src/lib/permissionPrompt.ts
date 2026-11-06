@@ -27,3 +27,11 @@ export function offersSessionAllow(prompt: string): boolean {
   const tool = /^allow (\S+)/i.exec(prompt.trim())?.[1];
   return tool != null && tool !== "python";
 }
+
+/** The secondary button for an offered rule: the exact rule on the button, the history under it. */
+export function suggestionCopy(s: { rule: string; allows: number }): { label: string; detail: string } {
+  return {
+    label: `Always allow ${s.rule}`,
+    detail: `You've allowed ${s.rule} ${s.allows}\u00d7 here. Saved as a project rule.`,
+  };
+}

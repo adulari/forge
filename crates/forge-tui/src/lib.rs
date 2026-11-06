@@ -5,7 +5,7 @@
 
 pub use forge_types::{
     Answer, ConfirmOutcome, ConfirmReply, Presenter, PresenterEvent, QChoice, Question, ReplayItem,
-    NO_ANSWER,
+    RuleSuggestion, NO_ANSWER,
 };
 pub use question_form::{parse_structured_answers, FormOutcome, QuestionForm};
 

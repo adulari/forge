@@ -23,6 +23,7 @@ export default function CardSlot() {
         prompt={snapshot.permission_prompt}
         diff={snapshot.diff}
         promptSeq={snapshot.prompt_seq}
+        suggestion={snapshot.permission_suggestion ?? null}
         send={send}
         onQueueAnswer={setPendingAnswer}
       />

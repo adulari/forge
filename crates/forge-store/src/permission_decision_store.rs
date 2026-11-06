@@ -4,10 +4,6 @@
 
 use crate::{project_key, Result, Store};
 
-/// How a prompt was answered, as stored. `suggestion_*` rows record what the person did with an
-/// offered rule, so a declined offer is not repeated until the shape has earned it again.
-pub const DECISIONS_THAT_ALLOW: [&str; 3] = ["allow", "session", "always"];
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PermissionDecisionRow {
     pub id: i64,

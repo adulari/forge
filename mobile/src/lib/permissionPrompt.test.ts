@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { displayPermissionPrompt, offersSessionAllow, permissionPromptParts } from "./permissionPrompt";
+import { displayPermissionPrompt, offersSessionAllow, permissionPromptParts, suggestionCopy } from "./permissionPrompt";
 
 describe("displayPermissionPrompt", () => {
   it("drops the terminal's key hint and asks the question", () => {
@@ -34,5 +34,14 @@ describe("offersSessionAllow", () => {
     expect(offersSessionAllow("allow mcp__fs__read (External) [y/n]")).toBe(true);
     expect(offersSessionAllow("allow python (Shell) [y/n]")).toBe(false);
     expect(offersSessionAllow("something else")).toBe(false);
+  });
+});
+
+describe("suggestionCopy", () => {
+  it("puts the exact rule on the button and the count under it", () => {
+    expect(suggestionCopy({ rule: "cargo test *", allows: 3 })).toEqual({
+      label: "Always allow cargo test *",
+      detail: "You've allowed cargo test * 3× here. Saved as a project rule.",
+    });
   });
 });

@@ -120,6 +120,11 @@ impl App {
             } else {
                 self.prompt.clone()
             },
+            permission_suggestion: if self.form.is_some() || self.prompt.is_none() {
+                None
+            } else {
+                self.interaction_ui.suggestion.clone()
+            },
             question: self.question_prompt.clone(),
             question_options,
             question_allow_other,
@@ -739,6 +744,8 @@ pub struct RemoteSnapshot {
     pub subagents: Vec<SubagentSnapshot>,
     pub queued: Vec<String>,
     pub permission_prompt: Option<String>,
+    /// The standing rule the pending permission prompt offers, if any (approvals learn).
+    pub permission_suggestion: Option<crate::RuleSuggestion>,
     pub question: Option<String>,
     pub question_options: Vec<crate::QChoice>,
     pub question_allow_other: bool,

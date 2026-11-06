@@ -133,6 +133,7 @@ pub(crate) fn build_snapshot_frame(
             .collect(),
         queued: view.queued,
         permission_prompt: view.permission_prompt,
+        permission_suggestion: view.permission_suggestion,
         question: view.question,
         question_options: view
             .question_options
