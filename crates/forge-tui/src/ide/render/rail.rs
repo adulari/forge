@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 
 use super::{cells, clip, fill, put, rule_row, section_label, split_row};
 use crate::ide::hunk::Bucket;
-use crate::ide::model::Tier;
+use crate::ide::model::{risk_totals, Risk, Tier};
 use crate::ide::state::{Hit, IdeApp, Pane, RailFocus, RailTab};
 use crate::theme::glyphs::g;
 use crate::theme::{styles, t};
@@ -240,8 +240,19 @@ fn body(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hi
 }
 
 enum Item {
+    /// "9 look here · 31 routine" over the whole queue in view.
+    Summary,
     Group(usize),
+    /// The "Look here" / "Routine" label over a run of unreviewed files, with the run's length.
+    Section(Risk, usize),
     File(usize, usize),
+}
+
+/// A look-here file says why on a second line; reviewed and routine rows stay one line.
+fn shows_reason(row: &crate::ide::model::QueueRow) -> bool {
+    row.tier != Tier::Reviewed
+        && row.file.risk == Some(Risk::Look)
+        && !row.file.risk_reason.is_empty()
 }
 
 fn queue(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, Hit)>) {
@@ -270,9 +281,30 @@ fn queue(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, H
     }
     // Flat items so the selected row can be kept on screen and only visible ones are drawn.
     let mut items: Vec<Item> = Vec::new();
+    let totals = risk_totals(&app.rows);
+    if totals.ranked && totals.look_hunks + totals.routine_hunks > 0 {
+        items.push(Item::Summary);
+    }
     for (g_i, group) in app.groups.iter().enumerate() {
         items.push(Item::Group(g_i));
-        for r_i in 0..group.rows.len() {
+        let ranked = group.rows.iter().any(|row| row.file.risk.is_some());
+        let mut section: Option<Risk> = None;
+        for (r_i, row) in group.rows.iter().enumerate() {
+            if ranked && row.tier != Tier::Reviewed {
+                let risk = row.file.risk.unwrap_or(Risk::Look);
+                if section != Some(risk) {
+                    section = Some(risk);
+                    let count = group
+                        .rows
+                        .iter()
+                        .filter(|other| {
+                            other.tier != Tier::Reviewed
+                                && other.file.risk.unwrap_or(Risk::Look) == risk
+                        })
+                        .count();
+                    items.push(Item::Section(risk, count));
+                }
+            }
             items.push(Item::File(g_i, r_i));
         }
     }
@@ -280,17 +312,20 @@ fn queue(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, H
     let selected = open_key.and_then(|key| {
         items.iter().position(|item| match item {
             Item::File(g_i, r_i) => app.groups[*g_i].rows[*r_i].key == key,
-            Item::Group(_) => false,
+            _ => false,
         })
     });
     let height = usize::from(rect.height);
-    // Groups take two rows; count rows, not items, when finding the first visible item.
-    let row_of = |i: usize| -> usize {
-        items[..i]
-            .iter()
-            .map(|item| if matches!(item, Item::Group(_)) { 2 } else { 1 })
-            .sum()
+    // Groups take two rows, and so does a look-here file (its reason sits under the name); count
+    // rows, not items, when finding the first visible item.
+    let height_of = |item: &Item| -> usize {
+        match item {
+            Item::Group(_) => 2,
+            Item::File(g_i, r_i) if shows_reason(&app.groups[*g_i].rows[*r_i]) => 2,
+            _ => 1,
+        }
     };
+    let row_of = |i: usize| -> usize { items[..i].iter().map(height_of).sum() };
     let mut first_row = 0usize;
     if let Some(sel) = selected {
         let at = row_of(sel);
@@ -301,7 +336,7 @@ fn queue(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, H
     let mut y = rect.y;
     let mut row = 0usize;
     for item in &items {
-        let item_h = if matches!(item, Item::Group(_)) { 2 } else { 1 };
+        let item_h = height_of(item);
         if row + item_h <= first_row {
             row += item_h;
             continue;
@@ -310,6 +345,54 @@ fn queue(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, H
             break;
         }
         match item {
+            Item::Summary => {
+                let right = if totals.routine_hunks > 0 && usize::from(rect.width) > 30 {
+                    "A accept routine"
+                } else {
+                    ""
+                };
+                let right_w = cells(right) as u16;
+                let room = usize::from(rect.width).saturating_sub(2 + usize::from(right_w) + 1);
+                put(
+                    buf,
+                    rect.x + 1,
+                    y,
+                    &clip(&totals.line(), room),
+                    styles::fg().bold(),
+                    room as u16,
+                );
+                if right_w > 0 {
+                    put(
+                        buf,
+                        rect.right() - right_w - 1,
+                        y,
+                        right,
+                        styles::faint(),
+                        right_w,
+                    );
+                }
+                y += 1;
+            }
+            Item::Section(risk, count) => {
+                let noun = if *count == 1 { "file" } else { "files" };
+                let label = match risk {
+                    Risk::Look => format!("Look here {} {count} {noun}", g().sep),
+                    Risk::Routine => format!("Routine {} {count} {noun}", g().sep),
+                };
+                let style = match risk {
+                    Risk::Look => styles::muted().bold(),
+                    Risk::Routine => styles::faint(),
+                };
+                put(
+                    buf,
+                    rect.x + 2,
+                    y,
+                    &clip(&label, usize::from(rect.width).saturating_sub(3)),
+                    style,
+                    rect.width.saturating_sub(3),
+                );
+                y += 1;
+            }
             Item::Group(g_i) => {
                 let group = &app.groups[*g_i];
                 let (glyph, glyph_style) = dot(app, group.waiting, group.busy);
@@ -411,8 +494,23 @@ fn queue(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(Rect, H
                     styles::faint().patch(style),
                     w,
                 );
+                let mut row_rect = row_rect;
+                if shows_reason(queue_row) && y + 1 < rect.bottom() {
+                    put(
+                        buf,
+                        rect.x + 6,
+                        y + 1,
+                        &clip(
+                            &queue_row.file.risk_reason,
+                            usize::from(rect.width).saturating_sub(7),
+                        ),
+                        styles::faint().patch(style),
+                        rect.width.saturating_sub(7),
+                    );
+                    row_rect.height = 2;
+                }
                 hits.push((row_rect, Hit::Queue(queue_row.key.clone())));
-                y += 1;
+                y += item_h as u16;
             }
         }
         row += item_h;

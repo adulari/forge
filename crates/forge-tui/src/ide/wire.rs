@@ -15,6 +15,15 @@ pub struct WireChangedFile {
     pub dels: usize,
     #[serde(default)]
     pub content_hash: String,
+    /// `routine` or `look`; empty from a daemon that predates risk ranking.
+    #[serde(default)]
+    pub risk: String,
+    #[serde(default)]
+    pub risk_reason: String,
+    #[serde(default)]
+    pub look_hunks: usize,
+    #[serde(default)]
+    pub routine_hunks: usize,
 }
 
 /// One session (or the synthetic `unattributed` group) of `GET /api/projects/changes`.
@@ -105,6 +114,11 @@ pub struct WireHunk {
     pub header: String,
     #[serde(default)]
     pub lines: Vec<String>,
+    /// `routine` or `look`; empty from a daemon that predates risk ranking.
+    #[serde(default)]
+    pub risk: String,
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// One file of `GET /api/git/diff` or `GET /api/sessions/{id}/diff`.

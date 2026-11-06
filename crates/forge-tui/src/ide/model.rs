@@ -15,6 +15,23 @@ pub enum Tier {
     Reviewed,
 }
 
+/// The daemon's verdict on a file: every hunk routine, or something to look at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Risk {
+    Look,
+    Routine,
+}
+
+impl Risk {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "look" => Some(Risk::Look),
+            "routine" => Some(Risk::Routine),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChangedFile {
     pub path: String,
@@ -27,6 +44,11 @@ pub struct ChangedFile {
     pub conflicted: bool,
     /// A check (test, lint, build) that names this file is failing.
     pub failing: bool,
+    /// `None` from a daemon that predates risk ranking.
+    pub risk: Option<Risk>,
+    pub risk_reason: String,
+    pub look_hunks: usize,
+    pub routine_hunks: usize,
 }
 
 impl ChangedFile {
@@ -39,8 +61,61 @@ impl ChangedFile {
             hash: hash.to_string(),
             conflicted: false,
             failing: false,
+            risk: None,
+            risk_reason: String::new(),
+            look_hunks: 0,
+            routine_hunks: 0,
         }
     }
+
+    /// Sort key: files that need a look first; an unranked file counts as needing one.
+    pub fn risk_rank(&self) -> u8 {
+        u8::from(self.risk == Some(Risk::Routine))
+    }
+}
+
+/// Hunk and file counts over the files still to review ("9 look here · 31 routine").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RiskTotals {
+    /// Some file carries a verdict; without one the queue shows no risk UI.
+    pub ranked: bool,
+    pub look_hunks: usize,
+    pub routine_hunks: usize,
+    pub look_files: usize,
+    pub routine_files: usize,
+}
+
+impl RiskTotals {
+    pub fn line(&self) -> String {
+        let mut parts = Vec::new();
+        if self.look_hunks > 0 {
+            parts.push(format!("{} look here", self.look_hunks));
+        }
+        if self.routine_hunks > 0 {
+            parts.push(format!("{} routine", self.routine_hunks));
+        }
+        parts.join(" · ")
+    }
+}
+
+pub fn risk_totals(rows: &[QueueRow]) -> RiskTotals {
+    let mut totals = RiskTotals::default();
+    for row in rows {
+        let Some(risk) = row.file.risk else {
+            continue;
+        };
+        totals.ranked = true;
+        if row.tier == Tier::Reviewed {
+            continue;
+        }
+        totals.look_hunks += row.file.look_hunks;
+        totals.routine_hunks += row.file.routine_hunks;
+        match risk {
+            Risk::Look => totals.look_files += 1,
+            Risk::Routine => totals.routine_files += 1,
+        }
+    }
+    totals
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,6 +298,7 @@ pub fn build_queue(
         rows.sort_by(|a, b| {
             a.tier
                 .cmp(&b.tier)
+                .then_with(|| a.file.risk_rank().cmp(&b.file.risk_rank()))
                 .then_with(|| (b.file.adds + b.file.dels).cmp(&(a.file.adds + a.file.dels)))
                 .then_with(|| a.path.cmp(&b.path))
         });

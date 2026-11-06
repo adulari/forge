@@ -20,6 +20,10 @@ pub const HELP: &[(&str, &str)] = &[
         "a",
         "accept: stage the hunk (unstage when it is already staged)",
     ),
+    (
+        "A",
+        "accept routine: stage every hunk the queue marks routine (lockfiles, whitespace, import reorders); u undoes",
+    ),
     ("x", "revert the hunk (asks first)"),
     ("X", "revert the whole file (asks first)"),
     ("u", "undo the last revert"),
@@ -324,6 +328,7 @@ fn review_key(app: &mut IdeApp, key: KeyEvent) -> Option<Vec<IdeAction>> {
             app.advance_coach(1);
             app.accept_hunk()
         }
+        KeyCode::Char('A') => app.accept_routine(),
         KeyCode::Char('x') => {
             app.advance_coach(1);
             app.request_revert_hunk();

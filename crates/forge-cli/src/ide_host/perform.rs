@@ -49,6 +49,9 @@ pub(super) fn perform(
                     .await
             });
         }
+        IdeAction::AcceptRoutine(targets) => {
+            tokio::spawn(async move { api.accept_routine(targets).await });
+        }
         IdeAction::DiscardFile {
             session_id,
             path,

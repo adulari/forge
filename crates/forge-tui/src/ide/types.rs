@@ -133,6 +133,23 @@ pub struct HunkOutcome {
     pub is_undo: bool,
 }
 
+/// A file whose routine hunks "accept routine" should stage; `session_id` is the routed session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineTarget {
+    pub session_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutineOutcome {
+    /// Hunks that went into the index.
+    pub staged: usize,
+    /// Hunks (or files) the daemon refused, usually because the file changed meanwhile.
+    pub failed: usize,
+    /// Takes the whole accept back with `u`.
+    pub undo: Option<UndoRecord>,
+}
+
 /// Something the host learned and the IDE should reflect.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +163,7 @@ pub enum IdeEvent {
     SessionClosed(String),
     History(String, Vec<HistoryRow>),
     Hunk(HunkOutcome),
+    Routine(RoutineOutcome),
     /// A stage, commit or push finished.
     GitOp(Result<String, String>),
     Toast(ToastLevel, String),
@@ -226,6 +244,8 @@ pub enum IdeAction {
         path: String,
         undo: Option<UndoRecord>,
     },
+    /// Stage every routine hunk of these files, one hunk request each.
+    AcceptRoutine(Vec<RoutineTarget>),
     StagePaths {
         session_id: String,
         paths: Vec<String>,

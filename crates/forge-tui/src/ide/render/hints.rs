@@ -173,19 +173,22 @@ pub(super) fn draw(app: &IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Vec<(R
             ]),
             BottomTab::Terminal => pairs.extend([("h/l", "tab"), ("t", "close")]),
         },
-        _ => pairs.extend([
-            ("j/k", "files"),
-            ("n/p", "hunks"),
-            ("a", "accept"),
-            ("x", "revert"),
-            ("u", "undo"),
-            ("r", "reviewed"),
-            ("c", "comment"),
-            ("e", "edit"),
-            ("w", "why"),
-            ("S", "send review"),
-            ("m", "message"),
-        ]),
+        _ => {
+            pairs.extend([("j/k", "files"), ("n/p", "hunks"), ("a", "accept")]);
+            if app.routine_hunks() > 0 {
+                pairs.push(("A", "accept routine"));
+            }
+            pairs.extend([
+                ("x", "revert"),
+                ("u", "undo"),
+                ("r", "reviewed"),
+                ("c", "comment"),
+                ("e", "edit"),
+                ("w", "why"),
+                ("S", "send review"),
+                ("m", "message"),
+            ]);
+        }
     }
     pairs.extend([("Tab", "pane"), ("?", "help"), ("F2", "back")]);
     pairs_row(buf, rect, left_room, &pairs);

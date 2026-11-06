@@ -22,7 +22,7 @@ use ratatui::layout::Rect;
 
 use crate::board::{project_name, ConnState, FleetRow, HistoryRow, LiveSnapshot, ToastLevel};
 
-use super::hunk::{Bucket, UndoRecord};
+use super::hunk::{Bucket, HunkAction, UndoRecord};
 use super::model::{
     build_queue, flatten_queue, marks_to_json, prune_reviewed, ChangedFile, QueueAgent, QueueGroup,
     QueueRow, ReviewedMarks, Tier,
@@ -204,6 +204,11 @@ impl IdeApp {
             .count()
     }
 
+    /// Routine hunks still to review in the queue in view (what `A` would accept).
+    pub fn routine_hunks(&self) -> usize {
+        super::model::risk_totals(&self.rows).routine_hunks
+    }
+
     pub fn waiting_count(&self) -> usize {
         self.agents.iter().filter(|a| a.waiting).count()
     }
@@ -296,6 +301,7 @@ impl IdeApp {
             }
             IdeEvent::GitStatus(_, Err(_)) => {}
             IdeEvent::Diff(loaded) => self.apply_diff(loaded),
+            IdeEvent::Routine(outcome) => actions.extend(self.apply_routine(outcome)),
             IdeEvent::Snapshot(id, snap) => {
                 if snap.closed {
                     self.snapshots.remove(&id);
@@ -460,6 +466,10 @@ impl IdeApp {
                         let mut file =
                             ChangedFile::new(&f.path, status, f.adds, f.dels, &f.content_hash);
                         file.failing = self.tools.checks.failing.contains(&f.path);
+                        file.risk = super::model::Risk::parse(&f.risk);
+                        file.risk_reason = f.risk_reason.clone();
+                        file.look_hunks = f.look_hunks;
+                        file.routine_hunks = f.routine_hunks;
                         file
                     })
                     .collect(),
@@ -612,7 +622,12 @@ impl IdeApp {
         match outcome.result {
             Ok(()) => {
                 if outcome.is_undo {
-                    self.say(ToastLevel::Ok, "revert undone".to_string());
+                    let what = if outcome.action == HunkAction::Revert {
+                        "revert undone"
+                    } else {
+                        "accept undone"
+                    };
+                    self.say(ToastLevel::Ok, what.to_string());
                 } else {
                     self.say(ToastLevel::Ok, outcome.action.done().to_string());
                     if let Some(record) = outcome.undo {

@@ -371,6 +371,75 @@ impl Api {
         }));
     }
 
+    /// Stage the routine hunks of each file: read its working-tree diff, then one `stage` request
+    /// per routine hunk. A refused hunk is counted, never retried; the next changes read shows
+    /// what is left.
+    async fn accept_routine(&self, targets: Vec<forge_tui::ide::RoutineTarget>) {
+        let (mut staged, mut failed) = (0usize, 0usize);
+        let mut records: Vec<UndoRecord> = Vec::new();
+        for target in targets {
+            let diff: Result<WireDiff, CallError> = get(
+                &self.http,
+                &self.base,
+                &self.token,
+                "api/git/diff",
+                &[
+                    ("session", target.session_id.as_str()),
+                    ("path", target.path.as_str()),
+                    ("staged", "false"),
+                    ("context", "3"),
+                ],
+            )
+            .await;
+            let Ok(diff) = diff else {
+                failed += 1;
+                continue;
+            };
+            let Some(file) = diff.files.iter().find(|f| f.path == target.path) else {
+                continue;
+            };
+            let mut done = Vec::new();
+            for step in forge_tui::ide::hunk::routine_stage_steps(file) {
+                let body = serde_json::json!({
+                    "session": target.session_id,
+                    "path": target.path,
+                    "hunk_header": step.hunk_header,
+                    "patch": step.patch,
+                    "action": "stage",
+                });
+                match post(&self.http, &self.base, &self.token, "api/git/hunk", body).await {
+                    Ok(_) => {
+                        staged += 1;
+                        done.push(step);
+                    }
+                    Err(_) => failed += 1,
+                }
+            }
+            if !done.is_empty() {
+                done.reverse();
+                records.push(UndoRecord {
+                    action: forge_tui::ide::hunk::HunkAction::Unstage,
+                    ..UndoRecord::revert(
+                        target.session_id,
+                        target.path.clone(),
+                        format!("routine hunks of {}", target.path),
+                        done,
+                    )
+                });
+            }
+        }
+        let mut records = records.into_iter();
+        let undo = records.next().map(|mut first| {
+            first.with = records.collect();
+            first
+        });
+        self.send(IdeEvent::Routine(forge_tui::ide::RoutineOutcome {
+            staged,
+            failed,
+            undo,
+        }));
+    }
+
     async fn discard(&self, session: String, path: String, undo: Option<UndoRecord>) {
         let body = serde_json::json!({ "session": session, "paths": [path] });
         let result = post(&self.http, &self.base, &self.token, "api/git/discard", body).await;
@@ -846,6 +915,9 @@ mod tests {
             path: "p".into(),
             label: "l".into(),
             steps: vec![],
+            action: HunkAction::Revert,
+            unmark: vec![],
+            with: vec![],
         };
         api.hunk(
             "a".into(),

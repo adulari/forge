@@ -27,6 +27,7 @@ fn changes() -> ProjectChanges {
                     adds: 2,
                     dels: 1,
                     content_hash: "h1".into(),
+                    ..Default::default()
                 },
                 WireChangedFile {
                     path: "src/b.rs".into(),
@@ -34,6 +35,7 @@ fn changes() -> ProjectChanges {
                     adds: 1,
                     dels: 1,
                     content_hash: "h2".into(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -51,6 +53,7 @@ fn diff_file(path: &str, hunks: usize) -> WireDiffFile {
             .map(|i| WireHunk {
                 header: format!("@@ -{0},2 +{0},2 @@", i * 10 + 1),
                 lines: vec![" ctx".into(), "-old".into(), format!("+new{i}")],
+                ..Default::default()
             })
             .collect(),
         ..Default::default()
@@ -714,6 +717,7 @@ fn big_diff(lines: usize) -> WireDiffFile {
                         _ => format!("+let new_{h}_{l} = 3;"),
                     })
                     .collect(),
+                ..Default::default()
             })
             .collect(),
         ..Default::default()

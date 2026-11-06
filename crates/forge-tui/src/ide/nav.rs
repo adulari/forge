@@ -296,11 +296,13 @@ impl IdeApp {
         };
         let hunk = &parsed.wire.hunks[index];
         let patch = build_patch(&parsed.wire.path, &parsed.wire.kind, hunk);
-        let undo = (action == HunkAction::Revert).then(|| UndoRecord {
-            session_id: self.route_session(&open.session_id),
-            path: parsed.wire.path.clone(),
-            label: format!("hunk {}", hunk.header),
-            steps: vec![undo_step_for_hunk(&parsed.wire.path, hunk)],
+        let undo = (action == HunkAction::Revert).then(|| {
+            UndoRecord::revert(
+                self.route_session(&open.session_id),
+                parsed.wire.path.clone(),
+                format!("hunk {}", hunk.header),
+                vec![undo_step_for_hunk(&parsed.wire.path, hunk)],
+            )
         });
         vec![IdeAction::Hunk {
             session_id: self.route_session(&open.session_id),
@@ -380,11 +382,13 @@ impl IdeApp {
                 };
                 let undo = self.parsed().and_then(|(parsed, _)| {
                     let steps = undo_steps_for_file(&parsed.wire);
-                    (!steps.is_empty()).then(|| UndoRecord {
-                        session_id: self.route_session(&open.session_id),
-                        path: parsed.wire.path.clone(),
-                        label: format!("file {}", parsed.wire.path),
-                        steps,
+                    (!steps.is_empty()).then(|| {
+                        UndoRecord::revert(
+                            self.route_session(&open.session_id),
+                            parsed.wire.path.clone(),
+                            format!("file {}", parsed.wire.path),
+                            steps,
+                        )
                     })
                 });
                 vec![IdeAction::DiscardFile {
@@ -396,26 +400,133 @@ impl IdeApp {
         }
     }
 
-    /// `u`: put back the last revert by re-applying its reversed patch(es).
+    /// `A`: accept every routine hunk in the queue in view. A shared tree's are staged one hunk
+    /// request each; a worktree agent has no index to stage into, so its fully routine files are
+    /// marked reviewed (what `r` does). `u` takes either back.
+    pub fn accept_routine(&mut self) -> Vec<IdeAction> {
+        let mut actions = Vec::new();
+        let mut targets = Vec::new();
+        let mut marked = Vec::new();
+        for row in self.rows.clone() {
+            if matches!(row.tier, Tier::Reviewed | Tier::Conflict) || row.file.routine_hunks == 0 {
+                continue;
+            }
+            if self.is_worktree(&row.session_id) {
+                if row.file.look_hunks == 0
+                    && mark_reviewed(&mut self.marks, &row.session_id, &row.path, &row.file.hash)
+                {
+                    marked.push((row.session_id.clone(), row.path.clone()));
+                }
+            } else {
+                let routed = self.route_session(&row.session_id);
+                if !self.read_only_session(&routed) {
+                    targets.push(RoutineTarget {
+                        session_id: routed,
+                        path: row.path.clone(),
+                    });
+                }
+            }
+        }
+        if !marked.is_empty() {
+            actions.push(self.save_marks());
+            self.rebuild_queue();
+            let count = marked.len();
+            self.undo.push(UndoRecord {
+                label: "routine files reviewed".to_string(),
+                unmark: marked,
+                ..UndoRecord::revert(String::new(), String::new(), String::new(), Vec::new())
+            });
+            self.say(
+                ToastLevel::Ok,
+                format!(
+                    "marked {count} routine {} reviewed  (u undoes)",
+                    if count == 1 { "file" } else { "files" }
+                ),
+            );
+        }
+        if targets.is_empty() {
+            if actions.is_empty() {
+                self.say(ToastLevel::Info, "no routine hunks to accept".to_string());
+            }
+            return actions;
+        }
+        actions.push(IdeAction::AcceptRoutine(targets));
+        actions
+    }
+
+    /// The host finished staging: say how many hunks went in and keep the undo.
+    pub(super) fn apply_routine(&mut self, outcome: RoutineOutcome) -> Vec<IdeAction> {
+        let mut actions = vec![IdeAction::RefreshChanges];
+        let mut text = format!(
+            "staged {} routine {}",
+            outcome.staged,
+            if outcome.staged == 1 { "hunk" } else { "hunks" }
+        );
+        if outcome.staged > 0 {
+            text.push_str("  (u undoes)");
+        }
+        if outcome.failed > 0 {
+            text.push_str(&format!(
+                ", {} refused (the file changed): refreshed",
+                outcome.failed
+            ));
+        }
+        let level = if outcome.staged > 0 {
+            ToastLevel::Ok
+        } else {
+            ToastLevel::Info
+        };
+        self.say(level, text);
+        if let Some(record) = outcome.undo {
+            self.undo.push(record);
+            if self.undo.len() > UNDO_CAP {
+                self.undo.remove(0);
+            }
+        }
+        // The open diff just lost its routine hunks from the working-tree side.
+        if let Some(open) = &self.open {
+            let key = (open.session_id.clone(), open.path.clone());
+            self.cache.remove(&key);
+            self.inflight.remove(&key);
+            actions.extend(self.ensure_diff());
+            actions.push(IdeAction::FetchGitStatus(self.route_session(&key.0)));
+        }
+        actions
+    }
+
+    /// `u`: put back the last revert (re-applying its reversed patch) or take back the last
+    /// accept (unstaging the same hunks, clearing the marks it set).
     pub fn undo_last(&mut self) -> Vec<IdeAction> {
         let Some(record) = self.undo.pop() else {
             self.say(ToastLevel::Info, "nothing to undo".to_string());
             return Vec::new();
         };
-        let session_id = record.session_id.clone();
-        record
-            .steps
-            .iter()
-            .map(|step| IdeAction::Hunk {
-                session_id: session_id.clone(),
-                path: record.path.clone(),
-                header: step.hunk_header.clone(),
-                patch: step.patch.clone(),
-                action: HunkAction::Revert,
-                undo: None,
-                is_undo: true,
-            })
-            .collect()
+        let mut actions = Vec::new();
+        let mut cleared = false;
+        let mut pending = vec![record];
+        while let Some(record) = pending.pop() {
+            for (session, path) in &record.unmark {
+                cleared |= unmark_reviewed(&mut self.marks, session, path);
+            }
+            for step in &record.steps {
+                actions.push(IdeAction::Hunk {
+                    session_id: record.session_id.clone(),
+                    path: record.path.clone(),
+                    header: step.hunk_header.clone(),
+                    patch: step.patch.clone(),
+                    action: record.action,
+                    undo: None,
+                    is_undo: true,
+                });
+            }
+            pending.extend(record.with);
+        }
+        if cleared {
+            actions.push(self.save_marks());
+            self.rebuild_queue();
+            self.say(ToastLevel::Ok, "reviewed marks cleared".to_string());
+        }
+        actions
     }
 }
 

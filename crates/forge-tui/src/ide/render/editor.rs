@@ -180,8 +180,17 @@ pub(super) fn draw(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Ve
                     1 => "  1 comment".to_string(),
                     n => format!("  {n} comments"),
                 };
+                let why = match parsed.wire.hunks.get(*h) {
+                    Some(hunk) if !hunk.reason.is_empty() => {
+                        format!("  {}: {}", hunk.risk, hunk.reason)
+                    }
+                    _ => String::new(),
+                };
                 let text = pad(
-                    fit(&format!("{marker}{}{tag}", overlay.hunks[*h].header), width),
+                    fit(
+                        &format!("{marker}{}{why}{tag}", overlay.hunks[*h].header),
+                        width,
+                    ),
                     width,
                 );
                 put(buf, body.x, y, &text, style, body.width);
