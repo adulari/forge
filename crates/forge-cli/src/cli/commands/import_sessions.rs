@@ -5,7 +5,7 @@
 //! TUI's `/import`. Claude Code transcripts go through [`super::import_claude_session`]; Codex
 //! rollouts through [`super::codex_rollout`]. Source files are only ever read.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
@@ -143,11 +143,7 @@ fn scan_claude(projects: &Path, out: &mut Vec<Candidate>) {
                 continue;
             };
             let Ok(meta) = entry.metadata() else { continue };
-            if !super::switch::cc_fs::is_interactive(&path) {
-                continue;
-            }
-            let (cwd, title, prompt) = claude_head(&path);
-            let Some(title) = title.or(prompt).as_deref().and_then(clean_title) else {
+            let Some((cwd, title)) = claude_head_cached(&path, &meta) else {
                 continue;
             };
             out.push(Candidate {
@@ -164,6 +160,36 @@ fn scan_claude(projects: &Path, out: &mut Vec<Candidate>) {
             });
         }
     }
+}
+
+/// What a Claude Code transcript contributes to a scan (its cwd and title, or nothing when it is
+/// not an interactive session with a title), remembered per path while its size and mtime stay
+/// the same. A scan otherwise reads the head of every transcript, twice — about a gigabyte on a
+/// machine with a few thousand sessions — each time the picker or import screen opens.
+fn claude_head_cached(path: &Path, meta: &std::fs::Metadata) -> Option<(Option<String>, String)> {
+    type Head = Option<(Option<String>, String)>;
+    type Key = (Option<std::time::SystemTime>, u64);
+    static HEADS: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, (Key, Head)>>> =
+        std::sync::OnceLock::new();
+    let key = (meta.modified().ok(), meta.len());
+    let heads = HEADS.get_or_init(Default::default);
+    if let Some((seen, head)) = heads.lock().unwrap_or_else(|e| e.into_inner()).get(path) {
+        if *seen == key {
+            return head.clone();
+        }
+    }
+    let head = super::switch::cc_fs::is_interactive(path)
+        .then(|| {
+            let (cwd, title, prompt) = claude_head(path);
+            let title = title.or(prompt).as_deref().and_then(clean_title)?;
+            Some((cwd, title))
+        })
+        .flatten();
+    heads
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.to_path_buf(), (key, head.clone()));
+    head
 }
 
 fn scan_codex(dir: &Path, out: &mut Vec<Candidate>) {
