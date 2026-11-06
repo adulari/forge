@@ -123,13 +123,22 @@ async fn merge_locked(state: &DaemonState, id: &str) -> Result<(Report, Dispatch
     let (dirty, base_branch) = {
         let roots = roots.clone();
         tokio::task::spawn_blocking(move || {
-            let dirty: Vec<String> = roots.iter().flat_map(|r| base_dirty_tracked(r)).collect();
+            let dirty: Result<Vec<String>, String> = roots
+                .iter()
+                .map(|r| base_dirty_tracked(r))
+                .collect::<Result<Vec<_>, _>>()
+                .map(|lists| lists.into_iter().flatten().collect());
             let branch = git_stdout(&roots[0], &["rev-parse", "--abbrev-ref", "HEAD"]).ok();
             (dirty, branch)
         })
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| (Err(e.to_string()), None))
     };
+    let dirty = dirty.map_err(|why| {
+        DispatchError::Conflict(format!(
+            "could not check the base repo for uncommitted changes, so nothing was merged: {why}"
+        ))
+    })?;
     if !dirty.is_empty() {
         return Err(Refusal::Dirty(dirty));
     }

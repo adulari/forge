@@ -2344,7 +2344,9 @@ pub(crate) use crate::serve_worktree_start::worktree_repo_and_branch;
 /// worktree dirs and other untracked cruft never count). A non-empty list means merging would
 /// apply a patch on top of uncommitted work — the merge route refuses rather than do that
 /// silently. Best-effort: a git failure returns empty (the 3-way apply is the real safety net).
-pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
+/// `Err` when git could not answer (an `index.lock`, a broken repo): a merge must then refuse,
+/// because its conflict path ends in `reset --hard` and would discard work it never saw.
+pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Result<Vec<String>, String> {
     let out = std::process::Command::new("git")
         .args([
             "-C",
@@ -2355,11 +2357,12 @@ pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
         ])
         .output();
     match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout)
             .lines()
             .filter_map(|l| l.get(3..).map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
+            .collect()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -2640,10 +2643,17 @@ pub(crate) async fn merge_session_core(
         let root = repo_root.clone();
         tokio::task::spawn_blocking(move || base_dirty_tracked(&root))
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|e| Err(e.to_string()))
     };
-    if !dirty.is_empty() {
-        return SessionMerge::Dirty(dirty);
+    match dirty {
+        Ok(dirty) if !dirty.is_empty() => return SessionMerge::Dirty(dirty),
+        Ok(_) => {}
+        Err(why) => {
+            return SessionMerge::Refused(
+                StatusCode::CONFLICT,
+                format!("could not check the base repo for uncommitted changes, so nothing was merged: {why}"),
+            )
+        }
     }
 
     // Atomically claim ownership: `remove` is the only serialization point, so a concurrent
@@ -5206,6 +5216,23 @@ pub(crate) mod tests {
         edit(&wt);
         let outcome = run_merge(&repo, wt.to_str().unwrap(), "forge/merge-test");
         (dir, outcome)
+    }
+
+    #[test]
+    fn the_dirty_base_check_fails_closed_when_git_cannot_answer() {
+        let not_a_repo = tempfile::tempdir().unwrap();
+        assert!(base_dirty_tracked(not_a_repo.path()).is_err());
+        let repo = tempfile::tempdir().unwrap();
+        let _ = init_repo(repo.path(), &[("a.txt", "a\n")]);
+        assert_eq!(
+            base_dirty_tracked(repo.path()).unwrap(),
+            Vec::<String>::new()
+        );
+        std::fs::write(repo.path().join("a.txt"), "changed\n").unwrap();
+        assert_eq!(
+            base_dirty_tracked(repo.path()).unwrap(),
+            vec!["a.txt".to_string()]
+        );
     }
 
     #[test]
