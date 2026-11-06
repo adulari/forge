@@ -24,6 +24,7 @@ mod m0051_message_activity_index;
 mod m0052_permission_decision;
 mod m0053_goal_state;
 mod m0054_provider_verdict;
+mod m0055_report_indexes;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
@@ -48,6 +49,7 @@ use m0051_message_activity_index::migration_0051;
 use m0052_permission_decision::migration_0052;
 use m0053_goal_state::migration_0053;
 use m0054_provider_verdict::migration_0054;
+use m0055_report_indexes::migration_0055;
 mod usage;
 pub(super) use usage::migrate_subscription_usage;
 use usage::migration_0030;
@@ -709,6 +711,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0052,
     migration_0053,
     migration_0054,
+    migration_0055,
 ];
 
 /// Migration #31: give existing stores the `model_pricing.cache_read_per_1k` column.

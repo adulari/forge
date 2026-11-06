@@ -8,9 +8,6 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::*;
 
-/// Fewest rowids a table must span before bisecting for the window start is worth it.
-const BISECT_MIN_ROWS: i64 = 2048;
-
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ModelReportRow {
     pub model: String,
@@ -145,21 +142,19 @@ impl Store {
             }
         }
 
-        if let Some(first) = first_rowid_since(&conn, "tool_call", since)? {
+        {
             let sql = format!(
                 "SELECT m.model, COUNT(*),
                         SUM(CASE WHEN t.status = 'error' AND t.permission <> 'denied' THEN 1 ELSE 0 END)
                  FROM tool_call t JOIN message m ON m.id = t.message_id {}
-                 WHERE t.rowid >= ?3 AND t.created_at >= ?1 AND (?2 IS NULL OR ?2 IS NOT NULL)
+                 WHERE t.created_at >= ?1 AND (?2 IS NULL OR ?2 IS NOT NULL)
                    AND m.model IS NOT NULL
                  GROUP BY m.model",
                 repo_join("m")
             );
             let mut stmt = conn.prepare(&sql)?;
-            let mut bound = base_params();
-            bound.push(Value::Integer(first));
             let tools = stmt
-                .query_map(rusqlite::params_from_iter(bound), |r| {
+                .query_map(rusqlite::params_from_iter(base_params()), |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, i64>(1)?,
@@ -200,45 +195,6 @@ impl Store {
         out.sort_by(|a, b| b.calls.cmp(&a.calls).then_with(|| a.model.cmp(&b.model)));
         Ok(out)
     }
-}
-
-/// Smallest rowid whose `created_at` is at or after `since`, found by bisection because rowids
-/// grow with time and `tool_call` has no `created_at` index; scanning from there bounds the read
-/// to the window. `None` when the table has nothing that recent.
-fn first_rowid_since(conn: &Connection, table: &str, since: i64) -> Result<Option<i64>> {
-    let bounds: (Option<i64>, Option<i64>) = conn.query_row(
-        &format!("SELECT MIN(rowid), MAX(rowid) FROM {table}"),
-        [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    let (Some(mut lo), Some(mut hi)) = bounds else {
-        return Ok(None);
-    };
-    let created_at = |rowid: i64| -> Result<i64> {
-        Ok(conn
-            .query_row(
-                &format!("SELECT created_at FROM {table} WHERE rowid >= ?1 ORDER BY rowid LIMIT 1"),
-                [rowid],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(i64::MAX))
-    };
-    if hi - lo < BISECT_MIN_ROWS {
-        return Ok(Some(lo));
-    }
-    if created_at(hi)? < since {
-        return Ok(None);
-    }
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if created_at(mid)? >= since {
-            hi = mid;
-        } else {
-            lo = mid + 1;
-        }
-    }
-    Ok(Some(lo))
 }
 
 #[cfg(test)]
@@ -376,7 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn bisection_finds_the_window_start_in_a_large_tool_call_table() {
+    fn the_window_start_is_found_in_a_large_tool_call_table() {
         let (store, a, _) = seed();
         let m = store
             .add_message(&a, 1, Role::Assistant, "x", Some("x::m"))
@@ -396,5 +352,103 @@ mod tests {
         }
         let row = &store.model_report(4000, None).unwrap()[0];
         assert_eq!(row.tool_calls, 1000);
+    }
+
+    #[test]
+    fn report_queries_use_covering_indexes_and_never_scan_result_json() {
+        let (store, _, _) = seed();
+        let conn = store.lock().unwrap();
+        let plan = |sql: &str| -> String {
+            conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map([], |r| r.get::<_, String>(3))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        let tools = plan(
+            "SELECT m.model, COUNT(*), SUM(CASE WHEN t.status = 'error' AND t.permission <> 'denied' THEN 1 ELSE 0 END)
+             FROM tool_call t JOIN message m ON m.id = t.message_id
+             WHERE t.created_at >= 1 AND m.model IS NOT NULL GROUP BY m.model",
+        );
+        assert!(
+            tools.contains("COVERING INDEX idx_tool_call_report"),
+            "tool_call must be read through its covering index: {tools}"
+        );
+        let outcomes = plan("SELECT o.model FROM mesh_outcome o WHERE o.completed_at >= 1");
+        assert!(
+            outcomes.contains("idx_mesh_outcome_completed"),
+            "mesh_outcome must be range-scanned on completed_at: {outcomes}"
+        );
+    }
+
+    /// Generated-store measurement, run by hand: `FORGE_REPORT_BENCH_DIR=<dir> [FORGE_REPORT_BENCH_REUSE=1] cargo test -p
+    /// forge-agent-store --release -- --ignored report_bench --nocapture`. ~200k tool_call rows
+    /// with 4 KB results spread over 60 days, so half fall in the 30-day window.
+    #[test]
+    #[ignore]
+    fn report_bench() {
+        let dir = std::env::var("FORGE_REPORT_BENCH_DIR").expect("FORGE_REPORT_BENCH_DIR");
+        let path = std::path::Path::new(&dir).join("report-bench.db");
+        let reuse = std::env::var("FORGE_REPORT_BENCH_REUSE").is_ok() && path.exists();
+        if !reuse {
+            let _ = std::fs::remove_file(&path);
+        }
+        let opened = std::time::Instant::now();
+        let store = Store::open(&path).unwrap();
+        println!("open (runs pending migrations): {:?}", opened.elapsed());
+        let now = 1_800_000_000i64;
+        if !reuse {
+            let sid = store.create_session("/work/a", "auto").unwrap();
+            let conn = store.lock().unwrap();
+            conn.execute_batch(&format!(
+                "BEGIN;
+                 WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 3999)
+                 INSERT INTO message (id, session_id, seq, role, content, model, created_at)
+                 SELECT 'm' || i, '{sid}', i, 'assistant', 'x', 'x::model' || (i % 5), {now} - (i * 1300)
+                 FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 199999)
+                 INSERT INTO tool_call (id, message_id, tool_name, args_json, result_json, permission, status, created_at)
+                 SELECT 't' || i, 'm' || (i % 4000), 'shell', '{{}}', hex(randomblob(2048)), 'auto',
+                        CASE WHEN i % 17 = 0 THEN 'error' ELSE 'ok' END,
+                        {now} - 5_184_000 + (i * 26)
+                 FROM n;
+                 WITH RECURSIVE n(i) AS (SELECT 0 UNION ALL SELECT i + 1 FROM n WHERE i < 49999)
+                 INSERT INTO mesh_outcome (session_id, model, tier, started_at, completed_at, latency_ms, outcome, failover_hop)
+                 SELECT '{sid}', 'x::model' || (i % 5), 'standard', {now} - (i * 100) - 5, {now} - (i * 100), 900, 'success', 0
+                 FROM n;
+                 COMMIT;"
+            ))
+            .unwrap();
+        }
+        let since = now - 30 * 86_400;
+        let db_mb = std::fs::metadata(&path).unwrap().len() / 1_000_000;
+        {
+            let conn = store.lock().unwrap();
+            for sql in [
+                "SELECT m.model, COUNT(*), SUM(CASE WHEN t.status = 'error' AND t.permission <> 'denied' THEN 1 ELSE 0 END) FROM tool_call t JOIN message m ON m.id = t.message_id WHERE t.created_at >= 1 AND m.model IS NOT NULL GROUP BY m.model",
+                "SELECT o.model FROM mesh_outcome o WHERE o.completed_at >= 1",
+            ] {
+                let plan: Vec<String> = conn
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                    .unwrap()
+                    .query_map([], |r| r.get::<_, String>(3))
+                    .unwrap()
+                    .map(|r| r.unwrap())
+                    .collect();
+                println!("PLAN {plan:?}");
+            }
+        }
+        for run in 0..3 {
+            let t = std::time::Instant::now();
+            let rows = store.model_report(since, None).unwrap();
+            println!(
+                "db {db_mb} MB run {run}: model_report {:?} ({} models, {} tool calls)",
+                t.elapsed(),
+                rows.len(),
+                rows.iter().map(|r| r.tool_calls).sum::<u32>()
+            );
+        }
     }
 }

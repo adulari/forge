@@ -182,6 +182,44 @@ pub(crate) fn compact(e: &ReportEntry) -> Option<String> {
     Some(parts.join(" · "))
 }
 
+type ByModel = std::collections::HashMap<String, ReportEntry>;
+
+/// How long a computed `/models` report is reused. Drilling provider after provider in one
+/// browsing session reads the same window, so only the first drill pays for the query.
+const BROWSER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+type CacheSlot = std::sync::Mutex<Option<(std::time::Instant, u32, Arc<ByModel>)>>;
+
+fn cached_by(
+    slot: &CacheSlot,
+    now: std::time::Instant,
+    days: u32,
+    load: impl FnOnce() -> ByModel,
+) -> Arc<ByModel> {
+    let mut slot = slot.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, cached_days, report)) = slot.as_ref() {
+        if *cached_days == days && now.saturating_duration_since(*at) < BROWSER_CACHE_TTL {
+            return report.clone();
+        }
+    }
+    let report = Arc::new(load());
+    *slot = Some((now, days, report.clone()));
+    report
+}
+
+/// [`by_model`] for the TUI browser: computed on a blocking thread, so the UI task is not held
+/// for the length of the query, and reused for a minute so a second drill is free.
+pub(crate) async fn by_model_for_browser(store: Store, days: u32) -> Arc<ByModel> {
+    static SLOT: CacheSlot = std::sync::Mutex::new(None);
+    tokio::task::spawn_blocking(move || {
+        cached_by(&SLOT, std::time::Instant::now(), days, || {
+            by_model(&store, days)
+        })
+    })
+    .await
+    .unwrap_or_default()
+}
+
 /// Report cards keyed by model id, for decorating the TUI browser. Empty when the store cannot
 /// be read: the browser then simply shows no history rather than failing to open.
 pub(crate) fn by_model(store: &Store, days: u32) -> std::collections::HashMap<String, ReportEntry> {
@@ -228,6 +266,25 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_browser_report_is_computed_once_per_window_and_ttl() {
+        let slot: CacheSlot = std::sync::Mutex::new(None);
+        let t0 = std::time::Instant::now();
+        let loads = std::cell::Cell::new(0);
+        let load = || {
+            loads.set(loads.get() + 1);
+            ByModel::new()
+        };
+        cached_by(&slot, t0, 30, load);
+        cached_by(&slot, t0 + std::time::Duration::from_secs(5), 30, load);
+        cached_by(&slot, t0 + std::time::Duration::from_secs(30), 30, load);
+        assert_eq!(loads.get(), 1, "drilling again inside the TTL reuses it");
+        cached_by(&slot, t0 + std::time::Duration::from_secs(31), 7, load);
+        assert_eq!(loads.get(), 2, "another window is a different report");
+        cached_by(&slot, t0 + BROWSER_CACHE_TTL * 2, 7, load);
+        assert_eq!(loads.get(), 3, "an expired report is rebuilt");
+    }
 
     #[test]
     fn compact_line_summarises_and_is_none_without_calls() {

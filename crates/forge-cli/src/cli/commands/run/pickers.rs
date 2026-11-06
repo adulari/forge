@@ -581,7 +581,9 @@ pub(crate) async fn open_models_provider(
     };
     if let Some((heading, mut rows)) = view {
         // How each model actually did for this user, from local counts (never message text).
-        let report = crate::model_report::by_model(&store, crate::model_report::DEFAULT_DAYS);
+        let report =
+            crate::model_report::by_model_for_browser(store, crate::model_report::DEFAULT_DAYS)
+                .await;
         for row in &mut rows {
             let line = report
                 .get(&row.id)
