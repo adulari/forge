@@ -276,6 +276,14 @@ fn git_risk(rest: &[String]) -> Option<String> {
             .any(|w| w.starts_with('-') && !w.starts_with("--") && w[1..].contains(c))
     };
     let reason = match sub {
+        "diff" | "log" | "show" | "blame" | "grep" | "format-patch" | "whatchanged"
+        | "shortlog" | "range-diff" | "diff-tree" | "diff-index" | "diff-files"
+            if tail
+                .iter()
+                .any(|w| super::readonly_shell::git_arg_is_hostile(sub, w)) =>
+        {
+            "git option writes a file or runs a helper program"
+        }
         "reset" if has("--hard") || has("--merge") => "git reset --hard discards work",
         "push"
             if has("--force")

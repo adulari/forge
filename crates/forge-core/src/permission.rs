@@ -692,6 +692,9 @@ mod tests {
                 assert_eq!(d("git status -s"), Allow, "{mode:?}");
                 assert_eq!(d("git log"), Allow, "{mode:?}");
                 assert_eq!(d("git push --force"), Ask, "{mode:?}");
+                assert_eq!(d("git log --output=/etc/x"), Ask, "{mode:?}");
+                assert_eq!(d("git diff --ext-diff"), Ask, "{mode:?}");
+                assert_eq!(d("git show --textconv HEAD"), Ask, "{mode:?}");
                 assert_eq!(d("git reset --hard"), Ask, "{mode:?}");
                 assert_eq!(d("git status && git clean -fdx"), Ask, "{mode:?}");
             }

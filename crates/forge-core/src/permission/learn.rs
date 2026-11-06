@@ -145,6 +145,14 @@ const REFUSED_SUB: &[(&str, &[&str])] = &[
             "x",
         ],
     ),
+    ("pnpm", &["publish", "exec", "dlx", "x", "login", "logout"]),
+    (
+        "yarn",
+        &["publish", "exec", "dlx", "npm", "login", "logout"],
+    ),
+    ("bun", &["publish", "x", "exec", "login", "logout"]),
+    ("uv", &["tool", "run", "publish"]),
+    ("rustup", &["run"]),
 ];
 
 /// Git is the one tool where a positive list is safer than a deny list: `push --force`, `reset
@@ -189,6 +197,21 @@ fn shell_shape(args: &Value) -> Option<Shape> {
     let base = if SUBCOMMAND.contains(&program) {
         let sub = second.filter(|s| plain_word(s, false))?;
         if program == "git" && !GIT_SUB.contains(&sub) {
+            return None;
+        }
+        if program == "git"
+            && words[2..]
+                .iter()
+                .any(|a| super::readonly_shell::git_arg_is_hostile(sub, a))
+        {
+            return None;
+        }
+        if program == "go"
+            && sub == "run"
+            && words
+                .get(2)
+                .is_some_and(|t| t.contains('@') || t.contains('/'))
+        {
             return None;
         }
         if REFUSED_SUB
@@ -389,6 +412,42 @@ mod tests {
         ] {
             assert_eq!(shape(cmd), None, "{cmd:?}");
         }
+    }
+
+    #[test]
+    fn git_write_and_exec_options_have_no_shape() {
+        for cmd in [
+            "git log --output=/tmp/x",
+            "git diff --output /tmp/x",
+            "git diff --ext-diff",
+            "git show --textconv HEAD",
+            "git blame -Osh f",
+            "git log --open-files-in-pager=sh",
+            "git commit -c HEAD",
+        ] {
+            assert_eq!(shape(cmd), None, "{cmd:?}");
+        }
+        assert_eq!(shape("git log --oneline -5").as_deref(), Some("git log *"));
+    }
+
+    #[test]
+    fn program_runners_have_no_shape() {
+        for cmd in [
+            "bun x foo",
+            "pnpm dlx foo",
+            "pnpm exec foo",
+            "yarn dlx foo",
+            "yarn exec foo",
+            "uv run pytest",
+            "uv tool run ruff",
+            "uv tool install ruff",
+            "rustup run stable cargo build",
+            "go run example.com/x@latest",
+        ] {
+            assert_eq!(shape(cmd), None, "{cmd:?}");
+        }
+        assert_eq!(shape("go run .").as_deref(), Some("go run *"));
+        assert_eq!(shape("bun run build").as_deref(), Some("bun run build *"));
     }
 
     #[test]
