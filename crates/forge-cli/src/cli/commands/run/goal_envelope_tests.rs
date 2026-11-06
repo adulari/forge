@@ -115,3 +115,40 @@ fn the_goal_record_round_trips_through_json() {
     app.goal_clear();
     assert!(GoalRecord::of(&app).is_none());
 }
+
+#[test]
+fn a_restart_restores_the_goal_paused_with_its_envelope_and_counters() {
+    let store = forge_store::Store::open_in_memory().unwrap();
+    let id = store.create_session("/tmp", "Default").unwrap();
+    let mut app = forge_tui::App::default();
+    let mut envelope = EnvelopeState::new(
+        EnvelopeSpec::parse("claude:20%w", None).unwrap(),
+        40.0,
+        Some(9),
+    );
+    envelope.used = 20.0;
+    envelope.spent = true;
+    app.pending_envelope = Some(envelope);
+    app.goal_begin(
+        "harden the importer",
+        &["cargo test".to_string()],
+        None,
+        Some(30),
+    );
+    app.goal_sync(4, 1234, 90);
+    store
+        .set_session_goal_state(&id, GoalRecord::of(&app).as_deref())
+        .unwrap();
+
+    let mut fresh = forge_tui::App::default();
+    restore(&mut fresh, &store, &id);
+    let goal = fresh.goal.as_ref().expect("restored");
+    assert_eq!(goal.phase, forge_tui::goal_status::GoalPhase::Paused);
+    assert_eq!(
+        (goal.iteration, goal.tokens_used, goal.elapsed_secs),
+        (4, 1234, 90)
+    );
+    assert_eq!(goal.gates, vec!["cargo test".to_string()]);
+    assert!(goal.envelope.as_ref().unwrap().spent);
+    assert!(goal.reason.as_deref().unwrap().contains("restart"));
+}

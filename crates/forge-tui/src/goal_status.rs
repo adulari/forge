@@ -235,6 +235,9 @@ impl App {
             GoalPhase::Paused => {
                 if let Some(envelope) = goal.envelope.as_mut() {
                     envelope.retarget(spec);
+                    if !envelope.spent {
+                        goal.reason = None;
+                    }
                 }
                 true
             }
