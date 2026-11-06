@@ -8,7 +8,8 @@ envelope, and one line in the brief.
 - A slot frees only when the session opens a PR, goes idle, fails, its watch blocks, or the session
   ends. A session stopped on a permission prompt or question keeps its slot, so `--parallel 2` means
   at most 2 open, unfinished issue sessions at a time in any permission mode. The next queued issue
-  starts when a slot frees. Default parallelism is 2 (max 8).
+  starts when a slot frees. Default parallelism is 2 (max 8). With `--no-worktree` every agent would
+  share one checkout and branch, so parallelism is forced to 1 and the response carries a `note`.
 - `--budget claude:30%w` (same syntax as `/goal --budget`) is baselined when the drain is created.
   Once the slice is spent nothing new starts; when the window resets the drain rebaselines on the
   new reading and carries on. A `$5` budget sums the drain's sessions' cost and never resets.

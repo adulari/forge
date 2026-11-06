@@ -632,3 +632,39 @@ fn mock_state(repo: &Path) -> Arc<DaemonState> {
         anywhere_enable: tokio::sync::watch::channel(false).0,
     })
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drain_without_worktrees_runs_one_item_at_a_time() {
+    let _env = FORGE_DB_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("FORGE_DB", dir.path().join("drain.db"));
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "a").unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "init"]);
+    let state = mock_state(&repo);
+    let reg = DrainRegistry::new(None);
+
+    let created = create(
+        &state,
+        &reg,
+        CreateRequest {
+            session: None,
+            cwd: Some(repo.display().to_string()),
+            numbers: vec![1, 2, 3],
+            parallel: Some(4),
+            budget: None,
+            worktree: false,
+            mode: Mode::Fix,
+            method: None,
+        },
+    )
+    .await
+    .ok()
+    .unwrap();
+    assert_eq!(created.parallel, 1);
+
+    std::env::remove_var("FORGE_DB");
+}

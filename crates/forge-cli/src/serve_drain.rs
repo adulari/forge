@@ -318,6 +318,9 @@ fn default_mode() -> Mode {
     Mode::Fix
 }
 
+const NO_WORKTREE_NOTE: &str =
+    "parallel was set to 1: without a worktree every agent would share one checkout and branch";
+
 fn bad(message: &str) -> Response {
     err_response(StatusCode::BAD_REQUEST, message)
 }
@@ -332,13 +335,18 @@ async fn drain_create(
     State(state): State<Arc<DaemonState>>,
     Json(request): Json<CreateRequest>,
 ) -> Response {
+    let capped = !request.worktree && request.parallel.unwrap_or(DEFAULT_PARALLEL) > 1;
     match create(&state, registry(), request).await {
         Ok(drain) => {
             let state = state.clone();
             tokio::spawn(
                 async move { sweep_with_refresh(&state, &Gh::system(), registry()).await },
             );
-            json_response(&drain.to_json())
+            let mut body = drain.to_json();
+            if capped {
+                body["note"] = json!(NO_WORKTREE_NOTE);
+            }
+            json_response(&body)
         }
         Err(response) => *response,
     }
@@ -372,6 +380,7 @@ async fn create(
             "parallel must be between 1 and {MAX_PARALLEL}"
         ))));
     }
+    let parallel = if request.worktree { parallel } else { 1 };
     let method = request.method.as_deref().unwrap_or("squash");
     if !matches!(method, "squash" | "merge" | "rebase" | "auto") {
         return Err(Box::new(bad(
