@@ -168,6 +168,7 @@ pub enum CommandAction {
     Run,
     /// Pick Claude Code and Codex conversations from this computer and import them (`/import`).
     Import,
+    Issues,
     /// Open the control-tools menu: which tools agents may use to drive the app, and what they did.
     Control,
     /// Open the agent CLI install/update menu (`/clis`).
@@ -550,6 +551,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "notes" | "todo" | "todos" => CommandAction::Notes,
         "run" | "actions" | "ports" => CommandAction::Run,
         "import" => CommandAction::Import,
+        "issues" => CommandAction::Issues,
         "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
         "control" => CommandAction::Control,
         "clis" | "agent-clis" => CommandAction::AgentClis,

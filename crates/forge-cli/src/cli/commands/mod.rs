@@ -12,6 +12,7 @@ pub(crate) mod host;
 pub(crate) mod import;
 pub(crate) mod import_claude_session;
 pub(crate) mod import_sessions;
+pub(crate) mod issues;
 pub(crate) mod lattice;
 pub(crate) mod local;
 pub(crate) mod marketplace;

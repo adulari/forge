@@ -66,6 +66,7 @@ pub(crate) fn key_goes_to_card(app: &App, busy: bool, nothing_pending: bool) -> 
         || app.notes_overlay.open
         || app.run_menu.open
         || app.import_menu.open
+        || app.issues_menu.open
         || app.agents_menu.open
         || app.diff_overlay.open
         || app.jobs_overlay.open

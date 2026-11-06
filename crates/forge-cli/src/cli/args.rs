@@ -516,6 +516,33 @@ pub(crate) enum Command {
         #[arg(long)]
         token: Option<String>,
     },
+    /// List this project's GitHub issues, or start a session on one. `--start N` opens a worktree
+    /// session whose first prompt carries the issue (title, body, comments), arms PR Watch for it,
+    /// and tells the agent to open a pull request containing `Fixes #N`. Needs the daemon
+    /// (`forge serve --local`) and a signed-in `gh`.
+    Issues {
+        /// Start a session on this issue number instead of listing.
+        #[arg(long, value_name = "N")]
+        start: Option<u64>,
+        /// With --start: work in the project checkout instead of a new worktree.
+        #[arg(long, requires = "start")]
+        no_worktree: bool,
+        /// With --start: PR Watch mode for the session.
+        #[arg(long, value_parser = ["off", "fix", "merge"], default_value = "fix")]
+        watch: String,
+        /// With --start --watch merge: how to merge (squash, merge, rebase, auto).
+        #[arg(long, value_parser = ["squash", "merge", "rebase", "auto"])]
+        method: Option<String>,
+        /// Which issues to list.
+        #[arg(long, value_parser = ["open", "closed", "all"], default_value = "open")]
+        state: String,
+        /// Daemon base URL. Defaults to the local daemon's loopback origin.
+        #[arg(long)]
+        url: Option<String>,
+        /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Run an OpenAI-compatible HTTP endpoint backed by Forge's model mesh — embed Forge as your
     /// app's AI backend. Point any OpenAI-compatible client's `base_url` at `http://<host>:<port>/v1`
     /// and every chat completion is routed through the mesh (tier-based model choice, cross-provider

@@ -402,6 +402,8 @@ pub struct App {
     pub run_menu: crate::run_menu::RunMenu,
     /// The `/import` picker for Claude Code and Codex conversations, while open.
     pub import_menu: crate::import_menu::ImportMenu,
+    /// The `/issues` list (GitHub issues, one-key start), while open.
+    pub issues_menu: crate::issues_menu::IssuesMenu,
     /// The `/worktree` and `/project` overlay, while open.
     pub workspace_menu: crate::workspace_menu::WorkspaceMenu,
     /// The `/clis` menu (install and update the subscription CLIs), while open.

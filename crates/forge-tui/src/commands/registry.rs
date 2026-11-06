@@ -413,6 +413,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/import",
     },
     Command {
+        name: "issues",
+        desc: "list this project's GitHub issues and start a session on one",
+        usage: "/issues",
+    },
+    Command {
         name: "clis",
         desc: "install and update the Claude Code, Codex and Antigravity CLIs",
         usage: "/clis",

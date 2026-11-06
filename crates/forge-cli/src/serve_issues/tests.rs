@@ -153,7 +153,8 @@ async fn start_creates_a_worktree_session_with_the_issue_prompt_and_an_armed_wat
     let gh = issue_gh(gh_dir.path());
 
     let request = |number| StartRequest {
-        session: seed.session_id.clone(),
+        session: Some(seed.session_id.clone()),
+        cwd: None,
         number,
         worktree: true,
         branch: None,
@@ -189,6 +190,30 @@ async fn start_creates_a_worktree_session_with_the_issue_prompt_and_an_armed_wat
         ..request(12)
     };
     assert!(start_in(&state, &gh, bad).await.is_err());
+
+    // A caller without a session names a project by cwd; only known projects are accepted.
+    let root = request_root(&state, None, repo.to_str()).await.unwrap();
+    assert_eq!(root, std::fs::canonicalize(&repo).unwrap());
+    let stranger = dir.path().join("stranger");
+    std::fs::create_dir(&stranger).unwrap();
+    git(&stranger, &["init", "-q", "-b", "main"]);
+    let denied = request_root(&state, None, stranger.to_str())
+        .await
+        .unwrap_err();
+    assert_eq!(denied.0, StatusCode::FORBIDDEN);
+    let plain = dir.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    assert_eq!(
+        request_root(&state, None, plain.to_str())
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        request_root(&state, None, None).await.unwrap_err().0,
+        StatusCode::BAD_REQUEST
+    );
 
     std::env::remove_var("FORGE_DB");
 }

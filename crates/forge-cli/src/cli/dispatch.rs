@@ -162,6 +162,26 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             url,
             token,
         } => crate::cli::commands::send::send_cmd(target, message, steer, url, token).await,
+        Command::Issues {
+            start,
+            no_worktree,
+            watch,
+            method,
+            state,
+            url,
+            token,
+        } => {
+            crate::cli::commands::issues::issues_cmd(
+                start,
+                no_worktree,
+                watch,
+                method,
+                state,
+                url,
+                token,
+            )
+            .await
+        }
         Command::Api {
             host,
             port,

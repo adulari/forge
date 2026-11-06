@@ -273,6 +273,7 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
     crate::qr_overlay::render_qr_overlay(frame, app, modal_region, full);
     crate::run_menu::render_run_menu(frame, app, modal_region);
     crate::import_menu::render_import_menu(frame, app, modal_region);
+    crate::issues_menu::render_issues_menu(frame, app, modal_region);
     crate::workspace_menu::render_workspace_menu(frame, app, modal_region);
     crate::agents_menu::render_agents_menu(frame, app, modal_region);
     // The inspector sits between the header and the composer; inline, where the live region is

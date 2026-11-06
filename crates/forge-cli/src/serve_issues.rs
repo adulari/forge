@@ -7,6 +7,9 @@
 //! - `POST /api/issues/start` `{session, number, worktree?, branch?, mode?, method?}` start a
 //!   session whose first prompt carries the issue, and arm PR Watch for it
 //!
+//! Callers without a session (`forge issues`, the TUI) pass `cwd` instead of `session`; it must be
+//! one of the host's known projects, so a client still cannot point `gh` at an arbitrary folder.
+//!
 //! `gh` is run through the same runner as the PR routes, so a missing or signed-out `gh` is
 //! reported as data (`available: false`) on the read routes.
 
@@ -43,11 +46,57 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
 
 #[derive(Deserialize)]
 struct IssueQuery {
-    session: String,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
     #[serde(default)]
     state: Option<String>,
     #[serde(default)]
     number: Option<u64>,
+}
+
+/// The repository an issue request addresses: a session's, or a known project's by `cwd`.
+async fn request_root(
+    state: &DaemonState,
+    session: Option<&str>,
+    cwd: Option<&str>,
+) -> Result<PathBuf, (StatusCode, String)> {
+    if let Some(session) = session.filter(|s| !s.is_empty()) {
+        return session_repo_root(state, session).await;
+    }
+    let Some(cwd) = cwd.filter(|c| !c.trim().is_empty()) else {
+        return Err((StatusCode::BAD_REQUEST, "session or cwd is required".into()));
+    };
+    let wanted = std::fs::canonicalize(cwd)
+        .ok()
+        .filter(|p| p.is_dir())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "cwd is not a directory on this host".to_string(),
+        ))?;
+    let root = git_stdout(&wanted, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .filter(|r| !r.is_empty())
+        .map(PathBuf::from)
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "cwd is not inside a git repository".to_string(),
+        ))?;
+    let mut known = crate::serve::project_catalog_paths(state).await;
+    known.push(state.default_cwd.clone());
+    let known: Vec<PathBuf> = known
+        .iter()
+        .filter_map(|p| std::fs::canonicalize(p).ok())
+        .collect();
+    if known.iter().any(|k| *k == wanted || *k == root) {
+        Ok(root)
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "cwd is not a project on this host".into(),
+        ))
+    }
 }
 
 fn parse_json(raw: &str) -> Result<Value, GhError> {
@@ -85,7 +134,7 @@ async fn issue_list(
     State(state): State<Arc<DaemonState>>,
     Query(query): Query<IssueQuery>,
 ) -> Response {
-    let root = match session_repo_root(&state, &query.session).await {
+    let root = match request_root(&state, query.session.as_deref(), query.cwd.as_deref()).await {
         Ok(root) => root,
         Err((status, message)) => return err_response(status, &message),
     };
@@ -148,7 +197,7 @@ async fn issue_detail(
     State(state): State<Arc<DaemonState>>,
     Query(query): Query<IssueQuery>,
 ) -> Response {
-    let root = match session_repo_root(&state, &query.session).await {
+    let root = match request_root(&state, query.session.as_deref(), query.cwd.as_deref()).await {
         Ok(root) => root,
         Err((status, message)) => return err_response(status, &message),
     };
@@ -288,7 +337,10 @@ fn seed_prompt(issue: &Issue) -> String {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StartRequest {
-    session: String,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
     number: u64,
     #[serde(default = "default_true")]
     worktree: bool,
@@ -356,7 +408,7 @@ async fn start_in(
             "method must be squash, merge, rebase or auto",
         )));
     }
-    let root = session_repo_root(state, &request.session)
+    let root = request_root(state, request.session.as_deref(), request.cwd.as_deref())
         .await
         .map_err(|(status, message)| Box::new(err_response(status, &message)))?;
     let issue = view_in(gh, &root, request.number)

@@ -31,6 +31,7 @@ pub use app_btw::BtwOverlay;
 pub mod agents_menu;
 pub mod anywhere_menu;
 pub mod import_menu;
+pub mod issues_menu;
 mod session_delete;
 pub mod workspace_menu;
 pub use session_delete::{DeleteKeyOutcome, SessionDeleteDialog};
