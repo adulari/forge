@@ -684,6 +684,7 @@ async fn drive_session(
                         .observe(&e, &mut st.queued_prompts, &mut st.app);
                     if let forge_tui::PresenterEvent::Error(m) = &e {
                         turn_error = Some(m.clone());
+                        st.record_turn_failure(m);
                         // A turn-ending error only reached `view.transcript` (scrollback) before
                         // this — never `Snapshot::notes`, the remote toast/banner mechanism the
                         // mobile app renders (see the doc comment on `mobile/src/app/session/
@@ -759,6 +760,7 @@ async fn drive_session(
             if let Some(panic) = st.turn_panic.take() {
                 let m = format!("the turn crashed: {panic}");
                 turn_error = Some(m.clone());
+                st.record_turn_failure(&m);
                 push_remote_note(&mut st.notes, &format!("⚠ {m}"));
                 st.app.apply(forge_tui::PresenterEvent::Error(m));
             }
@@ -972,6 +974,14 @@ impl DriverState {
             &mut self.busy,
             &mut self.busy_since,
         ));
+    }
+
+    fn record_turn_failure(&self, error: &str) {
+        if let Some((store, id)) = &self.interrupt_record {
+            if let Err(err) = store.note_turn_failure(id, error) {
+                tracing::warn!(session = %id, error = %err, "could not record the turn failure");
+            }
+        }
     }
 
     /// Abort the running turn; returns whether a queued prompt was started in its place.

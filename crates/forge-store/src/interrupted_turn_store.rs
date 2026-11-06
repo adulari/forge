@@ -141,6 +141,21 @@ impl Store {
             .map(|_| ())
     }
 
+    /// Append the UI-only note that records why a turn failed. Without it the failure lived only
+    /// in the live snapshot: history read later showed an unanswered prompt, and a restart took the
+    /// failed turn for one it had cut off and re-drove it.
+    pub fn note_turn_failure(&self, session_id: &str, error: &str) -> Result<()> {
+        let seq = self.next_message_seq(session_id)?;
+        let error: String = error.chars().take(500).collect();
+        self.add_ui_note(
+            session_id,
+            seq,
+            Role::System,
+            &format!("⚠ Turn failed: {error}"),
+        )
+        .map(|_| ())
+    }
+
     /// Append the UI-only note that tells the user a restart cut the turn off.
     pub fn note_restart_interrupt(&self, session_id: &str, will_continue: bool) -> Result<()> {
         let seq = self.next_message_seq(session_id)?;
@@ -198,6 +213,15 @@ mod tests {
             store.session_tail_state(&sid).unwrap(),
             TailState::Interrupted(InterruptedTail::UnansweredPrompt)
         );
+    }
+
+    #[test]
+    fn a_failed_turn_is_finished_not_cut_off() {
+        let (store, sid) = store_with_session();
+        store
+            .note_turn_failure(&sid, "provider busy (503 no_capacity)")
+            .unwrap();
+        assert_eq!(store.session_tail_state(&sid).unwrap(), TailState::Finished);
     }
 
     #[test]
