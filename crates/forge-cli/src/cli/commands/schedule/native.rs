@@ -136,7 +136,8 @@ pub(super) fn render_systemd_timer(
     ))
 }
 
-fn quote_unit_arg(s: &str) -> String {
+/// One systemd `ExecStart=` argument, quoted and with `%`, `$` and `\\` escaped.
+pub(crate) fn quote_unit_arg(s: &str) -> String {
     format!(
         "\"{}\"",
         s.replace('%', "%%")

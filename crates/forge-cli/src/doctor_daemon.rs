@@ -42,7 +42,11 @@ impl DaemonVersion {
 fn unit_exec_start(unit: &str) -> &str {
     unit.lines()
         .find_map(|l| l.trim().strip_prefix("ExecStart="))
-        .and_then(|cmd| cmd.split_whitespace().next())
+        .and_then(|cmd| match cmd.strip_prefix('"') {
+            // Units written since the path is quoted (it may contain spaces).
+            Some(quoted) => quoted.split('"').next(),
+            None => cmd.split_whitespace().next(),
+        })
         .unwrap_or_default()
 }
 
@@ -235,6 +239,16 @@ mod tests {
         assert!(guard.fix.is_some(), "must say how to fix it");
         // Same binary path, so only the guard should be reported — not a spurious binary mismatch.
         assert!(out.iter().all(|c| c.label != "daemon binary"));
+    }
+
+    #[test]
+    fn a_quoted_exec_start_path_is_read_whole() {
+        let unit = "[Service]\nExecStart=\"/home/me/My Tools/forge\" serve --port 7420\n";
+        assert_eq!(super::unit_exec_start(unit), "/home/me/My Tools/forge");
+        assert_eq!(
+            super::unit_exec_start("[Service]\nExecStart=/usr/bin/forge serve\n"),
+            "/usr/bin/forge"
+        );
     }
 
     #[test]

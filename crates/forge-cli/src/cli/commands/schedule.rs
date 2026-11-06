@@ -337,7 +337,7 @@ pub(crate) use cron::parse_posix_cron;
 
 // ---------------------------------------------------------------------------
 mod native;
-pub(crate) use native::{install_timer, uninstall_timer};
+pub(crate) use native::{install_timer, quote_unit_arg, uninstall_timer};
 pub(crate) mod tick;
 #[cfg(test)]
 use native::{

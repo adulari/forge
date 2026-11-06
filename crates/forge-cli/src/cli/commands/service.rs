@@ -407,7 +407,7 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          # ignores it under [Service], which is where it was first written — the alarm looked\n\
          # installed and never fired.\n\
          OnFailure={}\n\n\
-         [Service]\nExecStart={forge_exe} serve {} --port {port}\nRestart=on-failure\n\
+         [Service]\nExecStart={} serve {} --port {port}\nRestart=on-failure\n\
          # A permanent failure (exit 78 = EX_CONFIG, e.g. a store this build cannot open) cannot be\n\
          # fixed by retrying. Without this the daemon restarts forever — 632 times in one observed\n\
          # case, with Anywhere down throughout and the unit still reporting `activating`. Stopping\n\
@@ -423,6 +423,7 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          [Install]\nWantedBy=default.target\n",
         env!("CARGO_PKG_VERSION"),
         super::service_alert::ALERT_UNIT_NAME,
+        super::schedule::quote_unit_arg(forge_exe),
         exposure.flag()
     )
 }
@@ -812,7 +813,9 @@ mod tests {
     #[test]
     fn systemd_service_unit_contains_exec_and_restart_policy() {
         let unit = render_systemd_service("/usr/local/bin/forge", Exposure::Lan, 7420);
-        assert!(unit.contains("ExecStart=/usr/local/bin/forge serve --lan --port 7420"));
+        assert!(unit.contains("ExecStart=\"/usr/local/bin/forge\" serve --lan --port 7420"));
+        let spaced = render_systemd_service("/home/me/My Tools/forge", Exposure::Lan, 7420);
+        assert!(spaced.contains("ExecStart=\"/home/me/My Tools/forge\" serve --lan --port 7420"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("OOMPolicy=continue"));
         assert!(
