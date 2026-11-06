@@ -21,6 +21,7 @@ import { IconButton } from "../../components/ds/IconButton";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { TaskComposer } from "../../components/ds/TaskComposer";
+import { AwayCard } from "../../components/fleet/AwayCard";
 import { OfflineHosts } from "../../components/fleet/OfflineHosts";
 import { ProjectChips } from "../../components/fleet/ProjectChips";
 import { ServerScopePills } from "../../components/fleet/ServerScopePills";
@@ -260,6 +261,9 @@ export function FleetScreen() {
     return (
       <Screen scroll={false}>
         <View style={styles.expandedEmpty}>
+          <View style={styles.expandedAway}>
+            <AwayCard />
+          </View>
           <Flame size={34} color={tokens.borderStrong} strokeWidth={1.5} />
           <Text style={[styles.expandedEmptyMessage, { color: tokens.ink3 }]}>
             Pick a session from the fleet — or forge a new one
@@ -285,6 +289,7 @@ export function FleetScreen() {
     <Screen scroll={false} contentContainerStyle={styles.screen}>
       <FleetTitle />
       {pickerState === "ready" ? <FleetSummary sessions={data} needsYouOnly={needsYouOnly} onToggleNeedsYou={() => setNeedsYouOnly((value) => !value)} /> : null}
+      <AwayCard />
       <ServerScopePills />
       <ProjectChips chips={chips} selected={activeProject} onSelect={setProject} />
       {showingLastKnown ? (
@@ -362,6 +367,7 @@ const styles = StyleSheet.create({
   composer: { position: "absolute", left: space.space16, right: space.space16 },
   keyboardAnchor: { position: "absolute", left: 0, right: 0, bottom: 0, height: 0 },
   expandedEmpty: { flex: 1, alignItems: "center", justifyContent: "center", gap: space.space16, paddingHorizontal: space.space24 },
+  expandedAway: { width: 560, maxWidth: "100%" },
   expandedEmptyMessage: { fontSize: 14, lineHeight: 20, textAlign: "center" },
   expandedComposerWrap: { position: "relative", width: 560, maxWidth: "100%" },
   expandedComposerHintWrap: { position: "absolute", right: 54, top: 0, bottom: 0, alignItems: "center", justifyContent: "center" },
