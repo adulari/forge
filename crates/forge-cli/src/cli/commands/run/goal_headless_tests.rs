@@ -93,6 +93,7 @@ fn spec(gates: &[&str], max_tokens: Option<u64>) -> GoalRunSpec {
         gates: gates.iter().map(|g| g.to_string()).collect(),
         max_tokens,
         max_minutes: None,
+        budget: None,
     }
 }
 
@@ -226,4 +227,18 @@ async fn an_interrupt_stops_cleanly_and_is_not_met() {
         .await
         .unwrap();
     assert!(matches!(end, GoalRunEnd::NotMet(_)));
+}
+
+#[tokio::test]
+async fn a_headless_goal_refuses_an_envelope_instead_of_ignoring_it() {
+    let mut h = harness(|_| verdict_json(false, &[]));
+    let end = run(
+        &mut h,
+        GoalRunSpec {
+            budget: Some("claude:2%w".into()),
+            ..spec(&[], None)
+        },
+    )
+    .await;
+    assert!(matches!(end, GoalRunEnd::NotMet(r) if r.contains("--budget")));
 }

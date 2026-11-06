@@ -18,6 +18,7 @@ pub(crate) struct GoalRunSpec {
     pub(crate) gates: Vec<String>,
     pub(crate) max_tokens: Option<u64>,
     pub(crate) max_minutes: Option<u64>,
+    pub(crate) budget: Option<String>,
 }
 
 /// `Some` when `prompt` is a `/goal …` command, `None` for any other prompt.
@@ -33,12 +34,13 @@ pub(crate) fn parse_goal_prompt(prompt: &str) -> Option<GoalRunSpec> {
             gates,
             max_tokens,
             max_minutes,
-            ..
+            budget,
         } => Some(GoalRunSpec {
             goal: objective.trim().to_string(),
             gates,
             max_tokens,
             max_minutes,
+            budget,
         }),
         _ => None,
     }
@@ -78,6 +80,13 @@ pub(crate) async fn run_goal_headless(
             "usage: forge run \"/goal <objective> [--gate \\\"<cmd>\\\"]... [--max-tokens N] \
              [--max-minutes N]\""
         );
+    }
+    if spec.budget.is_some() {
+        return Ok(GoalRunEnd::NotMet(
+            "--budget needs an interactive or daemon-hosted goal; use --max-tokens or \
+             --max-minutes for a headless run (nothing was started)"
+                .to_string(),
+        ));
     }
     session
         .prime_guidance(&[goal_session_guidance(&spec.goal)])
