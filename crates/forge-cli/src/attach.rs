@@ -204,14 +204,18 @@ fn local_daemon_cert(base: &str) -> Option<Vec<u8>> {
 
 /// HTTP client for the local daemon: a LAN daemon's own certificate is the one added trusted root,
 /// so its self-signed HTTPS verifies; any other base keeps normal verification.
-pub(crate) fn local_http_client(base: &str) -> reqwest::Client {
+pub(crate) fn local_http_builder(base: &str) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder();
     if let Some(cert) =
         local_daemon_cert(base).and_then(|pem| reqwest::Certificate::from_pem(&pem).ok())
     {
         builder = builder.add_root_certificate(cert);
     }
-    builder.build().unwrap_or_default()
+    builder
+}
+
+pub(crate) fn local_http_client(base: &str) -> reqwest::Client {
+    local_http_builder(base).build().unwrap_or_default()
 }
 
 pub(crate) type WsStream =

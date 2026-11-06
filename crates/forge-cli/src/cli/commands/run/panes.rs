@@ -382,10 +382,10 @@ fn attach(app: &mut App, tui: &mut Tui, id: &str, heartbeat: &mut dyn FnMut()) {
 /// Keep the strip's rows current: read the fleet, then read it again whenever `/ws/fleet` says
 /// it moved (and every so often regardless, so a dropped socket cannot freeze the strip).
 async fn fleet_feed(tx: mpsc::UnboundedSender<Msg>) {
-    let http = reqwest::Client::new();
     let mut attempt = 0usize;
     loop {
         let base = crate::attach::resolve_base_url(None);
+        let http = crate::attach::local_http_client(&base);
         let token = match crate::attach::resolve_token(None) {
             Ok(token) => token,
             Err(e) => {
@@ -413,7 +413,7 @@ async fn fleet_feed(tx: mpsc::UnboundedSender<Msg>) {
             tokio::time::sleep(FLEET_REFRESH).await;
             continue;
         };
-        let Ok((mut socket, _)) = tokio_tungstenite::connect_async(&url).await else {
+        let Ok((mut socket, _)) = crate::attach::ws_connect(&url).await else {
             tokio::time::sleep(FLEET_REFRESH).await;
             continue;
         };

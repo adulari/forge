@@ -197,9 +197,10 @@ pub(crate) async fn dispatch_cmd(
     url: Option<String>,
     token: Option<String>,
 ) -> Result<()> {
+    let base = resolve_base_url(url);
     let daemon = Daemon::new(
-        reqwest::Client::new(),
-        resolve_base_url(url),
+        crate::attach::local_http_client(&base),
+        base,
         resolve_token(token)?,
     );
     match cmd {
@@ -385,7 +386,8 @@ pub(crate) async fn chat_dispatch_note(prompt: &str, cwd: &Path) -> String {
             return format!("⚠ dispatch not started: {e} — start it with: forge serve --local")
         }
     };
-    let http = match reqwest::Client::builder()
+    let base = resolve_base_url(None);
+    let http = match crate::attach::local_http_builder(&base)
         .connect_timeout(CHAT_CONNECT_TIMEOUT)
         .timeout(CHAT_TIMEOUT)
         .build()
@@ -393,7 +395,7 @@ pub(crate) async fn chat_dispatch_note(prompt: &str, cwd: &Path) -> String {
         Ok(http) => http,
         Err(e) => return format!("⚠ dispatch not started: {e}"),
     };
-    let daemon = Daemon::new(http, resolve_base_url(None), token);
+    let daemon = Daemon::new(http, base, token);
     let body = json!({ "prompt": prompt, "cwd": cwd.display().to_string() });
     let result = match daemon.post("dispatch", &body).await {
         Ok(value) => decode::<StartReply>(value),

@@ -180,7 +180,10 @@ async fn ask_daemon(request: &PushRequest) -> DaemonAnswer {
     let Ok(token) = crate::attach::resolve_token(None) else {
         return DaemonAnswer::Unreachable;
     };
-    let Ok(http) = reqwest::Client::builder().timeout(DAEMON_TIMEOUT).build() else {
+    let Ok(http) = crate::attach::local_http_builder(&base)
+        .timeout(DAEMON_TIMEOUT)
+        .build()
+    else {
         return DaemonAnswer::Unreachable;
     };
     let response = http

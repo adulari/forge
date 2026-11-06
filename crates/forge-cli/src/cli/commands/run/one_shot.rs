@@ -529,7 +529,7 @@ async fn publish_run_to_fleet(
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let http = reqwest::Client::new();
+    let http = crate::attach::local_http_client(base);
     let resp = http
         .post(format!("{base}/{token}/api/sessions"))
         .json(&serde_json::json!({

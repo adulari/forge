@@ -504,7 +504,7 @@ impl HttpFleet {
                 crate::attach::resolve_token(None).map_err(|e| e.to_string())?,
             ),
         };
-        let http = reqwest::Client::builder()
+        let http = crate::attach::local_http_builder(&base)
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| e.to_string())?;
@@ -516,7 +516,7 @@ impl HttpFleet {
         let Ok((_, url)) = Self::local().endpoint("/api/peers/sessions?local_only=true") else {
             return false;
         };
-        let Ok(http) = reqwest::Client::builder()
+        let Ok(http) = crate::attach::local_http_builder(&url)
             .timeout(std::time::Duration::from_millis(400))
             .build()
         else {
