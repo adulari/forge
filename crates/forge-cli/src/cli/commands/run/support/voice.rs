@@ -81,10 +81,28 @@ pub(crate) fn start_voice_transcribe(
     tokio::task::spawn_blocking(move || {
         let result = (|| -> forge_voice::Result<String> {
             let samples = handle.stop()?;
-            let transcriber = forge_voice::Transcriber::load(&model_path)?;
-            transcriber.transcribe(&samples, language.as_deref())
+            cached_transcriber(&model_path)?.transcribe(&samples, language.as_deref())
         })();
         let _ = tx.send(result);
     });
     rx
+}
+
+/// The loaded model, kept for the life of the process: loading takes hundreds of milliseconds to
+/// seconds, and paying it on every dictation delayed each transcript. Keyed by path so a model
+/// change in config loads the new one.
+fn cached_transcriber(
+    model_path: &std::path::Path,
+) -> forge_voice::Result<std::sync::Arc<forge_voice::Transcriber>> {
+    type Loaded = Option<(std::path::PathBuf, std::sync::Arc<forge_voice::Transcriber>)>;
+    static LOADED: std::sync::Mutex<Loaded> = std::sync::Mutex::new(None);
+    let mut loaded = LOADED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((path, transcriber)) = loaded.as_ref() {
+        if path == model_path {
+            return Ok(transcriber.clone());
+        }
+    }
+    let transcriber = std::sync::Arc::new(forge_voice::Transcriber::load(model_path)?);
+    *loaded = Some((model_path.to_path_buf(), transcriber.clone()));
+    Ok(transcriber)
 }
