@@ -146,6 +146,9 @@ interface PreparedDelivery {
 }
 
 /** Ticketed, end-to-end encrypted implementation backing AnywhereTransport. */
+/** A frame to drop without tearing down the connection: a replay, or a sender not enrolled yet. */
+class DiscardFrame extends Error {}
+
 export class EncryptedAnywhereRelay implements AnywhereRelay {
   private connection: WebSocket | null = null;
   private connecting: Promise<WebSocket> | null = null;
@@ -551,7 +554,9 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       }
       const dataKey = await this.dataKeyForEpoch(decoded.metadata.keyEpoch);
       const senderId = bytesToHex(decoded.metadata.senderDeviceId);
-      const signingKey = await this.credentials.signingPublicKey(senderId);
+      const signingKey = await this.credentials.signingPublicKey(senderId).catch((error: unknown) => {
+        throw new DiscardFrame(asError(error).message);
+      });
       const opened = openEnvelope(bytes, dataKey, signingKey);
       let prepared: PreparedDelivery;
       if (opened.metadata.kind === 2) prepared = await this.prepareBridgeResponse(opened.plaintext, senderId);
@@ -562,12 +567,16 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       }
       const sequences = [...(prepared.precedingSequences ?? []), opened.metadata.sequence];
       if (!(await this.credentials.acceptSequences(senderId, opened.metadata.keyEpoch, sequences))) {
-        throw new Error("replayed or out-of-order Anywhere response");
+        throw new DiscardFrame("replayed or out-of-order Anywhere response");
       }
       await prepared.consume?.().catch(() => undefined);
       prepared.deliver();
       recordInboundHandling(nowMs() - startedAt);
     } catch (error) {
+      // The relay redelivers queued envelopes after a reconnect, and a device enrolled since the
+      // keys were loaded is not known yet. Dropping just that frame (as the host connector does)
+      // keeps every other in-flight request and stream alive; closing here failed them all.
+      if (error instanceof DiscardFrame) return;
       const connection = this.connection;
       this.connectionClosed(asError(error));
       connection?.close(1002, "invalid encrypted relay frame");

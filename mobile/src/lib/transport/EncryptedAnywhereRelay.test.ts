@@ -128,6 +128,106 @@ describe("EncryptedAnywhereRelay", () => {
     expect(globalThis.fetch).toHaveBeenCalledOnce();
   });
 
+  it("drops a replayed frame without failing the other requests on the connection", async () => {
+    const accountId = new Uint8Array(16).fill(0x11);
+    const controllerId = new Uint8Array(16).fill(0x22);
+    const hostDeviceId = new Uint8Array(16).fill(0x44);
+    const dataKey = new Uint8Array(32).fill(0x55);
+    const controllerSeed = new Uint8Array(32).fill(0x66);
+    const hostSeed = new Uint8Array(32).fill(0x77);
+    let nextSequence = 2n;
+    let closedWith: number | null = null;
+    const credentials: AnywhereRelayCredentials = {
+      serviceUrl: "https://app.forge.test",
+      accountId,
+      deviceId: controllerId,
+      dataKey,
+      keyEpoch: 3,
+      signingPrivateKey: controllerSeed,
+      accessToken: async () => "access-token",
+      reserveSequence: async () => nextSequence++,
+      // Sequence 8 was already accepted before a reconnect; the relay delivers it again.
+      acceptSequences: async (_sender, _epoch, sequences) => !sequences.includes(8n),
+      signingPublicKey: async () => ed25519.getPublicKey(hostSeed),
+      randomBytes: (length) => new Uint8Array(length).fill(length),
+    };
+    globalThis.fetch = vi.fn(async () =>
+      new Response(JSON.stringify({ version: 1, ticket: "ticket" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    ) as typeof fetch;
+
+    const frame = (requestId: number[], sequence: bigint, status: number) =>
+      sealEnvelope(
+        {
+          kind: 2,
+          flags: 0,
+          accountId,
+          senderDeviceId: hostDeviceId,
+          recipientKind: 1,
+          recipientId: controllerId,
+          keyEpoch: 3,
+          sequence,
+          createdAtMs: 1n,
+          nonce: new Uint8Array(24).fill(Number(sequence)),
+        },
+        new TextEncoder().encode(JSON.stringify({ request_id: requestId, status, headers: [], body: [] })),
+        dataKey,
+        hostSeed,
+      );
+
+    class MockWebSocket {
+      static readonly CONNECTING = 0;
+      static readonly OPEN = 1;
+      static readonly CLOSING = 2;
+      static readonly CLOSED = 3;
+      readyState = MockWebSocket.CONNECTING;
+      binaryType = "blob";
+      onopen: (() => void) | null = null;
+      onmessage: ((event: { data: ArrayBuffer }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+
+      constructor(readonly url: string) {
+        queueMicrotask(() => {
+          this.readyState = MockWebSocket.OPEN;
+          this.onopen?.();
+        });
+      }
+
+      send(value: Uint8Array): void {
+        const request = openEnvelope(value, dataKey, ed25519.getPublicKey(controllerSeed));
+        const payload = JSON.parse(new TextDecoder().decode(request.plaintext)) as { request_id: number[] };
+        const replay = frame(payload.request_id, 8n, 500);
+        const fresh = frame(payload.request_id, 9n, 200);
+        queueMicrotask(() => {
+          this.onmessage?.({ data: replay.buffer as ArrayBuffer });
+          this.onmessage?.({ data: fresh.buffer as ArrayBuffer });
+        });
+      }
+
+      close(code?: number): void {
+        closedWith = code ?? 1000;
+        this.readyState = MockWebSocket.CLOSED;
+        this.onclose?.();
+      }
+    }
+    globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+
+    const relay = new EncryptedAnywhereRelay(credentials);
+    const response = await relay.request({
+      hostId: "33".repeat(16),
+      route: "list_sessions",
+      parameters: [""],
+      method: "GET",
+      headers: [],
+      body: new Uint8Array(),
+    });
+    expect(response.status).toBe(200);
+    expect(closedWith).toBeNull();
+  });
+
   it("processes valid traffic on a new connection after an invalid frame", async () => {
     const accountId = new Uint8Array(16).fill(0x11);
     const controllerId = new Uint8Array(16).fill(0x22);
