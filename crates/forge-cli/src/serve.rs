@@ -2453,9 +2453,8 @@ fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> Merge
     if let Err(e) = forge_core::worktree::commit_worktree(std::path::Path::new(worktree)) {
         return MergeOutcome::Error(format!("snapshotting the worktree failed: {e}"));
     }
-    let mergebase = match git_stdout(repo_root, &["merge-base", "HEAD", branch]) {
-        Ok(b) => b,
-        Err(e) => return MergeOutcome::Error(format!("finding the fork point failed: {e}")),
+    let Some(mergebase) = forge_core::worktree_base::fork_point(repo_root, branch) else {
+        return MergeOutcome::Error(format!("finding the fork point of {branch} failed"));
     };
     let diff = std::process::Command::new("git")
         .args([

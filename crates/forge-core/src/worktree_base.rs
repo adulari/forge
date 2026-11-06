@@ -227,6 +227,40 @@ fn describe_age(age: Duration) -> String {
     }
 }
 
+/// The commit a session branch forked from, for diffing what the session itself changed.
+///
+/// A worktree started from a freshly fetched `origin/<default>` ([`fresh_base`]) forks AFTER the
+/// checkout's own `HEAD`, so `merge-base HEAD <branch>` alone lands on the stale local tip and
+/// the diff would carry every upstream commit the checkout has not pulled yet as if the session
+/// wrote it. Of the two fork points (against `HEAD` and against `origin/<default>`), the newer one
+/// is the real start: for a branch made from `HEAD` the origin candidate is older or the same.
+pub fn fork_point(repo: &Path, branch: &str) -> Option<String> {
+    let from_head = git(repo, &["merge-base", "HEAD", branch]);
+    let from_origin = git(
+        repo,
+        &["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"],
+    )
+    .and_then(|upstream| git(repo, &["merge-base", &upstream, branch]));
+    match (from_head, from_origin) {
+        (Some(head), Some(origin)) if head != origin && is_ancestor(repo, &head, &origin) => {
+            Some(origin)
+        }
+        (Some(head), _) => Some(head),
+        (None, origin) => origin,
+    }
+}
+
+fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// Where a worktree's base note is kept: inside its git dir, so it never shows in `git status`
 /// and survives a daemon restart.
 fn note_file(worktree: &Path) -> Option<std::path::PathBuf> {

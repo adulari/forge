@@ -758,8 +758,8 @@ pub(crate) fn worktree_diff(worktree: &str) -> Result<SessionDiffResponse, Strin
     let Some((repo_root, branch)) = worktree_repo_and_branch(worktree) else {
         return Err("worktree path is not a recognised forge worktree".to_string());
     };
-    let base = git_stdout(&repo_root, &["merge-base", "HEAD", &branch])
-        .map_err(|e| format!("finding the fork point failed: {e}"))?;
+    let base = forge_core::worktree_base::fork_point(&repo_root, &branch)
+        .ok_or_else(|| format!("finding the fork point of {branch} failed"))?;
     let raw = String::from_utf8_lossy(&git_raw(
         Path::new(worktree),
         &[

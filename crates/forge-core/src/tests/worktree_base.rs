@@ -226,3 +226,38 @@ fn the_note_is_stored_in_the_git_dir_and_read_back() {
     );
     assert!(git(&f.mine, &["status", "--porcelain"]).is_empty());
 }
+
+#[test]
+fn the_fork_point_of_a_fresh_base_session_excludes_upstream_commits() {
+    let f = fixture();
+    let tip = push_ahead(&f, 3);
+    let base = fresh_base(&f.mine);
+    let wt = f.mine.join(".forge/worktrees/fork");
+    let guard =
+        WorktreeGuard::create_at_base(&f.mine, "fork", wt.clone(), &base.start_point).unwrap();
+    commit(&wt, "session-work");
+    let branch = git(&wt, &["branch", "--show-current"]);
+
+    let fork = fork_point(&f.mine, &branch).unwrap();
+    assert_eq!(
+        fork, tip,
+        "the fork is origin's tip, not the stale local HEAD"
+    );
+    let changed = git(&f.mine, &["diff", "--name-only", &fork, &branch]);
+    assert_eq!(changed, "session-work", "only the session's own change");
+    drop(guard);
+}
+
+#[test]
+fn the_fork_point_of_a_head_based_session_is_unchanged() {
+    let f = fixture();
+    let local = git(&f.mine, &["rev-parse", "HEAD"]);
+    let wt = f.mine.join(".forge/worktrees/plain");
+    let guard = WorktreeGuard::create_at_base(&f.mine, "plain", wt.clone(), "HEAD").unwrap();
+    commit(&wt, "plain-work");
+    push_ahead(&f, 2);
+    git(&f.mine, &["fetch", "-q", "origin"]);
+    let branch = git(&wt, &["branch", "--show-current"]);
+    assert_eq!(fork_point(&f.mine, &branch).unwrap(), local);
+    drop(guard);
+}
