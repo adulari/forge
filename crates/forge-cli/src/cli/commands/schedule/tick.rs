@@ -18,7 +18,12 @@ use crate::cli::commands::replay::open_store;
 pub(crate) const STOP_MARKER: &str = "[[schedule:done]]";
 const MAX_RETRIES: i64 = 5;
 const SUMMARY_CHARS: usize = 800;
-const DEFAULT_MAX_RUNTIME_SECS: i64 = 3600;
+/// Cap for a tick with no `--max-runtime`. Long enough that a legitimate overnight run is never cut
+/// off (Forge does not hard-cap productive work); short enough that a truly hung run cannot stall
+/// its schedule for days.
+const DEFAULT_MAX_RUNTIME_SECS: i64 = 12 * 3600;
+/// Time a capped run gets to stop on SIGTERM (flush its transcript, end the turn) before SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(10);
 const CAPTURE_BYTES: usize = 4 << 20;
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
@@ -111,8 +116,23 @@ fn runtime_cap(schedule: &Schedule) -> Duration {
 
 fn kill_tree(child: &mut std::process::Child) {
     #[cfg(unix)]
-    unsafe {
-        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    {
+        let group = -(child.id() as i32);
+        // SAFETY: signalling a process group we created; no memory is involved.
+        unsafe {
+            libc::kill(group, libc::SIGTERM);
+        }
+        let stop_by = Instant::now() + TERM_GRACE;
+        while Instant::now() < stop_by {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // SAFETY: as above; anything left in the group after the grace period is killed.
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
     }
     let _ = child.kill();
 }
@@ -359,9 +379,15 @@ mod tests {
     #[test]
     fn unset_runtime_cap_falls_back_to_the_default() {
         let mut s = schedule(None);
-        assert_eq!(runtime_cap(&s), Duration::from_secs(3600));
+        assert_eq!(
+            runtime_cap(&s),
+            Duration::from_secs(DEFAULT_MAX_RUNTIME_SECS as u64)
+        );
         s.policy.max_runtime_secs = Some(0);
-        assert_eq!(runtime_cap(&s), Duration::from_secs(3600));
+        assert_eq!(
+            runtime_cap(&s),
+            Duration::from_secs(DEFAULT_MAX_RUNTIME_SECS as u64)
+        );
         s.policy.max_runtime_secs = Some(90);
         assert_eq!(runtime_cap(&s), Duration::from_secs(90));
     }

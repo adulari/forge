@@ -29,7 +29,7 @@ Policy flags on `add` (all optional, also editable in the app):
 | Flag | Meaning |
 |------|---------|
 | `--tz Europe/Amsterdam` | read `--at` / `--cron` on that zone's clock (systemd `OnCalendar=... <zone>`; Linux only) |
-| `--max-runtime <min>` | kill a tick (and its whole process tree) that runs longer; defaults to 60 minutes |
+| `--max-runtime <min>` | stop a tick (and its whole process tree: SIGTERM, then SIGKILL after 10 s) that runs longer; defaults to 12 hours |
 | `--max-runs <n>` | pause the schedule after n ticks (a one-time schedule is a dated cron with `--max-runs 1`) |
 | `--retries <0-5>` | re-run a failed tick with doubling backoff (60s base) |
 | `--stop-on-error` | pause the schedule when a tick fails |
