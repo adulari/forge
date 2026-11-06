@@ -7908,6 +7908,31 @@ mod tests {
     }
 
     #[test]
+    fn prune_keeps_starred_sessions_and_sessions_with_a_live_worktree() {
+        let store = Store::open_in_memory().unwrap();
+        let starred = store.create_session("/tmp", "default").unwrap();
+        let worktree = store.create_session("/tmp", "default").unwrap();
+        let gone_worktree = store.create_session("/tmp", "default").unwrap();
+        let plain = store.create_session("/tmp", "default").unwrap();
+        store.set_session_starred(&starred, true).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        store
+            .set_session_worktree(&worktree, &dir.path().display().to_string())
+            .unwrap();
+        store
+            .set_session_worktree(&gone_worktree, "/nonexistent/forge-worktree")
+            .unwrap();
+        assert_eq!(store.prune(-1, 50).unwrap(), 2);
+        assert!(store.session_cost(&starred).is_ok(), "starred kept");
+        assert!(store.session_cost(&worktree).is_ok(), "live worktree kept");
+        assert!(
+            store.session_cost(&gone_worktree).is_err(),
+            "removed worktree pruned"
+        );
+        assert!(store.session_cost(&plain).is_err());
+    }
+
+    #[test]
     fn mesh_outcomes_are_bounded_and_aggregate_without_prompt_content() {
         let store = Store::open_in_memory().unwrap();
         for n in 0..130 {

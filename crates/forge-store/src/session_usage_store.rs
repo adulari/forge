@@ -111,6 +111,10 @@ impl Store {
         })
     }
 
+    /// Extra stale candidates `prune` reads so sessions skipped for a live worktree do not hide
+    /// prunable ones behind them.
+    const PRUNE_WORKTREE_SLACK: usize = 64;
+
     /// Delete up to `max_sessions` sessions whose `updated_at` is older than `horizon_secs` ago
     /// (oldest first), cascading to their messages/usage/routing/tool_calls/live_events/tasks. The
     /// retention unit is a whole stale session, never individual rows of a live one, so an active
@@ -134,17 +138,34 @@ impl Store {
                     // restore the bare parent row afterwards but NOT the history.
                     // A `kill -9`'d `forge mcp agent` never clears its flag; once a session is a
                     // week past the horizon the flag is a leftover, not a live agent.
-                    "SELECT id FROM session WHERE updated_at < ?1 \
+                    // Starred is the user saying "keep this". A session whose worktree is still on
+                    // disk owns unmerged work; deleting its row strands the worktree and branch with
+                    // nothing pointing at them. Both are skipped (the worktree check needs the
+                    // filesystem, so it runs below over a few extra candidates).
+                    "SELECT id, worktree_path FROM session WHERE updated_at < ?1 \
                      AND (agent_active = 0 OR updated_at < ?3) \
-                     AND local_live = 0 AND daemon_live = 0 \
+                     AND local_live = 0 AND daemon_live = 0 AND starred = 0 \
                      ORDER BY updated_at LIMIT ?2",
                 )?;
                 let v = stmt
-                    .query_map((cutoff, max_sessions as i64, cutoff - 7 * 86_400), |r| {
-                        r.get::<_, String>(0)
-                    })?
+                    .query_map(
+                        (
+                            cutoff,
+                            (max_sessions + Self::PRUNE_WORKTREE_SLACK) as i64,
+                            cutoff - 7 * 86_400,
+                        ),
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                    )?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                v
+                v.into_iter()
+                    .filter(|(_, worktree)| {
+                        !worktree
+                            .as_deref()
+                            .is_some_and(|path| std::path::Path::new(path).is_dir())
+                    })
+                    .map(|(id, _)| id)
+                    .take(max_sessions)
+                    .collect()
             };
             for id in &ids {
                 // ON DELETE CASCADE clears the dependent rows (messages → usage/routing/tool_call).
