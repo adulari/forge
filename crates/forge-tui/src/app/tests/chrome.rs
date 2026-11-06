@@ -1010,10 +1010,18 @@ fn a_running_shell_card_shows_its_live_tail_until_the_result_lands() {
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let _ = app.drain_flush();
+    app.apply(PresenterEvent::ToolOutputDelta {
+        name: "shell".into(),
+        lines: vec!["running 4 tests".into(), "test a ... ok".into()],
+        elapsed_ms: 1600,
+    });
+    let on_screen = screen_wh(&app, 150, 40);
+    assert!(on_screen.contains("test a ... ok"), "drawn: {on_screen}");
     let remote = app.remote_snapshot().live_tail.expect("remote live tail");
     assert_eq!(remote.tool, "shell");
     assert_eq!(remote.lines.len(), 2);
-    assert_eq!(remote.elapsed_ms, 1500);
+    assert_eq!(remote.elapsed_ms, 1600);
     let text = card_text(&app);
     assert!(text.contains("running 4 tests"), "{text}");
     assert!(text.contains("test a ... ok"), "{text}");

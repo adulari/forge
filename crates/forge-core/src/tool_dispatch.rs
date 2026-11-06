@@ -151,7 +151,13 @@ impl Session {
                     None => (format!("error: unknown tool '{}'", p.name), None, false),
                 }
             });
-            futures::future::join_all(futs).await
+            let all = futures::future::join_all(futs);
+            // One call owns the tail; several running at once would interleave theirs.
+            if pend.len() == 1 && pend[0].allowed && pend[0].name == "shell" {
+                stream_live_tail(self.presenter.as_mut(), "shell", all).await
+            } else {
+                all.await
+            }
         };
         // Phase 3 (serial): surface + persist + append each result in the ORIGINAL order, so every
         // tool_call_id is answered in sequence. Also classify each result for the failure-loop guard.
