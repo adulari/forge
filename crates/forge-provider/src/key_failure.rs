@@ -106,6 +106,26 @@ fn short_reason(text: &str) -> String {
     out
 }
 
+/// A 429 is a routine per-minute/per-day limit unless it names a wall no retry can clear. Gemini
+/// and Groq word their ordinary limits with "quota" and a billing link, so those words alone prove
+/// nothing here.
+fn is_hard_quota_wall(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let zero_limit = lower
+        .match_indices("limit: 0")
+        .any(|(i, m)| !lower[i + m.len()..].starts_with(|c: char| c.is_ascii_digit() || c == '.'));
+    zero_limit
+        || [
+            "insufficient_quota",
+            "insufficient quota",
+            "payment required",
+            "out of credits",
+            "requires more credits",
+        ]
+        .iter()
+        .any(|m| lower.contains(m))
+}
+
 impl ProviderError {
     /// The key verdict this error implies, if any. Typed [`Auth`](Self::Auth) is always a bad
     /// credential; quota and billing walls arrive as `Capability`/`RateLimited` and are read from
@@ -116,7 +136,14 @@ impl ProviderError {
                 classify_key_failure(&self.to_string())
                     .unwrap_or_else(|| (KeyFailure::Rejected, short_reason(msg))),
             ),
-            Self::Capability(msg) | Self::RateLimited { message: msg, .. } => {
+            Self::Capability(msg) => {
+                let (kind, reason) = classify_key_failure(msg)?;
+                (kind == KeyFailure::OutOfQuota).then_some((kind, reason))
+            }
+            Self::RateLimited { message: msg, .. } => {
+                if !is_hard_quota_wall(msg) {
+                    return None;
+                }
                 let (kind, reason) = classify_key_failure(msg)?;
                 (kind == KeyFailure::OutOfQuota).then_some((kind, reason))
             }
@@ -189,6 +216,29 @@ mod tests {
                 .0,
             KeyFailure::OutOfQuota
         );
+    }
+
+    #[test]
+    fn routine_429s_are_never_a_key_verdict() {
+        let gemini = r#"{"error":{"code":429,"message":"You exceeded your current quota, please check your plan and billing details. Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 15, model: gemini-2.0-flash. Please retry in 37.047405996s.","status":"RESOURCE_EXHAUSTED"}}"#;
+        let groq = r#"{"error":{"message":"Rate limit reached for model `llama-3.3-70b-versatile` in organization `org_x` service tier `on_demand` on requests per day (RPD): Limit 1000, Used 1000, Requested 1. Please try again in 8m24s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing","type":"requests","code":"rate_limit_exceeded"}}"#;
+        for (body, retry_after) in [(gemini, Some(37)), (groq, None)] {
+            let e = ProviderError::RateLimited {
+                message: body.into(),
+                retry_after: retry_after.map(std::time::Duration::from_secs),
+            };
+            assert!(e.key_failure().is_none(), "{body}");
+        }
+        let hard = ProviderError::RateLimited {
+            message: "You exceeded your current quota. limit: 0, model: x".into(),
+            retry_after: None,
+        };
+        assert_eq!(hard.key_failure().unwrap().0, KeyFailure::OutOfQuota);
+        let hard = ProviderError::RateLimited {
+            message: r#"{"error":{"code":"insufficient_quota"}}"#.into(),
+            retry_after: None,
+        };
+        assert_eq!(hard.key_failure().unwrap().0, KeyFailure::OutOfQuota);
     }
 
     #[test]
