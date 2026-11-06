@@ -1,4 +1,4 @@
-import type { GoalPhase, RemoteInput, Snapshot, SnapshotGoal } from "./ws";
+import type { GoalPhase, RemoteInput, Snapshot, SnapshotEnvelope, SnapshotGoal } from "./ws";
 
 export interface GoalView {
   objective: string;
@@ -15,6 +15,7 @@ export interface GoalView {
   gates: number;
   reason: string | null;
   pending: "pause" | "clear" | null;
+  envelope: SnapshotEnvelope | null;
 }
 
 /** The goal an older host announces only through the CLI's transient notes. */
@@ -53,6 +54,7 @@ function fromWire(goal: SnapshotGoal): GoalView {
     gates: goal.gates.length,
     reason: goal.reason,
     pending: goal.pending,
+    envelope: goal.envelope ?? null,
   };
 }
 
@@ -74,6 +76,7 @@ export function resolveGoal(snapshot: Pick<Snapshot, "goal" | "notes"> | null): 
     gates: 0,
     reason: null,
     pending: null,
+    envelope: null,
   };
 }
 
@@ -136,6 +139,13 @@ export function liveElapsedSecs(goal: GoalView, nowMs: number): number {
 export function budgetFraction(goal: GoalView): number | null {
   if (goal.maxTokens == null || goal.maxTokens <= 0) return null;
   return Math.min(1, goal.tokensUsed / goal.maxTokens);
+}
+
+/** Share of the spend envelope used, 0..1; `null` when the goal has no envelope. */
+export function envelopeFraction(goal: GoalView): number | null {
+  const envelope = goal.envelope;
+  if (!envelope || envelope.slice <= 0) return null;
+  return Math.max(0, Math.min(1, envelope.used / envelope.slice));
 }
 
 export function goalMeta(goal: GoalView, nowMs: number): string {

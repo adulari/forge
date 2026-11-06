@@ -8,6 +8,7 @@ import { StyleSheet, Text, View } from "react-native";
 
 import {
   budgetFraction,
+  envelopeFraction,
   GOAL_PHASE_LABEL,
   type GoalAction,
   type GoalView,
@@ -85,6 +86,7 @@ function GoalBannerBody({ goal, send }: { goal: GoalView; send: GoalBannerProps[
   const live = goal.phase === "active";
   const now = useNow(live && goal.structured);
   const fraction = budgetFraction(goal);
+  const envelopeFill = envelopeFraction(goal);
   const actions = goalActions(goal);
   const ended = !live && goal.phase !== "paused";
   const tone = !ended ? tokens.accent : goal.phase === "complete" ? tokens.success : goal.phase === "cancelled" ? tokens.ink3 : tokens.danger;
@@ -121,7 +123,7 @@ function GoalBannerBody({ goal, send }: { goal: GoalView; send: GoalBannerProps[
           {goal.objective}
         </Text>
         {status ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{status}</Text> : null}
-        {goal.reason && ended ? <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>{goal.reason}</Text> : null}
+        {goal.reason && (ended || goal.phase === "paused") ? <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>{goal.reason}</Text> : null}
         <Text style={[styles.meta, { color: tokens.ink3 }]} numberOfLines={1} testID="goal-meta">
           {goalMeta(goal, now)}
         </Text>
@@ -134,6 +136,25 @@ function GoalBannerBody({ goal, send }: { goal: GoalView; send: GoalBannerProps[
           >
             <View style={[styles.fill, { width: `${Math.round(fraction * 100)}%`, backgroundColor: fraction >= 0.9 ? tokens.danger : tokens.accent }]} />
           </View>
+        ) : null}
+        {goal.envelope && envelopeFill != null ? (
+          <>
+            <Text
+              style={[styles.meta, { color: goal.envelope.spent || goal.envelope.unverified ? tokens.danger : tokens.ink3 }]}
+              numberOfLines={1}
+              testID="goal-envelope"
+            >
+              {goal.envelope.unverified ? `${goal.envelope.meter} · unverified` : goal.envelope.meter}
+            </Text>
+            <View
+              style={[styles.track, { backgroundColor: tokens.bg3 }]}
+              accessibilityRole="progressbar"
+              accessibilityLabel={`Goal envelope, ${goal.envelope.label}`}
+              accessibilityValue={{ min: 0, max: 100, now: Math.round(envelopeFill * 100) }}
+            >
+              <View style={[styles.fill, { width: `${Math.round(envelopeFill * 100)}%`, backgroundColor: envelopeFill >= 0.8 ? tokens.danger : tokens.accent }]} />
+            </View>
+          </>
         ) : null}
       </Card>
       <GoalSheet

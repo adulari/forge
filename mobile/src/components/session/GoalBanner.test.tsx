@@ -96,6 +96,26 @@ describe("GoalBanner", () => {
     ]);
   });
 
+  it("draws the spend envelope with its meter line", () => {
+    const envelope = { unit: "percent" as const, used: 12, slice: 20, label: "claude weekly", meter: "envelope 12/20% claude weekly", spent: false, unverified: false, resets_at: null };
+    const { html } = render(snapshot({ goal: goal({ envelope }) }));
+    expect(html).toContain("envelope 12/20% claude weekly");
+    expect(html).not.toContain("unverified");
+  });
+
+  it("shows why a goal paused at its envelope cap and offers resume", () => {
+    const envelope = { unit: "percent" as const, used: 20, slice: 20, label: "claude weekly", meter: "envelope 20/20% claude weekly", spent: true, unverified: false, resets_at: 1_800_000_000 };
+    const reason = "Envelope spent (20% of Claude weekly). The window resets at Thu 09:00, then /goal resume";
+    const { html } = render(snapshot({ goal: goal({ state: "paused", reason, envelope }) }));
+    expect(html).toContain("Envelope spent (20% of Claude weekly)");
+    expect(html).toContain("envelope 20/20% claude weekly");
+    expect(buttons.has("goal-resume")).toBe(true);
+  });
+
+  it("omits the envelope row for a goal without one", () => {
+    expect(render(snapshot({ goal: goal() })).html).not.toContain("envelope");
+  });
+
   it("says a pause is pending and leaves only stop", () => {
     const { html } = render(snapshot({ goal: goal({ pending: "pause" }) }));
     expect(html).toContain("pausing after this turn");

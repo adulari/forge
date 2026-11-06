@@ -191,6 +191,22 @@ export interface SnapshotGoal {
   reason: string | null;
   /** A pause or clear that applies when the turn in flight ends. */
   pending: "pause" | "clear" | null;
+  /** The spend envelope (`/goal --budget`). Absent when the goal has none or the host predates it. */
+  envelope?: SnapshotEnvelope | null;
+}
+
+/** How much of a goal's spend envelope is used. `unit` is `percent` of a subscription window or
+ * `usd`; `meter` is the host's ready-to-show line. */
+export interface SnapshotEnvelope {
+  unit: "percent" | "usd";
+  used: number;
+  slice: number;
+  label: string;
+  meter: string;
+  spent: boolean;
+  unverified: boolean;
+  /** When the measured window resets, Unix seconds. */
+  resets_at: number | null;
 }
 
 /** A rule a permission prompt offers: `rule` exactly as it would be written (`cargo test *`),

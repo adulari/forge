@@ -20,6 +20,27 @@ pub struct SnapGoal {
     pub reason: Option<String>,
     /// `pause` or `clear`, applied when the turn in flight ends.
     pub pending: Option<&'static str>,
+    /// The spend envelope (`/goal --budget`); absent when the goal has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<SnapEnvelope>,
+}
+
+/// A goal's spend envelope: how much of its slice is used, ready to draw as a fill bar.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapEnvelope {
+    /// `percent` of a subscription window, or `usd`.
+    pub unit: &'static str,
+    pub used: f64,
+    pub slice: f64,
+    /// `claude weekly`, `codex 5h` or `spend`.
+    pub label: String,
+    /// The ready-to-show line, e.g. `envelope 12/20% claude weekly`.
+    pub meter: String,
+    pub spent: bool,
+    /// The last check found no fresh reading to measure against.
+    pub unverified: bool,
+    /// When the measured window resets, Unix seconds.
+    pub resets_at: Option<i64>,
 }
 
 impl From<&GoalStatus> for SnapGoal {
@@ -36,6 +57,16 @@ impl From<&GoalStatus> for SnapGoal {
             gates: goal.gates.clone(),
             reason: goal.reason.clone(),
             pending: goal.request.map(|request| request.wire()),
+            envelope: goal.envelope.as_ref().map(|e| SnapEnvelope {
+                unit: if e.is_usd() { "usd" } else { "percent" },
+                used: e.used,
+                slice: e.spec.slice,
+                label: e.spec.label(),
+                meter: e.meter(),
+                spent: e.spent,
+                unverified: e.unverified,
+                resets_at: e.resets_at,
+            }),
         }
     }
 }

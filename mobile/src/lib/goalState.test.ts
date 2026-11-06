@@ -4,6 +4,7 @@ import {
   budgetFraction,
   compactTokens,
   deriveNoteGoal,
+  envelopeFraction,
   formatElapsed,
   goalActions,
   goalInput,
@@ -26,6 +27,22 @@ const wire = (over: Partial<SnapshotGoal> = {}): SnapshotGoal => ({
   reason: null,
   pending: null,
   ...over,
+});
+
+describe("envelope", () => {
+  const envelope = { unit: "usd" as const, used: 1.5, slice: 5, label: "spend", meter: "envelope $1.50/$5.00", spent: false, unverified: false, resets_at: null };
+
+  it("carries the host's envelope and reports how full it is", () => {
+    const goal = resolveGoal({ goal: wire({ envelope }), notes: [] });
+    expect(goal?.envelope?.meter).toBe("envelope $1.50/$5.00");
+    expect(goal && envelopeFraction(goal)).toBeCloseTo(0.3);
+  });
+
+  it("is absent from an older host's goal", () => {
+    const goal = resolveGoal({ goal: wire(), notes: [] });
+    expect(goal?.envelope).toBeNull();
+    expect(goal && envelopeFraction(goal)).toBeNull();
+  });
 });
 
 describe("resolveGoal", () => {
