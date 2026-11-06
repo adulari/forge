@@ -20,6 +20,8 @@ pub(crate) struct SnapshotIdentity<'a> {
     pub model_pinned: bool,
     /// Progress of the worktree's background copy + `setup`, for a daemon-hosted session.
     pub worktree_setup: Option<remote::SnapWorktreeSetup>,
+    /// What the session's worktree was branched from; see [`remote::Snapshot::worktree_base`].
+    pub worktree_base: Option<String>,
 }
 
 /// Build one wire [`remote::Snapshot`] frame from the App's remote projection. The ONE snapshot
@@ -178,6 +180,7 @@ pub(crate) fn build_snapshot_frame(
         thread_error: None,
         history_gap: None,
         worktree_setup: ident.worktree_setup,
+        worktree_base: ident.worktree_base,
         live_tail: view.live_tail.map(|t| remote::SnapLiveTail {
             tool: t.tool,
             lines: t.lines,

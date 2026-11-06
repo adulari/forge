@@ -502,6 +502,9 @@ async fn drive_session(
     worktree_setup: crate::serve_worktree_start::SetupCell,
 ) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
+    let worktree_base = worktree
+        .as_deref()
+        .and_then(|w| forge_core::worktree_base::stored_note(std::path::Path::new(w)));
     let mut app = App::default();
     app.transcript_follow = true;
     let workspace_binding = {
@@ -874,6 +877,7 @@ async fn drive_session(
                     exposure: "daemon".to_string(),
                     model_pinned,
                     worktree_setup: setup_now.clone(),
+                    worktree_base: worktree_base.clone(),
                 },
                 st.copy_text.clone(),
                 st.prompt_seq,

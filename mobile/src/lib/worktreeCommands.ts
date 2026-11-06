@@ -76,3 +76,20 @@ export function worktreeSetupBanner(status: WorktreeSetupStatus | null | undefin
   }
   return make("neutral", "Worktree ready.", status.message, true);
 }
+
+export interface WorktreeBaseBanner {
+  tone: "neutral" | "warn";
+  message: string;
+}
+
+/**
+ * One line for where a new worktree was branched from. Warns when the session was cut from a local
+ * branch that origin could not refresh (a failed fetch) or that has diverged from it, because that
+ * is the case where the session may start behind.
+ */
+export function worktreeBaseBanner(note: string | null | undefined): WorktreeBaseBanner | null {
+  const text = note?.trim();
+  if (!text) return null;
+  const stale = text.includes("fetch failed") || text.includes("diverged from");
+  return { tone: stale ? "warn" : "neutral", message: `Worktree ${text}` };
+}

@@ -303,6 +303,9 @@ export interface Snapshot {
   history_gap?: { count: number; reason: string } | null;
   /** Progress of the worktree's background copy + `setup`; absent when nothing was provisioned. */
   worktree_setup?: { state: "running" | "done" | "failed" | "interrupted"; message: string } | null;
+  /** One line saying what a worktree session was branched from, e.g. "based on origin/main @1a2b3c4
+   * (local main was 3 behind)". Absent from an older host and for sessions without a new worktree. */
+  worktree_base?: string | null;
   /** Additive: the rolling output of the foreground tool call in flight (last few lines, ANSI
    * stripped) and how long it has run. Absent from an older host and when nothing is reporting. */
   live_tail?: SnapshotLiveTail | null;

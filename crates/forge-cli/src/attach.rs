@@ -110,6 +110,9 @@ struct ClientSnapshot {
     /// The worktree's background copy + `setup`, when the daemon is provisioning one.
     #[serde(default)]
     worktree_setup: Option<ClientSetup>,
+    /// What the worktree was branched from, e.g. `based on origin/main @1a2b3c4 (...)`.
+    #[serde(default)]
+    worktree_base: Option<String>,
     /// The rolling output of the foreground tool call in flight, when the daemon reports one.
     #[serde(default)]
     live_tail: Option<ClientLiveTail>,
@@ -577,6 +580,7 @@ struct Renderer {
     shown_prompt_seq: Option<u64>,
     was_busy: bool,
     shown_setup: Option<ClientSetup>,
+    shown_base: Option<String>,
     printed_live: Vec<String>,
     held_live: Option<String>,
 }
@@ -631,6 +635,13 @@ impl Renderer {
         }
         self.printed_live = settled.to_vec();
         self.held_live = last.cloned();
+
+        if snap.worktree_base != self.shown_base {
+            if let Some(base) = &snap.worktree_base {
+                println!("· worktree {base}");
+            }
+            self.shown_base.clone_from(&snap.worktree_base);
+        }
 
         if snap.worktree_setup != self.shown_setup {
             if let Some(setup) = &snap.worktree_setup {

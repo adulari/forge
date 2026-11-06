@@ -725,6 +725,11 @@ pub struct Snapshot {
     /// whose worktree needed no provisioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_setup: Option<SnapWorktreeSetup>,
+    /// One line saying what a worktree session was branched from and why, e.g. `based on
+    /// origin/main @1a2b3c4 (local main was 3 behind)` (additive). Absent for sessions that did
+    /// not create their worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_base: Option<String>,
     /// The rolling output of the foreground tool call in flight (additive): the last few lines,
     /// ANSI stripped, plus how long it has run. Absent when no call is reporting; a client that
     /// does not know the key ignores it. Never part of the transcript or the model's context.
@@ -849,6 +854,7 @@ impl Default for Snapshot {
             thread_error: None,
             history_gap: None,
             worktree_setup: None,
+            worktree_base: None,
             live_tail: None,
         }
     }
@@ -2055,6 +2061,21 @@ pub(crate) fn manifest_json(base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_base_is_an_optional_additive_wire_field() {
+        let plain = serde_json::to_value(Snapshot::default()).unwrap();
+        assert!(plain.get("worktree_base").is_none());
+        let based = Snapshot {
+            worktree_base: Some("based on origin/main @1a2b3c4 (local main was 3 behind)".into()),
+            ..Snapshot::default()
+        };
+        let wire = serde_json::to_value(based).unwrap();
+        assert_eq!(
+            wire["worktree_base"],
+            "based on origin/main @1a2b3c4 (local main was 3 behind)"
+        );
+    }
 
     #[test]
     fn live_tail_is_an_optional_additive_wire_field() {

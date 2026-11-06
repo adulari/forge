@@ -91,7 +91,7 @@ import { isSegmentPath, type SegmentValue } from "../../../lib/sessionSegments";
 import { useSessionSegment } from "../../../lib/useSessionSegment";
 import { sessionDisplayTitle } from "../../../lib/sessionTitle";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
-import { worktreeSetupBanner } from "../../../lib/worktreeCommands";
+import { worktreeBaseBanner, worktreeSetupBanner } from "../../../lib/worktreeCommands";
 import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../../theme/tokens";
@@ -157,6 +157,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const [projectWarningDismissed, setProjectWarningDismissed] = useState(false);
   const [setupDismissed, setSetupDismissed] = useState<string | null>(null);
   const [setupExpanded, setSetupExpanded] = useState(false);
+  const [baseDismissed, setBaseDismissed] = useState<string | null>(null);
   const [projectSetupRequested, setProjectSetupRequested] = useState(false);
 
   useEffect(() => {
@@ -356,6 +357,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const projectNeedsInitialization = snapshot?.project_initialized === false && !projectWarningDismissed;
   const setupBanner = worktreeSetupBanner(snapshot?.worktree_setup);
   const setupState = snapshot?.worktree_setup?.state;
+  const baseBanner = worktreeBaseBanner(snapshot?.worktree_base);
   useEffect(() => {
     setSetupExpanded(false);
   }, [setupState]);
@@ -648,6 +650,13 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
               actionLabel={setupBanner.expandable ? (setupExpanded ? "Show less" : "Show all") : undefined}
               onAction={setupBanner.expandable ? () => setSetupExpanded((open) => !open) : undefined}
               onDismiss={setupBanner.dismissible ? () => setSetupDismissed(snapshot?.worktree_setup?.state ?? null) : undefined}
+            />
+          ) : null}
+          {baseBanner && baseDismissed !== snapshot?.worktree_base ? (
+            <Banner
+              tone={baseBanner.tone}
+              message={baseBanner.message}
+              onDismiss={() => setBaseDismissed(snapshot?.worktree_base ?? null)}
             />
           ) : null}
           {projectNeedsInitialization ? (
