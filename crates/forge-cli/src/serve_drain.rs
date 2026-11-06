@@ -3,8 +3,9 @@
 //! A drain is a queue of issue numbers plus a concurrency cap and an optional spend envelope.
 //! Each item is started exactly like a single start (`serve_issues::start_in`: fresh-base worktree,
 //! the issue quoted as untrusted data, PR Watch armed without raising the permission mode). The
-//! next item starts when a running one stops needing a slot: its PR is open, it is waiting on the
-//! owner, or it ended. The envelope is the `/goal --budget` accounting
+//! next item starts when a running one stops needing a slot: its PR is open or it finished. A
+//! session waiting on a prompt or question keeps its slot, so the queue never runs ahead of the
+//! owner's answers. The envelope is the `/goal --budget` accounting
 //! (`forge_types::goal_envelope`), baselined when the drain is created; once spent, nothing new
 //! starts until the window resets, then the drain rebaselines and carries on.
 //!

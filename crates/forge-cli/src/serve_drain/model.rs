@@ -15,7 +15,8 @@ pub(crate) enum ItemStatus {
     Queued,
     /// A session is working on it and holds one of the drain's slots.
     Running,
-    /// The session stopped on a permission prompt or a question for the owner.
+    /// The session stopped on a permission prompt or a question for the owner. It still holds
+    /// its slot: answering resumes it, so the queue must not run ahead of unanswered prompts.
     Waiting,
     /// A pull request exists and PR Watch is carrying it.
     PrOpen,
@@ -95,6 +96,8 @@ pub(crate) struct Counts {
     pub(crate) started: usize,
     pub(crate) queued: usize,
     pub(crate) running: usize,
+    /// Sessions stopped on a prompt or question; they keep their slot like running ones.
+    pub(crate) prompted: usize,
     pub(crate) merged: usize,
     /// Needs the owner: a prompt to answer, a PR to merge, or work with no PR to look at.
     pub(crate) waiting: usize,
@@ -148,6 +151,13 @@ pub(crate) struct Inputs<'a> {
 /// How long after going idle an item with no pull request is still watched for one: PR Watch
 /// polls every 30 seconds, so a PR opened in the last turn shows up a little later.
 const PR_LOOKUP_SECS: i64 = 10 * 60;
+
+impl Counts {
+    /// Items that hold one of the drain's slots.
+    pub(crate) fn occupied(&self) -> usize {
+        self.running + self.prompted
+    }
+}
 
 impl Drain {
     #[allow(clippy::too_many_arguments)]
@@ -220,7 +230,11 @@ impl Drain {
                 ItemStatus::Queued => c.queued += 1,
                 ItemStatus::Running => c.running += 1,
                 ItemStatus::Merged => c.merged += 1,
-                ItemStatus::Waiting | ItemStatus::Done => c.waiting += 1,
+                ItemStatus::Waiting => {
+                    c.prompted += 1;
+                    c.waiting += 1;
+                }
+                ItemStatus::Done => c.waiting += 1,
                 ItemStatus::PrOpen => c.waiting += usize::from(self.mode != Mode::Merge),
                 ItemStatus::Failed | ItemStatus::Blocked => c.blocked += 1,
                 ItemStatus::Cancelled => {}
@@ -229,11 +243,12 @@ impl Drain {
         c
     }
 
-    /// `Drain: 7 started, 4 merged, 2 waiting on you, 1 blocked`.
+    /// `Drain: 7 started, 2 running, 4 merged, 2 waiting on you, 1 blocked`.
     pub(crate) fn line(&self) -> String {
         let c = self.counts();
         let mut parts = vec![format!("{} started", c.started)];
         for (n, label) in [
+            (c.running, "running"),
             (c.merged, "merged"),
             (c.waiting, "waiting on you"),
             (c.blocked, "blocked"),
@@ -410,7 +425,7 @@ fn decide(drain: &mut Drain, inp: &Inputs) -> Vec<u64> {
         return Vec::new();
     }
     let counts = drain.counts();
-    if counts.queued == 0 && counts.running == 0 {
+    if counts.queued == 0 && counts.occupied() == 0 {
         drain.status = DrainStatus::Finished;
         drain.paused_reason = None;
         return Vec::new();
@@ -439,7 +454,7 @@ fn decide(drain: &mut Drain, inp: &Inputs) -> Vec<u64> {
             }
         }
     }
-    let free = drain.parallel.saturating_sub(counts.running);
+    let free = drain.parallel.saturating_sub(counts.occupied());
     drain
         .items
         .iter()

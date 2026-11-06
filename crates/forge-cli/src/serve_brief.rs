@@ -86,7 +86,7 @@ pub(crate) struct BriefTotals {
     pub(crate) spend_usd: f64,
 }
 
-/// The newest issue drain, as one line: `Drain: 7 started, 4 merged, 2 waiting on you, 1 blocked`.
+/// The newest issue drain, as one line: `Drain: 7 started, 2 running, 4 merged, 2 waiting on you, 1 blocked`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct DrainBrief {
     pub(crate) id: String,

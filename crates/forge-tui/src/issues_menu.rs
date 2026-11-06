@@ -114,7 +114,7 @@ pub struct DrainView {
     pub id: String,
     /// `active`, `paused`, `finished` or `cancelled`.
     pub status: String,
-    /// `Drain: 7 started, 4 merged, 2 waiting on you, 1 blocked`.
+    /// `Drain: 7 started, 2 running, 4 merged, 2 waiting on you, 1 blocked`.
     pub line: String,
     pub meter: Option<String>,
     pub paused_reason: Option<String>,

@@ -120,21 +120,20 @@ fn runs_at_most_parallel_items_and_starts_the_next_when_one_finishes() {
     );
     start(&mut d, 19, "s19");
 
-    // 15 asks the owner a question: it frees its slot too, without counting as done.
-    let live = [
-        ("s12", idle()),
-        (
-            "s15",
-            LiveSession {
-                waiting: true,
-                busy: true,
-                ..busy()
-            },
-        ),
-        ("s19", busy()),
-    ];
-    assert_eq!(step(&mut d, &live, &watches, &src), vec![20]);
+    // 15 asks the owner a question: it keeps its slot, so nothing new starts.
+    let asking = LiveSession {
+        waiting: true,
+        busy: true,
+        ..busy()
+    };
+    let live = [("s12", idle()), ("s15", asking), ("s19", busy())];
+    assert!(step(&mut d, &live, &watches, &src).is_empty());
     assert_eq!(status_of(&d, 15), ItemStatus::Waiting);
+
+    // 19 opens a PR: that frees its slot and 20 starts.
+    let live = [("s12", idle()), ("s15", asking), ("s19", idle())];
+    let watches = [("s12", pr(7)), ("s19", pr(9))];
+    assert_eq!(step(&mut d, &live, &watches, &src), vec![20]);
     start(&mut d, 20, "s20");
 
     // Everything has been started; the drain is finished once nothing is running.
@@ -153,6 +152,38 @@ fn runs_at_most_parallel_items_and_starts_the_next_when_one_finishes() {
     assert_eq!(status_of(&d, 19), ItemStatus::PrOpen);
     assert_eq!(status_of(&d, 15), ItemStatus::Done);
     assert_eq!(status_of(&d, 20), ItemStatus::Done);
+}
+
+#[test]
+fn sessions_stopped_on_a_prompt_keep_their_slots_so_the_queue_cannot_run_ahead() {
+    let src = sources(10.0, NOW + 100_000, NOW);
+    let mut d = drain(&[1, 2, 3, 4, 5], 2, None);
+    assert_eq!(step(&mut d, &[], &[], &src), vec![1, 2]);
+    start(&mut d, 1, "s1");
+    start(&mut d, 2, "s2");
+
+    // Default Ask mode: both sessions stop on their first permission prompt.
+    let asking = LiveSession {
+        waiting: true,
+        ..idle()
+    };
+    let live = [("s1", asking), ("s2", asking)];
+    for _ in 0..3 {
+        assert!(step(&mut d, &live, &[], &src).is_empty());
+    }
+    assert_eq!(d.counts().prompted, 2);
+    assert_eq!(d.counts().queued, 3);
+    assert_eq!(d.status, DrainStatus::Active);
+    assert!(d.line().contains("2 waiting on you"), "{}", d.line());
+
+    // The owner approves 1; it works again and still holds its slot.
+    let live = [("s1", busy()), ("s2", asking)];
+    assert!(step(&mut d, &live, &[], &src).is_empty());
+    assert_eq!(status_of(&d, 1), ItemStatus::Running);
+
+    // 1 opens a PR: one slot frees, and only one item starts.
+    let live = [("s1", idle()), ("s2", asking)];
+    assert_eq!(step(&mut d, &live, &[("s1", pr(4))], &src), vec![3]);
 }
 
 #[test]
@@ -318,7 +349,7 @@ fn the_brief_line_names_started_merged_waiting_and_blocked() {
     }
     assert_eq!(
         d.line(),
-        "Drain: 7 started, 2 merged, 2 waiting on you, 1 blocked, 1 queued"
+        "Drain: 7 started, 2 running, 2 merged, 2 waiting on you, 1 blocked, 1 queued"
     );
     d.mode = Mode::Merge;
     assert_eq!(
