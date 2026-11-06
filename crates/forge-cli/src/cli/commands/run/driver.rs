@@ -1505,7 +1505,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "/btw what does the lock do".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1526,7 +1526,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "/compact".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1537,7 +1537,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "then fix the test".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1570,7 +1570,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "/undo".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1590,7 +1590,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "also cover the edge case".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1609,7 +1609,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "switch to the v2 endpoint".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1678,7 +1678,7 @@ pub(super) mod tests {
             state
                 .handle_input(remote::RemoteInput::Queue {
                     text: text.into(),
-                    attachments: Vec::new(),
+                    attachments: None,
                 })
                 .await
                 .unwrap();
@@ -1741,7 +1741,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "typed later".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -2203,6 +2203,69 @@ pub(super) mod tests {
             state.queued_prompts.is_empty(),
             "a rename is not queued behind the turn"
         );
+        state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn a_busy_prompt_carries_its_image_and_file_with_the_queue_entry() {
+        let mut state = busy_state().await;
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = dir.path().join(".forge").join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let image = uploads.join("shot.png");
+        std::fs::write(&image, png.into_inner()).unwrap();
+        let notes = uploads.join("notes.txt");
+        std::fs::write(&notes, "hello").unwrap();
+        state.cwd = dir.path().display().to_string();
+        let turn = state.session.clone().lock_owned().await;
+
+        within(state.handle_input(remote::RemoteInput::Prompt {
+            text: "look".into(),
+            attachments: Some(vec![
+                remote::PromptAttachment {
+                    path: image.display().to_string(),
+                    image: true,
+                },
+                remote::PromptAttachment {
+                    path: notes.display().to_string(),
+                    image: false,
+                },
+            ]),
+        }))
+        .await
+        .unwrap();
+        within(state.handle_input(remote::RemoteInput::Prompt {
+            text: "unrelated".into(),
+            attachments: Some(Vec::new()),
+        }))
+        .await
+        .unwrap();
+
+        let expected = format!("@{} @{}\nlook", image.display(), notes.display());
+        assert_eq!(
+            state.queued_prompts,
+            [expected.clone(), "unrelated".to_string()]
+        );
+        assert!(
+            state.app.has_queued_images(&expected),
+            "image waits with its prompt"
+        );
+        assert!(state.pending_mentions.is_empty());
+        drop(turn);
+        let session = state.session.clone();
+        assert!(
+            session.lock().await.take_pending_images().is_empty(),
+            "the image did not leak onto whichever turn starts next"
+        );
+        let first =
+            crate::cli::commands::run::dequeue_prompt(&mut state.queued_prompts, &mut state.app)
+                .unwrap();
+        assert_eq!(first, expected);
+        assert_eq!(state.app.take_ready_images().len(), 1);
         state.turn_handle.take().unwrap().abort();
     }
 

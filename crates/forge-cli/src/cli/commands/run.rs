@@ -4092,7 +4092,7 @@ pub(crate) async fn run_chat_tui(
             remote_inputs.extend(local_lines.drain(..).map(|(text, from_queue)| {
                 let input = remote::RemoteInput::Prompt {
                     text,
-                    attachments: Vec::new(),
+                    attachments: None,
                 };
                 (input, Some(from_queue))
             }));
@@ -4159,7 +4159,7 @@ pub(crate) async fn run_chat_tui(
                     remote::RemoteInput::Steer { text }
                     | remote::RemoteInput::FollowUp { text } => remote::RemoteInput::Prompt {
                         text,
-                        attachments: Vec::new(),
+                        attachments: None,
                     },
                     other => other,
                 };
@@ -4180,7 +4180,7 @@ pub(crate) async fn run_chat_tui(
                         // plain-prompt branch below, exactly where the old ambient
                         // `remote_attach_mentions` were — so a `//`-escape or `/command` typed
                         // alongside an attachment still parses the ORIGINAL text, unchanged.
-                        let has_explicit_attachments = !attachments.is_empty();
+                        let has_explicit_attachments = attachments.is_some();
                         if has_explicit_attachments {
                             remote_attach_mentions.clear();
                         }
@@ -6181,10 +6181,19 @@ mod tests {
             image: true,
         }];
 
-        let mentions =
-            resolve_prompt_attachments(&session, &mut app, &mut remote_notes, &cwd, attachments)
-                .await;
-        assert!(mentions.is_empty(), "no non-image attachments in this list");
+        let mentions = resolve_prompt_attachments(
+            &session,
+            &mut app,
+            &mut remote_notes,
+            &cwd,
+            Some(attachments),
+        )
+        .await;
+        assert_eq!(
+            mentions,
+            vec![real_path.display().to_string()],
+            "the image's upload path is recorded as a mention so the stored user row keeps it"
+        );
 
         let images = session.lock().await.take_pending_images();
         assert_eq!(
@@ -6198,8 +6207,8 @@ mod tests {
             "the stale ambient image from the unrelated Attach must not leak in"
         );
 
-        // An empty attachments list (the fallback case) must leave ambient state untouched —
-        // it's a no-op, not a second discard.
+        // An absent list (older client / TUI) must leave ambient state untouched — it's a
+        // no-op, not a second discard.
         session
             .lock()
             .await
@@ -6208,16 +6217,56 @@ mod tests {
                 data_base64: "still-ambient".into(),
             }]);
         let mentions =
-            resolve_prompt_attachments(&session, &mut app, &mut remote_notes, &cwd, Vec::new())
-                .await;
+            resolve_prompt_attachments(&session, &mut app, &mut remote_notes, &cwd, None).await;
         assert!(mentions.is_empty());
         let images = session.lock().await.take_pending_images();
         assert_eq!(
             images.len(),
             1,
-            "empty list leaves ambient pending_images alone"
+            "absent list leaves ambient pending_images alone"
         );
         assert_eq!(images[0].data_base64, "still-ambient");
+
+        // An EMPTY list is authoritative: a tray item the user removed (already uploaded, so
+        // ambient on the host) must not ride this prompt.
+        session
+            .lock()
+            .await
+            .attach_images(vec![forge_types::ImageAttachment {
+                media_type: "image/gif".into(),
+                data_base64: "removed-from-tray".into(),
+            }]);
+        let mentions = resolve_prompt_attachments(
+            &session,
+            &mut app,
+            &mut remote_notes,
+            &cwd,
+            Some(Vec::new()),
+        )
+        .await;
+        assert!(mentions.is_empty());
+        assert!(
+            session.lock().await.take_pending_images().is_empty(),
+            "empty explicit list discards the ambient image"
+        );
+
+        // Loading for a busy (queued) prompt returns the image instead of attaching it, so it
+        // can travel with the queue entry.
+        let loaded = load_prompt_attachments(
+            &mut app,
+            &mut remote_notes,
+            &cwd,
+            vec![remote::PromptAttachment {
+                path: real_path.display().to_string(),
+                image: true,
+            }],
+        );
+        assert_eq!(loaded.images.len(), 1);
+        assert_eq!(loaded.mentions, vec![real_path.display().to_string()]);
+        assert!(
+            session.lock().await.take_pending_images().is_empty(),
+            "the session's ambient images stay untouched"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6261,10 +6310,10 @@ mod tests {
             &mut app,
             &mut remote_notes,
             &cwd,
-            vec![remote::PromptAttachment {
+            Some(vec![remote::PromptAttachment {
                 path: outside.display().to_string(),
                 image: false,
-            }],
+            }]),
         )
         .await;
         assert!(mentions.is_empty(), "refused path never becomes a mention");

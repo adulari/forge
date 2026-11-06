@@ -305,7 +305,7 @@ pub(crate) async fn apply_effort(
             .input_tx
             .send(crate::remote::RemoteInput::Prompt {
                 text: format!("/effort {}", level.as_str()),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await;
     }

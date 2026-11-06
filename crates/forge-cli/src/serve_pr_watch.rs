@@ -342,7 +342,7 @@ async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
                 .input_tx
                 .send(crate::remote::RemoteInput::Prompt {
                     text,
-                    attachments: Vec::new(),
+                    attachments: None,
                 })
                 .await;
         }

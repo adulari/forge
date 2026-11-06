@@ -793,7 +793,7 @@ mod unit_tests {
             serde_json::from_str::<RemoteInput>(&terminal_input("follow_up", "hi".into())).unwrap(),
             RemoteInput::Prompt {
                 text: "hi".into(),
-                attachments: Vec::new()
+                attachments: None
             }
         );
         assert_eq!(

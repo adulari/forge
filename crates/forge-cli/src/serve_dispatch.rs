@@ -518,7 +518,7 @@ async fn start_worker(state: &DaemonState, row: &DispatchRow, idx: i64) -> Resul
         .input_tx
         .send(remote::RemoteInput::Prompt {
             text: prompt,
-            attachments: Vec::new(),
+            attachments: None,
         })
         .await;
     Ok(handle.session_id.clone())

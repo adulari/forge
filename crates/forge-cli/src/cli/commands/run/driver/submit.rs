@@ -221,7 +221,7 @@ impl DriverState {
     async fn handle_prompt(
         &mut self,
         text: String,
-        attachments: Vec<remote::PromptAttachment>,
+        attachments: Option<Vec<remote::PromptAttachment>>,
         steer: bool,
     ) -> Result<()> {
         // A fresh prompt starts a fresh interaction — drop stale notices + copy payload.
@@ -229,15 +229,50 @@ impl DriverState {
         self.copy_text = None;
 
         // A message-correlated attachment list (mobile upload race fix, mirrors
-        // `run_chat_tui`'s remote drain) is authoritative for THIS turn when non-empty:
-        // discard stale ambient state from an unrelated `Attach` up front (image
-        // attachment happens inside `resolve_prompt_attachments` regardless of dispatch
-        // branch, matching how it already applied ambiently); non-image mentions are
-        // threaded into `submit_line` and only actually prepended in its plain-prompt
-        // branch, exactly where the old ambient `pending_mentions` were.
-        let has_explicit_attachments = !attachments.is_empty();
+        // `run_chat_tui`'s remote drain) is authoritative for THIS turn when present, even if
+        // empty (the user may have removed an already-uploaded file from the tray): ambient
+        // state from an `Attach` is discarded. Idle, images attach to the session and the
+        // mentions are threaded into `submit_line`; busy, both travel with the queue entry so
+        // they ride the turn this prompt becomes, not whichever turn starts next.
+        let has_explicit_attachments = attachments.is_some();
         if has_explicit_attachments {
             self.pending_mentions.clear();
+        }
+
+        if self.busy {
+            let mut resolved = match attachments {
+                Some(list) => {
+                    discard_ambient_images(&self.session);
+                    load_prompt_attachments(&mut self.app, &mut self.notes, &self.cwd, list)
+                }
+                None => ResolvedAttachments {
+                    images: Vec::new(),
+                    mentions: Vec::new(),
+                },
+            };
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                // nothing to queue
+            } else if is_command_line(trimmed) {
+                self.busy_command(text).await?;
+            } else {
+                self.prompt_history.record(&text);
+                let text = prepend_attach_mentions(&mut resolved.mentions, text);
+                if steer && !resolved.images.is_empty() {
+                    self.app.note(
+                        "images can't join the running turn — queued with its image to run next",
+                    );
+                }
+                queue_prompt(
+                    &mut self.queued_prompts,
+                    &self.steer,
+                    &mut self.app,
+                    text,
+                    resolved.images,
+                    steer,
+                );
+            }
+            return Ok(());
         }
         let explicit_mentions = resolve_prompt_attachments(
             &self.session,
@@ -247,26 +282,6 @@ impl DriverState {
             attachments,
         )
         .await;
-
-        if self.busy {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                // nothing to queue
-            } else if is_command_line(trimmed) {
-                self.busy_command(text).await?;
-            } else {
-                self.prompt_history.record(&text);
-                queue_prompt(
-                    &mut self.queued_prompts,
-                    &self.steer,
-                    &mut self.app,
-                    text,
-                    Vec::new(),
-                    steer,
-                );
-            }
-            return Ok(());
-        }
         self.submit_line(text, has_explicit_attachments.then_some(explicit_mentions))
             .await?;
         Ok(())

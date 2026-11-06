@@ -885,15 +885,16 @@ pub enum RemoteInput {
     ///
     /// `attachments` (added v7.1) is the message-correlated, client-computed list of uploads
     /// that ride THIS specific prompt — e.g. the mobile composer's tray at send time. When
-    /// non-empty it is authoritative for this turn and any stale ambient `Attach` state (from an
-    /// unrelated upload for an adjacent message) is discarded instead of used. `#[serde(default)]`
-    /// keeps a bare `{"kind":"prompt","text":"..."}` (older clients, or the local TUI's own
-    /// ambient `/image <path>` flow) parsing fine — an empty list falls back to exactly the old
-    /// ambient `Attach`-then-`Prompt` behavior.
+    /// present (`Some`, even an empty list) it is authoritative for this turn: exactly those
+    /// uploads ride it and any ambient `Attach` state (an upload the user later removed from the
+    /// tray, or one for an adjacent message) is discarded. `#[serde(default)]` keeps a bare
+    /// `{"kind":"prompt","text":"..."}` (older clients, or the local TUI's own ambient
+    /// `/image <path>` flow) parsing as `None`, which keeps the old ambient
+    /// `Attach`-then-`Prompt` behavior.
     Prompt {
         text: String,
         #[serde(default)]
-        attachments: Vec<PromptAttachment>,
+        attachments: Option<Vec<PromptAttachment>>,
     },
     /// Answer a pending permission prompt: `true` = allow (y), `false` = deny (n). `seq` echoes
     /// the [`Snapshot::prompt_seq`] the page rendered its buttons from; the drain ignores a
@@ -964,7 +965,7 @@ pub enum RemoteInput {
     Queue {
         text: String,
         #[serde(default)]
-        attachments: Vec<PromptAttachment>,
+        attachments: Option<Vec<PromptAttachment>>,
     },
     /// Move ONE queued prompt to position `to` in [`Snapshot::queued`]. `index` + `text` echo the
     /// row the client rendered, so a queue that shifted under the tap is detected and dropped.
@@ -2533,7 +2534,7 @@ mod tests {
             serde_json::from_str::<RemoteInput>(r#"{"kind":"prompt","text":"fix it"}"#).unwrap(),
             RemoteInput::Prompt {
                 text: "fix it".into(),
-                attachments: Vec::new(),
+                attachments: None,
             }
         );
         assert_eq!(
@@ -2665,7 +2666,7 @@ mod tests {
             .unwrap(),
             RemoteInput::Prompt {
                 text: "look at this".into(),
-                attachments: vec![
+                attachments: Some(vec![
                     PromptAttachment {
                         path: "/tmp/x/.forge/uploads/s1/1-shot.png".into(),
                         image: true,
@@ -2674,8 +2675,43 @@ mod tests {
                         path: "/tmp/x/.forge/uploads/s1/2-notes.txt".into(),
                         image: false,
                     },
-                ],
+                ]),
             }
+        );
+    }
+
+    #[test]
+    fn prompt_attachments_distinguish_absent_from_empty() {
+        let parse = |json: &str| serde_json::from_str::<RemoteInput>(json).unwrap();
+        assert_eq!(
+            parse(r#"{"kind":"prompt","text":"hi"}"#),
+            RemoteInput::Prompt {
+                text: "hi".into(),
+                attachments: None
+            },
+            "older clients keep the ambient behavior"
+        );
+        assert_eq!(
+            parse(r#"{"kind":"prompt","text":"hi","attachments":[]}"#),
+            RemoteInput::Prompt {
+                text: "hi".into(),
+                attachments: Some(Vec::new())
+            },
+            "an empty list is authoritative: nothing rides this prompt"
+        );
+        assert_eq!(
+            parse(r#"{"kind":"queue","text":"hi","attachments":[],"client_msg_id":"m"}"#),
+            RemoteInput::Queue {
+                text: "hi".into(),
+                attachments: Some(Vec::new())
+            },
+        );
+        assert_eq!(
+            parse(r#"{"kind":"queue","text":"hi"}"#),
+            RemoteInput::Queue {
+                text: "hi".into(),
+                attachments: None
+            },
         );
     }
 
@@ -2854,7 +2890,7 @@ mod tests {
             serde_json::from_str::<RemoteInput>(r#"{"kind":"queue","text":"later"}"#).unwrap(),
             RemoteInput::Queue {
                 text: "later".into(),
-                attachments: Vec::new()
+                attachments: None
             }
         );
         assert_eq!(

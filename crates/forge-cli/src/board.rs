@@ -640,7 +640,7 @@ mod tests {
             serde_json::from_value::<crate::remote::RemoteInput>(frames[0].1.clone()).unwrap(),
             crate::remote::RemoteInput::Prompt {
                 text: "go".into(),
-                attachments: Vec::new(),
+                attachments: None,
             }
         );
     }

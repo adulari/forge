@@ -164,7 +164,7 @@ pub(super) async fn start_dispatch(
         .input_tx
         .send(remote::RemoteInput::Prompt {
             text: first_prompt,
-            attachments: Vec::new(),
+            attachments: None,
         })
         .await;
     state.registry.notify_fleet();
