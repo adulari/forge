@@ -15,6 +15,7 @@
 //! uses, so the same board can later render in the mobile and desktop apps.
 
 pub mod actions;
+pub mod brief;
 pub mod card_render;
 pub mod detail;
 pub mod detail_head;
@@ -38,6 +39,7 @@ mod dispatch_tests;
 #[cfg(test)]
 mod tests;
 
+pub use brief::{BriefCard, BriefLine, BriefTone};
 pub use dispatch::{group_color, CardDispatch, Progress, Role};
 pub use form::{DispatchForm, FormField, FormHit};
 pub use keys::{handle_key, handle_mouse, handle_paste, HELP};
@@ -86,6 +88,8 @@ pub enum BoardEvent {
     DeleteRefused(String),
     /// Daemon connectivity.
     Connection(ConnState),
+    /// The "while you were away" digest: opens the overlay over the board.
+    Brief(BriefCard),
     /// ~10 Hz: advances animation, ages, toast expiry.
     Tick,
     /// The terminal was resized.
@@ -152,6 +156,8 @@ pub enum BoardAction {
     /// Merge every `succeeded` worker of this dispatch in index order, stopping at the first
     /// conflict or error.
     MergeFinished(String),
+    /// `B`: fetch the "while you were away" digest and show it ([`BoardEvent::Brief`]).
+    ShowBrief,
     /// Open IDE mode (F2) over the board, then come back.
     OpenIde,
     Quit,

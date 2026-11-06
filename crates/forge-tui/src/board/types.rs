@@ -15,6 +15,8 @@ pub enum Focus {
     Filter,
     /// The plan-and-dispatch form.
     Form,
+    /// The "while you were away" overlay.
+    Brief,
 }
 
 /// The detail pane's sections.

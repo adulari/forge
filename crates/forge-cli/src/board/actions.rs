@@ -35,6 +35,8 @@ pub(crate) struct Host<'a> {
     pub(crate) refresh: &'a mpsc::UnboundedSender<()>,
     pub(crate) pool: &'a mut SocketPool,
     pub(crate) clipboard: &'a mut Option<arboard::Clipboard>,
+    /// The start of the "while you were away" window `B` reopens.
+    pub(crate) brief_since: i64,
 }
 
 pub(crate) fn perform(action: BoardAction, host: &mut Host<'_>) -> After {
@@ -42,6 +44,15 @@ pub(crate) fn perform(action: BoardAction, host: &mut Host<'_>) -> After {
         BoardAction::Quit => return After::Quit,
         BoardAction::Attach(id) => return After::Attach(id),
         BoardAction::OpenIde => return After::OpenIde,
+        BoardAction::ShowBrief => {
+            tokio::spawn(super::brief_host::show_brief(
+                host.base.to_string(),
+                host.token.to_string(),
+                host.brief_since,
+                true,
+                host.ev.clone(),
+            ));
+        }
         BoardAction::Input(id, json) => host.pool.send(&id, &json),
         BoardAction::Interrupt(id) => host.post(
             &format!("api/sessions/{id}/interrupt"),

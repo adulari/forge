@@ -71,6 +71,9 @@ pub struct BoardApp {
     pub(crate) detail_requested: HashSet<String>,
     /// Plan & dispatch: the dispatch list, the form, the checklist, zoom (`dispatch_state.rs`).
     pub(crate) dispatch: DispatchUi,
+    /// The "while you were away" digest, while its overlay is open.
+    pub(crate) brief: Option<super::brief::BriefCard>,
+    pub(crate) brief_cursor: usize,
 }
 
 impl BoardApp {
@@ -115,6 +118,8 @@ impl BoardApp {
             closed: HashSet::new(),
             detail_requested: HashSet::new(),
             dispatch: DispatchUi::default(),
+            brief: None,
+            brief_cursor: 0,
         }
     }
 
@@ -162,6 +167,11 @@ impl BoardApp {
             }
             BoardEvent::History(id, rows) => {
                 self.history.insert(id, rows);
+            }
+            BoardEvent::Brief(card) => {
+                self.brief = Some(card);
+                self.brief_cursor = 0;
+                self.focus = Focus::Brief;
             }
             BoardEvent::Toast(level, text) => self.toast(level, text),
             BoardEvent::DeleteRefused(text) => {
@@ -461,6 +471,16 @@ impl BoardApp {
             return Vec::new();
         }
         vec![BoardAction::WantDetail(id.to_string())]
+    }
+
+    pub(crate) fn close_brief(&mut self) {
+        self.brief = None;
+        self.brief_cursor = 0;
+        self.focus = if self.detail_open {
+            Focus::Detail
+        } else {
+            Focus::Board
+        };
     }
 
     pub(crate) fn close_detail(&mut self) {

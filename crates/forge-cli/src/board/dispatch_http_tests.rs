@@ -217,6 +217,7 @@ async fn perform_one(base: &str, action: BoardAction) -> Run {
     let mut pool = SocketPool::new(base.to_string(), TOKEN.into(), ev_tx.clone());
     let mut clipboard = None;
     let mut host = Host {
+        brief_since: 0,
         http: &http,
         base,
         token: TOKEN,

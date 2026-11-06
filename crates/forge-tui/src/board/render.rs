@@ -75,6 +75,9 @@ pub fn draw(app: &mut BoardApp, frame: &mut Frame) {
     } else if app.dispatch.form.is_some() {
         form_render::draw_form(app, frame, area);
     }
+    if app.focus == Focus::Brief {
+        super::brief::draw_brief(app, frame, area);
+    }
     if app.focus == Focus::Help {
         overlays::draw_help(frame, area);
     }

@@ -1899,3 +1899,75 @@ fn offline_connection_toasts_once_not_on_every_repeat() {
     a.apply(BoardEvent::Connection(ConnState::Offline("down".into())));
     assert_eq!(a.toasts.len(), 1);
 }
+
+// ============================================================ while you were away
+
+fn away_card() -> BriefCard {
+    BriefCard {
+        title: "While you were away (6h)".into(),
+        headline: "2 finished, 1 failed".into(),
+        lines: vec![
+            BriefLine {
+                session_id: "a".into(),
+                text: "Fix flake [forge] — failed: provider 503".into(),
+                detail: String::new(),
+                tone: BriefTone::Bad,
+            },
+            BriefLine {
+                session_id: "gone".into(),
+                text: "Old work [forge] — finished".into(),
+                detail: "done".into(),
+                tone: BriefTone::Good,
+            },
+        ],
+    }
+}
+
+#[test]
+fn the_away_digest_takes_the_keyboard_and_esc_dismisses_it() {
+    let mut a = app_with_selected("a");
+    a.apply(BoardEvent::Brief(away_card()));
+    assert_eq!(a.focus, Focus::Brief);
+    // Keys that would act on the board are inert while the overlay is up.
+    assert!(handle_key(&mut a, key(KeyCode::Char('x'))).is_empty());
+    assert!(a.confirm.is_none());
+    handle_key(&mut a, key(KeyCode::Esc));
+    assert_eq!(a.focus, Focus::Board);
+    assert!(a.brief.is_none());
+}
+
+#[test]
+fn b_asks_the_host_for_the_digest() {
+    let mut a = app_with_selected("a");
+    assert_eq!(
+        handle_key(&mut a, key(KeyCode::Char('B'))),
+        vec![BoardAction::ShowBrief]
+    );
+}
+
+#[test]
+fn enter_opens_the_picked_session_and_tolerates_one_that_left_the_board() {
+    let mut a = app_with_selected("a");
+    a.apply(BoardEvent::Brief(away_card()));
+    handle_key(&mut a, key(KeyCode::Enter));
+    assert!(a.detail_open, "the picked session's pane opened");
+    assert_eq!(a.selected.as_deref(), Some("a"));
+
+    a.close_detail();
+    a.apply(BoardEvent::Brief(away_card()));
+    handle_key(&mut a, key(KeyCode::Down));
+    handle_key(&mut a, key(KeyCode::Down));
+    assert_eq!(a.brief_cursor, 1, "the cursor stops on the last line");
+    handle_key(&mut a, key(KeyCode::Enter));
+    assert!(!a.detail_open);
+    assert_eq!(a.focus, Focus::Board);
+    assert!(a
+        .toasts
+        .back()
+        .is_some_and(|t| t.text.contains("not on the board")));
+}
+
+#[test]
+fn the_away_key_is_in_the_help() {
+    assert!(HELP.iter().any(|(k, d)| *k == "B" && d.contains("away")));
+}

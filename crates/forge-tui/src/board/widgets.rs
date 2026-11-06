@@ -340,6 +340,11 @@ pub(super) type Bind = (&'static str, &'static str, bool);
 pub(super) fn keybar(app: &BoardApp) -> Vec<Bind> {
     match app.focus {
         Focus::Help => vec![("any key", "closes", false)],
+        Focus::Brief => vec![
+            ("↑↓", "move", false),
+            ("Enter", "open", true),
+            ("Esc", "dismiss", false),
+        ],
         Focus::Confirm => vec![("Enter", "yes", true), ("Esc", "no", false)],
         Focus::Composer => {
             let mut v = vec![("Enter", "send", true), ("Esc", "cancel", false)];
@@ -412,6 +417,7 @@ fn board_keybar(app: &BoardApp) -> Vec<Bind> {
         ("D", "dispatch", false),
         ("f", "project", false),
         ("/", "filter", false),
+        ("B", "away", false),
         ("?", "help", false),
         ("q", "quit", false),
     ]);

@@ -57,6 +57,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("F", "follow the live tail again"),
     ("c", "copy the session id"),
     ("R", "refresh now"),
+    (
+        "B",
+        "while you were away: what your sessions did since you last looked",
+    ),
     ("?", "this help"),
     ("F2", "IDE mode: review what agents changed"),
     ("q  Ctrl+C", "quit — sessions keep running"),
@@ -88,10 +92,40 @@ pub fn handle_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
             };
             Vec::new()
         }
+        Focus::Brief => brief_key(app, key),
         Focus::Filter => filter_key(app, key),
         Focus::Form => super::form::form_key(app, key),
         Focus::Board | Focus::Detail => shared_key(app, key),
     }
+}
+
+/// The away overlay: pick a session and open it, or dismiss.
+fn brief_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
+    let len = app.brief.as_ref().map_or(0, |b| b.lines.len());
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => app.brief_cursor = app.brief_cursor.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => {
+            app.brief_cursor = (app.brief_cursor + 1).min(len.saturating_sub(1));
+        }
+        KeyCode::Enter => {
+            let id = app
+                .brief
+                .as_ref()
+                .and_then(|b| b.lines.get(app.brief_cursor))
+                .map(|l| l.session_id.clone());
+            app.close_brief();
+            if let Some(id) = id {
+                if app.card(&id).is_some() {
+                    app.select(&id);
+                    return app.open_detail();
+                }
+                app.toast(ToastLevel::Info, "that session is not on the board");
+            }
+        }
+        KeyCode::Esc | KeyCode::Char('q' | 'B') => app.close_brief(),
+        _ => {}
+    }
+    Vec::new()
 }
 
 fn composer_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
@@ -171,6 +205,7 @@ fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
     match key.code {
         KeyCode::Char('q') => return vec![BoardAction::Quit],
         KeyCode::Char('?') => app.focus = Focus::Help,
+        KeyCode::Char('B') => return vec![BoardAction::ShowBrief],
         KeyCode::Esc => {
             if in_detail {
                 app.focus = Focus::Board;
@@ -402,7 +437,7 @@ pub fn handle_mouse(app: &mut BoardApp, ev: MouseEvent) -> Vec<BoardAction> {
 fn wheel(app: &mut BoardApp, col: u16, row: u16, dir: i32) -> Vec<BoardAction> {
     if matches!(
         app.focus,
-        Focus::Composer | Focus::Confirm | Focus::Help | Focus::Form
+        Focus::Composer | Focus::Confirm | Focus::Help | Focus::Form | Focus::Brief
     ) {
         return Vec::new();
     }
@@ -445,6 +480,10 @@ fn click(app: &mut BoardApp, col: u16, row: u16) -> Vec<BoardAction> {
         }
         Focus::Composer => {
             app.cancel_composer();
+        }
+        Focus::Brief => {
+            app.close_brief();
+            return Vec::new();
         }
         _ => {}
     }

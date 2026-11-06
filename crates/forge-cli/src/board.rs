@@ -14,6 +14,7 @@
 //! [`BoardEvent`]. Everything below is that translation layer.
 
 mod actions;
+mod brief_host;
 pub(crate) mod client;
 mod dispatch_client;
 pub(crate) mod sockets;
@@ -116,8 +117,25 @@ pub(crate) async fn board_cmd(
         None => {}
     }
 
+    let now = now_unix();
+    let previous = brief_host::read_last_visit();
+    brief_host::stamp_visit(now);
+    let away = brief_host::away_window(previous, now);
+    // `B` always looks back at least an hour, so a quick re-open still has something to show.
+    let brief_since = previous.map_or(now - brief_host::FIRST_WINDOW_SECS, |p| p.min(now - 3600));
+
     let mut guard = TerminalGuard::enter()?;
-    let outcome = run_board(&mut app, &mut guard, &base, &token, &http).await;
+    let outcome = run_board(
+        &mut app,
+        &mut guard,
+        &base,
+        &token,
+        &http,
+        brief_since,
+        away,
+    )
+    .await;
+    brief_host::stamp_visit(now_unix());
     guard.suspend();
     println!("⚒ board closed — sessions keep running");
     outcome
@@ -328,6 +346,8 @@ async fn run_board(
     base: &str,
     token: &str,
     http: &reqwest::Client,
+    brief_since: i64,
+    auto_brief: Option<i64>,
 ) -> Result<()> {
     let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Ev>();
     let (refresh_tx, refresh_rx) = mpsc::unbounded_channel::<()>();
@@ -358,6 +378,15 @@ async fn run_board(
     let mut last_draw = Instant::now() - DRAW_MIN_INTERVAL;
 
     pool.sync(&app.watch_ids());
+    if let Some(since) = auto_brief {
+        tokio::spawn(brief_host::show_brief(
+            base.to_string(),
+            token.to_string(),
+            since,
+            false,
+            ev_tx.clone(),
+        ));
+    }
 
     let result = loop {
         if dirty && last_draw.elapsed() >= DRAW_MIN_INTERVAL {
@@ -379,6 +408,7 @@ async fn run_board(
                 dirty |= animating || app.needs_animation();
             }
             _ = git_tick.tick() => {
+                brief_host::stamp_visit(now_unix());
                 if let Some(id) = app.detail_session() {
                     tokio::spawn(client::fetch_git(
                         http.clone(), base.to_string(), token.to_string(), id, ev_tx.clone(),
@@ -422,6 +452,7 @@ async fn run_board(
                 refresh: &refresh_tx,
                 pool: &mut pool,
                 clipboard: &mut clipboard,
+                brief_since,
             };
             match actions::perform(action, &mut host) {
                 actions::After::None => {}
