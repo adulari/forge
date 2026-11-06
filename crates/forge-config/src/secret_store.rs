@@ -168,6 +168,9 @@ pub fn set_all(key: &str, value: &str) -> Result<(), ConfigError> {
 pub fn set(key: &str, value: &str) -> Result<(), ConfigError> {
     refuse_if_test_binary();
     read_cache().invalidate(key);
+    if get_uncached(key).as_deref() == Some(value) {
+        return Ok(());
+    }
     let result = set_inner(key, value);
     if result.is_ok() {
         touch_change_stamp();
@@ -275,6 +278,14 @@ pub fn set_all(key: &str, value: &str) -> Result<(), ConfigError> {
 #[cfg(any(not(feature = "test-secrets"), test))]
 fn all_set(key: &str, value: &str) -> Result<(), ConfigError> {
     read_cache().invalidate(key);
+    // A rewrite of the value already stored must not move the change stamp: every long-running
+    // process treats a moved stamp as "a key changed" and rediscovers every provider, and a
+    // periodic writer (account sync re-applying the same keys) kept a daemon doing that every
+    // 30 s, around the clock.
+    let keyring_holds = !keyring_available() || keyring_value(key).as_deref() == Some(value);
+    if keyring_holds && file_get(key).as_deref() == Some(value) {
+        return Ok(());
+    }
     let mut stored = false;
     if keyring_available() {
         let name = key.to_string();
@@ -300,6 +311,17 @@ fn all_set(key: &str, value: &str) -> Result<(), ConfigError> {
         touch_change_stamp();
     }
     result
+}
+
+#[cfg(any(not(feature = "test-secrets"), test))]
+fn keyring_value(key: &str) -> Option<String> {
+    let key = key.to_string();
+    match keyring_call("read", move || {
+        keyring::Entry::new(KEYRING_SERVICE, &key).and_then(|entry| entry.get_password())
+    }) {
+        Some(Ok(v)) if !v.is_empty() => Some(v),
+        _ => None,
+    }
 }
 
 #[cfg(any(not(feature = "test-secrets"), test))]
@@ -843,6 +865,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         test_dir::set(dir.path().to_path_buf());
         dir
+    }
+
+    #[test]
+    fn rewriting_the_same_secret_leaves_the_change_stamp_alone() {
+        let _dir = isolated_file_store();
+        if keyring_available() {
+            return;
+        }
+        all_set("slot-stamp", "v1").unwrap();
+        let first = change_stamp();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        all_set("slot-stamp", "v1").unwrap();
+        assert_eq!(change_stamp(), first, "an identical write is not a change");
+        all_set("slot-stamp", "v2").unwrap();
+        assert_ne!(change_stamp(), first, "a real change still moves the stamp");
+        assert_eq!(file_get("slot-stamp").as_deref(), Some("v2"));
     }
 
     #[test]
