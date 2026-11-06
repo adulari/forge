@@ -56,6 +56,16 @@ impl WorktreeGuard {
         child_id: &str,
         worktree_path: PathBuf,
     ) -> Result<WorktreeGuard, WorktreeError> {
+        Self::create_at_base(repo_root, child_id, worktree_path, "HEAD")
+    }
+
+    /// [`create_at`](Self::create_at) branched from `start_point` (a commit id) instead of HEAD.
+    pub fn create_at_base(
+        repo_root: &Path,
+        child_id: &str,
+        worktree_path: PathBuf,
+        start_point: &str,
+    ) -> Result<WorktreeGuard, WorktreeError> {
         let branch = format!("forge/subagent/{child_id}");
         if let Some(parent) = worktree_path.parent() {
             if worktree_path.starts_with(repo_root) {
@@ -73,7 +83,7 @@ impl WorktreeGuard {
                 worktree_path.to_str().unwrap_or(child_id),
                 "-b",
                 &branch,
-                "HEAD",
+                start_point,
             ],
             "worktree add",
         )?;

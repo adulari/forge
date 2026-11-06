@@ -408,3 +408,59 @@ async fn cancelling_a_clean_create_removes_only_the_fresh_worktree() {
     assert!(!path.exists(), "a clean, empty worktree is cleaned up");
     assert!(git(&main, &["branch", "--list", "forge/orphan"]).is_empty());
 }
+
+#[test]
+fn create_branches_from_a_fresher_origin_and_reports_the_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let main = repo(dir.path());
+    let origin = dir.path().join("origin.git");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            main.to_str().unwrap(),
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(
+        &main,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&main, &["fetch", "-q", "origin"]);
+    git(&main, &["remote", "set-head", "origin", "main"]);
+    let other = dir.path().join("other");
+    git(
+        dir.path(),
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&other, &["config", "user.email", "t@t"]);
+    git(&other, &["config", "user.name", "t"]);
+    std::fs::write(other.join("b.txt"), "b\n").unwrap();
+    git(&other, &["add", "."]);
+    git(&other, &["commit", "-qm", "remote"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+
+    let out = execute(&req(json!({"action": "create", "name": "x"})), &ctx(&main));
+    assert!(out.ok, "{}", out.text);
+    let path = out.switch_to.unwrap();
+    assert_eq!(
+        git(&path, &["rev-parse", "HEAD"]),
+        git(&other, &["rev-parse", "HEAD"])
+    );
+    assert!(
+        out.text.contains("(local main was 1 behind)"),
+        "{}",
+        out.text
+    );
+    assert_ne!(
+        git(&main, &["rev-parse", "HEAD"]),
+        git(&other, &["rev-parse", "HEAD"])
+    );
+}

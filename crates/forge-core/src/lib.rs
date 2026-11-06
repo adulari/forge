@@ -223,6 +223,7 @@ pub mod workflow;
 pub mod workflow_meta;
 mod workspace_context;
 pub mod worktree;
+pub mod worktree_base;
 pub mod worktree_ops;
 pub mod worktree_reclaim;
 pub mod worktree_setup;

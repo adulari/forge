@@ -47,6 +47,7 @@ pub(crate) fn create_only(repo: &Path, requested: Option<&str>) -> Result<Create
         .map(|config| config.worktree)
         .unwrap_or_default();
     let requested = requested.map(str::trim).filter(|n| !n.is_empty());
+    let base = forge_core::worktree_base::fresh_base(repo);
     let guard = match requested {
         Some(raw) => {
             let name = forge_core::worktree_ops::slug(raw);
@@ -54,7 +55,8 @@ pub(crate) fn create_only(repo: &Path, requested: Option<&str>) -> Result<Create
                 return Err(format!("{raw:?} is not a usable branch name"));
             }
             let path = worktree_setup::worktree_path(repo, &settings, &name);
-            WorktreeGuard::create_at(repo, &name, path).map_err(|e| e.to_string())?
+            WorktreeGuard::create_at_base(repo, &name, path, &base.start_point)
+                .map_err(|e| e.to_string())?
         }
         // The generated space is large, not unique: a kept branch from an earlier session can
         // already own the name.
@@ -63,7 +65,7 @@ pub(crate) fn create_only(repo: &Path, requested: Option<&str>) -> Result<Create
             loop {
                 let name = worktree_setup::friendly_name();
                 let path = worktree_setup::worktree_path(repo, &settings, &name);
-                match WorktreeGuard::create_at(repo, &name, path) {
+                match WorktreeGuard::create_at_base(repo, &name, path, &base.start_point) {
                     Ok(guard) => break guard,
                     Err(e) if attempt >= 5 => return Err(e.to_string()),
                     Err(_) => attempt += 1,
@@ -71,6 +73,7 @@ pub(crate) fn create_only(repo: &Path, requested: Option<&str>) -> Result<Create
             }
         }
     };
+    forge_core::worktree_base::store_note(guard.path(), &base.note);
     Ok(Created {
         guard,
         repo: repo.to_path_buf(),
