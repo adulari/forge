@@ -39,9 +39,10 @@ import { SETTINGS_ENTRIES } from "../../lib/palette/settingsEntries";
 import { configHref, settingsIndex } from "../../lib/settingsSearch";
 import { recencyOf } from "../../lib/palette/recents";
 import { formatShortcut, getResolvedShortcut, type AppShortcutAction, useShortcutLabel } from "../../lib/shortcuts";
-import { useArchiveSession, useConfig, useHostPressure, useReclaimHostSpace, useSessions } from "../../lib/queries";
+import { useArchiveSession, useConfig, useHostPressure, useSessions } from "../../lib/queries";
 import { useAuth } from "../../lib/auth";
-import { canReclaimFrom, isPressured, reclaimResultMessage } from "../../lib/hostPressure";
+import { canReclaimFrom, offersReclaim } from "../../lib/hostPressure";
+import { requestHostReclaim } from "../../lib/hostReclaimRequest";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { formatCwd, formatRelativeTime, type as typeScale } from "../../theme/typography";
@@ -138,7 +139,6 @@ export function usePaletteSources(options: PaletteSourceOptions) {
   const { hosts: anywhereHosts } = useAnywhereHosts();
   const { baseUrl: paletteBaseUrl } = useAuth();
   const hostPressure = useHostPressure();
-  const reclaimHost = useReclaimHostSpace();
   const newSessionHint = useShortcutLabel("session.new");
   const fleetHint = useShortcutLabel("nav.fleet");
   const inboxHint = useShortcutLabel("nav.inbox");
@@ -362,7 +362,7 @@ export function usePaletteSources(options: PaletteSourceOptions) {
       });
     }
 
-    if (isPressured(hostPressure.data) && canReclaimFrom(paletteBaseUrl)) {
+    if (offersReclaim(hostPressure.data) && canReclaimFrom(paletteBaseUrl)) {
       items.push({
         id: "host:reclaim",
         section: "commands",
@@ -372,10 +372,7 @@ export function usePaletteSources(options: PaletteSourceOptions) {
         leading: <Settings2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
         onSelect: () => {
           close();
-          reclaimHost.mutateAsync(undefined).then(
-            (outcome) => toast.show(reclaimResultMessage(outcome), { tone: "neutral" }),
-            () => toast.show("Couldn't reclaim space. Try `forge worktree reclaim` on the host.", { tone: "danger" }),
-          );
+          requestHostReclaim();
         },
       });
     }
@@ -428,7 +425,7 @@ export function usePaletteSources(options: PaletteSourceOptions) {
     return items.map((item) => ({ ...item, recency: recencyOf(recents, item.id) }));
   }, [
     tokens, activeSessionId, scheme, setScheme, close, archiveSession, continueInClaudeCode, toast, runSlashCommand, skillCommands, isCompact,
-    newSessionHint, fleetHint, inboxHint, historyHint, hostPressure.data, paletteBaseUrl, reclaimHost, anywhereSignedIn, anywhereHosts, anywhereAccount, recents,
+    newSessionHint, fleetHint, inboxHint, historyHint, hostPressure.data, paletteBaseUrl, anywhereSignedIn, anywhereHosts, anywhereAccount, recents,
     openWhatsNew, openSchedules,
   ]);
 

@@ -129,6 +129,7 @@ import {
   type DiagnosticsResponse,
   getDiagnostics,
   getIdentity,
+  getReclaimPreview,
   reclaimHostSpace,
   type AccountSyncStatus,
   getAccountSync,
@@ -317,6 +318,19 @@ export function useHostPressure(enabled = true) {
     enabled: enabled && baseUrl != null,
     staleTime: PRESSURE_REFRESH_MS / 2,
     refetchInterval: PRESSURE_REFRESH_MS,
+    retry: false,
+  });
+}
+
+/** What Reclaim would free, fetched while the confirmation is open. */
+export function useReclaimPreview(enabled: boolean) {
+  const { baseUrl } = useAuth();
+  return useQuery({
+    queryKey: [...keys(baseUrl).hostPressure, "reclaim-preview"],
+    queryFn: async () => (await getReclaimPreview(baseUrl as string)).reclaimable_bytes ?? null,
+    enabled: enabled && baseUrl != null,
+    staleTime: 0,
+    gcTime: 0,
     retry: false,
   });
 }

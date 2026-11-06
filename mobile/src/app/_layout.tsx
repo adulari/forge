@@ -29,6 +29,7 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { StartupWatchdog } from "../components/StartupWatchdog";
 import { DesktopOtaHost } from "../components/DesktopOtaHost";
 import { UpdateNotice } from "../components/UpdateNotice";
+import { HostReclaimDialog } from "../components/HostReclaimDialog";
 import { OperationalNotice } from "../components/OperationalNotice";
 import { useOnboardingBrief } from "../components/onboarding/brief";
 import { ClaudeReconnectBanner } from "../components/onboarding/ClaudeReconnectBanner";
@@ -463,6 +464,7 @@ export default function RootLayout() {
                             `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                         <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
                           <OperationalNotice />
+                          <HostReclaimDialog />
                           <ScopeDeniedToast />
                           <ClaudeReconnectBanner />
                           <DesktopOtaHost />

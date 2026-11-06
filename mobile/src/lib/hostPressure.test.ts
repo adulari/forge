@@ -5,8 +5,11 @@ import {
   createWarning,
   floorRefusal,
   formatBytes,
+  dismissKey,
   isPressured,
+  offersReclaim,
   pressureMessage,
+  reclaimConfirmMessage,
   reclaimLabel,
   reclaimResultMessage,
 } from "./hostPressure";
@@ -67,5 +70,34 @@ describe("host pressure", () => {
       "Reclaimed 3.0 GB: 2 worktrees removed, 1 build dir pruned.",
     );
     expect(reclaimResultMessage({ freed_bytes: 0, removed: 0, pruned: 0, failures: ["a"] })).toContain("1 failed");
+  });
+
+  it("offers Reclaim only when a disk is the cause, never for memory-only pressure", () => {
+    expect(offersReclaim({ level: "warn", cause: "disk" })).toBe(true);
+    expect(offersReclaim({ level: "floor", cause: "disk" })).toBe(true);
+    expect(offersReclaim({ level: "warn" })).toBe(true);
+    expect(offersReclaim({ level: "warn", cause: "memory" })).toBe(false);
+    expect(offersReclaim({ level: "ok", cause: "disk" })).toBe(false);
+    expect(offersReclaim(null)).toBe(false);
+  });
+
+  it("words memory pressure as a plain line, not as paused worktrees", () => {
+    const summary = "memory: 200.0 MB available of 16.0 GB";
+    expect(pressureMessage({ level: "warn", cause: "memory", summary })).toBe(`Host memory is low. ${summary}`);
+  });
+
+  it("keys the banner dismissal by level and cause", () => {
+    expect(dismissKey({ level: "warn", cause: "memory" })).not.toBe(dismissKey({ level: "warn", cause: "disk" }));
+    expect(dismissKey({ level: "warn" })).toBe(dismissKey({ level: "warn", cause: "disk" }));
+    expect(dismissKey({ level: "floor", cause: "disk" })).not.toBe(dismissKey({ level: "warn", cause: "disk" }));
+  });
+
+  it("asks for confirmation with what is removed and how much it frees", () => {
+    const msg = reclaimConfirmMessage("projects disk: 4.1 GB free of 500.0 GB (1%)", 30 * 1024 ** 3);
+    expect(msg).toContain("projects disk: 4.1 GB free");
+    expect(msg).toContain("merged, clean, pushed");
+    expect(msg).toContain("About 30.0 GB can be freed.");
+    expect(reclaimConfirmMessage(null, 0)).toContain("Nothing is provably safe");
+    expect(reclaimConfirmMessage(null, null)).toContain("not known yet");
   });
 });

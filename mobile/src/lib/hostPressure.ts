@@ -4,8 +4,12 @@
 
 export type PressureLevel = "ok" | "warn" | "floor";
 
+export type PressureCause = "disk" | "memory";
+
 export interface HostPressure {
   level: PressureLevel;
+  /** What is short; absent from a daemon that predates it (treated as disk). */
+  cause?: PressureCause | null;
   /** One sentence naming the tightest disk and/or low memory; null while the host is fine. */
   summary?: string | null;
 }
@@ -28,6 +32,16 @@ export function isPressured(pressure: HostPressure | null | undefined): pressure
   return pressure?.level === "warn" || pressure?.level === "floor";
 }
 
+/** Reclaim frees disk; memory-only pressure gets a plain line and no destructive action. */
+export function offersReclaim(pressure: HostPressure | null | undefined): pressure is HostPressure {
+  return isPressured(pressure) && pressure.cause !== "memory";
+}
+
+/** Dismissal is remembered per level and cause, so a worse or different problem shows again. */
+export function dismissKey(pressure: HostPressure): string {
+  return `${pressure.level}:${pressure.cause ?? "disk"}`;
+}
+
 const UNITS = ["B", "KB", "MB", "GB", "TB"];
 
 export function formatBytes(bytes: number): string {
@@ -43,6 +57,7 @@ export function formatBytes(bytes: number): string {
 /** The banner sentence: what is wrong, and what that means for starting work. */
 export function pressureMessage(pressure: HostPressure): string {
   const why = pressure.summary ?? "this host is low on disk or memory";
+  if (pressure.cause === "memory") return `Host memory is low. ${why}`;
   return pressure.level === "floor"
     ? `New worktree sessions are paused. ${why}`
     : `Host running low. ${why}`;
@@ -84,6 +99,17 @@ export function createWarning(gate: WorktreeGate | null | undefined): string | n
 
 export function reclaimLabel(gate: WorktreeGate | null | undefined): string {
   return gate?.reclaimable_bytes ? `Reclaim ${formatBytes(gate.reclaimable_bytes)}` : "Reclaim";
+}
+
+/** The confirmation body: what is wrong, what Reclaim removes and (when known) how much it frees. */
+export function reclaimConfirmMessage(summary: string | null | undefined, reclaimableBytes: number | null | undefined): string {
+  const amount =
+    reclaimableBytes == null
+      ? "How much it frees is not known yet."
+      : reclaimableBytes > 0
+        ? `About ${formatBytes(reclaimableBytes)} can be freed.`
+        : "Nothing is provably safe to remove right now.";
+  return `${summary ? `${summary}. ` : ""}Removes worktrees that are merged, clean, pushed and not in use, and stale build directories, across every project on the host. Anything else is kept. ${amount}`;
 }
 
 export function reclaimResultMessage(out: ReclaimOutcome): string {

@@ -882,6 +882,11 @@ export function reclaimHostSpace(baseUrl: string, cwd?: string): Promise<Reclaim
   });
 }
 
+/** What Reclaim would free across every repo the host knows (`reclaimable_bytes` is null when it could not be surveyed). */
+export function getReclaimPreview(baseUrl: string): Promise<{ reclaimable_bytes?: number | null }> {
+  return request(baseUrl, "/api/host/pressure");
+}
+
 export function createSession(
   baseUrl: string,
   body: CreateSessionRequest,
