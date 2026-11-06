@@ -277,15 +277,17 @@ export function SessionChat() {
         clearPendingAnswer();
       }
     }
+    // The pending interrupt is edge-only: it means "Stop pressed while offline", so it fires on the
+    // reconnect edge, not on a plain remount-while-online. It goes before the queued prompts: the
+    // Stop was meant for the turn that was running then, and sent after them it would cancel the
+    // prompt the user typed while offline instead.
+    if (pendingInterrupt) {
+      if (was !== "open") send({ kind: "interrupt" });
+      setPendingInterrupt(false);
+    }
     if (offlineQueue.length > 0) {
       for (const input of queuedPromptInputs(offlineQueue)) send(input);
       setOfflineQueue([]);
-    }
-    // The pending interrupt is edge-only: it means "Stop pressed while offline", so it fires on the
-    // reconnect edge, not on a plain remount-while-online.
-    if (pendingInterrupt && was !== "open") {
-      send({ kind: "interrupt" });
-      setPendingInterrupt(false);
     }
   }, [connectionState, offlineQueue, pendingInterrupt, pendingAnswer, snapshot?.prompt_seq, snapshot?.permission_prompt, snapshot?.question, send, clearPendingAnswer]);
 
