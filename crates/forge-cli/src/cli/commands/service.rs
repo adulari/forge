@@ -102,6 +102,26 @@ pub(crate) fn resolved_port(port: Option<u16>) -> u16 {
     port.unwrap_or_else(|| forge_config::load().unwrap_or_default().remote.serve_port())
 }
 
+/// The port the installed daemon actually uses: `forge service install --port N` bakes it into the
+/// unit, and a running daemon records it in serve-state.json. Config is only the fallback.
+pub(crate) fn daemon_port() -> u16 {
+    #[cfg(target_os = "linux")]
+    let unit_port = installed_unit_text()
+        .as_deref()
+        .and_then(crate::doctor_daemon::unit_port);
+    #[cfg(not(target_os = "linux"))]
+    let unit_port: Option<u16> = None;
+    unit_port
+        .or_else(|| {
+            crate::serve::read_state()
+                .ok()
+                .flatten()
+                .filter(|state| state.process_is_alive())
+                .map(|state| state.port)
+        })
+        .unwrap_or_else(|| resolved_port(None))
+}
+
 fn token_file_path() -> Option<std::path::PathBuf> {
     forge_config::config_dir().map(|d| d.join("serve-token"))
 }
@@ -171,7 +191,7 @@ fn uninstall_cmd() -> Result<()> {
 
 fn status_cmd(port: Option<u16>) -> Result<()> {
     let status = query_service_status()?;
-    let port = resolved_port(port);
+    let port = port.unwrap_or_else(daemon_port);
     let port_up = probe_port(port);
 
     println!("installed: {}", if status.installed { "yes" } else { "no" });
