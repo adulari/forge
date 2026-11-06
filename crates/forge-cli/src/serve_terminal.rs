@@ -592,10 +592,7 @@ pub(crate) async fn terminal_ws(
     if !valid_terminal_id(&params.terminal) {
         return err_response(axum::http::StatusCode::BAD_REQUEST, "invalid terminal id");
     }
-    let cwd = session
-        .worktree
-        .clone()
-        .unwrap_or_else(|| session.cwd.clone());
+    let cwd = session.worktree.clone().unwrap_or_else(|| session.cwd());
     if cwd.is_empty() {
         return err_response(
             axum::http::StatusCode::BAD_REQUEST,

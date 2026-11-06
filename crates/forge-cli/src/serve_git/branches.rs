@@ -12,10 +12,7 @@ pub(super) async fn session_git_context(
 ) -> Option<SessionGitContext> {
     let (dir, managed_worktree, self_busy) = match state.registry.get(session).await {
         Some(handle) => (
-            handle
-                .worktree
-                .clone()
-                .unwrap_or_else(|| handle.cwd.clone()),
+            handle.worktree.clone().unwrap_or_else(|| handle.cwd()),
             handle.worktree.is_some(),
             handle.snapshot_rx.borrow().snapshot.busy,
         ),
@@ -36,7 +33,7 @@ pub(super) async fn session_git_context(
             .await
             .into_iter()
             .filter(|peer| peer.worktree.is_none() && peer.snapshot_rx.borrow().snapshot.busy)
-            .map(|peer| peer.cwd.clone())
+            .map(|peer| peer.cwd())
             .collect::<Vec<_>>();
         let target_dir = dir.clone();
         tokio::task::spawn_blocking(move || {

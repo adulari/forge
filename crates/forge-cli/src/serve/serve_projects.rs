@@ -190,7 +190,7 @@ async fn recent_candidates(state: &DaemonState) -> Result<Vec<(String, i64)>, St
         .filter(|handle| handle.worktree.is_none())
         .map(|handle| {
             (
-                handle.cwd.clone(),
+                handle.cwd(),
                 handle
                     .last_activity
                     .load(std::sync::atomic::Ordering::Relaxed),

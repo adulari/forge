@@ -1398,10 +1398,7 @@ async fn create_session(
         Ok(handle) => {
             let terminals = state.terminals.clone();
             let terminal_session = handle.session_id.clone();
-            let terminal_cwd = handle
-                .worktree
-                .clone()
-                .unwrap_or_else(|| handle.cwd.clone());
+            let terminal_cwd = handle.worktree.clone().unwrap_or_else(|| handle.cwd());
             tokio::spawn(async move { terminals.prewarm(&terminal_session, terminal_cwd).await });
             crate::serve_worktree_start::apply_effort(
                 &handle,
@@ -1424,7 +1421,7 @@ async fn create_session(
             json_response(&serde_json::json!({
                 "id": handle.session_id,
                 "title": handle.title(),
-                "cwd": handle.cwd,
+                "cwd": handle.cwd(),
                 "worktree": handle.worktree,
             }))
         }
@@ -1969,7 +1966,7 @@ pub(crate) async fn fork_session(
             json_response(&serde_json::json!({
                 "id": handle.session_id,
                 "title": handle.title(),
-                "cwd": handle.cwd,
+                "cwd": handle.cwd(),
                 "worktree": handle.worktree,
             }))
         }
@@ -2680,7 +2677,7 @@ pub(crate) async fn merge_session_core(
     };
     state.terminals.close_session(id).await;
     let resume_spec = DriverSpec {
-        cwd: handle.cwd.clone(),
+        cwd: handle.cwd(),
         worktree: handle.worktree.clone(),
         title: handle.title(),
         mock: state.mock,
@@ -2946,7 +2943,7 @@ async fn upload(
     let Some(handle) = state.registry.get(&params.session).await else {
         return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
     };
-    let Some(uploads_root) = unlinked_uploads_root(std::path::Path::new(&handle.cwd)) else {
+    let Some(uploads_root) = unlinked_uploads_root(std::path::Path::new(&handle.cwd())) else {
         return err_response(
             axum::http::StatusCode::FORBIDDEN,
             "the uploads directory is a symlink",
@@ -5884,7 +5881,7 @@ pub(crate) mod tests {
             .await
             .expect("resumed driver registered");
         assert_eq!(resumed.title(), "was-archived");
-        assert_eq!(resumed.cwd, stored_dir.display().to_string());
+        assert_eq!(resumed.cwd(), stored_dir.display().to_string());
         assert_eq!(
             resumed.worktree.as_deref(),
             Some(stored_dir.to_str().unwrap())

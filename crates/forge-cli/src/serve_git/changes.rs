@@ -161,7 +161,7 @@ async fn live_sessions(state: &DaemonState) -> Vec<LiveSession> {
         rows.push(LiveSession {
             id: handle.session_id.clone(),
             title: handle.title(),
-            cwd: handle.cwd.clone(),
+            cwd: handle.cwd(),
             worktree: handle.worktree.clone(),
             busy: snap.busy,
             waiting: snap.permission_prompt.is_some() || snap.question.is_some(),

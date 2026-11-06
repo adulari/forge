@@ -365,12 +365,7 @@ async fn stored_session_dir(state: &DaemonState, session: &str) -> Option<(Strin
 /// session.
 pub(crate) async fn session_dir(state: &DaemonState, session: &str) -> Option<String> {
     if let Some(handle) = state.registry.get(session).await {
-        return Some(
-            handle
-                .worktree
-                .clone()
-                .unwrap_or_else(|| handle.cwd.clone()),
-        );
+        return Some(handle.worktree.clone().unwrap_or_else(|| handle.cwd()));
     }
     stored_session_dir(state, session).await.map(|(dir, _)| dir)
 }

@@ -200,7 +200,7 @@ async fn session_id(state: &Arc<DaemonState>, address: &str) -> Result<String, S
 /// The folders a session works in: its directory and, when it has one, its worktree.
 async fn session_roots(state: &Arc<DaemonState>, id: &str) -> Vec<String> {
     match state.registry.get(id).await {
-        Some(handle) => std::iter::once(handle.cwd.clone())
+        Some(handle) => std::iter::once(handle.cwd())
             .chain(handle.worktree.clone())
             .collect(),
         None => state

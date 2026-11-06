@@ -77,7 +77,9 @@ pub(crate) struct DriverSpec {
 pub(crate) struct SessionDriverHandle {
     pub session_id: String,
     title: std::sync::Arc<std::sync::RwLock<String>>,
-    pub cwd: String,
+    /// The workspace the session was spawned in; read it through [`Self::cwd`], which follows a
+    /// session moved to another project afterwards.
+    spawn_cwd: String,
     pub worktree: Option<String>,
     pub created_at: i64,
     /// Latest broadcast snapshot (busy/cost/model ride in it — the session list reads these).
@@ -122,6 +124,20 @@ impl SessionDriverHandle {
             .await
             .context("session driver stopped")?;
         result.await.context("session driver stopped")
+    }
+
+    /// The session's current workspace. A session moved with `/project` (or the "Move it
+    /// there" offer) reports its new folder in the snapshot; without this, the git, changes,
+    /// terminal and ports routes kept working in the folder it was spawned in. A worktree session
+    /// keeps its spawn cwd: its snapshot cwd is the worktree, which callers read from `worktree`.
+    pub(crate) fn cwd(&self) -> String {
+        if self.worktree.is_none() {
+            let snap = self.snapshot_rx.borrow();
+            if !snap.snapshot.cwd.is_empty() {
+                return snap.snapshot.cwd.clone();
+            }
+        }
+        self.spawn_cwd.clone()
     }
 
     pub(crate) fn title(&self) -> String {
@@ -324,7 +340,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     Ok(SessionDriverHandle {
         session_id,
         title,
-        cwd: spec.cwd,
+        spawn_cwd: spec.cwd,
         worktree: spec.worktree,
         created_at,
         snapshot_rx,
@@ -1437,7 +1453,7 @@ pub(super) mod tests {
         drop(SessionDriverHandle {
             session_id: "test".into(),
             title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
-            cwd: String::new(),
+            spawn_cwd: String::new(),
             worktree: None,
             created_at: 0,
             snapshot_rx,
@@ -1460,6 +1476,50 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    async fn the_handle_cwd_follows_a_session_moved_to_another_project() {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+            remote::SnapshotFrame::new(remote::Snapshot::default()),
+        ));
+        let (input_tx, _) = tokio::sync::mpsc::channel(1);
+        let (mode_tx, _) = tokio::sync::mpsc::channel(1);
+        let mut handle = SessionDriverHandle {
+            session_id: "test".into(),
+            title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
+            spawn_cwd: "/home/me".into(),
+            worktree: None,
+            created_at: 0,
+            snapshot_rx,
+            events: std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(1))),
+            input_tx,
+            mode_tx,
+            last_activity: std::sync::Arc::new(AtomicI64::new(0)),
+            ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            draining: std::sync::Arc::new(AtomicBool::new(false)),
+            daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
+            shutdown_tx,
+            task: std::sync::Mutex::new(None),
+            worktree_setup: Default::default(),
+            setup_control: Default::default(),
+        };
+        assert_eq!(handle.cwd(), "/home/me", "no snapshot cwd yet");
+        let moved = remote::Snapshot {
+            cwd: "/home/me/code/forge".into(),
+            ..Default::default()
+        };
+        snapshot_tx
+            .send(std::sync::Arc::new(remote::SnapshotFrame::new(moved)))
+            .unwrap();
+        assert_eq!(handle.cwd(), "/home/me/code/forge");
+        handle.worktree = Some("/repo/.forge/worktrees/w".into());
+        assert_eq!(
+            handle.cwd(),
+            "/home/me",
+            "a worktree session keeps its spawn cwd"
+        );
+    }
+
+    #[tokio::test]
     async fn timed_out_join_aborts_the_retained_driver_task() {
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
@@ -1471,7 +1531,7 @@ pub(super) mod tests {
         let handle = SessionDriverHandle {
             session_id: "test".into(),
             title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
-            cwd: String::new(),
+            spawn_cwd: String::new(),
             worktree: None,
             created_at: 0,
             snapshot_rx,

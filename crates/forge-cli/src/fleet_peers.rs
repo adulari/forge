@@ -109,7 +109,7 @@ pub(crate) async fn local_sessions(
         rows.push(FleetSessionInfo {
             id: handle.session_id.clone(),
             title: handle.title(),
-            cwd: handle.cwd.clone(),
+            cwd: handle.cwd(),
             model: snap.model,
             state: state_word(
                 snap.busy,

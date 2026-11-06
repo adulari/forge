@@ -439,10 +439,7 @@ async fn start_in(
     let handle = started.map_err(|e| Box::new(e.into_response()))?;
     let terminals = state.terminals.clone();
     let terminal_session = handle.session_id.clone();
-    let terminal_cwd = handle
-        .worktree
-        .clone()
-        .unwrap_or_else(|| handle.cwd.clone());
+    let terminal_cwd = handle.worktree.clone().unwrap_or_else(|| handle.cwd());
     tokio::spawn(async move { terminals.prewarm(&terminal_session, terminal_cwd).await });
     let watch =
         crate::serve_pr_watch::arm_watch(state, &handle.session_id, request.mode, method).await;
@@ -456,7 +453,7 @@ async fn start_in(
     Ok(json!({
         "id": handle.session_id,
         "title": handle.title(),
-        "cwd": handle.cwd,
+        "cwd": handle.cwd(),
         "worktree": handle.worktree,
         "issue": issue.number,
         "watch": watch,

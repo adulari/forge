@@ -31,10 +31,7 @@ async fn ports(State(state): State<Arc<DaemonState>>, Query(query): Query<PortsQ
         return err_response(StatusCode::NOT_FOUND, "session not found");
     };
     let roots = state.terminals.session_roots(&query.session).await;
-    let workspace = session
-        .worktree
-        .clone()
-        .unwrap_or_else(|| session.cwd.clone());
+    let workspace = session.worktree.clone().unwrap_or_else(|| session.cwd());
     let workspace = std::path::PathBuf::from(workspace)
         .canonicalize()
         .ok()
