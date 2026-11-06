@@ -103,7 +103,6 @@ pub use interrupted_turn_store::{
 };
 pub use maintenance::MaintenanceReport;
 pub use memory::{Memory, MemoryAdded};
-pub use permission_decision_store::PermissionDecisionRow;
 pub use project_notes_store::{project_key, ProjectNotes, ProjectTodo, ScratchpadSave};
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 pub use transcript_read_store::HistoryFilter;

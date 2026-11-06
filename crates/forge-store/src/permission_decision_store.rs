@@ -4,16 +4,6 @@
 
 use crate::{project_key, Result, Store};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PermissionDecisionRow {
-    pub id: i64,
-    pub project: String,
-    pub tool: String,
-    pub shape: String,
-    pub decision: String,
-    pub created_at: i64,
-}
-
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -53,40 +43,6 @@ impl Store {
             |row| row.get(0),
         )?;
         Ok(count as u32)
-    }
-
-    /// Every row for `project` that is a learned-rule event (accepted or declined offers), newest
-    /// first: the settings list.
-    pub fn permission_learned(&self, project: Option<&str>) -> Result<Vec<PermissionDecisionRow>> {
-        let conn = self.lock()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, project, tool, shape, decision, created_at FROM permission_decision
-             WHERE decision IN ('suggestion_accepted', 'suggestion_declined')
-               AND (?1 IS NULL OR project = ?1)
-             ORDER BY id DESC",
-        )?;
-        let rows = stmt.query_map([project.map(project_key)], |r| {
-            Ok(PermissionDecisionRow {
-                id: r.get(0)?,
-                project: r.get(1)?,
-                tool: r.get(2)?,
-                shape: r.get(3)?,
-                decision: r.get(4)?,
-                created_at: r.get(5)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    /// Forget one learned-rule event. `true` when a row was removed.
-    pub fn delete_permission_learned(&self, id: i64) -> Result<bool> {
-        let conn = self.lock()?;
-        let n = conn.execute(
-            "DELETE FROM permission_decision
-             WHERE id = ?1 AND decision IN ('suggestion_accepted', 'suggestion_declined')",
-            [id],
-        )?;
-        Ok(n > 0)
     }
 }
 
@@ -154,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    fn a_declined_offer_resets_and_learned_rows_list_and_delete() {
+    fn a_declined_offer_resets_the_streak() {
         let s = store();
         let p = "/work/app";
         for _ in 0..3 {
@@ -167,12 +123,5 @@ mod tests {
             s.permission_allow_streak(p, "shell", "npm test *").unwrap(),
             0
         );
-        s.record_permission_decision(p, "shell", "cargo test *", "suggestion_accepted")
-            .unwrap();
-        let rows = s.permission_learned(Some(p)).unwrap();
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].shape, "cargo test *");
-        assert!(s.delete_permission_learned(rows[0].id).unwrap());
-        assert_eq!(s.permission_learned(None).unwrap().len(), 1);
     }
 }
