@@ -285,6 +285,19 @@ pub(crate) async fn arm_watch(
     watch
 }
 
+/// Arm (or clear) a session's watch without touching its permission mode, for sessions whose
+/// work was seeded from untrusted text (a GitHub issue).
+pub(crate) fn arm_watch_keeping_mode(
+    state: &DaemonState,
+    session: &str,
+    mode: Mode,
+    method: &str,
+) -> Option<Watch> {
+    let watch = registry().arm(session, mode, method, now_secs());
+    state.registry.notify_fleet();
+    watch
+}
+
 pub(crate) fn start(state: &Arc<DaemonState>) {
     if let Some(path) = forge_config::data_dir().map(|d| d.join("pr-watch.json")) {
         let _ = REGISTRY.set(Arc::new(Registry::new(Some(path))));

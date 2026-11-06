@@ -284,9 +284,29 @@ fn clip(text: &str, max_chars: usize) -> String {
     format!("{kept}\n[truncated]")
 }
 
-/// Keep issue text from closing the data block it is quoted in.
+/// Keep issue text from closing (or reopening) the data block it is quoted in, whatever the case
+/// or spacing (`</ISSUE >`, `< /issue`), and drop control characters that could fake a line.
 fn neutralize(text: &str) -> String {
-    text.replace("</issue", "<\\/issue")
+    let cleaned: String = text
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect();
+    let mut out = String::with_capacity(cleaned.len());
+    let mut rest = cleaned.as_str();
+    while let Some(at) = rest.find('<') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at + 1..];
+        let probe: String = tail
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '/')
+            .take(5)
+            .collect::<String>()
+            .to_lowercase();
+        out.push_str(if probe == "issue" { "‹" } else { "<" });
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The first prompt of an issue session. The issue is quoted as data inside `<issue>`: it is
@@ -329,7 +349,7 @@ fn seed_prompt(issue: &Issue) -> String {
          2. Run the project's checks and fix what they report.\n\
          3. Commit, push the branch and open a pull request whose body contains the line \
          `Fixes #{n}` so merging closes the issue.\n",
-        title = issue.title.lines().next().unwrap_or_default(),
+        title = neutralize(issue.title.lines().next().unwrap_or_default()),
         url = neutralize(&issue.url),
     )
 }
@@ -441,8 +461,15 @@ async fn start_in(
     let terminal_session = handle.session_id.clone();
     let terminal_cwd = handle.worktree.clone().unwrap_or_else(|| handle.cwd());
     tokio::spawn(async move { terminals.prewarm(&terminal_session, terminal_cwd).await });
-    let watch =
-        crate::serve_pr_watch::arm_watch(state, &handle.session_id, request.mode, method).await;
+    // The session acts on text anyone who can file an issue wrote, so it keeps the permission
+    // mode it was created with: arming the watch here must not escalate it to Auto the way
+    // arming it on a PR the owner opened does. The owner can raise the mode from the session.
+    let watch = crate::serve_pr_watch::arm_watch_keeping_mode(
+        state,
+        &handle.session_id,
+        request.mode,
+        method,
+    );
     let _ = handle
         .input_tx
         .send(crate::remote::RemoteInput::Prompt {
