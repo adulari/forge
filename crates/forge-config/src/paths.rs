@@ -68,6 +68,29 @@ pub fn project_initialization(cwd: &Path) -> ProjectInitialization {
     }
 }
 
+/// [`project_initialization`], re-checked at most every [`ProjectInitCache::EVERY`] per directory.
+/// The remote snapshot loops build a frame every tick while a turn runs; each check stats about a
+/// dozen files per ancestor and re-reads the trust store, which is wasted work at 30+ Hz.
+#[derive(Debug, Default)]
+pub struct ProjectInitCache {
+    last: Option<(PathBuf, std::time::Instant, ProjectInitialization)>,
+}
+
+impl ProjectInitCache {
+    pub const EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+
+    pub fn get(&mut self, cwd: &Path) -> ProjectInitialization {
+        if let Some((dir, at, value)) = &self.last {
+            if dir == cwd && at.elapsed() < Self::EVERY {
+                return value.clone();
+            }
+        }
+        let value = project_initialization(cwd);
+        self.last = Some((cwd.to_path_buf(), std::time::Instant::now(), value.clone()));
+        value
+    }
+}
+
 /// Whether this project has already attempted automatic setup. Stored as a Forge-owned marker so
 /// an unsuccessful model turn cannot consume quota again on every new session.
 pub fn project_auto_setup_attempted(cwd: &Path) -> bool {

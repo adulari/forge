@@ -546,6 +546,7 @@ async fn drive_session(
 
     let mut last_snap: Option<remote::Snapshot> = None;
     let mut stream_pacer = remote::StreamPacer::default();
+    let mut project_init = forge_config::ProjectInitCache::default();
     let mut revision: u64 = 0;
     let mut child_links = crate::serve_agents::ChildLinks::default();
     let mut model_pinned = false;
@@ -724,7 +725,7 @@ async fn drive_session(
             if st.busy {
                 st.app.turn_elapsed_secs = st.busy_since.elapsed().as_secs();
             }
-            let project = forge_config::project_initialization(std::path::Path::new(&cwd));
+            let project = project_init.get(std::path::Path::new(&cwd));
             // A running turn holds the session; keep the last known pin state until it's free.
             if let Ok(s) = st.session.try_lock() {
                 model_pinned = s.pinned_model().is_some();

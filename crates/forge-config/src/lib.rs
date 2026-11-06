@@ -105,7 +105,7 @@ pub use oauth::{
 pub use paths::{
     claude_dir, codex_dir, config_dir, cursor_dir, data_dir, home_dir, is_global_worktree_path,
     mark_project_auto_setup_attempted, project_auto_setup_attempted, project_initialization,
-    ProjectInitialization,
+    ProjectInitCache, ProjectInitialization,
 };
 pub use progress_guard::ProgressGuardMode;
 pub use project_dirs::{project_resource_dirs, repo_top};

@@ -955,6 +955,7 @@ pub(crate) async fn run_chat_tui(
     // connected browser (~60 frames/s of JSON for nothing).
     let mut last_remote_snap: Option<remote::Snapshot> = None;
     let mut remote_stream_pacer = remote::StreamPacer::default();
+    let mut remote_project_init = forge_config::ProjectInitCache::default();
     let mut remote_revision: u64 = 0;
     // Runtime failure from the loopback remote server, shown once after its URL was published.
     let mut remote_server_error_seen: Option<String> = None;
@@ -5443,8 +5444,7 @@ pub(crate) async fn run_chat_tui(
                     .read()
                     .map(|cwd| cwd.display().to_string())
                     .unwrap_or_default();
-                let project =
-                    forge_config::project_initialization(std::path::Path::new(&remote_cwd));
+                let project = remote_project_init.get(std::path::Path::new(&remote_cwd));
                 let mut snap = build_snapshot_frame(
                     &app,
                     SnapshotIdentity {
