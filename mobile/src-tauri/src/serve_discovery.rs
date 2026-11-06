@@ -32,7 +32,9 @@ fn local_cert_fingerprint(dir: &std::path::Path) -> Option<String> {
     let pem = std::fs::read_to_string(dir.join("serve-tls-cert.pem")).ok()?;
     let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
     use base64::Engine as _;
-    let der = base64::engine::general_purpose::STANDARD.decode(body).ok()?;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .ok()?;
     Some(crate::pinned::leaf_fingerprint(&der))
 }
 
