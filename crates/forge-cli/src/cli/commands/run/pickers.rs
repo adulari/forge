@@ -579,7 +579,24 @@ pub(crate) async fn open_models_provider(
         s.catalog()
             .map(|c| models_for_provider(c, s.pricing(), &benched, &ctx, provider))
     };
-    if let Some((heading, rows)) = view {
+    if let Some((heading, mut rows)) = view {
+        // How each model actually did for this user, from local counts (never message text).
+        let report = crate::model_report::by_model(&store, crate::model_report::DEFAULT_DAYS);
+        for row in &mut rows {
+            let line = report
+                .get(&row.id)
+                .and_then(crate::model_report::compact)
+                .unwrap_or_else(|| format!("no calls in {}d", crate::model_report::DEFAULT_DAYS));
+            row.subtitle = if row.subtitle.is_empty() {
+                line
+            } else {
+                format!("{}  ·  {line}", row.subtitle)
+            };
+        }
+        let heading = format!(
+            "{heading}  ·  last {}d: completion, calls, failures, median latency/cost, tool errors",
+            crate::model_report::DEFAULT_DAYS
+        );
         app.models_drilled = Some(provider.to_string());
         app.picker
             .open_with(forge_tui::PickerKind::Models, &heading, rows);

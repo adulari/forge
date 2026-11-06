@@ -152,6 +152,53 @@ pub(crate) fn render(report: &ModelReport) -> String {
     out
 }
 
+/// One-line summary for the TUI model browser; `None` when the model has no calls in the window.
+pub(crate) fn compact(e: &ReportEntry) -> Option<String> {
+    let s = &e.stats;
+    if s.calls == 0 {
+        return None;
+    }
+    let failed = s.failed + s.failed_over;
+    let mut parts = vec![
+        format!("{} done", pct(e.completion_rate)),
+        format!(
+            "{} {}",
+            s.calls,
+            if s.calls == 1 { "call" } else { "calls" }
+        ),
+    ];
+    if failed > 0 {
+        parts.push(if s.failed_over > 0 {
+            format!("{failed} failed ({} failed over)", s.failed_over)
+        } else {
+            format!("{failed} failed")
+        });
+    }
+    parts.push(latency(s.median_latency_ms));
+    parts.push(cost(s.median_cost_usd));
+    if e.tool_error_rate.is_some() {
+        parts.push(format!("tool err {}", pct(e.tool_error_rate)));
+    }
+    Some(parts.join(" · "))
+}
+
+/// Report cards keyed by model id, for decorating the TUI browser. Empty when the store cannot
+/// be read: the browser then simply shows no history rather than failing to open.
+pub(crate) fn by_model(store: &Store, days: u32) -> std::collections::HashMap<String, ReportEntry> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    build(store, &|_| None, days, None, now)
+        .map(|report| {
+            report
+                .models
+                .into_iter()
+                .map(|e| (e.stats.model.clone(), e))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub(crate) fn row_line(e: &ReportEntry) -> String {
     let s = &e.stats;
     format!(
@@ -181,6 +228,36 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_line_summarises_and_is_none_without_calls() {
+        let entry = |calls, completed, failed, failed_over| ReportEntry {
+            stats: ModelReportRow {
+                model: "p::m".into(),
+                calls,
+                completed,
+                failed,
+                failed_over,
+                median_latency_ms: Some(1300),
+                median_cost_usd: Some(0.015),
+                tool_calls: 10,
+                tool_errors: 2,
+                ..ModelReportRow::default()
+            },
+            completion_rate: Some(f64::from(completed) / f64::from(calls.max(1))),
+            tool_error_rate: Some(0.2),
+            benchmark_intelligence: None,
+            benchmark_coding: None,
+        };
+        assert_eq!(
+            compact(&entry(10, 9, 1, 0)).unwrap(),
+            "90% done · 10 calls · 1 failed · 1.3s · $0.015 · tool err 20%"
+        );
+        assert!(compact(&entry(4, 1, 0, 3))
+            .unwrap()
+            .contains("3 failed (3 failed over)"));
+        assert_eq!(compact(&entry(0, 0, 0, 0)), None);
+    }
 
     #[test]
     fn formats_rates_latency_and_cost() {
