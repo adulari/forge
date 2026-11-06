@@ -299,7 +299,7 @@ export type RemoteInput =
   // Reorders / promotes one server-queued prompt; index+text echo Snapshot.queued like dequeue.
   | { kind: "queue_move"; index: number; text: string; to: number }
   | { kind: "queue_send_now"; index: number; text: string }
-  | { kind: "allow"; yes: boolean; seq: number; note?: string }
+  | { kind: "allow"; yes: boolean; seq: number; note?: string; scope?: "session" }
   | { kind: "answer"; text: string; seq: number }
   | { kind: "interrupt" }
   // Cancels one server-queued prompt; index+text echo Snapshot.queued so a shifted queue is

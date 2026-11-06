@@ -315,6 +315,7 @@ async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
                         yes: false,
                         seq: snapshot.prompt_seq,
                         note: None,
+                        scope: None,
                     })
                     .await;
                 registry().update(&watch.session_id, |w| {

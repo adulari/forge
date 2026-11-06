@@ -4595,7 +4595,12 @@ pub(crate) async fn run_chat_tui(
                         )
                         .await;
                     }
-                    remote::RemoteInput::Allow { yes, seq, note } => {
+                    remote::RemoteInput::Allow {
+                        yes,
+                        seq,
+                        note,
+                        scope,
+                    } => {
                         // The seq must target the prompt pending NOW: a new prompt can be
                         // installed in the SAME loop iteration (UiMsg drain runs just above),
                         // so an un-gated Allow could approve a newer, more dangerous prompt
@@ -4606,7 +4611,11 @@ pub(crate) async fn run_chat_tui(
                                 "⚠ stale answer ignored — the prompt changed; review the current one",
                             );
                         } else if let Some((tool, reply)) = pending.take() {
-                            let _ = reply.send(remote::allow_reply(yes, note.as_deref()));
+                            let _ = reply.send(remote::allow_reply(
+                                yes,
+                                note.as_deref(),
+                                scope.as_deref(),
+                            ));
                             app.prompt = None;
                             if yes {
                                 app.note(&format!("✓ remote allowed {tool}"));

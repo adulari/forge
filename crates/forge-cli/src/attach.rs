@@ -743,7 +743,8 @@ mod tests {
             RemoteInput::Allow {
                 yes: true,
                 seq: 7,
-                note: None
+                note: None,
+                scope: None
             }
         );
 
@@ -753,7 +754,8 @@ mod tests {
             RemoteInput::Allow {
                 yes: false,
                 seq: 7,
-                note: None
+                note: None,
+                scope: None
             }
         );
 

@@ -56,14 +56,19 @@ impl DriverState {
                     }
                 }
             }
-            remote::RemoteInput::Allow { yes, seq, note } => {
+            remote::RemoteInput::Allow {
+                yes,
+                seq,
+                note,
+                scope,
+            } => {
                 if !remote::prompt_seq_current(self.prompt_seq, seq) {
                     push_remote_note(
                         &mut self.notes,
                         "⚠ stale answer ignored — the prompt changed; review the current one",
                     );
                 } else if let Some((tool, reply)) = self.pending.take() {
-                    let _ = reply.send(remote::allow_reply(yes, note.as_deref()));
+                    let _ = reply.send(remote::allow_reply(yes, note.as_deref(), scope.as_deref()));
                     self.app.prompt = None;
                     if yes {
                         self.app.note(&format!("✓ remote allowed {tool}"));

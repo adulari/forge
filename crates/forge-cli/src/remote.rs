@@ -902,11 +902,17 @@ pub enum RemoteInput {
     ///
     /// `note` is the optional one-line reason (on a deny) or instruction (on an allow) the user
     /// typed; it reaches the model with the tool result. Absent from older clients.
+    ///
+    /// `scope` widens an allow: `"session"` is the TUI's "allow for this session" (a grant scoped
+    /// to what the prompt showed, not saved). Absent or unknown means allow once, so an older
+    /// client or daemon degrades to the plain allow.
     Allow {
         yes: bool,
         seq: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
     /// Answer a pending AskUserQuestion with a free-text line (a number picks an option). `seq`
     /// as on [`RemoteInput::Allow`].
@@ -1012,8 +1018,14 @@ const MAX_REMOTE_NOTE_CHARS: usize = 500;
 
 /// The confirm reply a remote [`RemoteInput::Allow`] resolves to: the allow/deny outcome plus the
 /// optional one-line note, bounded, which the model reads next to the tool result.
-pub fn allow_reply(yes: bool, note: Option<&str>) -> forge_types::ConfirmReply {
-    let outcome = if yes {
+pub fn allow_reply(
+    yes: bool,
+    note: Option<&str>,
+    scope: Option<&str>,
+) -> forge_types::ConfirmReply {
+    let outcome = if yes && scope == Some("session") {
+        forge_types::ConfirmOutcome::AllowSession
+    } else if yes {
         forge_types::ConfirmOutcome::Allow
     } else {
         forge_types::ConfirmOutcome::Deny
@@ -2529,7 +2541,8 @@ mod tests {
             RemoteInput::Allow {
                 yes: true,
                 seq: 3,
-                note: None
+                note: None,
+                scope: None
             }
         );
         assert_eq!(
@@ -3786,13 +3799,20 @@ mod tests {
 
     #[test]
     fn allow_reply_carries_a_bounded_one_line_note() {
-        let deny = allow_reply(false, Some("  use the staging db instead\nsecond line "));
+        let deny = allow_reply(
+            false,
+            Some("  use the staging db instead\nsecond line "),
+            None,
+        );
         assert_eq!(deny.outcome, forge_types::ConfirmOutcome::Deny);
         assert_eq!(deny.note.as_deref(), Some("use the staging db instead"));
-        assert_eq!(allow_reply(true, None).note, None);
-        assert_eq!(allow_reply(true, Some("   ")).note, None);
+        assert_eq!(allow_reply(true, None, None).note, None);
+        assert_eq!(allow_reply(true, Some("   "), None).note, None);
         let long = "x".repeat(2000);
-        assert_eq!(allow_reply(false, Some(&long)).note.unwrap().len(), 500);
+        assert_eq!(
+            allow_reply(false, Some(&long), None).note.unwrap().len(),
+            500
+        );
     }
 
     #[test]
@@ -3804,8 +3824,39 @@ mod tests {
             RemoteInput::Allow {
                 yes: false,
                 seq: 4,
-                note: None
+                note: None,
+                scope: None
             }
+        );
+    }
+
+    #[test]
+    fn remote_allow_scope_session_parses_and_maps_to_a_session_grant() {
+        let input: RemoteInput =
+            serde_json::from_str(r#"{"kind":"allow","yes":true,"seq":5,"scope":"session"}"#)
+                .unwrap();
+        assert_eq!(
+            input,
+            RemoteInput::Allow {
+                yes: true,
+                seq: 5,
+                note: None,
+                scope: Some("session".into())
+            }
+        );
+        let outcome = |yes, scope| allow_reply(yes, None, scope).outcome;
+        assert_eq!(
+            outcome(true, Some("session")),
+            forge_types::ConfirmOutcome::AllowSession
+        );
+        assert_eq!(
+            outcome(true, Some("always")),
+            forge_types::ConfirmOutcome::Allow
+        );
+        assert_eq!(outcome(true, None), forge_types::ConfirmOutcome::Allow);
+        assert_eq!(
+            outcome(false, Some("session")),
+            forge_types::ConfirmOutcome::Deny
         );
     }
 }

@@ -2903,6 +2903,7 @@ async fn answer(
             yes: req.allow,
             seq: req.seq,
             note: req.note,
+            scope: None,
         })
         .await
         .is_err()

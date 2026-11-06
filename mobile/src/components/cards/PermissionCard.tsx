@@ -27,7 +27,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { hexToRgba, space } from "../../theme/tokens";
 import { formatRelativeTime, type as typeScale } from "../../theme/typography";
 import { DiffCard } from "../review/DiffCard";
-import { permissionPromptParts } from "../../lib/permissionPrompt";
+import { offersSessionAllow, permissionPromptParts } from "../../lib/permissionPrompt";
 
 export interface PermissionCardProps {
   prompt: string;
@@ -110,13 +110,13 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
   const locked = lockedSeq === promptSeq;
   const parts = permissionPromptParts(prompt);
 
-  const respond = (yes: boolean) => {
+  const respond = (yes: boolean, scope?: "session") => {
     if (locked) return;
     setLockedSeq(promptSeq);
     setCommitted(yes ? "allow" : "deny");
     if (yes) haptics.allow();
     else haptics.deny();
-    const input = allowInput(yes, promptSeq, note, noteOpen);
+    const input = allowInput(yes, promptSeq, note, noteOpen, scope);
     if (!send(input)) {
       if (onQueueAnswer) {
         onQueueAnswer(input);
@@ -195,6 +195,15 @@ export function PermissionCard({ prompt, diff, promptSeq, send, onQueueAnswer }:
           ) : null}
           {noteOpen ? <Text style={[typeScale.sub, { color: tokens.ink3 }, styles.noteHint]}>Sent with Allow or Deny</Text> : null}
           {queued ? <Text style={[typeScale.sub, { color: tokens.ink3 }]}>will send on reconnect</Text> : null}
+          {offersSessionAllow(prompt) ? (
+            <Button
+              label="Allow for session"
+              variant="secondary"
+              onPress={() => respond(true, "session")}
+              disabled={locked}
+              style={styles.sessionBtn}
+            />
+          ) : null}
           <View style={styles.actionsRow}>
             <View style={styles.actions}>
               <Button
@@ -257,4 +266,5 @@ const styles = StyleSheet.create({
   actions: { flex: 1, flexDirection: "row", gap: space.space8 },
   allowBtn: { flex: 1.4 },
   denyBtn: { flex: 1 },
+  sessionBtn: { marginBottom: space.space8 },
 });

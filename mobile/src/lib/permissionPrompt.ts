@@ -21,3 +21,9 @@ export function displayPermissionPrompt(prompt: string): string {
   const { question, subject } = permissionPromptParts(prompt);
   return subject ? `${question} ${subject}` : question;
 }
+
+/** The TUI offers "allow for this session" for every tool except `python`, whose cells always ask. */
+export function offersSessionAllow(prompt: string): boolean {
+  const tool = /^allow (\S+)/i.exec(prompt.trim())?.[1];
+  return tool != null && tool !== "python";
+}
