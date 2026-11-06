@@ -7,7 +7,7 @@ cat >"$tmp/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "gh $*" | tr "\n" " " | sed "s/  */ /g; s/$/\n/" >>"$GH_LOG"
 case "$1 $2" in
-  "issue list") if [ "${OPEN_ISSUE:-}" = 1 ]; then echo 42; fi ;;
+  "issue list") if [ "${OPEN_ISSUE:-}" = 1 ]; then echo "42 2020-01-01T00:00:00Z"; elif [ "${OPEN_ISSUE:-}" = fresh ]; then echo "42 $(date -u +%Y-%m-%dT%H:%M:%SZ)"; fi ;;
   "run view") echo "- e2e (step: Run the real turn)" ;;
 esac
 STUB
@@ -25,6 +25,7 @@ G='{"a":{"result":"success"},"b":{"result":"skipped"}}'
 C='{"a":{"result":"cancelled"},"b":{"result":"success"}}'
 run "red, no issue"     "$F" 0 "issue create"
 run "red, open issue"   "$F" 1 "issue comment"
+run "red, issue updated just now" "$F" fresh ""
 run "green, open issue" "$G" 1 "issue comment,issue close"
 run "green, none"       "$G" 0 ""
 run "cancelled+green"   "$C" 1 ""

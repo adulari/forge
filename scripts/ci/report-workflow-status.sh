@@ -34,8 +34,10 @@ else
   exit 0
 fi
 
-number=$(gh issue list --repo "$REPO" --state open --limit 200 --json number,body \
-  --jq '[.[] | select(.body | contains(env.MARKER))] | .[0].number // empty' )
+found=$(gh issue list --repo "$REPO" --state open --limit 200 --json number,body,updatedAt \
+  --jq '[.[] | select(.body | contains(env.MARKER))] | .[0] // empty | "\(.number) \(.updatedAt)"' )
+number=${found%% *}
+updated=${found#* }
 
 if [ "$verdict" = green ]; then
   if [ -z "$number" ]; then
@@ -73,6 +75,12 @@ body=$(mktemp)
 } >"$body"
 
 if [ -n "$number" ]; then
+  # Workflows on a 3-6 h schedule would otherwise comment several times a day on one red streak.
+  age=$(( $(date +%s) - $(date -d "$updated" +%s 2>/dev/null || echo 0) ))
+  if [ "$age" -lt $((20 * 3600)) ]; then
+    echo "issue #$number already updated ${age}s ago: not commenting again yet"
+    exit 0
+  fi
   gh issue comment "$number" --repo "$REPO" --body-file "$body"
 else
   gh issue create --repo "$REPO" --title "$TITLE" --body-file "$body"
