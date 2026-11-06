@@ -2452,7 +2452,11 @@ fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> Merge
             "-C",
             repo_root.to_str().unwrap_or("."),
             "diff",
-            "--diff-filter=ACDMR",
+            // `--binary` so images and other blobs carry full index lines `git apply` can use;
+            // `T` so a file turned into a symlink (or back) is not mistaken for an empty patch,
+            // which would take the no-op path below and delete the branch with the work on it.
+            "--binary",
+            "--diff-filter=ACDMRT",
             &mergebase,
             branch,
         ])
@@ -5158,6 +5162,79 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
         std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Set up a repo plus a session-style worktree on its own branch, let `edit` change the
+    /// worktree, and run the merge sequence directly.
+    fn merge_with(
+        tag: &str,
+        edit: impl Fn(&std::path::Path),
+    ) -> (std::path::PathBuf, MergeOutcome) {
+        let dir = std::env::temp_dir().join(format!("forge-merge-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = init_repo(&repo, &[("README.md", "hi\n"), ("target.txt", "t\n")]);
+        std::fs::write(repo.join("logo.bin"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+        git(&["add", "logo.bin"]);
+        git(&["commit", "-qm", "binary"]);
+        let wt = dir.join("wt");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "forge/merge-test",
+            wt.to_str().unwrap(),
+        ]);
+        edit(&wt);
+        let outcome = run_merge(&repo, wt.to_str().unwrap(), "forge/merge-test");
+        (dir, outcome)
+    }
+
+    #[test]
+    fn worktree_merge_carries_binary_files() {
+        let (dir, outcome) = merge_with("bin", |wt| {
+            std::fs::write(wt.join("logo.bin"), [0u8, 1, 2, 3, 255, 0, 7]).unwrap();
+            std::fs::write(wt.join("new.png"), [137u8, 80, 78, 71, 0, 0, 0, 13]).unwrap();
+        });
+        assert!(
+            matches!(outcome, MergeOutcome::Clean),
+            "binary edits merge cleanly"
+        );
+        let repo = dir.join("repo");
+        assert_eq!(
+            std::fs::read(repo.join("logo.bin")).unwrap(),
+            [0u8, 1, 2, 3, 255, 0, 7]
+        );
+        assert_eq!(
+            std::fs::read(repo.join("new.png")).unwrap(),
+            [137u8, 80, 78, 71, 0, 0, 0, 13]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_merge_keeps_a_type_change_instead_of_discarding_it() {
+        let (dir, outcome) = merge_with("type", |wt| {
+            std::fs::remove_file(wt.join("README.md")).unwrap();
+            std::os::unix::fs::symlink("target.txt", wt.join("README.md")).unwrap();
+        });
+        assert!(
+            matches!(outcome, MergeOutcome::Clean),
+            "a type change merges"
+        );
+        let link = dir.join("repo/README.md");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink landed in the base tree"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
