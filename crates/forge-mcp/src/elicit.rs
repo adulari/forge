@@ -690,19 +690,23 @@ mod tests {
 
     #[tokio::test]
     async fn requests_reach_only_the_scope_of_the_connection_that_sent_them() {
+        // Scopes live in one process-wide registry, and tests run in parallel: another test's
+        // scopes on a shared server name make the owner-less route below ambiguous, so it
+        // declines without sending and the wait for the form never ends.
+        const SERVER: &str = "srv-connection-scoping";
         let (a, b) = (new_owner_id(), new_owner_id());
         assert_eq!(
-            route(Some(a), "srv", "hi".into(), url()).await,
+            route(Some(a), SERVER, "hi".into(), url()).await,
             ElicitReply::Decline,
             "no scope open"
         );
         let (_b_other, mut b_other_rx) = open_scope(b, "elsewhere");
-        let (scope_a, mut a_rx) = open_scope(a, "srv");
-        let (scope_b, mut b_rx) = open_scope(b, "srv");
+        let (scope_a, mut a_rx) = open_scope(a, SERVER);
+        let (scope_b, mut b_rx) = open_scope(b, SERVER);
 
         // A private connection of manager A reaches A's scope even though B's is newer.
-        let task = tokio::spawn(route(Some(a), "srv", "hi".into(), url()));
-        let req = a_rx.recv().await.unwrap();
+        let task = tokio::spawn(route(Some(a), SERVER, "hi".into(), url()));
+        let req = form_arrives(&mut a_rx).await;
         assert_eq!(req.message, "hi");
         assert!(b_rx.try_recv().is_err() && b_other_rx.try_recv().is_err());
         req.reply.send(ElicitReply::Cancel).unwrap();
@@ -711,18 +715,25 @@ mod tests {
         // A pooled connection (owner unknown) shared by two sessions is ambiguous: declined,
         // and neither session sees the form.
         assert_eq!(
-            route(None, "srv", "hi".into(), url()).await,
+            route(None, SERVER, "hi".into(), url()).await,
             ElicitReply::Decline
         );
         assert!(a_rx.try_recv().is_err() && b_rx.try_recv().is_err());
 
         // With only one session covering the server there is no ambiguity.
         drop(scope_a);
-        let task = tokio::spawn(route(None, "srv", "hi".into(), url()));
-        let req = b_rx.recv().await.unwrap();
+        let task = tokio::spawn(route(None, SERVER, "hi".into(), url()));
+        let req = form_arrives(&mut b_rx).await;
         req.reply.send(ElicitReply::Decline).unwrap();
         assert_eq!(task.await.unwrap(), ElicitReply::Decline);
         drop(scope_b);
+    }
+
+    async fn form_arrives(rx: &mut mpsc::UnboundedReceiver<ElicitRequest>) -> ElicitRequest {
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the elicitation form should reach this scope")
+            .unwrap()
     }
 
     #[tokio::test]
