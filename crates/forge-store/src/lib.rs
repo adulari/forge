@@ -41,6 +41,7 @@ mod path_evidence_store;
 mod project_notes_store;
 mod provider_items_store;
 mod queued_prompt_store;
+pub use queued_prompt_store::QueuedPrompt;
 mod schedule_run_store;
 use migrations::{
     add_column_if_missing, migrate_subscription_usage, run_migrations, seed_singleton_rows,

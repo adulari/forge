@@ -413,6 +413,7 @@ struct DriverState {
 /// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
 /// checks immediately (`on_turn_done`); this coarse tick is only for a session that sits fully
 /// idle for a while, no new activity, with nothing else waking the loop up.
+const IMAGES_LOST_NOTE: &str = "[This prompt was queued with images that were lost when the daemon restarted; none are attached.]";
 const HEARTBEAT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Drop for DriverState {
@@ -556,7 +557,7 @@ async fn drive_session(
     let mut turn_error: Option<String> = None;
 
     let queue_store = st.session.lock().await.store.clone();
-    let mut persisted_queue: Vec<String> = Vec::new();
+    let mut persisted_queue: Vec<forge_store::QueuedPrompt> = Vec::new();
     match queue_store.session_queued_prompts(&session_id) {
         Ok(restored) if !restored.is_empty() => {
             st.app.note(&format!(
@@ -564,7 +565,22 @@ async fn drive_session(
                 restored.len()
             ));
             persisted_queue.clone_from(&restored);
-            st.queued_prompts = restored;
+            let lost_images = restored.iter().filter(|q| q.had_images).count();
+            if lost_images > 0 {
+                st.app.note(&format!(
+                    "⚠ {lost_images} restored prompt(s) were queued with images, which did not survive the restart"
+                ));
+            }
+            st.queued_prompts = restored
+                .into_iter()
+                .map(|q| {
+                    if q.had_images {
+                        format!("{IMAGES_LOST_NOTE}\n\n{}", q.text)
+                    } else {
+                        q.text
+                    }
+                })
+                .collect();
             st.app.set_queued(&st.queued_prompts);
             st.drain_queue().await;
         }
@@ -712,9 +728,17 @@ async fn drive_session(
         // Mirror the queue to the store whenever it changes so a restart can restore it. Not while
         // draining: that path empties the in-memory queue on purpose, and the saved copy is what
         // the next daemon generation restores.
-        if !st.draining.load(Ordering::Acquire) && st.queued_prompts != persisted_queue {
-            match queue_store.set_session_queued_prompts(&session_id, &st.queued_prompts) {
-                Ok(()) => persisted_queue.clone_from(&st.queued_prompts),
+        let queue_now: Vec<forge_store::QueuedPrompt> = st
+            .queued_prompts
+            .iter()
+            .map(|text| forge_store::QueuedPrompt {
+                text: text.clone(),
+                had_images: st.app.has_queued_images(text),
+            })
+            .collect();
+        if !st.draining.load(Ordering::Acquire) && queue_now != persisted_queue {
+            match queue_store.set_session_queued_prompts(&session_id, &queue_now) {
+                Ok(()) => persisted_queue = queue_now,
                 Err(error) => {
                     tracing::warn!(session = %session_id, %error, "could not persist queued prompts");
                 }

@@ -2719,6 +2719,11 @@ impl App {
         }
     }
 
+    /// Whether a queued prompt still holds pasted images.
+    pub fn has_queued_images(&self, text: &str) -> bool {
+        self.queued_images.iter().any(|(t, _)| t == text)
+    }
+
     /// A queued prompt is about to run: move its stashed images (if any) to the ready slot.
     pub fn promote_queued_images(&mut self, text: &str) {
         if let Some(i) = self.queued_images.iter().position(|(t, _)| t == text) {

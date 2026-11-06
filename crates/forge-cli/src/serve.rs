@@ -7827,8 +7827,27 @@ pub(crate) mod tests {
             .add_message(&queued_id, 0, forge_types::Role::User, "first", None)
             .unwrap();
         store
-            .set_session_queued_prompts(&queued_id, &["queued before the restart".to_string()])
+            .set_session_queued_prompts(
+                &queued_id,
+                &[forge_store::QueuedPrompt::text("queued before the restart")],
+            )
             .unwrap();
+        let imaged_id = store
+            .create_session(ws.to_str().unwrap(), "default")
+            .unwrap();
+        store
+            .add_message(&imaged_id, 0, forge_types::Role::User, "first", None)
+            .unwrap();
+        store
+            .set_session_queued_prompts(
+                &imaged_id,
+                &[forge_store::QueuedPrompt {
+                    text: "what is in this screenshot".into(),
+                    had_images: true,
+                }],
+            )
+            .unwrap();
+        store.set_session_daemon_live(&imaged_id, true).unwrap();
         store.set_session_daemon_live(&queued_id, true).unwrap();
         let never_prompted = store
             .create_session(ws.to_str().unwrap(), "default")
@@ -7865,6 +7884,22 @@ pub(crate) mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the restored queue never ran"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let ran = store.load_messages(&imaged_id).unwrap().iter().any(|m| {
+                m.role == forge_types::Role::User
+                    && m.content.contains("images that were lost")
+                    && m.content.ends_with("what is in this screenshot")
+            });
+            if ran {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the imaged prompt ran without saying its images were lost"
             );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
