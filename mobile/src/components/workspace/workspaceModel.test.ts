@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
 
+import { externalChange } from "../ide/editorModel";
+
 import {
   joinWorkspacePath,
   parentWorkspacePath,
+  savedDraftDirty,
   replaceWorkspaceMention,
   workspaceBasename,
   workspaceMentionAtEnd,
@@ -40,5 +43,16 @@ describe("workspace UI model", () => {
     expect(joinWorkspacePath("", "new.ts")).toBe("new.ts");
     expect(joinWorkspacePath("src/", " /deep/new.ts/ ")).toBe("src/deep/new.ts");
     expect(joinWorkspacePath("src", "   ")).toBe("");
+  });
+});
+
+describe("editing while the file changes", () => {
+  it("keeps a dirty draft when the disk hash moves", () => {
+    expect(externalChange("h1", "h2", true)).toBe("conflict");
+    expect(externalChange("h1", "h2", false)).toBe("reload");
+  });
+  it("keeps text typed while a save was in flight", () => {
+    expect(savedDraftDirty("abc", "abcdef")).toBe(true);
+    expect(savedDraftDirty("abc", "abc")).toBe(false);
   });
 });

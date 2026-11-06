@@ -44,3 +44,8 @@ export function joinWorkspacePath(directory: string, name: string): string {
   if (!cleaned) return "";
   return directory ? `${directory.replace(/\/+$/, "")}/${cleaned}` : cleaned;
 }
+
+/** After a save, only text typed since the save began still differs from what is on disk. */
+export function savedDraftDirty(sent: string, current: string): boolean {
+  return current !== sent;
+}
