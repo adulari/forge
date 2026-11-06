@@ -25,7 +25,7 @@ pub(crate) async fn send_cmd(
     }
     let base = resolve_base_url(url);
     let token = resolve_token(token)?;
-    let http = reqwest::Client::new();
+    let http = crate::attach::local_http_client(&base);
     let mode = if steer { "steer" } else { "follow_up" };
     let resp = http
         .post(format!("{base}/{token}/api/peers/message"))

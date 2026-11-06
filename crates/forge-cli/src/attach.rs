@@ -144,7 +144,7 @@ pub(crate) async fn attach_cmd(
 ) -> Result<()> {
     let base = resolve_base_url(url);
     let token = resolve_token(token)?;
-    let http = reqwest::Client::new();
+    let http = local_http_client(&base);
 
     // One fetch does triple duty: connectivity check, token check, and session resolution.
     let sessions = fetch_sessions(&http, &base, &token).await?;
@@ -179,9 +179,9 @@ pub(crate) async fn attach_cmd(
 }
 
 /// Default base URL: the live daemon recorded in `serve-state.json` (its own port and scheme),
-/// else the configured `[remote] port` (7420) on loopback HTTP. A `--lan` daemon binds
-/// self-signed HTTPS, which a plain client can't validate — pair with `forge serve --local`,
-/// or pass `--url`.
+/// else the configured `[remote] port` (7420) on loopback HTTP. A LAN daemon is reached by
+/// `localhost`, a name its self-signed certificate covers, and `local_http_client` /
+/// `ws_connect` trust exactly that certificate.
 pub(crate) fn resolve_base_url(url: Option<String>) -> String {
     let raw = url.unwrap_or_else(|| {
         let state = crate::serve::read_state()
@@ -195,6 +195,55 @@ pub(crate) fn resolve_base_url(url: Option<String>) -> String {
     raw.trim_end_matches('/').to_string()
 }
 
+fn local_daemon_cert(base: &str) -> Option<Vec<u8>> {
+    if !(base.starts_with("https://localhost:") || base.starts_with("wss://localhost:")) {
+        return None;
+    }
+    std::fs::read(forge_config::config_dir()?.join("serve-tls-cert.pem")).ok()
+}
+
+/// HTTP client for the local daemon: a LAN daemon's own certificate is the one added trusted root,
+/// so its self-signed HTTPS verifies; any other base keeps normal verification.
+pub(crate) fn local_http_client(base: &str) -> reqwest::Client {
+    let mut builder = reqwest::Client::builder();
+    if let Some(cert) =
+        local_daemon_cert(base).and_then(|pem| reqwest::Certificate::from_pem(&pem).ok())
+    {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().unwrap_or_default()
+}
+
+pub(crate) type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+pub(crate) async fn ws_connect(
+    url: &str,
+) -> Result<
+    (
+        WsStream,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    let connector = local_daemon_cert(url).and_then(|pem| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(crate::serve_pairing::der_of_pem(&pem)?.into())
+            .ok()?;
+        let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .ok()?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+            config,
+        )))
+    });
+    tokio_tungstenite::connect_async_tls_with_config(url, None, false, connector).await
+}
+
 fn default_base_url(
     state: Option<&crate::serve::ServeState>,
     config_port: impl FnOnce() -> u16,
@@ -206,7 +255,12 @@ fn default_base_url(
             } else {
                 "http"
             };
-            format!("{scheme}://127.0.0.1:{}", state.port)
+            let host = if state.exposure == "lan" {
+                "localhost"
+            } else {
+                "127.0.0.1"
+            };
+            format!("{scheme}://{host}:{}", state.port)
         }
         None => format!("http://127.0.0.1:{}", config_port()),
     }
@@ -348,9 +402,7 @@ async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
 async fn attach_once(base: &str, token: &str, id: &str, first: bool) -> Result<bool> {
     let ws_base = ws_scheme(base)?;
     let ws_url = format!("{ws_base}/{token}/ws?session={id}&rev=0");
-    let (ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
-        .await
-        .map_err(|e| map_ws_error(e, id))?;
+    let (ws, _resp) = ws_connect(&ws_url).await.map_err(|e| map_ws_error(e, id))?;
     let (mut ws_tx, mut ws_rx) = ws.split();
     let mut lost = false;
 
@@ -659,7 +711,7 @@ mod tests {
         let lan = state(9001, "lan");
         assert_eq!(
             default_base_url(Some(&lan), || unreachable!()),
-            "https://127.0.0.1:9001"
+            "https://localhost:9001"
         );
         assert_eq!(default_base_url(None, || 7420), "http://127.0.0.1:7420");
     }

@@ -84,7 +84,7 @@ pub(crate) async fn board_cmd(
 ) -> Result<()> {
     let base = crate::attach::resolve_base_url(url);
     let token = crate::attach::resolve_token(token)?;
-    let http = reqwest::Client::new();
+    let http = crate::attach::local_http_client(&base);
 
     // Fetched BEFORE the alternate screen: a daemon that isn't running must print `forge attach`'s
     // friendly "is it running?" line to a normal terminal, not leave a blank full-screen board

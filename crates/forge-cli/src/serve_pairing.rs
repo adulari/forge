@@ -91,14 +91,17 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn fingerprint_of_pem(pem: &[u8]) -> Option<String> {
+pub(crate) fn der_of_pem(pem: &[u8]) -> Option<Vec<u8>> {
     let text = std::str::from_utf8(pem).ok()?;
     let body: String = text
         .lines()
         .filter(|l| !l.starts_with("-----"))
         .collect::<String>();
-    let der = base64_decode(&body)?;
-    Some(crate::remote::sha256_fingerprint(&der))
+    base64_decode(&body)
+}
+
+pub(crate) fn fingerprint_of_pem(pem: &[u8]) -> Option<String> {
+    Some(crate::remote::sha256_fingerprint(&der_of_pem(pem)?))
 }
 
 fn base64_decode(text: &str) -> Option<Vec<u8>> {

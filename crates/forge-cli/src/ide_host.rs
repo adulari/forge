@@ -59,7 +59,7 @@ pub(crate) async fn ensure_daemon(
 ) -> Result<(String, String)> {
     let explicit = url.is_some();
     let base = crate::attach::resolve_base_url(url);
-    let http = reqwest::Client::new();
+    let http = crate::attach::local_http_client(&base);
     if let Ok(token) = crate::attach::resolve_token(token.clone()) {
         if probe(&http, &base, &token).await {
             return Ok((base, token));

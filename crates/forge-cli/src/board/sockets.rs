@@ -66,7 +66,7 @@ pub(crate) async fn fleet_watcher(
     };
     let mut attempt = 0usize;
     loop {
-        match tokio_tungstenite::connect_async(&url).await {
+        match crate::attach::ws_connect(&url).await {
             Ok((mut socket, _)) => {
                 attempt = 0;
                 set_conn(&ev, &mut state, ConnState::Live);
@@ -195,7 +195,7 @@ async fn session_socket(
             Ok(url) => url,
             Err(_) => break,
         };
-        if let Ok((socket, _)) = tokio_tungstenite::connect_async(&url).await {
+        if let Ok((socket, _)) = crate::attach::ws_connect(&url).await {
             let (mut tx, mut rx) = socket.split();
             loop {
                 tokio::select! {
