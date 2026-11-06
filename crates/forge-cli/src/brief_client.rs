@@ -112,10 +112,17 @@ pub(crate) fn session_line(s: &BriefSession, now: i64) -> String {
 }
 
 pub(crate) fn render(brief: &Brief) -> String {
+    let drain = brief
+        .drain
+        .as_ref()
+        .map_or_else(String::new, |d| format!("  {}\n", d.line));
     if brief.sessions.is_empty() {
-        return format!("{}: nothing happened.", title_line(brief));
+        if drain.is_empty() {
+            return format!("{}: nothing happened.", title_line(brief));
+        }
+        return format!("{}: nothing finished.\n{drain}", title_line(brief));
     }
-    let mut out = format!("{}: {}\n", title_line(brief), headline(brief));
+    let mut out = format!("{}: {}\n{drain}", title_line(brief), headline(brief));
     for s in &brief.sessions {
         out.push_str(&format!("  {}\n", session_line(s, brief.now)));
         if s.outcome != Outcome::Failed && !s.summary.is_empty() {
@@ -180,6 +187,7 @@ mod tests {
                 ..BriefTotals::default()
             },
             sessions: Vec::new(),
+            drain: None,
         };
         assert_eq!(
             headline(&brief),
@@ -200,5 +208,24 @@ mod tests {
         assert!(line.contains("waiting on you for 40 min"), "{line}");
         assert!(line.contains("+4/-2 to land"), "{line}");
         assert!(line.contains("$1.25"), "{line}");
+    }
+
+    #[test]
+    fn a_drain_adds_its_line_even_when_no_session_finished() {
+        let brief = Brief {
+            since: 0,
+            now: 3600,
+            totals: BriefTotals::default(),
+            sessions: Vec::new(),
+            drain: Some(crate::serve_brief::DrainBrief {
+                id: "d1".into(),
+                line: "Drain: 7 started, 4 merged, 2 waiting on you, 1 blocked".into(),
+                status: "active".into(),
+                queued: 0,
+            }),
+        };
+        let out = render(&brief);
+        assert!(out.contains("Drain: 7 started, 4 merged, 2 waiting on you, 1 blocked"));
+        assert!(!out.contains("nothing happened"));
     }
 }

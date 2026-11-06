@@ -127,6 +127,7 @@ mod serve_control;
 mod serve_crews;
 mod serve_diagnostics;
 mod serve_dispatch;
+mod serve_drain;
 mod serve_fleet_ws;
 mod serve_fork_move;
 mod serve_git;

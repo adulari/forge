@@ -36,7 +36,7 @@ mod gates;
 pub(crate) use gates::*;
 mod goal_control;
 pub(crate) use goal_control::*;
-mod goal_envelope;
+pub(crate) mod goal_envelope;
 pub(crate) use goal_envelope::GoalRecord;
 mod goal_headless;
 pub(crate) use goal_headless::*;

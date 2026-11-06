@@ -28,12 +28,17 @@ pub(crate) struct EnvelopeSources {
 
 impl EnvelopeSources {
     pub(crate) fn read(s: &Session) -> Self {
+        Self::from_store(&s.store, s.store.session_cost(s.id()).unwrap_or(0.0))
+    }
+
+    /// The same reading without a session, for work that spans several (an issue drain).
+    pub(crate) fn from_store(store: &forge_store::Store, session_usd: f64) -> Self {
         let now = chrono::Utc::now().timestamp();
-        let mut windows = s.store.subscription_windows().unwrap_or_default();
+        let mut windows = store.subscription_windows().unwrap_or_default();
         windows.extend(test_override(now));
         Self {
             windows,
-            session_usd: s.store.session_cost(s.id()).unwrap_or(0.0),
+            session_usd,
             now,
         }
     }
@@ -110,29 +115,37 @@ fn test_override_active() -> bool {
 /// Ask the claude or codex probe for a current reading when the stored one is old. Never runs for
 /// a mock session or under the test override.
 pub(crate) async fn refresh_quota(session: &Arc<tokio::sync::Mutex<Session>>, spec: &EnvelopeSpec) {
+    let EnvelopeKind::Quota { .. } = &spec.kind else {
+        return;
+    };
+    if MOCK_SESSION.load(Ordering::Relaxed) || test_override_active() {
+        return;
+    }
+    let store = session.lock().await.store.clone();
+    refresh_quota_store(&store, spec).await;
+}
+
+/// [`refresh_quota`] for a caller that holds a store rather than a session.
+pub(crate) async fn refresh_quota_store(store: &forge_store::Store, spec: &EnvelopeSpec) {
     let EnvelopeKind::Quota { provider, .. } = &spec.kind else {
         return;
     };
     if MOCK_SESSION.load(Ordering::Relaxed) || test_override_active() {
         return;
     }
-    let (store, fresh) = {
-        let s = session.lock().await;
-        let sources = EnvelopeSources::read(&s);
-        let fresh = sources
-            .quota(spec)
-            .is_some_and(|r| sources.now - r.observed_at <= REFRESH_AFTER_SECS);
-        (s.store.clone(), fresh)
-    };
-    if fresh {
+    let sources = EnvelopeSources::from_store(store, 0.0);
+    if sources
+        .quota(spec)
+        .is_some_and(|r| sources.now - r.observed_at <= REFRESH_AFTER_SECS)
+    {
         return;
     }
     match provider.as_str() {
         "claude" => {
-            crate::cli::commands::models::refresh_claude_quota_if_stale(&store, REFRESH_AFTER_SECS)
+            crate::cli::commands::models::refresh_claude_quota_if_stale(store, REFRESH_AFTER_SECS)
                 .await
         }
-        _ => crate::cli::commands::models::refresh_codex_quota(&store).await,
+        _ => crate::cli::commands::models::refresh_codex_quota(store).await,
     }
 }
 
@@ -144,7 +157,23 @@ pub(crate) async fn baseline(
 ) -> Result<EnvelopeState, String> {
     refresh_quota(session, &spec).await;
     let s = session.lock().await;
-    let sources = EnvelopeSources::read(&s);
+    baseline_from(&EnvelopeSources::read(&s), spec)
+}
+
+/// [`baseline`] for a drain: the envelope starts counting at the window's reading right now, and
+/// a `$` envelope at zero (the drain sums its own sessions' cost).
+pub(crate) async fn baseline_store(
+    store: &forge_store::Store,
+    spec: EnvelopeSpec,
+    refresh: bool,
+) -> Result<EnvelopeState, String> {
+    if refresh {
+        refresh_quota_store(store, &spec).await;
+    }
+    baseline_from(&EnvelopeSources::from_store(store, 0.0), spec)
+}
+
+fn baseline_from(sources: &EnvelopeSources, spec: EnvelopeSpec) -> Result<EnvelopeState, String> {
     if spec.kind == EnvelopeKind::Usd {
         return Ok(EnvelopeState::new(spec, sources.session_usd, None));
     }

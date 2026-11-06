@@ -57,7 +57,7 @@ struct IssueQuery {
 }
 
 /// The repository an issue request addresses: a session's, or a known project's by `cwd`.
-async fn request_root(
+pub(crate) async fn request_root(
     state: &DaemonState,
     session: Option<&str>,
     cwd: Option<&str>,
@@ -356,21 +356,21 @@ fn seed_prompt(issue: &Issue) -> String {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StartRequest {
+pub(crate) struct StartRequest {
     #[serde(default)]
-    session: Option<String>,
+    pub(crate) session: Option<String>,
     #[serde(default)]
-    cwd: Option<String>,
-    number: u64,
+    pub(crate) cwd: Option<String>,
+    pub(crate) number: u64,
     #[serde(default = "default_true")]
-    worktree: bool,
+    pub(crate) worktree: bool,
     #[serde(default)]
-    branch: Option<String>,
+    pub(crate) branch: Option<String>,
     /// PR Watch mode for the new session; `off` leaves it unarmed.
     #[serde(default = "default_mode")]
-    mode: Mode,
+    pub(crate) mode: Mode,
     #[serde(default)]
-    method: Option<String>,
+    pub(crate) method: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -416,7 +416,7 @@ fn branch_name(issue: &Issue) -> String {
     }
 }
 
-async fn start_in(
+pub(crate) async fn start_in(
     state: &Arc<DaemonState>,
     gh: &Gh,
     request: StartRequest,

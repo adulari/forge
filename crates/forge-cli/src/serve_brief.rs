@@ -86,12 +86,23 @@ pub(crate) struct BriefTotals {
     pub(crate) spend_usd: f64,
 }
 
+/// The newest issue drain, as one line: `Drain: 7 started, 4 merged, 2 waiting on you, 1 blocked`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct DrainBrief {
+    pub(crate) id: String,
+    pub(crate) line: String,
+    pub(crate) status: String,
+    pub(crate) queued: usize,
+}
+
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Brief {
     pub(crate) since: i64,
     pub(crate) now: i64,
     pub(crate) totals: BriefTotals,
     pub(crate) sessions: Vec<BriefSession>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) drain: Option<DrainBrief>,
 }
 
 fn first_line(text: &str, limit: usize) -> String {
@@ -227,6 +238,7 @@ pub(crate) fn build(
         now,
         totals,
         sessions,
+        drain: None,
     }
 }
 
@@ -280,7 +292,9 @@ async fn brief(
                 }
             }
         }
-        Ok(build(rows, &live, &changes, since, now))
+        let mut brief = build(rows, &live, &changes, since, now);
+        brief.drain = crate::serve_drain::brief_line(crate::serve_drain::registry(), since);
+        Ok(brief)
     })
     .await;
     match result {
