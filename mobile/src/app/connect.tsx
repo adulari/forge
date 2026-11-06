@@ -31,6 +31,7 @@ import { type ConnectTestState, parseConnectUrl, useAuth } from "../lib/auth";
 import { describeConnectTarget, type ConnectTarget } from "../lib/connectUrl";
 import { readPairingFromLocation, stripPairingFromLocation } from "../lib/pairingLocation";
 import {
+  desktopConnectUrl,
   detectForgeServe,
   resolveDesktopConnection,
   forgeBinaryAvailable,
@@ -230,7 +231,7 @@ export default function ConnectScreen() {
       switch (plan.kind) {
         case "connect":
           setDesktopState({ kind: "idle" });
-          void attemptConnect(plan.state.base_url);
+          void attemptConnect(desktopConnectUrl(plan.state));
           return;
         case "confirm-lan":
           setDesktopState({ kind: "found-lan", state: plan.state });
@@ -258,7 +259,7 @@ export default function ConnectScreen() {
     // Hand off to the same test/add/navigate flow the manual field and QR scan use — the card's
     // own job ends here, the status banner below takes over.
     setDesktopState({ kind: "idle" });
-    void attemptConnect(desktopState.state.base_url);
+    void attemptConnect(desktopConnectUrl(desktopState.state));
   }, [desktopState, attemptConnect]);
 
   const onStartServerPress = useCallback(async () => {
@@ -279,7 +280,7 @@ export default function ConnectScreen() {
       return;
     }
     setDesktopState({ kind: "idle" });
-    void attemptConnect(found.base_url);
+    void attemptConnect(desktopConnectUrl(found));
   }, [attemptConnect]);
 
   const onScanned = useCallback((data: string) => requestConnect(data), [requestConnect]);
@@ -349,8 +350,8 @@ export default function ConnectScreen() {
 
       {desktopState.kind === "found-lan" ? (
         <Text style={[typeScale.sub, styles.autoHint, { color: tokens.ink2 }]}>
-          forge is running on this machine over <Text style={{ fontWeight: "600" }}>--lan</Text>, but its
-          self-signed certificate isn&apos;t trusted here — restart it with{" "}
+          forge is running on this machine over <Text style={{ fontWeight: "600" }}>--lan</Text>, but this
+          app couldn&apos;t read its certificate — restart it with{" "}
           <Text style={{ fontWeight: "600" }}>forge serve --local</Text> or{" "}
           <Text style={{ fontWeight: "600" }}>forge serve --anywhere</Text> to connect from this app.
         </Text>

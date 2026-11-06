@@ -16,13 +16,24 @@ pub struct ServeState {
     pid: u32,
     port: u16,
     /// `"local"` | `"lan"` | `"anywhere"`. The desktop webview rejects the `--lan` self-signed
-    /// certificate, so the frontend must not auto-connect to a `"lan"` state — it only surfaces
-    /// a hint. That policy lives in TS (connect.tsx), not here: this command reports the raw
-    /// state and lets the caller decide.
+    /// certificate, so a `"lan"` state is only reachable through the pinned proxy, using
+    /// `fingerprint`. That policy lives in TS (desktopServe.ts), not here.
     exposure: String,
     base_url: String,
     token: String,
     started_at: u64,
+    /// `sha256:<hex>` of the daemon's local self-signed certificate, read from this machine's
+    /// config dir; only set for `"lan"`. Not part of the file `forge serve` writes.
+    #[serde(default)]
+    fingerprint: Option<String>,
+}
+
+fn local_cert_fingerprint(dir: &std::path::Path) -> Option<String> {
+    let pem = std::fs::read_to_string(dir.join("serve-tls-cert.pem")).ok()?;
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    use base64::Engine as _;
+    let der = base64::engine::general_purpose::STANDARD.decode(body).ok()?;
+    Some(crate::pinned::leaf_fingerprint(&der))
 }
 
 /// Per-OS config dir, resolved the same way `forge_config::config_dir()` does.
@@ -60,13 +71,16 @@ fn probe_port(port: u16) -> bool {
 /// silent port. Advisory data only — never trust it without this validation.
 pub(crate) fn read_and_validate(dir: &std::path::Path) -> Option<ServeState> {
     let raw = std::fs::read_to_string(dir.join("serve-state.json")).ok()?;
-    let state: ServeState = serde_json::from_str(&raw).ok()?;
+    let mut state: ServeState = serde_json::from_str(&raw).ok()?;
     if !pid_alive(state.pid) {
         return None;
     }
     if !probe_port(state.port) {
         return None;
     }
+    state.fingerprint = (state.exposure == "lan")
+        .then(|| local_cert_fingerprint(dir))
+        .flatten();
     Some(state)
 }
 
@@ -611,6 +625,21 @@ mod tests {
         assert_eq!(state.port, 7452);
         assert_eq!(state.exposure, "local");
         assert_eq!(state.base_url, "http://127.0.0.1:7452/deadbeefdeadbeef");
+    }
+
+    #[test]
+    fn local_cert_fingerprint_matches_the_leaf_the_pairing_link_pins() {
+        let dir = std::env::temp_dir().join(format!("forge-desktop-cert-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(local_cert_fingerprint(&dir), None);
+        let rcgen::CertifiedKey { cert, .. } =
+            rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(dir.join("serve-tls-cert.pem"), cert.pem()).unwrap();
+        assert_eq!(
+            local_cert_fingerprint(&dir),
+            Some(crate::pinned::leaf_fingerprint(cert.der()))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

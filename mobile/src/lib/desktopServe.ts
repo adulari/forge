@@ -3,6 +3,7 @@
 // fs/shell plugin grant, so this is the only way the desktop app can see or start a local
 // `forge serve` daemon. No-ops (resolve to the "nothing found" value) on every other platform,
 // so callers never need their own `isTauri` guard.
+import { composeManualLink } from "./connectUrl";
 import { isTauri } from "./platform";
 
 export type ServeExposure = "local" | "lan" | "anywhere";
@@ -15,6 +16,8 @@ export interface DetectedServeState {
   base_url: string;
   token: string;
   started_at: number;
+  /** `sha256:<hex>` of the local self-signed certificate; present only for `lan`. */
+  fingerprint?: string | null;
 }
 
 async function invokeTauri<T>(cmd: string): Promise<T> {
@@ -57,10 +60,23 @@ export async function startForgeServe(): Promise<void> {
 }
 
 /**
+ * The URL to hand to the connect flow for a detected daemon. A `lan` daemon's self-signed
+ * certificate is pinned by its fingerprint, exactly as a pairing link would.
+ */
+export function desktopConnectUrl(state: DetectedServeState): string {
+  if (state.exposure !== "lan" || !state.fingerprint) return state.base_url;
+  try {
+    return composeManualLink(new URL(state.base_url).host, "", state.token, state.fingerprint) ?? state.base_url;
+  } catch {
+    return state.base_url;
+  }
+}
+
+/**
  * What the desktop shell should do on launch.
  *
- * `lan` is never auto-connected: it needs the self-signed certificate trusted first, so it stays
- * a deliberate choice rather than a connection that silently fails.
+ * `lan` connects only when the local certificate's fingerprint is known, so it can be pinned;
+ * without one it stays a hint rather than a connection that silently fails.
  */
 export type DesktopConnectionPlan =
   | { kind: "connect"; state: DetectedServeState; started: boolean }
@@ -88,7 +104,7 @@ export async function resolveDesktopConnection(
 ): Promise<DesktopConnectionPlan> {
   const found = await probes.detect();
   if (found) {
-    return found.exposure === "lan"
+    return found.exposure === "lan" && !found.fingerprint
       ? { kind: "confirm-lan", state: found }
       : { kind: "connect", state: found, started: false };
   }

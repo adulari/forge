@@ -12,7 +12,7 @@ import {
   localStatus,
   type InstallProgress,
 } from "../../lib/desktopOnboarding";
-import { detectForgeServe, pollForForgeServe } from "../../lib/desktopServe";
+import { desktopConnectUrl, detectForgeServe, pollForForgeServe } from "../../lib/desktopServe";
 import {
   applyChecklistJob,
   applyJobPoll,
@@ -217,8 +217,8 @@ export function useOnboarding(options: { focus?: string } = {}): Controller {
         try {
           serve = serve ?? (await pollForForgeServe(10_000));
           if (!serve) throw new Error("Forge is not answering on this computer.");
-          if (serve.exposure === "lan") throw new Error("Forge is only reachable over HTTPS on your network. Start it with --local.");
-          await addServer(serve.base_url, { setActive: true });
+          if (serve.exposure === "lan" && !serve.fingerprint) throw new Error("Forge is only reachable over HTTPS on your network. Start it with --local.");
+          await addServer(desktopConnectUrl(serve), { setActive: true });
           apply(phase0Update(rows, "connect", { status: "done", message: "Connected", fraction: 1 }));
         } catch (cause) {
           return fail("connect", cause);

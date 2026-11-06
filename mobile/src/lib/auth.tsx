@@ -170,6 +170,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (repointed === current) return;
         const next = [...repointed];
         await saveServers(next);
+        for (const server of next) void registerPin(server.baseUrl, server.fingerprint);
         setServers(next);
       }).catch(() => {
         // discovery is best-effort; the socket keeps retrying the stored address regardless
