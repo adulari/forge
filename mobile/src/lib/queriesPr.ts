@@ -21,6 +21,7 @@ import {
   setPrWatch,
   type PrState,
 } from "./apiPr";
+import { shipSession } from "./apiShip";
 import { useAuth } from "./auth";
 import { shouldPoll } from "../components/pr/prModel";
 import { supportsDirectDaemonEndpoints } from "./transport";
@@ -230,6 +231,20 @@ export function useSetPrWatch() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["pr", "watch"] });
       void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });
+    },
+  });
+}
+
+export function useShipSession() {
+  const baseUrl = useDirectBase();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { sessionId: string; request: Parameters<typeof shipSession>[2] }) =>
+      shipSession(baseUrl as string, args.sessionId, args.request),
+    // A refusal can still have committed, so the working tree and branch lists refresh either way.
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["pr"] });
+      void queryClient.invalidateQueries({ queryKey: ["git"] });
     },
   });
 }

@@ -58,6 +58,7 @@ import { activeWorkbenchSurface } from "../components/workbench/model";
 import { useWorkbenchCommands } from "../components/workbench/useWorkbenchCommands";
 import { FindHotkey } from "../components/find/FindHotkey";
 import { ClaudePickerHost } from "../components/claude/ClaudePickerHost";
+import { ShipHost } from "../components/ship/ShipHost";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
@@ -457,6 +458,7 @@ export default function RootLayout() {
                         <HostRecoveryGate />
                         <NoticesWatcher />
                         <ClaudePickerHost />
+                        <ShipHost />
                         {/* Inside the query provider because it reads the daemon's changelog, and above
                             the navigator so it is not tied to whichever tab happens to be open. */}
                         <UpdateNotice />

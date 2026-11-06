@@ -5,6 +5,7 @@ import React, { useCallback, useState } from "react";
 import { StyleSheet, Text, View , ScrollView } from "react-native";
 
 import { useAuth } from "../../lib/auth";
+import { openShip } from "../../lib/shipRequest";
 import { useProjectActions } from "../../lib/queriesProjectActions";
 import { useCommitAction } from "../../lib/commitAction";
 import { useDiscardPaths, useGenerateCommitMessage, usePushGit } from "../../lib/gitActions";
@@ -171,6 +172,7 @@ function GitColumn({ sessionId }: { sessionId: string }) {
             {postShip.kind !== "none" && !shipping ? (
               <IdeTextButton label={postShip.kind === "view-pr" ? `View PR #${postShip.number}` : "Open pull request"} onPress={() => setPrVisible(true)} />
             ) : null}
+            {prDirect ? <IdeTextButton label="Ship to PR" onPress={() => openShip(sessionId)} /> : null}
             <IdeTextButton label={manual ? "Hide message" : "Edit message"} onPress={() => setManual((value) => !value)} />
             <IdeTextButton
               label={shipLabel(steps)}

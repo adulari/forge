@@ -16,6 +16,7 @@ import {
   MoonStar,
   Plus,
   QrCode,
+  Rocket,
   Settings2,
   Sparkles,
   SquareTerminal,
@@ -33,6 +34,8 @@ import { haptics } from "../../lib/haptics";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
 import { openClaudePicker } from "../../lib/claudeHandoff";
+import { openShip } from "../../lib/shipRequest";
+import { usePrAvailable } from "../../lib/queriesPr";
 import { useContinueInClaudeCode } from "../../lib/claudeHandoffQueries";
 import { openSession } from "../../lib/nav";
 import { SETTINGS_ENTRIES } from "../../lib/palette/settingsEntries";
@@ -138,6 +141,7 @@ export function usePaletteSources(options: PaletteSourceOptions) {
   const { signedIn: anywhereSignedIn, account: anywhereAccount } = useAnywhere();
   const { hosts: anywhereHosts } = useAnywhereHosts();
   const { baseUrl: paletteBaseUrl } = useAuth();
+  const canShip = usePrAvailable();
   const hostPressure = useHostPressure();
   const newSessionHint = useShortcutLabel("session.new");
   const fleetHint = useShortcutLabel("nav.fleet");
@@ -242,6 +246,21 @@ export function usePaletteSources(options: PaletteSourceOptions) {
           continueInClaudeCode(id);
         },
       });
+      if (canShip) {
+        items.push({
+          id: "action:ship-current",
+          section: "commands",
+          title: "Ship current session",
+          subtitle: "commit, push, open the PR and merge when green",
+          keywords: "ship commit push pull request pr merge watch finish",
+          leading: <Rocket size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+          onSelect: () => {
+            const id = activeSessionId;
+            close();
+            openShip(id);
+          },
+        });
+      }
       items.push({
         id: "action:archive-current",
         section: "commands",
@@ -425,7 +444,7 @@ export function usePaletteSources(options: PaletteSourceOptions) {
     return items.map((item) => ({ ...item, recency: recencyOf(recents, item.id) }));
   }, [
     tokens, activeSessionId, scheme, setScheme, close, archiveSession, continueInClaudeCode, toast, runSlashCommand, skillCommands, isCompact,
-    newSessionHint, fleetHint, inboxHint, historyHint, hostPressure.data, paletteBaseUrl, anywhereSignedIn, anywhereHosts, anywhereAccount, recents,
+    newSessionHint, fleetHint, inboxHint, historyHint, hostPressure.data, paletteBaseUrl, canShip, anywhereSignedIn, anywhereHosts, anywhereAccount, recents,
     openWhatsNew, openSchedules,
   ]);
 
