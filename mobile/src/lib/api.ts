@@ -279,7 +279,15 @@ export interface GitSwitchRequest { session: string; branch: string; }
 export interface GitCreateBranchRequest { session: string; name: string; }
 export interface GitBranchActionResponse { ok: boolean; branch: string; }
 /** Same shape as the WS snapshot's `DiffHunk` — the first character of each line is the gutter. */
-export interface GitDiffHunk { header: string; lines: string[]; }
+export interface GitDiffHunk {
+  header: string;
+  lines: string[];
+  /** The daemon's verdict: "routine" hunks (lockfile churn, whitespace, import reorders) can be accepted in bulk. Absent from an older daemon. */
+  risk?: HunkRisk;
+  /** One line saying why: "lockfile churn", "deletes a test". */
+  reason?: string;
+}
+export type HunkRisk = "routine" | "look";
 export interface GitDiffFile {
   path: string;
   kind: "created" | "modified" | "deleted" | "renamed";
@@ -1824,6 +1832,11 @@ export interface ChangedFile {
   dels: number;
   /** Changes whenever the file's current content does; drop "reviewed" marks on a new value. */
   content_hash: string;
+  /** "routine" when every hunk is safe to accept in bulk. Absent from an older daemon. */
+  risk?: HunkRisk;
+  risk_reason?: string;
+  look_hunks?: number;
+  routine_hunks?: number;
 }
 export interface SessionChanges {
   /** A session id, or the synthetic group `"unattributed"`. */

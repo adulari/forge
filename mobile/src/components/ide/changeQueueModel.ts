@@ -26,6 +26,11 @@ export interface ChangedFile {
   conflicted?: boolean;
   /** A check (test, lint, build) that names this file is failing. */
   failing?: boolean;
+  /** The daemon's verdict for the whole file; unset when the daemon predates risk ranking. */
+  risk?: "routine" | "look";
+  riskReason?: string;
+  lookHunks?: number;
+  routineHunks?: number;
 }
 
 export interface QueueAgent {
@@ -115,6 +120,43 @@ export interface QueueGroup {
   rows: QueueRow[];
 }
 
+/** Files that need a look sort ahead of routine ones; an unranked file is treated as needing one. */
+export function riskRank(file: Pick<ChangedFile, "risk">): number {
+  return file.risk === "routine" ? 1 : 0;
+}
+
+export interface RiskTotals {
+  /** Whether any file carries a verdict; without one the queue shows no risk UI. */
+  ranked: boolean;
+  lookHunks: number;
+  routineHunks: number;
+  lookFiles: number;
+  routineFiles: number;
+}
+
+/** Hunk and file counts over the files still to review ("9 look here · 31 routine"). */
+export function riskTotals(rows: readonly QueueRow[]): RiskTotals {
+  const totals: RiskTotals = { ranked: false, lookHunks: 0, routineHunks: 0, lookFiles: 0, routineFiles: 0 };
+  for (const row of rows) {
+    if (row.file.risk === undefined) continue;
+    totals.ranked = true;
+    if (row.tier === "reviewed") continue;
+    totals.lookHunks += row.file.lookHunks ?? 0;
+    totals.routineHunks += row.file.routineHunks ?? 0;
+    if (row.file.risk === "look") totals.lookFiles += 1;
+    else totals.routineFiles += 1;
+  }
+  return totals;
+}
+
+/** "9 look here · 31 routine", leaving out an empty side. */
+export function riskLine(totals: Pick<RiskTotals, "lookHunks" | "routineHunks">): string {
+  const parts: string[] = [];
+  if (totals.lookHunks > 0) parts.push(`${totals.lookHunks} look here`);
+  if (totals.routineHunks > 0) parts.push(`${totals.routineHunks} routine`);
+  return parts.join(" · ");
+}
+
 function tierOf(agent: QueueAgent, file: ChangedFile, marks: ReviewedMarks): AttentionTier {
   if (agent.waiting) return "waiting";
   if (file.conflicted) return "conflict";
@@ -159,6 +201,7 @@ export function buildQueue({ agents, marks, scope }: BuildQueueInput): QueueGrou
     rows.sort(
       (a, b) =>
         TIER_RANK[a.tier] - TIER_RANK[b.tier] ||
+        riskRank(a.file) - riskRank(b.file) ||
         b.file.adds + b.file.dels - (a.file.adds + a.file.dels) ||
         a.path.localeCompare(b.path),
     );
