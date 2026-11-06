@@ -1677,7 +1677,17 @@ pub(crate) async fn pump_ws(
     input_tx: mpsc::Sender<RemoteInput>,
     since: u64,
 ) {
-    pump_ws_draining(socket, snapshot_rx, events, input_tx, since, None, None).await;
+    pump_ws_draining(
+        socket,
+        snapshot_rx,
+        events,
+        input_tx,
+        since,
+        None,
+        None,
+        WsLiveness::DEFAULT,
+    )
+    .await;
 }
 
 /// The close frame a daemon sends when it is about to restart: code 1001 ("going away") with a
@@ -1706,7 +1716,24 @@ async fn host_going_away(going_away: &mut Option<watch::Receiver<bool>>) {
     }
 }
 
+/// How a socket tells a vanished client from a quiet one. Phones leave networks without a FIN,
+/// so the kernel keeps the connection (and the "a client is attached" state that suppresses
+/// pushes) for ~15 minutes; the server pings, and any frame from the client counts as alive.
+#[derive(Clone, Copy)]
+pub(crate) struct WsLiveness {
+    pub(crate) ping_every: std::time::Duration,
+    pub(crate) idle: std::time::Duration,
+}
+
+impl WsLiveness {
+    pub(crate) const DEFAULT: Self = Self {
+        ping_every: std::time::Duration::from_secs(20),
+        idle: std::time::Duration::from_secs(60),
+    };
+}
+
 /// [`pump_ws`] that also announces a daemon shutdown to the client with a 1001 close frame.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_ws_draining(
     socket: WebSocket,
     snapshot_rx: watch::Receiver<Arc<SnapshotFrame>>,
@@ -1715,6 +1742,7 @@ pub(crate) async fn pump_ws_draining(
     since: u64,
     mut going_away: Option<watch::Receiver<bool>>,
     gate: Option<crate::serve_access::InputGate>,
+    liveness: WsLiveness,
 ) {
     use futures::stream::StreamExt;
     use futures::SinkExt;
@@ -1791,7 +1819,7 @@ pub(crate) async fn pump_ws_draining(
 
     let (note_tx, mut note_rx) = mpsc::unbounded_channel::<String>();
     let mut forward = tokio::spawn(async move {
-        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(20));
+        let mut keepalive = tokio::time::interval(liveness.ping_every);
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_sent = last_sent;
         loop {
@@ -1818,6 +1846,9 @@ pub(crate) async fn pump_ws_draining(
                     if tx.send(Message::Text(r#"{"keepalive":true}"#.into())).await.is_err() {
                         break;
                     }
+                    if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
                 }
                 _ = host_going_away(&mut going_away) => {
                     let _ = tx.send(host_restarting_close()).await;
@@ -1838,7 +1869,7 @@ pub(crate) async fn pump_ws_draining(
     // Receive inputs from the browser; forward each to the render loop's channel.
     let dedupe_events = events.clone();
     let mut receive = tokio::spawn(async move {
-        while let Some(Ok(msg)) = rx.next().await {
+        while let Ok(Some(Ok(msg))) = tokio::time::timeout(liveness.idle, rx.next()).await {
             let text = match msg {
                 Message::Text(t) => t.to_string(),
                 Message::Binary(b) => match String::from_utf8(b.to_vec()) {
@@ -3227,6 +3258,9 @@ mod tests {
                 .expect("a frame arrives")
                 .expect("stream open")
                 .expect("text frame");
+            if !frame.is_text() {
+                continue;
+            }
             let text = frame.into_text().expect("text frame");
             let v: serde_json::Value = serde_json::from_str(&text).expect("frame is JSON");
             if v.get("keepalive").is_some() {
@@ -3234,6 +3268,69 @@ mod tests {
             }
             return v;
         }
+    }
+
+    /// A client that stops answering (a phone off its network, no FIN) must stop counting as
+    /// attached, or pushes stay suppressed until the kernel gives up on the connection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn silent_client_is_dropped_after_the_idle_deadline() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let clients = Arc::new(AtomicUsize::new(0));
+        let (_snapshot_tx, snapshot_rx) =
+            watch::channel(Arc::new(SnapshotFrame::new(Snapshot::default())));
+        let (input_tx, _input_rx) = mpsc::channel::<RemoteInput>(4);
+        let events = Arc::new(std::sync::Mutex::new(EventLog::new(EVENT_LOG_CAP)));
+        let liveness = WsLiveness {
+            ping_every: std::time::Duration::from_millis(50),
+            idle: std::time::Duration::from_millis(300),
+        };
+        let counter = clients.clone();
+        let app = Router::new().route(
+            "/ws",
+            get(move |ws: axum::extract::WebSocketUpgrade| async move {
+                ws.on_upgrade(move |socket| async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    pump_ws_draining(
+                        socket,
+                        snapshot_rx,
+                        events,
+                        input_tx,
+                        0,
+                        None,
+                        None,
+                        liveness,
+                    )
+                    .await;
+                    counter.fetch_sub(1, Ordering::SeqCst);
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let (silent, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+            .await
+            .expect("WS handshake");
+        let wait_for = |want: usize| {
+            let clients = clients.clone();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while clients.load(Ordering::SeqCst) != want {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok()
+            }
+        };
+        assert!(wait_for(1).await, "client counted as attached");
+        assert!(
+            wait_for(0).await,
+            "a client that never answers is dropped after the idle deadline"
+        );
+        drop(silent);
+        server.abort();
     }
 
     /// `start()` binds a real port + spawns the server task. This is the real round-trip smoke:
