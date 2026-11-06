@@ -8,7 +8,7 @@ pub fn command_category(name: &str) -> &'static str {
         | "fork" | "stash" | "timeline" | "notes" | "jobs" | "ide" => "Session",
         "model" | "models" | "mode" | "effort" | "subagents" | "delegation" | "crew" | "agents"
         | "thinking" | "mesh" | "usage" => "Model & usage",
-        "assay" | "lattice" | "pr" | "commit" | "diff" => "Review & ship",
+        "assay" | "lattice" | "pr" | "ship" | "commit" | "diff" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "import" | "issues" | "clis" | "host" | "self-mcp"
         | "voice" | "image" | "claude" => "Integrations",
         "config" | "theme" | "statusline" | "keys" | "help" | "init" | "remember" | "memories"

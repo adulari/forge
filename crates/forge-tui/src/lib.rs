@@ -33,6 +33,7 @@ pub mod anywhere_menu;
 pub mod import_menu;
 pub mod issues_menu;
 mod session_delete;
+pub mod ship_menu;
 pub mod workspace_menu;
 pub use session_delete::{DeleteKeyOutcome, SessionDeleteDialog};
 mod arg_parse;

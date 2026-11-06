@@ -1417,6 +1417,37 @@ fn x_on_a_live_daemon_card_opens_the_archive_confirm() {
 }
 
 #[test]
+fn shift_s_asks_first_and_only_enter_ships_the_idle_session() {
+    let mut a = app_with_selected("s1");
+    handle_key(&mut a, key(KeyCode::Char('S')));
+    let confirm = a.confirm.as_ref().unwrap();
+    assert_eq!(confirm.kind, ConfirmKind::Ship("s1".into()));
+    assert!(confirm.body.contains("never forced") && confirm.body.contains("PR Watch"));
+    assert!(handle_key(&mut a, key(KeyCode::Esc)).is_empty());
+    assert!(a.confirm.is_none());
+
+    handle_key(&mut a, key(KeyCode::Char('S')));
+    let out = handle_key(&mut a, key(KeyCode::Enter));
+    assert_eq!(out, vec![BoardAction::Ship("s1".into())]);
+}
+
+#[test]
+fn a_busy_or_past_session_is_not_offered_for_shipping() {
+    let mut a = app();
+    a.apply(BoardEvent::Fleet(vec![FleetRow {
+        busy: true,
+        ..row("busy")
+    }]));
+    a.select("busy");
+    handle_key(&mut a, key(KeyCode::Char('S')));
+    assert!(a.confirm.is_none());
+    assert!(a
+        .toasts
+        .back()
+        .is_some_and(|t| t.text.contains("still working")));
+}
+
+#[test]
 fn enter_on_the_confirm_archives() {
     let mut a = app_with_selected("s1");
     handle_key(&mut a, key(KeyCode::Char('x')));

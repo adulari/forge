@@ -454,9 +454,17 @@ pub(crate) async fn ship_session(
     });
 
     out.watch = arm_watch(state, session, Mode::Merge, method).await;
+    // The watcher acts only on sessions this daemon hosts; a session that lives elsewhere (a
+    // terminal chat) is armed all the same and starts being watched once it runs here.
+    let hosted = state.registry.get(session).await.is_some();
+    let note = if hosted {
+        ""
+    } else {
+        "; the session is not running on this daemon, so watching starts when it is resumed here"
+    };
     out.done(
         "watch",
-        format!("watching {label} in merge mode ({method})"),
+        format!("watching {label} in merge mode ({method}){note}"),
     );
     out.ok = true;
     Ok(out)

@@ -334,7 +334,7 @@ pub(crate) async fn fetch_sessions(
 }
 
 /// Resolve a full session id from an exact id or a unique prefix; ambiguity/absence is an error.
-fn resolve_session_id(sessions: &[SessionInfo], needle: &str) -> Result<String> {
+pub(crate) fn resolve_session_id(sessions: &[SessionInfo], needle: &str) -> Result<String> {
     if let Some(exact) = sessions.iter().find(|s| s.id == needle) {
         return Ok(exact.id.clone());
     }

@@ -106,6 +106,7 @@ mod notes_menu;
 mod panes;
 mod refine_cmd;
 mod run_menu;
+mod ship_menu;
 mod slash_commands;
 mod workspace_menu;
 pub(crate) use dispatch::*;
@@ -841,6 +842,7 @@ pub(crate) async fn run_chat_tui(
     let mut run_menu_driver = run_menu::RunMenuDriver::new();
     let mut import_driver = import_menu::ImportMenuDriver::new();
     let mut issues_driver = issues_menu::IssuesMenuDriver::new();
+    let mut ship_driver = ship_menu::ShipMenuDriver::new();
     let mut agents_driver = agents_menu::AgentsMenuDriver::new(mock);
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
     // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
@@ -1773,6 +1775,11 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
                 continue;
             }
+            if app.ship_menu.open {
+                ship_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
             if app.agents_menu.open {
                 agents_driver.key(&mut app, key);
                 dirty = true;
@@ -1982,6 +1989,7 @@ pub(crate) async fn run_chat_tui(
                 || app.run_menu.open
                 || app.import_menu.open
                 || app.issues_menu.open
+                || app.ship_menu.open
                 || app.workspace_menu.open
                 || app.agents_menu.open
                 || app.status_open
@@ -5276,6 +5284,9 @@ pub(crate) async fn run_chat_tui(
             dirty = true;
         }
         if issues_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if ship_driver.tick(&mut app) {
             dirty = true;
         }
         if let Some(done) = import_driver.take_switch() {

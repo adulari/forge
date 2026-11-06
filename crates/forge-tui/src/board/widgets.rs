@@ -616,6 +616,12 @@ pub(super) fn action_chips(card: &Card) -> Vec<Chip> {
         ("m", "model", Button::Model, live),
         ("M", "mode", Button::Mode, live && !card.terminal),
         ("x", "archive", Button::Archive, !card.terminal),
+        (
+            "S",
+            "ship",
+            Button::Ship,
+            live && !card.terminal && !card.busy,
+        ),
         ("c", "copy", Button::Copy, true),
     ];
     if worktree {

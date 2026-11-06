@@ -74,6 +74,7 @@ pub(crate) fn other_modal_open(app: &App) -> bool {
         || app.run_menu.open
         || app.import_menu.open
         || app.issues_menu.open
+        || app.ship_menu.open
         || app.agents_menu.open
         || app.diff_overlay.open
         || app.jobs_overlay.open

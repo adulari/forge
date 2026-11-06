@@ -42,6 +42,7 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Run
         | CommandAction::Import
         | CommandAction::Issues
+        | CommandAction::Ship
         | CommandAction::Host(_)
         | CommandAction::Control
         | CommandAction::AgentClis

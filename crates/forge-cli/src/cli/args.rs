@@ -516,6 +516,36 @@ pub(crate) enum Command {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Ship a finished session in one step: commit its changes with a generated message, push the
+    /// branch (never forced), open the pull request with a generated title and body plus the
+    /// session's provenance, and arm PR Watch in merge mode so Forge merges it when checks pass.
+    /// Stops at the first refusal (detached HEAD, the base branch, a failing commit hook, no write
+    /// access) and says why. Needs the daemon (`forge serve --local`) and a signed-in `gh`.
+    Ship {
+        /// Session id (a unique prefix is accepted) of a session running on the daemon.
+        session: String,
+        /// Pull request title instead of the generated one.
+        #[arg(long)]
+        title: Option<String>,
+        /// Commit message instead of the generated one.
+        #[arg(long, short = 'm')]
+        message: Option<String>,
+        /// Base branch for the pull request (default: the repository's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// Open the pull request as a draft.
+        #[arg(long)]
+        draft: bool,
+        /// How PR Watch merges once checks pass.
+        #[arg(long, value_parser = ["squash", "merge", "rebase", "auto"])]
+        method: Option<String>,
+        /// Daemon base URL. Defaults to the local daemon's loopback origin.
+        #[arg(long)]
+        url: Option<String>,
+        /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// List this project's GitHub issues, or start a session on one. `--start N` opens a worktree
     /// session whose first prompt carries the issue (title, body, comments), arms PR Watch for it,
     /// and tells the agent to open a pull request containing `Fixes #N`. Needs the daemon

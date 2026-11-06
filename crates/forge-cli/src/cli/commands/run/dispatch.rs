@@ -998,6 +998,8 @@ and keep going."
         CommandAction::Import if tui.is_some() => app.import_menu.open(super::import_menu::fallback_dir()),
         CommandAction::Issues if tui.is_some() => app.issues_menu.open(),
         CommandAction::Issues => app.note("/issues opens in a terminal chat; run `forge issues` instead"),
+        CommandAction::Ship if tui.is_some() => app.ship_menu.open(),
+        CommandAction::Ship => app.note("/ship opens in a terminal chat; run `forge ship <session>` instead"),
         CommandAction::ContinueClaude(q) if tui.is_some() => super::import_menu::cont_claude(app, q),
         CommandAction::ContinueClaude(_) => app.note("/continue-claude needs a terminal chat; run `forge switch --to forge` instead"),
         CommandAction::Import => app.note("/import opens in a terminal chat; run `forge import scan` and `forge import sessions` instead"),

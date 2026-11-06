@@ -202,6 +202,8 @@ pub enum ConfirmKind {
     /// Merge every succeeded worker of this dispatch, in index order.
     MergeFinished(String),
     Merge(String),
+    /// Commit, push, open the PR and arm PR Watch for this session.
+    Ship(String),
     Discard(String),
     /// Reclaim worktree space on the host, for the repository at this cwd.
     Reclaim(Option<String>),
@@ -288,5 +290,6 @@ pub enum Button {
     CancelDispatch,
     MergeAll,
     Merge,
+    Ship,
     Discard,
 }

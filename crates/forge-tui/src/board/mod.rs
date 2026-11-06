@@ -161,6 +161,8 @@ pub enum BoardAction {
     Merge(String),
     /// `POST /api/sessions/{id}/discard`.
     Discard(String),
+    /// `POST /api/sessions/{id}/ship`: commit, push, open the PR, arm PR Watch in merge mode.
+    Ship(String),
     /// Merge every `succeeded` worker of this dispatch in index order, stopping at the first
     /// conflict or error.
     MergeFinished(String),

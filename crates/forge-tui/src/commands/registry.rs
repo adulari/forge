@@ -308,6 +308,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/pr [title]",
     },
     Command {
+        name: "ship",
+        desc: "commit, push, open the pull request and let PR Watch merge it when checks pass",
+        usage: "/ship",
+    },
+    Command {
         name: "loop",
         desc: "re-run a task each turn until done, optionally gated on checks and a budget",
         usage: "/loop <task> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N]",

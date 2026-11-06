@@ -211,6 +211,25 @@ impl Daemon {
         let value = self.call(http.post(url).json(&json!({"id": id}))).await?;
         Ok(DrainLine::of(&value))
     }
+
+    /// `POST /api/sessions/{id}/ship`: the daemon's answer, refusals included (`ok: false`).
+    pub(crate) async fn ship(&self, session: &str, body: &Value) -> Result<Value> {
+        let http = local_http_client(&self.base);
+        let url = format!("{}/{}/api/sessions/{session}/ship", self.base, self.token);
+        // Commit hooks, a push and `gh` each run on the host; the client default is too short.
+        self.call(
+            http.post(url)
+                .timeout(std::time::Duration::from_secs(180))
+                .json(body),
+        )
+        .await
+    }
+
+    /// Full ids of the sessions this daemon is running, for resolving a typed prefix.
+    pub(crate) async fn running_sessions(&self) -> Result<Vec<crate::attach::SessionInfo>> {
+        let http = local_http_client(&self.base);
+        crate::attach::fetch_sessions(&http, &self.base, &self.token).await
+    }
 }
 
 pub(crate) fn current_dir() -> String {

@@ -45,6 +45,10 @@ pub const HELP: &[(&str, &str)] = &[
     ("z", "zoom to the selected card's dispatch (Esc clears)"),
     ("w", "merge the selected worktree session back (asks first)"),
     ("X", "discard the selected worktree session (asks first)"),
+    (
+        "S",
+        "ship the selected session: commit, push, open the PR, merge when green (asks first)",
+    ),
     ("Space", "Dispatch tab: tick or untick an item of the split"),
     (
         "A",
@@ -361,6 +365,7 @@ fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
         KeyCode::Char('z') => app.toggle_zoom(),
         KeyCode::Char('w') => app.request_merge(),
         KeyCode::Char('X') => app.request_discard(),
+        KeyCode::Char('S') => app.request_ship(),
         KeyCode::Char('A') => app.request_merge_finished(),
         KeyCode::Char(d @ '1'..='9') => {
             return app.answer_option(d.to_digit(10).unwrap_or(0) as usize);
@@ -627,6 +632,10 @@ fn button(app: &mut BoardApp, b: Button) -> Vec<BoardAction> {
         }
         Button::Merge => {
             app.request_merge();
+            Vec::new()
+        }
+        Button::Ship => {
+            app.request_ship();
             Vec::new()
         }
         Button::Discard => {

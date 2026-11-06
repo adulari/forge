@@ -34,6 +34,7 @@ pub(crate) mod service_alert;
 pub(crate) mod service_logs;
 pub(crate) mod service_report;
 pub(crate) mod sessions_delete;
+pub(crate) mod ship;
 pub(crate) mod skill;
 pub(crate) mod stats;
 mod stats_codemode;

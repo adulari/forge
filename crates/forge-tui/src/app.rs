@@ -404,6 +404,8 @@ pub struct App {
     pub import_menu: crate::import_menu::ImportMenu,
     /// The `/issues` list (GitHub issues, one-key start), while open.
     pub issues_menu: crate::issues_menu::IssuesMenu,
+    /// The `/ship` card (commit, push, PR, watch in one action), while open.
+    pub ship_menu: crate::ship_menu::ShipMenu,
     /// The `/worktree` and `/project` overlay, while open.
     pub workspace_menu: crate::workspace_menu::WorkspaceMenu,
     /// The `/clis` menu (install and update the subscription CLIs), while open.
