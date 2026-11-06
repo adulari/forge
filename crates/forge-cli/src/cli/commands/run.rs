@@ -954,6 +954,7 @@ pub(crate) async fn run_chat_tui(
     // spins every 16ms; without this compare every iteration pushed an identical frame to every
     // connected browser (~60 frames/s of JSON for nothing).
     let mut last_remote_snap: Option<remote::Snapshot> = None;
+    let mut remote_stream_pacer = remote::StreamPacer::default();
     let mut remote_revision: u64 = 0;
     // Runtime failure from the loopback remote server, shown once after its URL was published.
     let mut remote_server_error_seen: Option<String> = None;
@@ -5467,7 +5468,10 @@ pub(crate) async fn run_chat_tui(
                 // Change-only broadcast: while busy this branch runs every 16ms, and
                 // `watch::send` notifies every subscriber unconditionally — without this
                 // compare each client got ~60 identical JSON frames/s for a whole turn.
-                if last_remote_snap.as_ref() != Some(&snap) {
+                if last_remote_snap.as_ref() != Some(&snap)
+                    && !remote_stream_pacer.hold(last_remote_snap.as_ref(), &snap)
+                {
+                    remote_stream_pacer.sent();
                     remote_revision += 1;
                     snap.revision = remote_revision;
                     last_remote_snap = Some(snap.clone());

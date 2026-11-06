@@ -714,6 +714,49 @@ pub struct SnapWorktreeSetup {
     pub message: String,
 }
 
+/// Minimum gap between two frames that differ only in the streamed reply. A model emits tokens
+/// far faster than anyone reads; at the loop's tick rate every token was a full snapshot frame
+/// to every client (~33/s from the daemon, ~60/s from a remote-controlled TUI), which costs
+/// phones battery, data and JS time. Any other change still goes out on the next tick.
+pub(crate) const STREAM_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Paces frames that only move the streamed reply forward; see [`STREAM_FRAME_INTERVAL`].
+#[derive(Default)]
+pub(crate) struct StreamPacer {
+    last_sent: Option<std::time::Instant>,
+}
+
+impl StreamPacer {
+    /// Whether `next` should wait: it differs from the last sent frame only in the streamed
+    /// reply, and that frame went out less than [`STREAM_FRAME_INTERVAL`] ago. The caller keeps
+    /// rebuilding while busy, so the held text goes out on a later tick (or with the next real
+    /// change, whichever comes first).
+    pub(crate) fn hold(&self, prev: Option<&Snapshot>, next: &Snapshot) -> bool {
+        let recent = self
+            .last_sent
+            .is_some_and(|at| at.elapsed() < STREAM_FRAME_INTERVAL);
+        recent && prev.is_some_and(|prev| next.only_stream_differs(prev))
+    }
+
+    pub(crate) fn sent(&mut self) {
+        self.last_sent = Some(std::time::Instant::now());
+    }
+}
+
+impl Snapshot {
+    /// Whether `self` and `prev` differ only in the streamed reply text and its offset (the
+    /// revision is ignored too: candidates carry the last one until they are sent).
+    fn only_stream_differs(&self, prev: &Snapshot) -> bool {
+        let aligned = Snapshot {
+            streaming: prev.streaming.clone(),
+            streaming_offset: prev.streaming_offset,
+            revision: prev.revision,
+            ..self.clone()
+        };
+        aligned == *prev
+    }
+}
+
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
@@ -1914,6 +1957,48 @@ pub(crate) fn manifest_json(base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_pacer_holds_only_token_frames_inside_the_interval() {
+        let sent = Snapshot {
+            busy: true,
+            streaming: "Hel".into(),
+            revision: 4,
+            ..Snapshot::default()
+        };
+        let mut pacer = StreamPacer::default();
+        let token = Snapshot {
+            streaming: "Hello".into(),
+            ..sent.clone()
+        };
+        assert!(!pacer.hold(Some(&sent), &token), "nothing sent yet: send");
+        pacer.sent();
+        assert!(
+            pacer.hold(Some(&sent), &token),
+            "a token right after a frame waits"
+        );
+        let prompt = Snapshot {
+            permission_prompt: Some("run make?".into()),
+            ..token.clone()
+        };
+        assert!(
+            !pacer.hold(Some(&sent), &prompt),
+            "a real change never waits"
+        );
+        let finished = Snapshot {
+            busy: false,
+            ..token.clone()
+        };
+        assert!(
+            !pacer.hold(Some(&sent), &finished),
+            "the turn ending never waits"
+        );
+        pacer.last_sent = Some(std::time::Instant::now() - STREAM_FRAME_INTERVAL);
+        assert!(
+            !pacer.hold(Some(&sent), &token),
+            "after the interval the text goes out"
+        );
+    }
 
     #[test]
     fn snapshot_serializes_to_json_with_all_fields() {

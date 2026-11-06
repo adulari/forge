@@ -545,6 +545,7 @@ async fn drive_session(
     };
 
     let mut last_snap: Option<remote::Snapshot> = None;
+    let mut stream_pacer = remote::StreamPacer::default();
     let mut revision: u64 = 0;
     let mut child_links = crate::serve_agents::ChildLinks::default();
     let mut model_pinned = false;
@@ -751,7 +752,8 @@ async fn drive_session(
                 .as_deref()
                 .filter(|_| !snap.busy)
                 .map(remote::ThreadError::from_message);
-            if last_snap.as_ref() != Some(&snap) {
+            if last_snap.as_ref() != Some(&snap) && !stream_pacer.hold(last_snap.as_ref(), &snap) {
+                stream_pacer.sent();
                 revision += 1;
                 snap.revision = revision;
                 // A fresh turn starting clears the previous turn's failure latch.
