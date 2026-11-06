@@ -59,6 +59,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::ListSchedules => exact(Method::GET, "/api/schedules"),
         RouteId::Changelog => exact(Method::GET, "/api/changelog"),
         RouteId::ListNotices => exact(Method::GET, "/api/notices"),
+        RouteId::Brief => exact(Method::GET, "/api/brief"),
         RouteId::Identity => exact(Method::GET, "/api/identity"),
         RouteId::AccountSyncStatus => exact(Method::GET, "/api/anywhere/sync"),
         RouteId::AccountSyncUpdate => exact(Method::PUT, "/api/anywhere/sync"),
@@ -356,7 +357,7 @@ mod tests {
 
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 22] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 23] = [
             (
                 RouteId::Blame,
                 "GET",
@@ -434,6 +435,13 @@ mod tests {
                 &["?limit=5"],
                 Method::GET,
                 "/api/changelog",
+            ),
+            (
+                RouteId::Brief,
+                "GET",
+                &["?since=100"],
+                Method::GET,
+                "/api/brief",
             ),
             (RouteId::Identity, "GET", &[], Method::GET, "/api/identity"),
             (

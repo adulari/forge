@@ -13,6 +13,7 @@ mod account_sync_store;
 mod assay_store;
 mod automation_store;
 mod bench_solve_store;
+mod brief_store;
 mod busy;
 mod checkpoint_store;
 mod child_view_store;
@@ -80,6 +81,7 @@ mod usage_store;
 
 pub use account_sync_store::AccountSyncItem;
 pub use bench_solve_store::{BenchSolveRun, BenchSolveTotals};
+pub use brief_store::BriefSessionRow;
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
 pub use child_view_store::{ChildIndexRow, ChildSessionInfo};
 pub use codemode_store::{CodemodeStats, ToolCallRow};

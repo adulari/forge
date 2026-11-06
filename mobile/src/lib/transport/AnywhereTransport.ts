@@ -63,6 +63,7 @@ export type BridgeRoute =
   | "delete_schedule"
   | "changelog"
   | "list_notices"
+  | "brief"
   | "identity"
   | "account_sync_status"
   | "account_sync_update"
@@ -304,6 +305,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/schedules": { GET: "list_schedules" },
     "/api/changelog": { GET: "changelog" },
     "/api/notices": { GET: "list_notices" },
+    "/api/brief": { GET: "brief" },
     "/api/identity": { GET: "identity" },
     "/api/anywhere/sync": { GET: "account_sync_status", PUT: "account_sync_update" },
     "/api/anywhere/sync/now": { POST: "account_sync_now" },

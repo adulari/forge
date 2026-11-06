@@ -475,6 +475,22 @@ pub(crate) enum Command {
         #[arg(long, global = true)]
         token: Option<String>,
     },
+    /// What your sessions did while you were away: how each one ended (finished, failed, waiting
+    /// on you, interrupted, still working), what it spent and whether it has changes to land.
+    Brief {
+        /// How far back to look: 90m, 8h, 2d. A bare number is hours.
+        #[arg(long, default_value = "8h")]
+        since: String,
+        /// Print the daemon's JSON instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Daemon base URL. Defaults to the local daemon's loopback origin.
+        #[arg(long)]
+        url: Option<String>,
+        /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Send a message to another daemon-hosted (fleet) session's `forge serve` daemon, without
     /// attaching. `--follow-up` (default) queues the message for delivery when the target session
     /// goes idle / at its current turn's end; `--steer` jumps the queue, delivered at the

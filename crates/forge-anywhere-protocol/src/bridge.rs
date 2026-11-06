@@ -100,6 +100,8 @@ pub enum RouteId {
     /// Notifications the model sent with `push_notification`. Hosted push carries only a generic
     /// alert, so the app reads the real text here, inside the end-to-end encrypted bridge.
     ListNotices,
+    /// `GET /api/brief?since=<unix seconds>`: the "while you were away" digest. Read-only.
+    Brief,
     Identity,
     /// Account-sync status (`GET /api/anywhere/sync`). Read-only.
     AccountSyncStatus,

@@ -67,6 +67,7 @@ mod benchmarks;
 mod blame;
 mod board;
 mod bridge_stats;
+mod brief_client;
 #[path = "cli/browser_args.rs"]
 mod browser_args;
 mod cli;
@@ -115,6 +116,7 @@ mod serve_account_sync;
 mod serve_actions;
 mod serve_agent_installs;
 mod serve_agents;
+mod serve_brief;
 mod serve_claude_link;
 mod serve_clients;
 mod serve_clients_cli;

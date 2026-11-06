@@ -147,6 +147,12 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Dispatch { cmd, url, token } => {
             crate::cli::commands::dispatch::dispatch_cmd(cmd, url, token).await
         }
+        Command::Brief {
+            since,
+            json,
+            url,
+            token,
+        } => crate::cli::commands::brief::brief_cmd(since, json, url, token).await,
         Command::Send {
             target,
             message,

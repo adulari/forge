@@ -1,6 +1,7 @@
 pub(crate) mod assay;
 pub(crate) mod backup;
 pub(crate) mod blame;
+pub(crate) mod brief;
 pub(crate) mod browser;
 pub(crate) mod cc_transcript;
 pub(crate) mod codex_rollout;

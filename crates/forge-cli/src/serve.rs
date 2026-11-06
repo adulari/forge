@@ -1042,6 +1042,7 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
         .merge(crate::serve_import::routes(&base))
+        .merge(crate::serve_brief::routes(&base))
         .merge(crate::serve_claude_link::routes(&base))
         .merge(crate::serve_crews::routes(&base))
         .merge(crate::serve_skills::routes(&base))
@@ -1272,7 +1273,7 @@ mod serve_mcp_redact;
 mod serve_models;
 mod serve_projects;
 mod serve_providers;
-mod serve_session_meta;
+pub(crate) mod serve_session_meta;
 mod serve_usage;
 mod serve_workflows;
 mod serve_ws;
