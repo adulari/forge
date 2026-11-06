@@ -178,23 +178,47 @@ pub(crate) async fn attach_cmd(
     result
 }
 
-/// Default base URL: the local daemon on the configured `[remote] port` (7420), loopback. The
-/// LAN default binds self-signed HTTPS which a same-machine attach can't validate, so the
-/// no-flag default is loopback HTTP — pair with `forge serve --local`, or pass `--url`.
+/// Default base URL: the live daemon recorded in `serve-state.json` (its own port and scheme),
+/// else the configured `[remote] port` (7420) on loopback HTTP. A `--lan` daemon binds
+/// self-signed HTTPS, which a plain client can't validate — pair with `forge serve --local`,
+/// or pass `--url`.
 pub(crate) fn resolve_base_url(url: Option<String>) -> String {
     let raw = url.unwrap_or_else(|| {
-        let port = forge_config::load().unwrap_or_default().remote.serve_port();
-        format!("http://127.0.0.1:{port}")
+        let state = crate::serve::read_state()
+            .ok()
+            .flatten()
+            .filter(|state| state.process_is_alive());
+        default_base_url(state.as_ref(), || {
+            forge_config::load().unwrap_or_default().remote.serve_port()
+        })
     });
     raw.trim_end_matches('/').to_string()
 }
 
-/// Default token: the persisted `serve-token` the daemon reads (never rotate from the client).
+fn default_base_url(
+    state: Option<&crate::serve::ServeState>,
+    config_port: impl FnOnce() -> u16,
+) -> String {
+    match state {
+        Some(state) => {
+            let scheme = if state.exposure == "lan" {
+                "https"
+            } else {
+                "http"
+            };
+            format!("{scheme}://127.0.0.1:{}", state.port)
+        }
+        None => format!("http://127.0.0.1:{}", config_port()),
+    }
+}
+
+/// Default token: the persisted `serve-token` the daemon reads. Never minted or repaired from the
+/// client — a missing file means no daemon has run yet.
 pub(crate) fn resolve_token(token: Option<String>) -> Result<String> {
     match token {
         Some(t) => Ok(t),
-        None => crate::serve::daemon_token(false).context(
-            "no --token given and no persisted daemon token found — start `forge serve` once, \
+        None => crate::serve::read_daemon_token().context(
+            "no --token given and no usable persisted daemon token found — start `forge serve` once, \
              or pass --token",
         ),
     }
@@ -613,6 +637,33 @@ fn map_ws_error(e: tokio_tungstenite::tungstenite::Error, id: &str) -> anyhow::E
 
 #[cfg(test)]
 mod tests {
+    fn state(port: u16, exposure: &str) -> crate::serve::ServeState {
+        crate::serve::ServeState {
+            pid: 1,
+            port,
+            exposure: exposure.into(),
+            base_url: String::new(),
+            token: String::new(),
+            started_at: 0,
+            store_path: None,
+        }
+    }
+
+    #[test]
+    fn default_base_url_prefers_live_state_port_and_scheme() {
+        let local = state(9000, "local");
+        assert_eq!(
+            default_base_url(Some(&local), || unreachable!()),
+            "http://127.0.0.1:9000"
+        );
+        let lan = state(9001, "lan");
+        assert_eq!(
+            default_base_url(Some(&lan), || unreachable!()),
+            "https://127.0.0.1:9001"
+        );
+        assert_eq!(default_base_url(None, || 7420), "http://127.0.0.1:7420");
+    }
+
     use super::*;
 
     /// The prompts the client sends must deserialize into the daemon's OWN `RemoteInput` — this is

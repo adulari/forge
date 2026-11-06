@@ -110,8 +110,11 @@ pub(crate) fn daemon_token(rotate: bool) -> Result<String> {
 /// starting the service but surprising (and disruptive to existing clients) from `forge doctor`.
 pub(crate) fn read_daemon_token() -> Result<String> {
     let dir = forge_config::config_dir().context("no config directory on this platform")?;
-    let path = dir.join(TOKEN_FILE);
-    let text = std::fs::read_to_string(&path)
+    read_daemon_token_at(&dir.join(TOKEN_FILE))
+}
+
+fn read_daemon_token_at(path: &std::path::Path) -> Result<String> {
+    let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading daemon token {}", path.display()))?;
     let token = text.trim();
     if !(16..=64).contains(&token.len()) || !token.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -3842,6 +3845,21 @@ pub(crate) mod tests {
         for label in ["Read-only", "Ask", "Auto-edit", "Full"] {
             assert!(err.contains(label), "{err} missing {label}");
         }
+    }
+
+    #[test]
+    fn read_daemon_token_never_creates_or_repairs_the_file() {
+        let dir = std::env::temp_dir().join(format!("forge-serve-readtok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("serve-token");
+        assert!(read_daemon_token_at(&path).is_err());
+        assert!(!path.exists(), "a missing token is not minted");
+        std::fs::write(&path, "not-hex").unwrap();
+        assert!(read_daemon_token_at(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-hex");
+        let token = daemon_token_at(&path, true).unwrap();
+        assert_eq!(read_daemon_token_at(&path).unwrap(), token);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
