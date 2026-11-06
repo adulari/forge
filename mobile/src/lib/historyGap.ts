@@ -1,3 +1,5 @@
+import { serverKeyId } from "./serverKeyId";
+
 export interface GapMarker {
   count: number;
   reason: string;
@@ -30,8 +32,16 @@ export function missingRowsNotice(gap: GapMarker): GapNotice {
   };
 }
 
+export const GAP_ACK_PREFIX = "forge.historyGap.ack.v2";
+export const LEGACY_GAP_ACK_PREFIX = "forge.historyGap.ack.v1";
+
 export function gapAckKey(baseUrl: string, sessionId: string): string {
-  return `forge.historyGap.ack.v1:${baseUrl}|${sessionId}`;
+  return `${GAP_ACK_PREFIX}:${serverKeyId(baseUrl)}|${sessionId}`;
+}
+
+/** Pre-upgrade key: embeds the baseUrl (and so the daemon token). Read only to migrate. */
+export function legacyGapAckKey(baseUrl: string, sessionId: string): string {
+  return `${LEGACY_GAP_ACK_PREFIX}:${baseUrl}|${sessionId}`;
 }
 
 /** Whether a stored-history gap still needs showing: only a gap larger than the one already

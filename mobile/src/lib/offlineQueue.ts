@@ -1,8 +1,9 @@
 import type { RemoteInput } from "./ws";
+import { serverKeyId } from "./serverKeyId";
 
 export const OFFLINE_QUEUE_CAP = 20;
 
-const OFFLINE_QUEUE_PREFIX = "forge.offlineQueue";
+export const OFFLINE_QUEUE_PREFIX = "forge.offlineQueue";
 
 export interface QueuedPrompt {
   text: string;
@@ -21,6 +22,11 @@ export function newClientMsgId(): string {
  * brand-new session's first prompt) is found by the chat screen that later mounts for that
  * same `baseUrl`+`sessionId` pair and flushes it on the next socket-open edge. */
 export function offlineQueueKey(baseUrl: string | null, sessionId: string): string {
+  return `${OFFLINE_QUEUE_PREFIX}:${serverKeyId(baseUrl)}:${sessionId}`;
+}
+
+/** Pre-upgrade key: embeds the baseUrl (and so the daemon token). Read only to migrate. */
+export function legacyOfflineQueueKey(baseUrl: string | null, sessionId: string): string {
   return `${OFFLINE_QUEUE_PREFIX}:${baseUrl ?? "unknown"}:${sessionId}`;
 }
 

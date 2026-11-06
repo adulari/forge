@@ -68,6 +68,7 @@ import { type HistoryRow } from "../../../lib/api";
 import { answerAlreadyShown, historyHasRealContentSince, shouldRetryEmptyHistory } from "../../../lib/historyMerge";
 import { shouldMountTranscript } from "../../../lib/transcriptMountGate";
 import { reconcilePendingMessages, unqueuedPendingMessages } from "../../../lib/sessionReconciler";
+import { readOfflineQueue } from "../../../lib/serverStorageKeys";
 import { OFFLINE_QUEUE_CAP, newClientMsgId, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { collapsePrompts } from "../../../lib/promptRecall";
 import { type FollowUpMode } from "../../../lib/followUp";
@@ -238,7 +239,7 @@ export function SessionChat() {
   useEffect(() => {
     offlineLoadedRef.current = false;
     let cancelled = false;
-    AsyncStorage.getItem(offlineQueueKey(baseUrl, sessionId)).then((raw) => {
+    readOfflineQueue(AsyncStorage, baseUrl, sessionId).then((raw) => {
       if (cancelled) return;
       setOfflineQueue(parseOfflineQueue(raw));
       offlineLoadedRef.current = true;

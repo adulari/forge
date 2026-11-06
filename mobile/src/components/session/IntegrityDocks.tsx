@@ -7,6 +7,7 @@ import { AlertTriangle, History } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 
 import { getHistoryIntegrity } from "../../lib/api";
+import { readGapAck } from "../../lib/serverStorageKeys";
 import { gapAckKey, liveGapNotice, missingRowsNotice, needsAck, type GapNotice } from "../../lib/historyGap";
 import { hasMoreDetail, threadErrorKey, threadErrorTitle } from "../../lib/threadError";
 import type { Snapshot } from "../../lib/ws";
@@ -35,7 +36,7 @@ function useStoredGapNotice(baseUrl: string | null, sessionId: string, refreshKe
     setAcked(null);
     if (!ackKey) return;
     let live = true;
-    AsyncStorage.getItem(ackKey)
+    readGapAck(AsyncStorage, baseUrl as string, sessionId)
       .then((raw) => {
         if (live) setAcked(raw == null ? 0 : Number(raw) || 0);
       })
@@ -45,7 +46,7 @@ function useStoredGapNotice(baseUrl: string | null, sessionId: string, refreshKe
     return () => {
       live = false;
     };
-  }, [ackKey]);
+  }, [ackKey, baseUrl, sessionId]);
   const gap = query.data ?? null;
   const notice = acked != null && needsAck(gap, acked) && gap ? missingRowsNotice(gap) : null;
   const acknowledge = () => {
