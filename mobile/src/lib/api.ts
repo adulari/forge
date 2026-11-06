@@ -606,6 +606,8 @@ export interface MergeSuccessResponse {
   ok: true;
   merged: true;
   branch: string;
+  /** The repository the changes were staged in; absent from older daemons. */
+  base?: string;
 }
 
 export interface MergeDirtyConflictResponse {

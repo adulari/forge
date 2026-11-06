@@ -42,6 +42,8 @@ import { ActionRunningIndicator } from "../ports/ActionRunningIndicator";
 import { SessionActionRows } from "../ports/SessionActionRows";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
+import { useWorkbench } from "../workbench/WorkbenchProvider";
+import { mergeStagedMessage } from "../../lib/mergeNextStep";
 import { SessionLifecycleSheet } from "../session/SessionLifecycleSheet";
 import { shortModelLabel } from "./shortModelLabel";
 
@@ -88,6 +90,15 @@ const ICON_STROKE = 1.75;
 function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const tokens = useTokens();
   const toast = useToast();
+  const workbench = useWorkbench();
+  const openSession = useOpenSession();
+  const reviewMerged = useCallback(
+    (id: string) => {
+      openSession(id);
+      workbench.openSurface({ kind: "git" });
+    },
+    [openSession, workbench],
+  );
   const reduced = useReducedMotion();
   const entranceStyle = useForgeline(index);
   // Forge Anywhere: host + transport prefix on the meta line (design mobile.dc.html
@@ -178,7 +189,11 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
     merge.mutate(row.id, {
       onSuccess: (res) => {
         haptics.pairSuccess();
-        toast.show(`merged branch ${res.branch}`, { tone: "success" });
+        toast.show(mergeStagedMessage(res.base, res.branch), {
+          tone: "success",
+          duration: 10_000,
+          action: { label: "Review", onPress: () => reviewMerged(row.id) },
+        });
       },
       onError: (err) => {
         haptics.mergeConflict();
@@ -189,7 +204,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
         }
       },
     });
-  }, [closeSwipe, merge, row.id, toast]);
+  }, [closeSwipe, merge, row.id, toast, reviewMerged]);
 
   const runDiscard = useCallback(() => {
     closeSwipe();
@@ -200,7 +215,6 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const prefetchSessionHistory = usePrefetchSessionHistory();
   const prefetchHistory = useCallback(() => prefetchSessionHistory(row.id), [prefetchSessionHistory, row.id]);
 
-  const openSession = useOpenSession();
   const goToSession = useCallback(() => openSession(row.id), [openSession, row.id]);
 
   // The row's trailing `…` IconButton is a real nested <button>, so on react-native-web the

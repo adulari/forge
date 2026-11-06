@@ -2562,8 +2562,8 @@ async fn merge_session(
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     match merge_session_core(&state, &id, true).await {
-        SessionMerge::Clean { branch } => json_response(&serde_json::json!({
-            "ok": true, "merged": true, "branch": branch,
+        SessionMerge::Clean { branch, base } => json_response(&serde_json::json!({
+            "ok": true, "merged": true, "branch": branch, "base": base,
         })),
         SessionMerge::Refused(status, message) => err_response(status, &message),
         SessionMerge::Dirty(dirty) => conflict_json(serde_json::json!({
@@ -2599,7 +2599,7 @@ pub(crate) fn conflict_json(body: serde_json::Value) -> Response {
 /// What [`merge_session_core`] did with one session.
 pub(crate) enum SessionMerge {
     /// Applied and staged; the worktree, branch and session are gone.
-    Clean { branch: String },
+    Clean { branch: String, base: String },
     /// Refused before anything was touched (unknown session, no worktree, already claimed).
     Refused(axum::http::StatusCode, String),
     /// Refused because the base repo has uncommitted tracked changes; the session is untouched.
@@ -2725,7 +2725,10 @@ pub(crate) async fn merge_session_core(
         crate::serve_dispatch::worker_left(state, id, forge_core::dispatch::item_status::MERGED)
             .await;
     }
-    SessionMerge::Clean { branch }
+    SessionMerge::Clean {
+        branch,
+        base: repo_root.display().to_string(),
+    }
 }
 
 /// `POST /api/sessions/{id}/discard` — stop the session and drop its worktree + branch WITHOUT
@@ -5128,7 +5131,7 @@ pub(crate) mod tests {
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
             terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
-            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            store: Arc::new(crate::open_store().unwrap()),
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
@@ -5138,6 +5141,10 @@ pub(crate) mod tests {
             voice: crate::voice::VoiceState::new(),
             anywhere_enable: tokio::sync::watch::channel(false).0,
         });
+        state
+            .store
+            .set_session_worktree(&handle.session_id, &wt_path)
+            .unwrap();
         let router = daemon_router(state);
         let resp = router
             .clone()
@@ -5154,6 +5161,11 @@ pub(crate) mod tests {
         );
         let j = json_body(resp).await;
         assert_eq!(j["merged"], true);
+        let base = j["base"].as_str().expect("merge reports the base repo");
+        assert_eq!(
+            std::fs::canonicalize(base).unwrap(),
+            std::fs::canonicalize(&dir).unwrap()
+        );
         // The change landed in the base tree, staged for review, not committed.
         assert!(
             dir.join("added.txt").exists(),
@@ -5173,6 +5185,54 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&staged.stdout).contains("added.txt"),
             "the merged change is staged"
         );
+        // The deleted worktree no longer hides the staged merge from the git dock: status and
+        // commit resolve to the base repo.
+        let status = router
+            .clone()
+            .oneshot(
+                axum::http::Request::get(format!(
+                    "/tok/api/git/status?session={}",
+                    handle.session_id
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), axum::http::StatusCode::OK);
+        assert!(
+            json_body(status).await.to_string().contains("added.txt"),
+            "staged file listed from the base repo"
+        );
+        let commit = router
+            .clone()
+            .oneshot(post_json_req(
+                "/api/git/commit",
+                serde_json::json!({"session": handle.session_id, "message": "merge work"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(commit.status(), axum::http::StatusCode::OK);
+        let _ = json_body(commit).await;
+        let staged_after = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.to_str().unwrap(),
+                "diff",
+                "--cached",
+                "--name-only",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            staged_after.stdout.is_empty(),
+            "commit consumed the staged merge"
+        );
+        let log = std::process::Command::new("git")
+            .args(["-C", dir.to_str().unwrap(), "log", "-1", "--format=%s"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "merge work");
         // Worktree + branch are gone.
         assert!(
             !std::path::Path::new(&wt_path).exists(),

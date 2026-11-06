@@ -329,7 +329,18 @@ async fn stored_session_dir(state: &DaemonState, session: &str) -> Option<(Strin
     tokio::task::spawn_blocking(move || {
         let worktree = store.session_worktree(&session).ok().flatten();
         match worktree {
-            Some(worktree) => Some((worktree, true)),
+            // A merged session's worktree is deleted but its changes are staged in the base repo
+            // (its cwd): resolve there so the merge can still be reviewed and committed.
+            Some(worktree) if Path::new(&worktree).is_dir() => Some((worktree, true)),
+            Some(worktree) => crate::serve_worktree_start::worktree_repo_and_branch(&worktree)
+                .map(|(root, _)| (root.display().to_string(), false))
+                .or_else(|| {
+                    store
+                        .session_cwd(&session)
+                        .ok()
+                        .flatten()
+                        .map(|cwd| (cwd, false))
+                }),
             None => store
                 .session_cwd(&session)
                 .ok()

@@ -157,7 +157,7 @@ async fn merge_locked(state: &DaemonState, id: &str) -> Result<(Report, Dispatch
             conflicts,
         };
         match merge_session_core(state, &session, false).await {
-            SessionMerge::Clean { branch } => {
+            SessionMerge::Clean { branch, .. } => {
                 let _ = state
                     .store
                     .set_dispatch_item(id, idx, item_status::MERGED, None, None);
