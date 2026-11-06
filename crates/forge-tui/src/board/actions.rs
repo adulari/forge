@@ -96,6 +96,13 @@ impl BoardApp {
             return;
         };
         let why = p.summary.clone().unwrap_or_default();
+        if !p.offers_reclaim() {
+            self.toast(
+                ToastLevel::Info,
+                format!("{why}. Low memory, not disk: reclaiming worktrees would not help"),
+            );
+            return;
+        }
         self.confirm = Some(Confirm {
             kind: ConfirmKind::Reclaim(None),
             title: "Reclaim worktree space?".into(),

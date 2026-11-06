@@ -418,11 +418,19 @@ pub struct PressureInfo {
     /// One sentence naming the tightest disk and/or low memory; absent while the host is fine.
     #[serde(default)]
     pub summary: Option<String>,
+    /// `disk` | `memory`; absent from a daemon that predates the field (treated as disk).
+    #[serde(default)]
+    pub cause: Option<String>,
 }
 
 impl PressureInfo {
     pub fn is_pressured(&self) -> bool {
         matches!(self.level.as_str(), "warn" | "floor")
+    }
+
+    /// Reclaim frees disk, so a memory-only warning has nothing to offer.
+    pub fn offers_reclaim(&self) -> bool {
+        self.is_pressured() && self.cause.as_deref() != Some("memory")
     }
 
     pub fn is_floor(&self) -> bool {

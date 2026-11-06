@@ -732,6 +732,7 @@ mod tests {
         crate::board::PressureInfo {
             level: level.into(),
             summary: Some("projects disk: 4.1 GB free of 500.0 GB (1%)".into()),
+            cause: Some("disk".into()),
         }
     }
 

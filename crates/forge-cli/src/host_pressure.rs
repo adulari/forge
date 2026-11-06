@@ -20,6 +20,9 @@ const GB: f64 = 1024.0 * 1024.0 * 1024.0;
 const MB: f64 = 1024.0 * 1024.0;
 /// A level only clears once the reading is this far past the threshold that raised it.
 const RECOVERY_MARGIN: f64 = 1.25;
+/// Memory dips under its threshold for a moment on every heavy link; it only counts as pressure
+/// after this many samples in a row.
+const MEMORY_CONFIRM_SAMPLES: u32 = 3;
 
 #[derive(
     Debug,
@@ -77,10 +80,21 @@ pub(crate) struct MemoryStatus {
     pub level: Level,
 }
 
+/// What is short. Reclaim frees disk, so it is only offered for [`Cause::Disk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Cause {
+    Disk,
+    Memory,
+}
+
 /// What the status routes and the fleet surfaces show.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub(crate) struct Pressure {
     pub level: Level,
+    /// A disk at warn/floor wins over memory; absent while the host is fine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Cause>,
     /// One sentence for the header chip and the push; `None` while the host is fine.
     pub summary: Option<String>,
     pub disks: Vec<DiskStatus>,
@@ -156,10 +170,19 @@ fn step(prev: Level, enter: Level, hold: Level) -> Level {
 pub(crate) struct Tracker {
     disks: HashMap<String, Level>,
     memory: Level,
+    memory_streak: u32,
     overall: Level,
 }
 
 impl Tracker {
+    /// A tracker that trusts its first memory sample (the one-shot `forge doctor` reading).
+    pub(crate) fn single_shot() -> Self {
+        Self {
+            memory_streak: MEMORY_CONFIRM_SAMPLES - 1,
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn evaluate(
         &mut self,
         cfg: &PressureConfig,
@@ -186,9 +209,20 @@ impl Tracker {
         }
         self.disks = kept;
         let memory = reading.memory.map(|m| {
+            let enter = memory_level(cfg, m.available, m.total, 1.0);
+            self.memory_streak = if enter > Level::Ok {
+                self.memory_streak.saturating_add(1)
+            } else {
+                0
+            };
+            let confirmed = if self.memory_streak >= MEMORY_CONFIRM_SAMPLES {
+                enter
+            } else {
+                Level::Ok
+            };
             let level = step(
                 self.memory,
-                memory_level(cfg, m.available, m.total, 1.0),
+                confirmed,
                 memory_level(cfg, m.available, m.total, RECOVERY_MARGIN),
             );
             self.memory = level;
@@ -200,6 +234,7 @@ impl Tracker {
         });
         if memory.is_none() {
             self.memory = Level::Ok;
+            self.memory_streak = 0;
         }
         let level = disks
             .iter()
@@ -212,8 +247,16 @@ impl Tracker {
             to: level,
         });
         self.overall = level;
+        let cause = if disks.iter().any(|d| d.level > Level::Ok) {
+            Some(Cause::Disk)
+        } else if memory.as_ref().is_some_and(|m| m.level > Level::Ok) {
+            Some(Cause::Memory)
+        } else {
+            None
+        };
         let mut pressure = Pressure {
             level,
+            cause,
             summary: None,
             disks,
             memory,
@@ -375,7 +418,16 @@ fn now_unix() -> u64 {
 pub(crate) fn push_request(
     summary: &str,
     transition: Transition,
+    cause: Option<Cause>,
 ) -> forge_core::push_notify::PushRequest {
+    if cause == Some(Cause::Memory) {
+        return forge_core::push_notify::PushRequest {
+            message: format!("{summary}."),
+            title: Some("Host low on memory".into()),
+            priority: forge_core::push_notify::Priority::Normal,
+            session_id: String::new(),
+        };
+    }
     let (title, priority) = if transition.to == Level::Floor {
         (
             "Host nearly out of space",
@@ -411,7 +463,7 @@ pub(crate) fn start(state: Arc<DaemonState>) {
                 let (pressure, transition) = tracker.evaluate(&cfg, &reading, now_unix());
                 let changed = current().as_ref().map(|p| p.level) != Some(pressure.level);
                 if let (Some(transition), Some(summary)) = (transition, pressure.summary.clone()) {
-                    notify(&state, &summary, transition).await;
+                    notify(&state, &summary, transition, pressure.cause).await;
                 }
                 publish(Some(pressure));
                 if changed {
@@ -429,8 +481,8 @@ pub(crate) fn start(state: Arc<DaemonState>) {
     });
 }
 
-async fn notify(state: &DaemonState, summary: &str, transition: Transition) {
-    let request = push_request(summary, transition);
+async fn notify(state: &DaemonState, summary: &str, transition: Transition, cause: Option<Cause>) {
+    let request = push_request(summary, transition, cause);
     let channels = crate::push_tool::channels_for(state, !state.mock);
     let reports = channels.deliver(&request).await;
     let detail: Vec<String> = reports
@@ -540,7 +592,7 @@ pub(crate) fn doctor_check() -> crate::doctor::Check {
     if let Ok(cwd) = std::env::current_dir() {
         places.push(("projects".into(), cwd));
     }
-    let (pressure, _) = Tracker::default().evaluate(&cfg, &sample(&places), now_unix());
+    let (pressure, _) = Tracker::single_shot().evaluate(&cfg, &sample(&places), now_unix());
     let status = match pressure.level {
         Level::Ok => crate::doctor::Status::Ok,
         Level::Warn => crate::doctor::Status::Warn,
@@ -556,7 +608,7 @@ pub(crate) fn doctor_check() -> crate::doctor::Check {
             None => "no filesystem could be read".to_string(),
         }
     });
-    let fix = (pressure.level > Level::Ok)
+    let fix = (pressure.cause == Some(Cause::Disk))
         .then_some("`forge worktree reclaim --artifacts` to preview what can be freed");
     crate::doctor::check(status, "host pressure", detail, fix)
 }
@@ -678,23 +730,90 @@ mod tests {
         );
     }
 
-    #[test]
-    fn low_memory_warns_but_never_reaches_the_floor() {
-        let mut t = Tracker::default();
-        let reading = Reading {
+    fn low_memory(available_mb: u64) -> Reading {
+        Reading {
             disks: Vec::new(),
             memory: Some(MemoryReading {
-                available: 200 * 1024 * 1024,
+                available: available_mb * 1024 * 1024,
                 total: 16 * G,
             }),
-        };
-        let (p, transition) = t.evaluate(&PressureConfig::default(), &reading, 0);
+        }
+    }
+
+    #[test]
+    fn low_memory_warns_only_after_consecutive_samples_and_never_reaches_the_floor() {
+        let mut t = Tracker::default();
+        let cfg = PressureConfig::default();
+        for _ in 0..MEMORY_CONFIRM_SAMPLES - 1 {
+            let (p, transition) = t.evaluate(&cfg, &low_memory(200), 0);
+            assert_eq!(p.level, Level::Ok, "a brief dip is not pressure");
+            assert_eq!(transition, None);
+        }
+        let (p, transition) = t.evaluate(&cfg, &low_memory(200), 0);
         assert_eq!(p.level, Level::Warn);
+        assert_eq!(p.cause, Some(Cause::Memory));
         assert_eq!(transition.map(|t| t.to), Some(Level::Warn));
         assert!(p
             .summary
             .unwrap()
             .starts_with("memory: 200.0 MB available of 16.0 GB"));
+    }
+
+    #[test]
+    fn a_cargo_link_dip_in_between_healthy_samples_never_warns() {
+        let mut t = Tracker::default();
+        let cfg = PressureConfig::default();
+        for _ in 0..10 {
+            assert_eq!(t.evaluate(&cfg, &low_memory(200), 0).0.level, Level::Ok);
+            assert_eq!(t.evaluate(&cfg, &low_memory(200), 0).0.level, Level::Ok);
+            assert_eq!(t.evaluate(&cfg, &low_memory(8000), 0).0.level, Level::Ok);
+        }
+    }
+
+    #[test]
+    fn single_shot_trusts_the_first_memory_sample() {
+        let (p, _) =
+            Tracker::single_shot().evaluate(&PressureConfig::default(), &low_memory(200), 0);
+        assert_eq!(p.level, Level::Warn);
+    }
+
+    #[test]
+    fn a_disk_cause_wins_over_memory_and_a_healthy_host_has_none() {
+        let cfg = PressureConfig::default();
+        let (p, _) = Tracker::default().evaluate(&cfg, &disk(500.0, 1000), 0);
+        assert_eq!(p.cause, None);
+        let both = Reading {
+            memory: low_memory(200).memory,
+            ..disk(2.0, 500)
+        };
+        let (p, _) = Tracker::single_shot().evaluate(&cfg, &both, 0);
+        assert_eq!(p.cause, Some(Cause::Disk));
+        assert_eq!(serde_json::to_value(&p).unwrap()["cause"], "disk");
+    }
+
+    #[test]
+    fn a_memory_push_never_offers_to_reclaim() {
+        let transition = Transition {
+            from: Level::Ok,
+            to: Level::Warn,
+        };
+        let memory = push_request(
+            "memory: 200.0 MB available of 16.0 GB",
+            transition,
+            Some(Cause::Memory),
+        );
+        assert!(
+            !memory.message.to_lowercase().contains("reclaim"),
+            "{}",
+            memory.message
+        );
+        assert!(!memory.title.unwrap().to_lowercase().contains("reclaim"));
+        let disk = push_request(
+            "projects disk: 2.0 GB free of 500.0 GB (0%)",
+            transition,
+            Some(Cause::Disk),
+        );
+        assert!(disk.message.contains("reclaim worktree space"));
     }
 
     #[test]
@@ -720,6 +839,7 @@ mod tests {
                 from: Level::Ok,
                 to: Level::Warn,
             },
+            Some(Cause::Disk),
         );
         let floor = push_request(
             "x",
@@ -727,6 +847,7 @@ mod tests {
                 from: Level::Warn,
                 to: Level::Floor,
             },
+            Some(Cause::Disk),
         );
         assert_eq!(warn.priority, forge_core::push_notify::Priority::Normal);
         assert_eq!(floor.priority, forge_core::push_notify::Priority::High);

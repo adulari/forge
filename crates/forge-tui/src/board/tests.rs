@@ -1462,6 +1462,7 @@ fn p_offers_reclaim_only_while_the_host_is_pressured() {
     a.apply(BoardEvent::HostPressure(Some(PressureInfo {
         level: "warn".into(),
         summary: Some("data disk: 9.0 GB free of 100.0 GB (9%)".into()),
+        cause: Some("disk".into()),
     })));
     handle_key(&mut a, key(KeyCode::Char('P')));
     let confirm = a.confirm.as_ref().unwrap();
@@ -1469,6 +1470,23 @@ fn p_offers_reclaim_only_while_the_host_is_pressured() {
     assert!(confirm.body.contains("9.0 GB free"));
     let out = handle_key(&mut a, key(KeyCode::Enter));
     assert_eq!(out, vec![BoardAction::Reclaim(None)]);
+}
+
+#[test]
+fn p_on_memory_only_pressure_explains_instead_of_offering_to_delete_worktrees() {
+    let mut a = app();
+    a.apply(BoardEvent::HostPressure(Some(PressureInfo {
+        level: "warn".into(),
+        summary: Some("memory: 200.0 MB available of 16.0 GB".into()),
+        cause: Some("memory".into()),
+    })));
+    handle_key(&mut a, key(KeyCode::Char('P')));
+    assert!(
+        a.confirm.is_none(),
+        "reclaiming worktrees does not free RAM"
+    );
+    let toast = &a.toasts.back().unwrap().text;
+    assert!(toast.contains("memory: 200.0 MB"), "{toast}");
 }
 
 #[test]
