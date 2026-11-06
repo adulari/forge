@@ -681,10 +681,16 @@ fn click(app: &mut IdeApp, hit: Hit, mouse_col: u16) -> Vec<IdeAction> {
         Hit::Ship => app.ship(),
         Hit::Suggest => app.suggest_message(),
         Hit::Draft => app.send_review(),
-        Hit::EditLine(line, text_x) => {
+        Hit::EditLine(line, text_x, hscroll) => {
             app.focus = Pane::Editor;
-            let col = usize::from(mouse_col.saturating_sub(text_x));
-            app.edit_op(false, |b| b.set_cursor(line, col));
+            // The click is a screen cell; the cursor is a char index. Undo the sideways scroll,
+            // then find the char drawn at that cell (tabs and wide chars span several).
+            let cell = usize::from(mouse_col.saturating_sub(text_x)) + hscroll;
+            app.edit_op(false, |b| {
+                let text = b.lines().get(line).map_or("", String::as_str);
+                let col = super::render::char_at_display_col(text, cell);
+                b.set_cursor(line, col);
+            });
             Vec::new()
         }
         Hit::Terminal => {

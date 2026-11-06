@@ -91,8 +91,9 @@ pub enum Hit {
     Check(usize),
     Job(usize),
     Draft,
-    /// A line of the text editor: its index and the screen column its text starts at.
-    EditLine(usize, u16),
+    /// A line of the text editor: its index, the screen column its text starts at, and how many
+    /// display cells the view is scrolled sideways.
+    EditLine(usize, u16, usize),
     Terminal,
 }
 
