@@ -53,6 +53,15 @@ pub(crate) fn perform(action: BoardAction, host: &mut Host<'_>) -> After {
                 host.ev.clone(),
             ));
         }
+        BoardAction::Reclaim(cwd) => {
+            tokio::spawn(super::client::reclaim_action(
+                host.http.clone(),
+                api_url(host.base, host.token, "api/host/reclaim"),
+                cwd,
+                host.ev.clone(),
+                host.refresh.clone(),
+            ));
+        }
         BoardAction::Input(id, json) => host.pool.send(&id, &json),
         BoardAction::Interrupt(id) => host.post(
             &format!("api/sessions/{id}/interrupt"),

@@ -89,6 +89,25 @@ impl BoardApp {
         self.focus = Focus::Confirm;
     }
 
+    /// `P` / the header chip: offer to free worktree space while the host is low.
+    pub(crate) fn request_reclaim(&mut self) {
+        let Some(p) = self.pressure.as_ref().filter(|p| p.is_pressured()) else {
+            self.toast(ToastLevel::Info, "this host has room: nothing to reclaim");
+            return;
+        };
+        let why = p.summary.clone().unwrap_or_default();
+        self.confirm = Some(Confirm {
+            kind: ConfirmKind::Reclaim(None),
+            title: "Reclaim worktree space?".into(),
+            body: format!(
+                "{why}.\n\nRemoves worktrees that are merged, clean, pushed and not in use, and \
+                 stale build directories (`forge worktree reclaim --artifacts --yes`). Anything \
+                 else is kept."
+            ),
+        });
+        self.focus = Focus::Confirm;
+    }
+
     pub(crate) fn request_delete(&mut self) {
         let Some(c) = self.selected_card() else {
             return;

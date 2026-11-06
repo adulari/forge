@@ -57,6 +57,7 @@ pub const HELP: &[(&str, &str)] = &[
     ("F", "follow the live tail again"),
     ("c", "copy the session id"),
     ("R", "refresh now"),
+    ("P", "host low on disk: reclaim worktree space (asks first)"),
     (
         "B",
         "while you were away: what your sessions did since you last looked",
@@ -206,6 +207,7 @@ fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
         KeyCode::Char('q') => return vec![BoardAction::Quit],
         KeyCode::Char('?') => app.focus = Focus::Help,
         KeyCode::Char('B') => return vec![BoardAction::ShowBrief],
+        KeyCode::Char('P') => app.request_reclaim(),
         KeyCode::Esc => {
             if in_detail {
                 app.focus = Focus::Board;
@@ -519,6 +521,10 @@ fn click(app: &mut BoardApp, col: u16, row: u16) -> Vec<BoardAction> {
         }
         Hit::ProjectFilter => {
             app.cycle_project_filter();
+            Vec::new()
+        }
+        Hit::Pressure => {
+            app.request_reclaim();
             Vec::new()
         }
         Hit::Button(b) => button(app, b),

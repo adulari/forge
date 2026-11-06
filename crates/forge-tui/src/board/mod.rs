@@ -53,8 +53,8 @@ pub use state::{
 };
 pub use wire::{
     DiffCard, DiffFile, DispatchInfo, DispatchItemInfo, FleetRow, GitFile, GitInfo, HistoryRow,
-    LiveSnapshot, PastRow, PlanCard, PlanStep, QOption, Subagent, Task, TranscriptRow,
-    WorkflowCard,
+    LiveSnapshot, PastRow, PlanCard, PlanStep, PressureInfo, QOption, Subagent, Task,
+    TranscriptRow, WorkflowCard,
 };
 
 /// Something the host learned and the board should reflect.
@@ -90,6 +90,14 @@ pub enum BoardEvent {
     Connection(ConnState),
     /// The "while you were away" digest: opens the overlay over the board.
     Brief(BriefCard),
+    /// The daemon's host disk/memory pressure (`None` from a daemon that does not report it).
+    HostPressure(Option<PressureInfo>),
+    /// The daemon refused a new worktree session because the disk is under its hard floor: the
+    /// full sentence, shown as a dialog that offers Reclaim for `cwd`.
+    ReclaimOffer {
+        cwd: Option<String>,
+        message: String,
+    },
     /// ~10 Hz: advances animation, ages, toast expiry.
     Tick,
     /// The terminal was resized.
@@ -158,6 +166,9 @@ pub enum BoardAction {
     MergeFinished(String),
     /// `B`: fetch the "while you were away" digest and show it ([`BoardEvent::Brief`]).
     ShowBrief,
+    /// `POST /api/host/reclaim`: free what `forge worktree reclaim --artifacts --yes` would,
+    /// for the repository at `cwd` (the daemon's default project when `None`).
+    Reclaim(Option<String>),
     /// Open IDE mode (F2) over the board, then come back.
     OpenIde,
     Quit,

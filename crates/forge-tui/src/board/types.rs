@@ -203,6 +203,8 @@ pub enum ConfirmKind {
     MergeFinished(String),
     Merge(String),
     Discard(String),
+    /// Reclaim worktree space on the host, for the repository at this cwd.
+    Reclaim(Option<String>),
 }
 
 impl ConfirmKind {
@@ -251,6 +253,8 @@ pub enum Hit {
     CloseDetail,
     Help,
     ProjectFilter,
+    /// The header's host-pressure chip.
+    Pressure,
     /// The header's `◆ dispatch` chip.
     DispatchChip,
     /// The header's zoom chip (`◆ <title> ✕`).

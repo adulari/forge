@@ -1453,6 +1453,50 @@ fn a_refused_delete_shows_the_whole_reason_in_a_dialog() {
 }
 
 #[test]
+fn p_offers_reclaim_only_while_the_host_is_pressured() {
+    let mut a = app();
+    handle_key(&mut a, key(KeyCode::Char('P')));
+    assert!(a.confirm.is_none(), "a healthy host has nothing to reclaim");
+    assert!(a.toasts.back().unwrap().text.contains("nothing to reclaim"));
+
+    a.apply(BoardEvent::HostPressure(Some(PressureInfo {
+        level: "warn".into(),
+        summary: Some("data disk: 9.0 GB free of 100.0 GB (9%)".into()),
+    })));
+    handle_key(&mut a, key(KeyCode::Char('P')));
+    let confirm = a.confirm.as_ref().unwrap();
+    assert_eq!(confirm.kind, ConfirmKind::Reclaim(None));
+    assert!(confirm.body.contains("9.0 GB free"));
+    let out = handle_key(&mut a, key(KeyCode::Enter));
+    assert_eq!(out, vec![BoardAction::Reclaim(None)]);
+}
+
+#[test]
+fn a_floor_refusal_opens_a_reclaim_dialog_for_that_repository() {
+    let mut a = app();
+    a.apply(BoardEvent::ReclaimOffer {
+        cwd: Some("/work/repo".into()),
+        message: "not creating a worktree: 2.0 GB free. Reclaim can free 30.0 GB".into(),
+    });
+    let confirm = a.confirm.as_ref().unwrap();
+    assert_eq!(
+        confirm.kind,
+        ConfirmKind::Reclaim(Some("/work/repo".into()))
+    );
+    assert!(confirm.body.contains("Reclaim can free 30.0 GB"));
+    let out = handle_key(&mut a, key(KeyCode::Enter));
+    assert_eq!(out, vec![BoardAction::Reclaim(Some("/work/repo".into()))]);
+    a.apply(BoardEvent::ReclaimOffer {
+        cwd: None,
+        message: "again".into(),
+    });
+    assert!(
+        handle_key(&mut a, key(KeyCode::Esc)).is_empty(),
+        "Esc declines"
+    );
+}
+
+#[test]
 fn esc_on_the_confirm_does_nothing() {
     let mut a = app_with_selected("s1");
     handle_key(&mut a, key(KeyCode::Char('x')));

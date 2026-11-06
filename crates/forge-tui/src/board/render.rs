@@ -157,7 +157,17 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
     } else {
         "○"
     };
-    let mut chips: Vec<(String, Style)> = vec![
+    let mut chips: Vec<(String, Style)> = Vec::new();
+    if let Some(p) = app.pressure.as_ref().filter(|p| p.is_pressured()) {
+        let style = if p.is_floor() {
+            styles::err().bold()
+        } else {
+            styles::warn()
+        };
+        let what = p.summary.as_deref().unwrap_or("host is low on resources");
+        chips.push((format!("⚠ {}", w::clip_cells(what, 52)), style));
+    }
+    chips.extend([
         (format!("{dot} {} needs you", t.attention), attn),
         (
             format!("{spin} {} working", t.working),
@@ -176,7 +186,7 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
             }),
         ),
         (format!("{} done", t.done), styles::muted()),
-    ];
+    ]);
     if t.subagents > 0 {
         chips.push((format!("⑂ {} subagents", t.subagents), styles::user()));
     }
@@ -200,7 +210,11 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
             break;
         }
         row.sep();
-        row.add(text, style);
+        let is_pressure = text.starts_with('⚠');
+        let r = row.add(text, style);
+        if is_pressure {
+            w::push_hit(hits, r, area, Hit::Pressure);
+        }
     }
     let left_end = area.x + row.width() + 1;
     let left_area = Rect {
@@ -712,6 +726,36 @@ mod tests {
         }
         assert!(app.hits.iter().any(|(_, h)| *h == Hit::ProjectFilter));
         assert!(app.hits.iter().any(|(_, h)| *h == Hit::Help));
+    }
+
+    fn pressured(level: &str) -> crate::board::PressureInfo {
+        crate::board::PressureInfo {
+            level: level.into(),
+            summary: Some("projects disk: 4.1 GB free of 500.0 GB (1%)".into()),
+        }
+    }
+
+    #[test]
+    fn the_header_shows_host_pressure_and_the_chip_is_clickable() {
+        let mut app = busy_app();
+        let quiet = screen(&mut app, 160, 40);
+        assert!(!quiet.contains("free of"), "no chip while the host is fine");
+        assert!(!app.hits.iter().any(|(_, h)| *h == Hit::Pressure));
+
+        app.apply(BoardEvent::HostPressure(Some(pressured("warn"))));
+        let s = screen(&mut app, 160, 40);
+        let header = s.lines().take(3).collect::<Vec<_>>().join("\n");
+        assert!(
+            header.contains("⚠ projects disk: 4.1 GB free of 500.0 GB (1%)"),
+            "{header}"
+        );
+        assert!(app.hits.iter().any(|(_, h)| *h == Hit::Pressure));
+
+        app.apply(BoardEvent::HostPressure(Some(pressured("ok"))));
+        assert!(
+            !screen(&mut app, 160, 40).contains("free of"),
+            "clears again"
+        );
     }
 
     #[test]

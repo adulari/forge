@@ -74,6 +74,8 @@ pub struct BoardApp {
     /// The "while you were away" digest, while its overlay is open.
     pub(crate) brief: Option<super::brief::BriefCard>,
     pub(crate) brief_cursor: usize,
+    /// The daemon host's disk/memory pressure, shown in the header while it is not fine.
+    pub(crate) pressure: Option<super::wire::PressureInfo>,
 }
 
 impl BoardApp {
@@ -120,6 +122,7 @@ impl BoardApp {
             dispatch: DispatchUi::default(),
             brief: None,
             brief_cursor: 0,
+            pressure: None,
         }
     }
 
@@ -172,6 +175,15 @@ impl BoardApp {
                 self.brief = Some(card);
                 self.brief_cursor = 0;
                 self.focus = Focus::Brief;
+            }
+            BoardEvent::HostPressure(info) => self.pressure = info,
+            BoardEvent::ReclaimOffer { cwd, message } => {
+                self.confirm = Some(Confirm {
+                    kind: ConfirmKind::Reclaim(cwd),
+                    title: "Not enough disk for a new worktree".into(),
+                    body: format!("{message}\n\nReclaim now?"),
+                });
+                self.focus = Focus::Confirm;
             }
             BoardEvent::Toast(level, text) => self.toast(level, text),
             BoardEvent::DeleteRefused(text) => {

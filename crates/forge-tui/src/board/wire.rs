@@ -407,3 +407,25 @@ pub struct HistoryRow {
     #[serde(default)]
     pub dels: Option<usize>,
 }
+
+/// The daemon's host-pressure sample (`GET /api/identity` → `pressure`), reduced to what the
+/// header shows. Every field defaults so a daemon that predates the sampler parses as "fine".
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct PressureInfo {
+    /// `ok` | `warn` | `floor`.
+    #[serde(default)]
+    pub level: String,
+    /// One sentence naming the tightest disk and/or low memory; absent while the host is fine.
+    #[serde(default)]
+    pub summary: Option<String>,
+}
+
+impl PressureInfo {
+    pub fn is_pressured(&self) -> bool {
+        matches!(self.level.as_str(), "warn" | "floor")
+    }
+
+    pub fn is_floor(&self) -> bool {
+        self.level == "floor"
+    }
+}
