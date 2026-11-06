@@ -101,10 +101,10 @@ export function AwayCard() {
   const dismiss = useCallback(() => setDismissed(true), []);
 
   if (dismissed || !worthShowing(brief.data)) return null;
-  return <AwayCardView brief={brief.data} now={nowSecs()} onOpen={openSession} onDismiss={dismiss} />;
+  return <AwayCardView brief={brief.data} onOpen={openSession} onDismiss={dismiss} />;
 }
 
-export function AwayCardView({ brief: data, now, onOpen, onDismiss }: { brief: Brief; now: number; onOpen: (sessionId: string) => void; onDismiss: () => void }) {
+export function AwayCardView({ brief: data, onOpen, onDismiss }: { brief: Brief; onOpen: (sessionId: string) => void; onDismiss: () => void }) {
   const tokens = useTokens();
   const { lines, hidden } = visibleLines(data);
 
@@ -132,7 +132,7 @@ export function AwayCardView({ brief: data, now, onOpen, onDismiss }: { brief: B
             onPress={() => onOpen(line.id)}
             style={styles.line}
             accessibilityRole="button"
-            accessibilityLabel={`${line.title}, ${lineState(line, now)}`}
+            accessibilityLabel={`${line.title}, ${lineState(line, data.now)}`}
           >
             <View style={styles.dot}>
               <StatusDot state={dotFor(line.outcome)} />
@@ -145,7 +145,7 @@ export function AwayCardView({ brief: data, now, onOpen, onDismiss }: { brief: B
                 style={[typeScale.sub, { color: line.outcome === "failed" || line.outcome === "waiting" ? tokens.danger : tokens.ink3 }]}
                 numberOfLines={1}
               >
-                {lineState(line, now)}
+                {lineState(line, data.now)}
                 {detail ? ` · ${detail}` : ""}
               </Text>
             </View>

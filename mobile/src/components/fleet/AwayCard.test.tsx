@@ -51,12 +51,30 @@ const brief: Brief = {
 
 describe("AwayCardView", () => {
   it("renders the window, the headline and one line per session with its state", () => {
-    const html = renderToStaticMarkup(<AwayCardView brief={brief} now={6 * 3600} onOpen={() => undefined} onDismiss={() => undefined} />);
+    const html = renderToStaticMarkup(<AwayCardView brief={brief} onOpen={() => undefined} onDismiss={() => undefined} />);
     expect(html).toContain("While you were away (6h)");
     expect(html).toContain("1 finished, 1 failed, 1 waiting on you, 1 with changes ready to land, $3.10 spent");
-    expect(html).toContain("waiting on you for 40 min");
+    expect(html).toContain("was waiting on you for 40 min");
     expect(html).toContain("failed: provider 503");
     expect(html).toContain("+12/-3 to land · $2.70");
     expect(html).toContain('aria-label="Dismiss summary"');
+  });
+
+  it("is a snapshot of the return: later wall-clock time does not grow the wait or revive 'still working'", () => {
+    const working = { ...brief, sessions: [...brief.sessions, { ...brief.sessions[2], id: "k", title: "Refactor", outcome: "working" as const }] };
+    const render = () => renderToStaticMarkup(<AwayCardView brief={working} onOpen={() => undefined} onDismiss={() => undefined} />);
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date((6 * 3600) * 1000));
+      const atReturn = render();
+      vi.setSystemTime(new Date((9 * 3600) * 1000));
+      const later = render();
+      expect(later).toBe(atReturn);
+      expect(later).toContain("was waiting on you for 40 min");
+      expect(later).toContain("was still working");
+      expect(later).not.toContain(" still working</span>");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

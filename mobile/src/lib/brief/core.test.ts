@@ -88,7 +88,7 @@ describe("wording", () => {
   });
 
   it("says how long a session has been waiting, why one failed, and what is ready to land", () => {
-    expect(lineState(session({ outcome: "waiting", waitingSince: 1000 }), 1000 + 40 * 60)).toBe("waiting on you for 40 min");
+    expect(lineState(session({ outcome: "waiting", waitingSince: 1000 }), 1000 + 40 * 60)).toBe("was waiting on you for 40 min");
     expect(lineState(session({ outcome: "failed", reason: "provider 503" }), 0)).toBe("failed: provider 503");
     expect(lineDetail(session({ unlanded: { added: 4, removed: 2 }, spendUsd: 1.5 }))).toBe("+4/-2 to land · $1.50");
     expect(lineDetail(session())).toBe("");

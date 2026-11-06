@@ -146,16 +146,18 @@ export function headline(brief: Brief): string {
   return parts.join(", ");
 }
 
-export function lineState(session: BriefSession, nowSecs: number): string {
+/** The state as of `atSecs` (the brief's own `now`, the moment of return), in the past tense: the card is a
+ * snapshot of that moment, so it must not keep claiming a session needs you after you have answered it. */
+export function lineState(session: BriefSession, atSecs: number): string {
   switch (session.outcome) {
     case "waiting":
-      return `waiting on you for ${spanLabel(nowSecs - (session.waitingSince ?? session.lastActivity))}`;
+      return `was waiting on you for ${spanLabel(atSecs - (session.waitingSince ?? session.lastActivity))}`;
     case "failed":
       return `failed: ${session.reason || "turn failed"}`;
     case "interrupted":
       return "interrupted by a restart";
     case "working":
-      return "still working";
+      return "was still working";
     default:
       return "finished";
   }
