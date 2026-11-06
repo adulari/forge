@@ -51,8 +51,8 @@ pub(crate) fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
     dir
 }
 
-pub(crate) fn router(store: Arc<forge_store::Store>, default_cwd: &Path) -> Router {
-    daemon_router(Arc::new(DaemonState {
+pub(crate) fn state(store: Arc<forge_store::Store>, default_cwd: &Path) -> Arc<DaemonState> {
+    Arc::new(DaemonState {
         registry: Arc::new(SessionRegistry::new()),
         terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
         store,
@@ -64,7 +64,11 @@ pub(crate) fn router(store: Arc<forge_store::Store>, default_cwd: &Path) -> Rout
         apns: None,
         voice: crate::voice::VoiceState::new(),
         anywhere_enable: tokio::sync::watch::channel(false).0,
-    }))
+    })
+}
+
+pub(crate) fn router(store: Arc<forge_store::Store>, default_cwd: &Path) -> Router {
+    daemon_router(state(store, default_cwd))
 }
 
 pub(crate) async fn http_get(

@@ -37,8 +37,8 @@ pub(crate) struct GitCommitMessageRequest {
 
 #[derive(serde::Serialize)]
 pub(crate) struct GitCommitMessageResponse {
-    message: String,
-    model: String,
+    pub(super) message: String,
+    pub(super) model: String,
     language: String,
 }
 
@@ -197,7 +197,7 @@ pub(super) fn clean_message(raw: &str) -> String {
 }
 
 /// A subject line for the offline `--mock` daemon, which has no model to ask.
-fn offline_message(change: &StagedChange) -> String {
+pub(super) fn offline_message(change: &StagedChange) -> String {
     let files: Vec<&str> = change
         .stat
         .lines()
@@ -257,7 +257,7 @@ async fn candidate_models(
     api
 }
 
-async fn generate(
+pub(super) async fn generate(
     state: &DaemonState,
     session: &str,
     root: &Path,
@@ -283,6 +283,34 @@ async fn generate(
         });
     }
     let prompt = build_prompt(&change, &language);
+    let (message, model) = trivial_call(
+        state,
+        session,
+        "commit-message",
+        "a commit message",
+        SYSTEM,
+        prompt,
+    )
+    .await?;
+    Ok(GitCommitMessageResponse {
+        message,
+        model,
+        language,
+    })
+}
+
+/// One trivial-tier completion (`system` + `prompt`), trying the router's candidates in order.
+/// `label` names the side-call in the usage ledger; `what` fills the error text. Returns the
+/// cleaned reply and the model that gave it.
+pub(super) async fn trivial_call(
+    state: &DaemonState,
+    session: &str,
+    label: &str,
+    what: &str,
+    system: &str,
+    prompt: String,
+) -> Result<(String, String), String> {
+    let config = forge_config::load().map_err(|e| e.to_string())?;
     let (provider, router) = crate::cli::commands::models::build_provider_and_router(
         &config,
         false,
@@ -291,11 +319,11 @@ async fn generate(
         Default::default(),
         Default::default(),
     );
-    let models = candidate_models(&config, &router, &state.store, "write a commit message").await;
+    let models = candidate_models(&config, &router, &state.store, &format!("write {what}")).await;
     if models.is_empty() {
-        return Err("no model is available for a commit message right now".to_string());
+        return Err(format!("no model is available for {what} right now"));
     }
-    let messages = [Message::system(SYSTEM), Message::user(prompt)];
+    let messages = [Message::system(system), Message::user(prompt)];
     let mut last = String::new();
     for model in models {
         let mut sink = |_: StreamEvent| {};
@@ -304,7 +332,7 @@ async fn generate(
             Ok(Ok(response)) => {
                 let _ = state.store.record_side_call_usage_for(
                     session,
-                    "commit-message",
+                    label,
                     Some(&model),
                     &response.usage,
                 );
@@ -313,17 +341,13 @@ async fn generate(
                     last = format!("{model} returned an empty message");
                     continue;
                 }
-                return Ok(GitCommitMessageResponse {
-                    message,
-                    model,
-                    language,
-                });
+                return Ok((message, model));
             }
             Ok(Err(error)) => last = format!("{model}: {error}"),
             Err(_) => last = format!("{model} did not answer within {}s", CALL_TIMEOUT.as_secs()),
         }
     }
-    Err(format!("could not generate a commit message ({last})"))
+    Err(format!("could not generate {what} ({last})"))
 }
 
 /// `POST /api/git/commit-message` `{session, language?}` → `{message, model, language}`.

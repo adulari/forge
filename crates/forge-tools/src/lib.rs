@@ -80,8 +80,8 @@ pub use kernel::PYTHON_TOOL;
 pub use kernel::{discover_python, PythonTool};
 pub use lattice_tool::LatticeTool;
 pub use open_pr::{
-    create_pr_in, set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn,
-    RepoFlagFn, OPEN_PR_TOOL,
+    create_pr_for_session, create_pr_in, set_open_pr_settings, OpenPrSettings, OpenPrTool,
+    ProvenanceFn, RedactFn, RepoFlagFn, OPEN_PR_TOOL,
 };
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};

@@ -1015,6 +1015,10 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
             &format!("{base}/api/sessions/{{id}}/diff"),
             get(crate::serve_git::session_diff),
         )
+        .route(
+            &format!("{base}/api/sessions/{{id}}/ship"),
+            post(crate::serve_git::session_ship),
+        )
         .merge(crate::serve_dispatch::routes(&base))
         .merge(crate::push_tool::routes(&base))
         .merge(crate::serve_update::routes(&base))

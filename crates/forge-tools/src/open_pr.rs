@@ -196,6 +196,26 @@ pub async fn create_pr_in(workspace: &Path, args: &Value) -> Result<String, Stri
     open_pr(&ctx, workspace, &args).await
 }
 
+/// [`create_pr_in`] for a session-owned PR: the body carries the session's provenance section and
+/// evidence, exactly as the model-facing tool writes them. `gh` is injectable so a caller (or a
+/// test) can point at a specific binary.
+pub async fn create_pr_for_session(
+    workspace: &Path,
+    args: &Value,
+    session: &str,
+    gh: &Path,
+) -> Result<String, String> {
+    let args = Args::parse(args).map_err(|e| e.to_string())?;
+    let ctx = Ctx {
+        git: PathBuf::from("git"),
+        gh: gh.to_path_buf(),
+        settings: settings(),
+        session: Some(session.to_string()),
+        ledger: Ledger::new(workspace, session),
+    };
+    open_pr(&ctx, workspace, &args).await
+}
+
 struct Ctx {
     git: PathBuf,
     gh: PathBuf,

@@ -112,6 +112,10 @@ fn classification_maps_routes_to_scopes() {
     assert_eq!(scope(Method::PUT, "/api/workspace/file"), "workspace-write");
     assert_eq!(scope(Method::POST, "/api/git/push"), "workspace-write");
     assert_eq!(scope(Method::POST, "/api/pr/merge"), "workspace-write");
+    assert_eq!(
+        scope(Method::POST, "/api/sessions/s1/ship"),
+        "workspace-write"
+    );
     assert_eq!(scope(Method::GET, "/api/git/diff"), "view");
     assert_eq!(scope(Method::POST, "/api/git/hunk"), "workspace-write");
     assert_eq!(scope(Method::GET, "/api/blame"), "view");

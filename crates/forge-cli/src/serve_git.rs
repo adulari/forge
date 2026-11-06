@@ -15,6 +15,7 @@
 //! - `POST /api/git/discard` `{session, paths[]}` → drop working-tree changes
 //! - `POST /api/git/switch`  `{session, branch}` → switch a clean shared workspace
 //! - `POST /api/git/branches` `{session, name}` → create + switch a clean shared workspace
+//! - `POST /api/sessions/{id}/ship` `{message?, title?, body?, base?, draft?, method?}` → commit, push, PR, watch
 //! - `GET  /api/sessions/{id}/diff`                         a forked session's worktree vs its base
 //!
 //! Every route resolves its repository from the SESSION (its worktree if it has one, else its
@@ -85,6 +86,7 @@ mod diff;
 pub(crate) mod hunk;
 mod message;
 mod risk;
+mod ship;
 mod status;
 mod sync;
 #[cfg(test)]
@@ -95,6 +97,7 @@ use diff::{
     is_untracked, parse_unified_diff, parse_unified_diff_window, staged_rename_source,
     untracked_counts, untracked_diff,
 };
+pub(crate) use ship::session_ship;
 
 /// Hunk lines returned per file. A review dock needs the whole change, but an unbounded diff of a
 /// generated file would push megabytes at a phone — the excess is reported as `skipped_lines`.
