@@ -69,6 +69,10 @@ pub(crate) struct Watch {
     pub(crate) last_checked: Option<i64>,
     pub(crate) last_action: Option<String>,
     pub(crate) created_at: i64,
+    /// The transition already announced by push (`merged` / `blocked` / `green`), kept so a
+    /// daemon restart never pushes the same one twice.
+    #[serde(default)]
+    pushed: Option<String>,
 }
 
 impl Watch {
@@ -89,6 +93,7 @@ impl Watch {
             last_checked: None,
             last_action: None,
             created_at: now,
+            pushed: None,
         }
     }
 
@@ -182,6 +187,7 @@ impl Registry {
                     w.fix_turns = 0;
                     w.last_key = None;
                     w.auto_armed = false;
+                    w.pushed = None;
                 })
                 .or_insert_with(|| Watch::new(session, mode, method, now));
             Some(watch.clone())
@@ -342,12 +348,14 @@ async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
                         scope: None,
                     })
                     .await;
-                registry().update(&watch.session_id, |w| {
-                    w.state = Phase::Blocked;
-                    w.blocked_reason =
-                        Some("refused a force push; PR Watch only pushes normally".into());
-                });
+                let mut blocked = watch.clone();
+                blocked.state = Phase::Blocked;
+                blocked.blocked_reason =
+                    Some("refused a force push; PR Watch only pushes normally".into());
+                let announcement = settle_push(&mut blocked, false);
+                registry().update(&watch.session_id, |w| *w = blocked.clone());
                 state.registry.notify_fleet();
+                announce(state, &watch.session_id, announcement).await;
             }
             continue;
         }
@@ -360,7 +368,9 @@ async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
         let free = !snapshot.busy && snapshot.question.is_none();
         let mut next = watch.clone();
         let outcome = poll_once(gh, &root, &mut next, free, now).await;
+        let announcement = settle_push(&mut next, outcome.green);
         registry().update(&watch.session_id, |w| *w = next.clone());
+        announce(state, &watch.session_id, announcement).await;
         if let Some(text) = outcome.prompt {
             let _ = handle
                 .input_tx
@@ -386,6 +396,67 @@ pub(crate) struct Outcome {
     pub(crate) prompt: Option<String>,
     pub(crate) merged: bool,
     pub(crate) changed: bool,
+    /// An open PR with every check passing and nothing left for the agent to fix.
+    pub(crate) green: bool,
+}
+
+/// One push per state transition: what to say, and the key that remembers it was said.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Announcement {
+    key: &'static str,
+    pub(crate) message: String,
+    pub(crate) high: bool,
+}
+
+/// The push owed for `watch`'s current state, or `None` when it was already sent (or nothing
+/// push-worthy happened). Records the key in `watch.pushed` so the caller persists it with the
+/// rest of the update: the push is at-most-once across a restart rather than at-least-once.
+pub(crate) fn settle_push(watch: &mut Watch, green: bool) -> Option<Announcement> {
+    let pr = watch
+        .pr_number
+        .map_or_else(|| "PR".to_string(), |n| format!("PR #{n}"));
+    let (key, message, high) = match watch.state {
+        Phase::Merged => ("merged", format!("{pr} merged"), false),
+        Phase::Blocked => (
+            "blocked",
+            match watch.blocked_reason.as_deref() {
+                Some(reason) => format!("{pr} blocked: {reason}"),
+                None => format!("{pr} blocked"),
+            },
+            true,
+        ),
+        Phase::Watching if green && watch.mode == Mode::Fix => (
+            "green",
+            format!("{pr} is green \u{2014} waiting for your merge"),
+            false,
+        ),
+        Phase::Watching => return None,
+    };
+    if watch.pushed.as_deref() == Some(key) {
+        return None;
+    }
+    watch.pushed = Some(key.to_string());
+    Some(Announcement { key, message, high })
+}
+
+/// Delivers through the same channels as the `push_notification` tool (Web Push, APNs, the
+/// Anywhere hint, desktop); the session id is the deep link the notification opens.
+async fn announce(state: &Arc<DaemonState>, session: &str, announcement: Option<Announcement>) {
+    let Some(a) = announcement else { return };
+    tracing::info!(session, transition = a.key, "PR Watch push");
+    let request = forge_core::push_notify::PushRequest {
+        message: a.message,
+        title: Some("PR Watch".into()),
+        priority: if a.high {
+            forge_core::push_notify::Priority::High
+        } else {
+            forge_core::push_notify::Priority::Normal
+        },
+        session_id: session.to_string(),
+    };
+    crate::push_tool::channels_for(state, !cfg!(test))
+        .deliver(&request)
+        .await;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -395,6 +466,7 @@ enum Decision {
     Fix { key: String, prompt: String },
     Merge,
     Merged,
+    Green,
 }
 
 fn failing_lines(pr: &PrSummary) -> Vec<String> {
@@ -488,7 +560,7 @@ fn decide(watch: &Watch, pr: &PrSummary, comments: &[String], free: bool) -> Dec
         };
     }
     if watch.mode != Mode::Merge {
-        return Decision::Wait(None);
+        return Decision::Green;
     }
     if conflicting {
         return Decision::Wait(Some("merge conflicts with the base branch".into()));
@@ -557,6 +629,10 @@ pub(crate) async fn poll_once(
     let mut outcome = Outcome::default();
     match decide(watch, &pr, &comments, free) {
         Decision::Wait(reason) => watch.blocked_reason = reason,
+        Decision::Green => {
+            watch.blocked_reason = None;
+            outcome.green = true;
+        }
         Decision::Block(reason) => {
             watch.state = Phase::Blocked;
             watch.blocked_reason = Some(reason);
@@ -592,6 +668,11 @@ pub(crate) async fn poll_once(
                 watch.blocked_reason = Some(format!("merge failed: {}", e.message()));
             }
         },
+    }
+    // A decision was reached and it is not green: the next green is a new transition. (A failed
+    // poll returns earlier and leaves this alone, so a flaky `gh` cannot repeat the push.)
+    if watch.state == Phase::Watching && !outcome.green {
+        watch.pushed = None;
     }
     finish(&before, watch, outcome)
 }
