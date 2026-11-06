@@ -371,6 +371,19 @@ CREATE TABLE IF NOT EXISTS project_todo (
 );
 CREATE INDEX IF NOT EXISTS idx_project_todo_project ON project_todo(project, position);
 
+-- Approvals learn: every answered permission prompt, keyed by project and command shape, so a
+-- shape the person keeps allowing can be offered as a standing rule. Also created in
+-- migration_0052 for pre-existing DBs.
+CREATE TABLE IF NOT EXISTS permission_decision (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project    TEXT NOT NULL,
+    tool       TEXT NOT NULL,
+    shape      TEXT NOT NULL DEFAULT '',
+    decision   TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_permission_decision_shape ON permission_decision(project, tool, shape, id);
+
 -- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
 -- queued headless task; a drain executes them in isolated worktrees and records the outcome
 -- back onto the row. Local machine state only — deliberately not in PORTABLE_METADATA_TABLES

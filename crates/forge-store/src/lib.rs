@@ -40,6 +40,7 @@ mod migrations;
 mod model_health_store;
 mod notification_store;
 mod path_evidence_store;
+mod permission_decision_store;
 mod project_notes_store;
 mod provider_items_store;
 mod queued_prompt_store;
@@ -102,6 +103,7 @@ pub use interrupted_turn_store::{
 };
 pub use maintenance::MaintenanceReport;
 pub use memory::{Memory, MemoryAdded};
+pub use permission_decision_store::PermissionDecisionRow;
 pub use project_notes_store::{project_key, ProjectNotes, ProjectTodo, ScratchpadSave};
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 pub use transcript_read_store::HistoryFilter;
@@ -112,7 +114,7 @@ pub use usage_store::ModelUsageRow;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 51;
+const SCHEMA_VERSION: i64 = 52;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);

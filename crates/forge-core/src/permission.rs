@@ -520,6 +520,7 @@ pub use narrowing::{
 };
 pub use workspace_delete::out_of_bounds_delete;
 mod expose;
+pub mod learn;
 pub use expose::{
     always_asks as is_public_expose, confirm_call, confirm_label, EXPOSE_PROMPT_PREFIX,
 };
