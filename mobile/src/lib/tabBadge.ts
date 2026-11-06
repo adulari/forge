@@ -11,7 +11,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useSyncExternalStore } from "react";
 
 import { isWeb } from "./platform";
-import { useSessions } from "./queries";
+import { waitingScoped } from "./allHostRows";
+import { useAllHostRows } from "./useAllHostRows";
 
 const TAB_BADGE_KEY = "forge.tabBadge";
 const TAB_BADGE_PREFIX = /^\(\d+\)\s+/;
@@ -61,8 +62,7 @@ export function useTabBadgePreference(): boolean {
  */
 export function useTabBadgeTitle() {
   const enabled = useTabBadgePreference();
-  const sessions = useSessions();
-  const waiting = (sessions.data ?? []).filter((session) => session.waiting).length;
+  const waiting = waitingScoped(useAllHostRows()).length;
 
   useEffect(() => {
     if (!isWeb || typeof document === "undefined") return;

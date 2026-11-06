@@ -1,5 +1,5 @@
 import { AppState, type AppStateStatus } from "react-native";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { isAppBackgrounded, useToast } from "../ds/ToastHost";
@@ -10,6 +10,8 @@ import { getNotifyPrefs } from "../../lib/notifyPrefs";
 import {
   alertCopy,
   detectFleetAlerts,
+  fleetRowKey,
+  type FleetRowState,
   isDuplicateAlert,
   rememberAlert,
   routeAlert,
@@ -18,8 +20,7 @@ import {
 import { playAlertChime } from "../../lib/notifySound";
 import { openSessionFromAlert } from "../../lib/openSessionFromAlert";
 import { isTauri, isWeb } from "../../lib/platform";
-import { useSessions } from "../../lib/queries";
-import type { SessionRow } from "../../lib/api";
+import { useAllHostRows } from "../../lib/useAllHostRows";
 import { useAuth } from "../../lib/auth";
 import { TWebSocket } from "../../lib/transport";
 import { supportsFleetInvalidationSocket } from "../../lib/fleetTransport";
@@ -43,8 +44,19 @@ export function FleetWatcher() {
   // watches, and they must run inside the provider tree (query client + theme). No-op off desktop.
   useDesktopNativeSync();
 
-  const { data } = useSessions();
-  const { baseUrl } = useAuth();
+  const scoped = useAllHostRows();
+  // Alerts cover every paired host, not just the active one; each row keeps its host so an alert
+  // can open the session on the right server.
+  const data = useMemo<FleetRowState[]>(() => scoped.map((item) => ({ ...item.row, serverId: item.serverId })), [scoped]);
+  const { baseUrl, setActive } = useAuth();
+  const setActiveRef = useRef(setActive);
+  useEffect(() => {
+    setActiveRef.current = setActive;
+  }, [setActive]);
+  const openAlert = (alert: FleetAlert) => {
+    if (alert.serverId) setActiveRef.current(alert.serverId);
+    openSessionFromAlert(alert.sessionId);
+  };
   const queryClient = useQueryClient();
   const toast = useToast();
   // A `[host]` ceiling refusing a session, terminal or helper is a notice, wherever it happened.
@@ -53,7 +65,7 @@ export function FleetWatcher() {
     toastRef.current = toast;
   }, [toast]);
   useEffect(() => onHostCap((message) => toastRef.current.show(message, { tone: "warn" })), []);
-  const previous = useRef<Map<string, SessionRow>>(new Map());
+  const previous = useRef<Map<string, FleetRowState>>(new Map());
   const queued = useRef<Map<string, FleetAlert>>(new Map());
   const shownAt = useRef<Map<string, number>>(new Map());
   const foreground = useRef(true);
@@ -73,10 +85,10 @@ export function FleetWatcher() {
       socket = new TWebSocket(url.toString());
       socket.onopen = () => {
         attempts = 0;
-        if (isHostRestarting()) {
-          clearHostRestarting();
-          void queryClient.invalidateQueries({ queryKey: ["sessions", baseUrl] });
-        }
+        if (isHostRestarting()) clearHostRestarting();
+        // `fleet_changed` frames sent while the socket was down are gone, so any (re)open
+        // refetches instead of waiting for the slow recovery poll.
+        void queryClient.invalidateQueries({ queryKey: ["sessions", baseUrl] });
       };
       socket.onmessage = (event) => {
         try {
@@ -136,9 +148,9 @@ export function FleetWatcher() {
   useEffect(() => {
     if (!data || !foreground.current) return;
     const old = previous.current;
-    previous.current = new Map(data.map((row) => [row.id, row]));
+    previous.current = new Map(data.map((row) => [fleetRowKey(row), row]));
     if (old.size === 0) return;
-    for (const alert of detectFleetAlerts(old, data)) queued.current.set(`${alert.sessionId}:${alert.category}`, alert);
+    for (const alert of detectFleetAlerts(old, data)) queued.current.set(`${alert.serverId ?? ""}:${alert.sessionId}:${alert.category}`, alert);
     if (queued.current.size === 0 || timer.current) return;
     timer.current = setTimeout(() => {
       timer.current = null;
@@ -163,14 +175,14 @@ export function FleetWatcher() {
         visibleSessionIds: getVisibleSessionIds(),
         backgrounded,
       });
-      const key = `${alert.sessionId}:${alert.category}`;
+      const key = `${alert.serverId ?? ""}:${alert.sessionId}:${alert.category}`;
       if (!route.toast && !route.os) continue;
       if (isDuplicateAlert(shownAt.current, key, now)) continue;
       rememberAlert(shownAt.current, key, now);
       if (route.toast) toasts.push(alert);
       if (route.os) {
         const copy = alertCopy(alert, prefs.hideText);
-        void notify(copy.title, copy.body, { onClick: () => openSessionFromAlert(alert.sessionId) });
+        void notify(copy.title, copy.body, { onClick: () => openAlert(alert) });
       }
     }
     for (const alert of toasts.slice(0, MAX_ALERT_TOASTS)) {
@@ -178,7 +190,7 @@ export function FleetWatcher() {
         tone: TONE[alert.category],
         duration: ALERT_TOAST_MS,
         system: false,
-        action: { label: "Open", onPress: () => openSessionFromAlert(alert.sessionId) },
+        action: { label: "Open", onPress: () => openAlert(alert) },
       });
       sounded = true;
     }

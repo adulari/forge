@@ -171,6 +171,7 @@ import { pastSessionsRefetchPolicy, sessionsRefetchPolicy, sessionsRetryPolicy }
 import { peekFleetRows, rememberFleetRows } from "./anywhere/fleetRowCache";
 import { markColdStart } from "./anywhere/relayMetrics";
 import { supportsDirectDaemonEndpoints } from "./transport";
+import { supportsFleetInvalidationSocket } from "./fleetTransport";
 import type { Snapshot } from "./ws";
 import { syncWidgetSessions } from "./widgetData";
 import {
@@ -373,7 +374,7 @@ export function useSessions() {
     ...sessionsRetryPolicy,
     enabled: baseUrl != null,
     refetchIntervalInBackground: false,
-    ...sessionsRefetchPolicy({ peeking, isFocused }),
+    ...sessionsRefetchPolicy({ peeking, isFocused, hasFleetSocket: baseUrl == null || supportsFleetInvalidationSocket(baseUrl) }),
   });
   useEffect(() => {
     // The widget mirrors what the user is looking at, not what slid past under a thumb.
@@ -420,7 +421,7 @@ function useRoutedModelCatalogSync(sessions: SessionRow[] | undefined) {
 }
 
 /** Per-server fleet probes for the Settings server switcher. */
-export function useServerFleets(servers: { id: string; baseUrl: string; disabled?: boolean }[]) {
+export function useServerFleets(servers: { id: string; baseUrl: string; disabled?: boolean }[], pollMs = SERVER_FLEET_POLL_MS) {
   const isFocused = useIsFocused();
   return useQueries({
     queries: servers.map((server) => ({
@@ -432,7 +433,7 @@ export function useServerFleets(servers: { id: string; baseUrl: string; disabled
       enabled: !server.disabled,
       refetchInterval: isFocused
         ? (query: { state: { error: unknown } }) =>
-            query.state.error ? SERVER_FLEET_BACKOFF_MS : SERVER_FLEET_POLL_MS
+            query.state.error ? Math.max(SERVER_FLEET_BACKOFF_MS, pollMs) : pollMs
         : false,
       refetchIntervalInBackground: false,
       retry: false,

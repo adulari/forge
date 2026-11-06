@@ -13,6 +13,12 @@
 /** Slow safety net for a dropped websocket event, not the primary update path. */
 export const SESSIONS_RECOVERY_POLL_MS = 60_000;
 
+/** Anywhere (relay) hosts have no fleet socket, so the poll is their only update path. */
+export const SESSIONS_RELAY_POLL_MS = 15_000;
+
+/** How often a host that is not the active one is polled just to notice waiting sessions. */
+export const OTHER_HOST_WATCH_POLL_MS = 15_000;
+
 export interface RefetchPolicy {
   /** `"always"` ignores staleTime — every mount goes to the network. */
   refetchOnMount: "always" | boolean;
@@ -31,14 +37,14 @@ export const sessionsRetryPolicy = {
 
 /** The live fleet list, which both Fleet and Inbox render. */
 export function sessionsRefetchPolicy(
-  { peeking, isFocused }: { peeking: boolean; isFocused: boolean },
+  { peeking, isFocused, hasFleetSocket = true }: { peeking: boolean; isFocused: boolean; hasFleetSocket?: boolean },
 ): RefetchPolicy {
   if (peeking) {
     return { refetchOnMount: false, refetchInterval: false, refetchOnWindowFocus: false };
   }
   return {
     refetchOnMount: "always",
-    refetchInterval: isFocused ? SESSIONS_RECOVERY_POLL_MS : false,
+    refetchInterval: isFocused ? (hasFleetSocket ? SESSIONS_RECOVERY_POLL_MS : SESSIONS_RELAY_POLL_MS) : false,
     refetchOnWindowFocus: true,
   };
 }
