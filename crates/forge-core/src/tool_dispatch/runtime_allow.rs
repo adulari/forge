@@ -81,9 +81,9 @@ impl Session {
                 || (call.name == "shell" && patterns.is_empty());
             if !unscopable {
                 let reason = if persist {
-                    "user answered 'always' at runtime prompt"
+                    forge_config::RUNTIME_ALWAYS_REASON
                 } else {
-                    "user allowed it for this session at runtime prompt"
+                    crate::permission::RUNTIME_SESSION_REASON
                 };
                 self.rules.push(forge_types::PermissionRule {
                     tool: call.name.clone(),

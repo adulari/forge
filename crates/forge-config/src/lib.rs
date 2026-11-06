@@ -3603,6 +3603,8 @@ pub fn append_allow_rule(tool: &str) -> std::io::Result<()> {
 /// every call of `tool`). Shell must always be scoped: a bare `allow = "*"` for shell approves
 /// every later command in that project, which is how 40 such rules once ended up auto-approving
 /// everything under `$HOME`.
+pub const RUNTIME_ALWAYS_REASON: &str = "user answered 'always' at runtime prompt";
+
 pub fn append_allow_rule_in(
     root: &std::path::Path,
     tool: &str,
@@ -3628,7 +3630,7 @@ pub fn append_allow_rule_in(
                 allow: Some(allow),
                 ask: None,
                 deny: None,
-                reason: None,
+                reason: Some(RUNTIME_ALWAYS_REASON.into()),
             },
         );
     }
@@ -3640,7 +3642,9 @@ pub fn append_allow_rule_in(
         let quoted: Vec<String> = patterns.iter().map(|p| format!("{p:?}")).collect();
         format!("[{}]", quoted.join(", "))
     };
-    let entry = format!("\n[[permissions.rules]]\ntool = {tool:?}\nallow = {allow}\n");
+    let entry = format!(
+        "\n[[permissions.rules]]\ntool = {tool:?}\nallow = {allow}\nreason = {RUNTIME_ALWAYS_REASON:?}\n"
+    );
     use std::io::Write;
     std::fs::OpenOptions::new()
         .create(true)
