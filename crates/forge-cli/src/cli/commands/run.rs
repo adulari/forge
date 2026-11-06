@@ -4780,6 +4780,22 @@ pub(crate) async fn run_chat_tui(
                     remote::RemoteInput::OverlayCancel => {
                         remote_keys.extend(apply_overlay_input(&mut app, RemoteOverlayOp::Cancel));
                     }
+                    remote::RemoteInput::ProjectMove { path } => {
+                        if !workspace_menu::project_offer_remote(&session, &mut app, &path, true) {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⚠ that project offer is no longer current",
+                            );
+                        }
+                    }
+                    remote::RemoteInput::ProjectDismiss { path } => {
+                        if !workspace_menu::project_offer_remote(&session, &mut app, &path, false) {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⚠ that project offer is no longer current",
+                            );
+                        }
+                    }
                     // Normalized away above (into a queue-front insert + `continue`, or a plain
                     // `Prompt`) before this match ever sees it.
                     remote::RemoteInput::Steer { .. }

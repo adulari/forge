@@ -10,7 +10,48 @@
 use super::*;
 use crate::cli::commands::run::queue_edit;
 
+const STALE_PROJECT_OFFER_NOTE: &str = "⚠ that project offer is no longer current";
+
 impl DriverState {
+    /// Whether `path` is the repository the card currently offers.
+    fn offered_project(&self, path: &str) -> bool {
+        self.app
+            .project_offer
+            .suggestion()
+            .is_some_and(|offer| offer.path == std::path::Path::new(path))
+    }
+
+    /// Re-root the session into the offered repository, as `/project` does. A running turn holds
+    /// the session lock for its whole length, so this declines (the card is only offered while
+    /// idle) rather than stall the driver loop.
+    fn project_move(&mut self, path: &str) {
+        if !self.offered_project(path) {
+            push_remote_note(&mut self.notes, STALE_PROJECT_OFFER_NOTE);
+            return;
+        }
+        let Ok(mut session) = self.session.try_lock() else {
+            push_remote_note(
+                &mut self.notes,
+                "⚠ finish the running turn, then move the session",
+            );
+            return;
+        };
+        let root = std::path::PathBuf::from(path);
+        match session.switch_project(&root) {
+            Ok(()) => {
+                self.cwd = session.workspace_scope();
+                drop(session);
+                self.app.project_offer.take_accepted();
+                self.app.follow_git_workspace(&root);
+                self.app.note(&format!("✓ now working in {}", self.cwd));
+            }
+            Err(error) => push_remote_note(
+                &mut self.notes,
+                &format!("⚠ could not move the session to {path}: {error}"),
+            ),
+        }
+    }
+
     /// One remote input — the headless mirror of `run_chat_tui`'s remote drain, minus the
     /// host-terminal cases (`/remote` toggling, host clipboard).
     pub(super) async fn handle_input(&mut self, input: remote::RemoteInput) -> Result<()> {
@@ -54,6 +95,16 @@ impl DriverState {
                     } else {
                         push_remote_note(&mut self.notes, queue_edit::STALE_QUEUE_EDIT_NOTE);
                     }
+                }
+            }
+            remote::RemoteInput::ProjectMove { path } => self.project_move(&path),
+            remote::RemoteInput::ProjectDismiss { path } => {
+                if self.offered_project(&path) {
+                    self.app.project_offer.dismiss();
+                    self.app
+                        .note("ok, not offering that project again in this session");
+                } else {
+                    push_remote_note(&mut self.notes, STALE_PROJECT_OFFER_NOTE);
                 }
             }
             remote::RemoteInput::Allow {

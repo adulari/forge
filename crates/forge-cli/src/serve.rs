@@ -1303,7 +1303,9 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
         rows.push(SessionRow {
             id: h.session_id.clone(),
             title: h.title(),
-            cwd: h.cwd.clone(),
+            // The live cwd: a session moved into a project (`project_move`) no longer lives where
+            // it was spawned, and the list groups sessions by it.
+            cwd: snap.cwd.clone(),
             worktree: h.worktree.clone(),
             busy: snap.busy,
             waiting: snap.permission_prompt.is_some() || snap.question.is_some(),

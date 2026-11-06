@@ -216,6 +216,14 @@ export interface PermissionSuggestion {
   allows: number;
 }
 
+/** The repository an idle Home-scope session keeps `cd`-ing into; `path` is echoed back in
+ * `project_move` / `project_dismiss` so a stale tap is dropped by the host. */
+export interface ProjectSuggestion {
+  path: string;
+  name: string;
+  calls: number;
+}
+
 export interface Snapshot {
   protocol: number;
   session_id: string;
@@ -263,6 +271,9 @@ export interface Snapshot {
   /** Additive: a standing rule the pending permission prompt offers because this command shape
    * was allowed several times in the project and never refused. Absent from an older host. */
   permission_suggestion?: PermissionSuggestion | null;
+  /** Additive: "this session is working in <repo> — move it there?" while idle. Absent from an
+   * older host. */
+  project_suggestion?: ProjectSuggestion | null;
   question: string | null;
   question_options: QuestionOption[];
   question_allow_other: boolean;
@@ -329,6 +340,8 @@ export type RemoteInput =
   // `permission_suggestion` (writes a project always-allow rule).
   | { kind: "allow"; yes: boolean; seq: number; note?: string; scope?: "session" | "rule" }
   | { kind: "answer"; text: string; seq: number }
+  | { kind: "project_move"; path: string }
+  | { kind: "project_dismiss"; path: string }
   | { kind: "interrupt" }
   // Cancels one server-queued prompt; index+text echo Snapshot.queued so a shifted queue is
   // detected server-side and dropped as stale.

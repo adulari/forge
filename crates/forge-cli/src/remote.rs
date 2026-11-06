@@ -441,6 +441,17 @@ pub struct SnapOption {
     pub description: String,
 }
 
+/// The repository an idle Home-scope session keeps working in ([`Snapshot::project_suggestion`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SnapProjectSuggestion {
+    /// Absolute path of the repository root: what [`RemoteInput::ProjectMove`] echoes back.
+    pub path: String,
+    /// The directory name, for the card's title.
+    pub name: String,
+    /// How many shell calls entered it.
+    pub calls: u32,
+}
+
 /// One row of the projected modal overlay ([`SnapOverlay::rows`]): an opaque `id` the page echoes
 /// back in [`RemoteInput::OverlaySelect`], display strings, the cursor flag, and an optional
 /// group header (e.g. a workflow phase).
@@ -640,6 +651,11 @@ pub struct Snapshot {
     /// button and answers `allow` with `scope: "rule"` to accept; absent from older hosts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_suggestion: Option<forge_types::RuleSuggestion>,
+    /// The repository an idle Home-scope session keeps `cd`-ing into (additive): a client shows
+    /// "Move it there?" and answers with [`RemoteInput::ProjectMove`] or
+    /// [`RemoteInput::ProjectDismiss`]. Absent from older hosts and when nothing is offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_suggestion: Option<SnapProjectSuggestion>,
     /// A pending AskUserQuestion, if the turn is blocked on a choice.
     pub question: Option<String>,
     /// The options for a pending AskUserQuestion (tappable buttons on the page).
@@ -799,6 +815,7 @@ impl Default for Snapshot {
             queued: Vec::new(),
             permission_prompt: None,
             permission_suggestion: None,
+            project_suggestion: None,
             question: None,
             question_options: Vec::new(),
             question_allow_other: false,
@@ -922,6 +939,13 @@ pub enum RemoteInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         scope: Option<String>,
     },
+    /// Accept the snapshot's `project_suggestion`: re-root the session into that repository, as
+    /// `/project` does. `path` echoes the suggestion the client rendered; one that no longer
+    /// matches (the offer changed or was already answered) is dropped with a note.
+    ProjectMove { path: String },
+    /// Decline the snapshot's `project_suggestion`: it is not offered again for that repository in
+    /// this session. `path` echoes the suggestion as on [`RemoteInput::ProjectMove`].
+    ProjectDismiss { path: String },
     /// Answer a pending AskUserQuestion with a free-text line (a number picks an option). `seq`
     /// as on [`RemoteInput::Allow`].
     Answer { text: String, seq: u64 },
@@ -3938,5 +3962,36 @@ mod tests {
         let v = serde_json::to_value(&snap).unwrap();
         assert_eq!(v["permission_suggestion"]["rule"], "cargo test *");
         assert_eq!(v["permission_suggestion"]["allows"], 3);
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_project_suggestion_only_when_there_is_one() {
+        let mut snap = Snapshot::default();
+        assert!(serde_json::to_value(&snap)
+            .unwrap()
+            .get("project_suggestion")
+            .is_none());
+        snap.project_suggestion = Some(SnapProjectSuggestion {
+            path: "/home/u/code/forge".into(),
+            name: "forge".into(),
+            calls: 3,
+        });
+        let v = serde_json::to_value(&snap).unwrap();
+        assert_eq!(v["project_suggestion"]["path"], "/home/u/code/forge");
+        assert_eq!(v["project_suggestion"]["name"], "forge");
+        assert_eq!(v["project_suggestion"]["calls"], 3);
+    }
+
+    #[test]
+    fn project_offer_answers_parse() {
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"project_move","path":"/p"}"#).unwrap(),
+            RemoteInput::ProjectMove { path: "/p".into() }
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"project_dismiss","path":"/p"}"#)
+                .unwrap(),
+            RemoteInput::ProjectDismiss { path: "/p".into() }
+        );
     }
 }

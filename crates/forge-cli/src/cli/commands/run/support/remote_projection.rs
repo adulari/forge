@@ -134,6 +134,13 @@ pub(crate) fn build_snapshot_frame(
         queued: view.queued,
         permission_prompt: view.permission_prompt,
         permission_suggestion: view.permission_suggestion,
+        project_suggestion: view
+            .project_suggestion
+            .map(|s| remote::SnapProjectSuggestion {
+                path: s.path.display().to_string(),
+                name: s.name,
+                calls: s.calls,
+            }),
         question: view.question,
         question_options: view
             .question_options

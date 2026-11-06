@@ -357,6 +357,32 @@ pub(super) fn project_offer_key(session: &SharedSession, app: &mut App, key: Key
     }
 }
 
+/// A phone's answer to the card, for a TUI host with `/remote` on. False when `path` is not the
+/// repository currently offered.
+pub(super) fn project_offer_remote(
+    session: &SharedSession,
+    app: &mut App,
+    path: &str,
+    accept: bool,
+) -> bool {
+    let current = app
+        .project_offer
+        .suggestion()
+        .is_some_and(|offer| offer.path == Path::new(path));
+    if !current {
+        return false;
+    }
+    project_offer_key(
+        session,
+        app,
+        if accept {
+            KeyKind::Char('m')
+        } else {
+            KeyKind::Char('d')
+        },
+    )
+}
+
 fn go_home(session: &SharedSession, app: &mut App) {
     match project_ops::home_dir() {
         Ok(dir) => switch_project(session, app, &dir, "Home"),

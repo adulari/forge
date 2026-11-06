@@ -488,6 +488,11 @@ async fn drive_session(
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
     let mut app = App::default();
     app.transcript_follow = true;
+    let workspace_binding = {
+        let s = session.lock().await;
+        app.watch_git_location(s.workspace_root().to_path_buf());
+        s.workspace_binding()
+    };
     {
         let s = session.lock().await;
         app.temper = s.temper().label().to_string();
@@ -654,6 +659,13 @@ async fn drive_session(
             st.app.set_queued(&st.queued_prompts);
             if !st.busy {
                 break;
+            }
+        }
+        // The workspace moves under a session (a worktree switch, the project move below); the
+        // "working in another repo" detector reads it from the App.
+        if let Ok(workspace) = workspace_binding.read() {
+            if st.app.follow_git_workspace(&workspace) {
+                dirty = true;
             }
         }
         let current_title = title
@@ -829,7 +841,7 @@ async fn drive_session(
             if st.busy {
                 st.app.turn_elapsed_secs = st.busy_since.elapsed().as_secs();
             }
-            let project = project_init.get(std::path::Path::new(&cwd));
+            let project = project_init.get(std::path::Path::new(&st.cwd));
             // A running turn holds the session; keep the last known pin state until it's free.
             if let Ok(s) = st.session.try_lock() {
                 model_pinned = s.pinned_model().is_some();
@@ -839,7 +851,7 @@ async fn drive_session(
                 SnapshotIdentity {
                     session_id: &session_id,
                     title: &current_title,
-                    cwd: &cwd,
+                    cwd: &st.cwd,
                     worktree: worktree.as_deref(),
                     project_initialized: project.initialized,
                     project_init_hint: project.hint,
@@ -2256,6 +2268,101 @@ pub(super) mod tests {
             "a rename is not queued behind the turn"
         );
         state.turn_handle.take().unwrap().abort();
+    }
+
+    /// A Home-scope state that has seen three `cd <repo> &&` shell calls: returns the repo root.
+    async fn state_offering_a_project() -> (DriverState, std::path::PathBuf, tempfile::TempDir) {
+        let mut state = test_driver_state().await;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let repo = home.join("code").join("forge");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        for _ in 0..3 {
+            state.app.project_offer.observe_shell_args(
+                r#"{"command":"cd code/forge && ls"}"#,
+                &home,
+                &home,
+                &forge_tui::project_offer::find_git_root,
+            );
+        }
+        assert_eq!(
+            state.app.remote_snapshot().project_suggestion.unwrap().path,
+            repo
+        );
+        (state, repo, dir)
+    }
+
+    #[tokio::test]
+    async fn accepting_the_project_offer_reroots_the_session() {
+        let (mut state, repo, _dir) = state_offering_a_project().await;
+
+        state
+            .handle_input(remote::RemoteInput::ProjectMove {
+                path: repo.display().to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(state.cwd, repo.display().to_string());
+        assert_eq!(
+            state.session.lock().await.workspace_root(),
+            repo.as_path(),
+            "the session itself moved, not just the label"
+        );
+        assert!(state.app.remote_snapshot().project_suggestion.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stale_or_busy_project_answer_changes_nothing() {
+        let (mut state, repo, _dir) = state_offering_a_project().await;
+        let before = state.cwd.clone();
+
+        state
+            .handle_input(remote::RemoteInput::ProjectMove {
+                path: "/somewhere/else".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(state.cwd, before);
+        assert!(state.app.remote_snapshot().project_suggestion.is_some());
+
+        let turn = state.session.clone().lock_owned().await;
+        state
+            .handle_input(remote::RemoteInput::ProjectMove {
+                path: repo.display().to_string(),
+            })
+            .await
+            .unwrap();
+        drop(turn);
+        assert_eq!(
+            state.cwd, before,
+            "a running turn holds the session; no move"
+        );
+        assert!(state.app.remote_snapshot().project_suggestion.is_some());
+    }
+
+    #[tokio::test]
+    async fn dismissing_the_project_offer_hides_it_for_good() {
+        let (mut state, repo, dir) = state_offering_a_project().await;
+
+        state
+            .handle_input(remote::RemoteInput::ProjectDismiss {
+                path: repo.display().to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(state.app.remote_snapshot().project_suggestion.is_none());
+
+        let home = dir.path().canonicalize().unwrap();
+        for _ in 0..4 {
+            state.app.project_offer.observe_shell_args(
+                r#"{"command":"cd code/forge && ls"}"#,
+                &home,
+                &home,
+                &forge_tui::project_offer::find_git_root,
+            );
+        }
+        assert!(state.app.remote_snapshot().project_suggestion.is_none());
     }
 
     #[tokio::test]

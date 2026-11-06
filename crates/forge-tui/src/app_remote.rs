@@ -125,6 +125,11 @@ impl App {
             } else {
                 self.interaction_ui.suggestion.clone()
             },
+            project_suggestion: self
+                .project_offer
+                .suggestion()
+                .filter(|_| !self.busy)
+                .cloned(),
             question: self.question_prompt.clone(),
             question_options,
             question_allow_other,
@@ -746,6 +751,9 @@ pub struct RemoteSnapshot {
     pub permission_prompt: Option<String>,
     /// The standing rule the pending permission prompt offers, if any (approvals learn).
     pub permission_suggestion: Option<crate::RuleSuggestion>,
+    /// The repository this Home-scope session keeps working in, offered as a one-tap move. Only
+    /// while idle: moving waits for the session lock, which a running turn holds.
+    pub project_suggestion: Option<crate::project_offer::Suggestion>,
     pub question: Option<String>,
     pub question_options: Vec<crate::QChoice>,
     pub question_allow_other: bool,
