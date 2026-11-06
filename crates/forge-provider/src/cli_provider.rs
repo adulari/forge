@@ -2345,7 +2345,12 @@ impl CliProvider {
             terminate(&mut child, pgid).await;
             let stderr_text = err_task.await.unwrap_or_default();
             let evidence = in_band_error.unwrap_or_default();
-            credentials::note_unauthenticated(self.kind, &evidence);
+            // Deliberately no `note_unauthenticated` here: a mid-turn 401/403 can be transient, and
+            // the process-lifetime verdict would outlive the user running the hinted login command.
+            tracing::debug!(
+                "{} turn hit a login failure: {evidence}",
+                self.kind.prefix()
+            );
             return Err(ProviderError::Auth(format!(
                 "{evidence}{}",
                 stderr_suffix_for(&self.binary, &stderr_text)
@@ -7869,6 +7874,34 @@ fi
             took < Duration::from_secs(3),
             "took {took:?}; the fake retries for 8s"
         );
+    }
+
+    /// The fast fail names the login command; running it must work without a daemon restart, so
+    /// the turn path may not leave a process-lifetime "logged out" verdict behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_mid_turn_login_failure_does_not_unroute_the_bridge() {
+        let _guard = credentials::test_guard();
+        credentials::reset_live_verdicts();
+        let kind = CliKind::Antigravity;
+        let line =
+            "Please sign in to view available models. Launch the CLI without arguments to sign in.";
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (err, _) = rt.block_on(logged_out_verdict(
+            kind,
+            "agy-cli::gemini-3.1-pro",
+            &retry_script(line),
+        ));
+        assert_login_hint(&err, "agy login");
+        assert_ne!(
+            credentials::credentials(kind),
+            credentials::CliCredentials::Absent,
+            "the next call after the user logs in must reach the CLI again"
+        );
+        credentials::reset_live_verdicts();
     }
 
     /// The same shape for an OVERLOAD must stay a patient retry: only a rejected credential is a
