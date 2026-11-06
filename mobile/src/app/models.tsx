@@ -1,3 +1,4 @@
+import { contextLabel, modelAccess } from "../lib/modelMeta";
 import { Cpu, Eye, EyeOff, Star } from "lucide-react-native";
 import { PageHeader } from "../components/ds/PageHeader";
 import React, { memo, useCallback, useMemo, useState } from "react";
@@ -23,7 +24,6 @@ type ProviderModel = { provider: string; model: ModelRow };
 type ModelListItem = { kind: "tier"; tier: Tier; count: number } | { kind: "model"; row: ProviderModel } | { kind: "hidden"; entry: string };
 const retryLabel = (until: number) => `retry ${new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(new Date(until * 1000))}`;
 const tierFor = (model: ModelRow): Tier => model.tier === "complex" || model.tier === "standard" || model.tier === "trivial" ? model.tier : "all";
-const contextLabel = (value: number | null | undefined) => value == null ? null : new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 
 const ModelRowItem = memo(function ModelRowItem({ row, favorite, onFavorite, onHide }: { row: ProviderModel; favorite: boolean; onFavorite: () => void; onHide: () => void }) {
   const tokens = useTokens();
@@ -33,7 +33,7 @@ const ModelRowItem = memo(function ModelRowItem({ row, favorite, onFavorite, onH
   // Prototype meta line (mobile.dc.html Models): LEFT `provider · access [· frontier]`,
   // RIGHT `IQ 74.2 · code 76.8 · 200k` — never the full model id (that's what made rows
   // truncate into unreadable "…" soup).
-  const access = model.subscription ? "subscription" : model.free ? "free" : "api";
+  const access = modelAccess(model);
   const left = [provider, runtimeLabel(row).toLowerCase(), access === "free" ? "free" : null, model.frontier ? "frontier" : null].filter(Boolean).join(" · ");
   const benchmark = model.benchmark_intelligence == null ? null : `IQ ${model.benchmark_intelligence.toFixed(1)} · code ${model.benchmark_coding?.toFixed(1) ?? "—"}`;
   const right = [benchmark, contextLabel(model.context_window)].filter(Boolean).join(" · ");
