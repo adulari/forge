@@ -18,6 +18,9 @@ export const SESSIONS_RELAY_POLL_MS = 15_000;
 
 /** How often a host that is not the active one is polled just to notice waiting sessions. */
 export const OTHER_HOST_WATCH_POLL_MS = 15_000;
+/** Other hosts' poll while none of their sessions is busy or waiting: an idle session cannot start
+ * waiting without a new prompt, so the fast poll would only spend battery and relay traffic. */
+export const OTHER_HOST_IDLE_POLL_MS = 60_000;
 
 export interface RefetchPolicy {
   /** `"always"` ignores staleTime — every mount goes to the network. */
