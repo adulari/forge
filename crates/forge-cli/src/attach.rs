@@ -110,12 +110,21 @@ struct ClientSnapshot {
     /// The worktree's background copy + `setup`, when the daemon is provisioning one.
     #[serde(default)]
     worktree_setup: Option<ClientSetup>,
+    /// The rolling output of the foreground tool call in flight, when the daemon reports one.
+    #[serde(default)]
+    live_tail: Option<ClientLiveTail>,
     /// Monotonic server snapshot revision. Replayed frames can race a live broadcast during the
     /// WebSocket handshake, so the client must discard duplicate/out-of-order revisions.
     #[serde(default)]
     revision: Option<u64>,
     #[serde(default)]
     closed: bool,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct ClientLiveTail {
+    #[serde(default)]
+    lines: Vec<String>,
 }
 
 /// Whether the question being asked wants a secret (an MCP server's token or password).
@@ -568,6 +577,7 @@ struct Renderer {
     shown_prompt_seq: Option<u64>,
     was_busy: bool,
     shown_setup: Option<ClientSetup>,
+    printed_live: Vec<String>,
 }
 
 impl Renderer {
@@ -599,6 +609,14 @@ impl Renderer {
             println!("{l}");
         }
         self.printed_transcript = snap.transcript.clone();
+
+        // A running command's rolling tail: print each line once as it arrives, indented so it
+        // reads as the call's output; the finished result follows in the transcript as usual.
+        let live = snap.live_tail.as_ref().map_or(&[][..], |t| &t.lines[..]);
+        for l in new_suffix(&self.printed_live, live) {
+            println!("  │ {l}");
+        }
+        self.printed_live = live.to_vec();
 
         if snap.worktree_setup != self.shown_setup {
             if let Some(setup) = &snap.worktree_setup {
@@ -843,6 +861,30 @@ mod tests {
         assert_eq!(new_suffix(&prev, &next3), next3);
         // Nothing printed yet: everything is new.
         assert_eq!(new_suffix(&[], &next), next);
+    }
+
+    #[test]
+    fn live_tail_lines_print_once_and_restart_after_the_call_ends() {
+        let mut renderer = Renderer::default();
+        let mut pending = Pending::None;
+        let frame = |revision, lines: &[&str]| ClientSnapshot {
+            revision: Some(revision),
+            live_tail: Some(ClientLiveTail {
+                lines: lines.iter().map(|l| (*l).to_string()).collect(),
+            }),
+            ..ClientSnapshot::default()
+        };
+        renderer.render(&frame(1, &["a", "b"]), &mut pending);
+        renderer.render(&frame(2, &["a", "b", "c"]), &mut pending);
+        assert_eq!(renderer.printed_live, vec!["a", "b", "c"]);
+        renderer.render(
+            &ClientSnapshot {
+                revision: Some(3),
+                ..ClientSnapshot::default()
+            },
+            &mut pending,
+        );
+        assert!(renderer.printed_live.is_empty());
     }
 
     #[test]
