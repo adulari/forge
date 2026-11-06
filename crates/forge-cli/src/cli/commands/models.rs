@@ -1096,9 +1096,22 @@ mod discovery_status_tests {
             provider: "openai".into(),
             kind: DiscoveryStatusKind::Failed,
             models: 0,
+            detail: Some("connection reset by peer".into()),
+        };
+        assert!(
+            discovery_status_line(&failed).contains("discovery failed: connection reset by peer")
+        );
+
+        // A refused key is a verdict the user can act on, not a generic discovery failure.
+        let refused = ProviderDiscoveryStatus {
+            provider: "openai".into(),
+            kind: DiscoveryStatusKind::Failed,
+            models: 0,
             detail: Some("unauthorized".into()),
         };
-        assert!(discovery_status_line(&failed).contains("discovery failed: unauthorized"));
+        let line = discovery_status_line(&refused);
+        assert!(!line.contains("discovery failed"), "{line}");
+        assert!(line.contains("`forge auth openai` to replace"), "{line}");
 
         let timed_out = ProviderDiscoveryStatus {
             provider: "nim".into(),
