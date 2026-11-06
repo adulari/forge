@@ -5,11 +5,11 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use sysinfo::{Pid, ProcessesToUpdate, System};
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tracing::{debug, warn};
 
-use crate::rpc::{read_msg, write_msg};
+use crate::rpc::{read_msg, write_msg, FrameReader};
 use crate::types::{Diagnostic, DiagnosticSeverity};
 
 /// How much of the server's stderr is retained (the tail — the last thing it said before dying).
@@ -24,7 +24,7 @@ const RESOURCE_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 pub struct LspServer {
     _child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: FrameReader<ChildStdout>,
     next_id: u64,
     documents: HashMap<String, i32>,
     /// Hash of the text last sent for each open document, so nav can tell a changed file from an
@@ -77,7 +77,7 @@ impl LspServer {
             .kill_on_drop(true)
             .spawn()?;
         let stdin = child.stdin.take().expect("stdin piped");
-        let stdout = BufReader::new(child.stdout.take().expect("stdout piped"));
+        let stdout = FrameReader::new(child.stdout.take().expect("stdout piped"));
         let stderr = Arc::new(Mutex::new(String::new()));
         let memory_guard = child.id().and_then(|pid| {
             memory_limit_bytes.map(|limit| {
