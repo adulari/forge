@@ -129,6 +129,7 @@ import {
   type DiagnosticsResponse,
   getDiagnostics,
   getIdentity,
+  reclaimHostSpace,
   type AccountSyncStatus,
   getAccountSync,
   updateAccountSync,
@@ -186,6 +187,7 @@ import {
 import { historyPageSize } from "./historyPaging";
 import { formatCwd } from "../theme/typography";
 import { usageRefetchInterval, useDesktopShellPrefs } from "./desktopShellPrefs";
+import type { HostPressure } from "./hostPressure";
 
 // FleetWatcher receives immediate daemon invalidations over /ws/fleet. This slow poll is only a
 // recovery net for proxies/platforms that cannot keep a WebSocket alive.
@@ -247,6 +249,7 @@ function keys(baseUrl: string | null) {
     diagnostics: ["diagnostics", baseUrl] as const,
     daemonUpdate: ["daemon-update", baseUrl] as const,
     identity: ["identity", baseUrl] as const,
+    hostPressure: ["host-pressure", baseUrl] as const,
   };
 }
 
@@ -300,6 +303,34 @@ export function useIdentityUpdateHint(enabled = true) {
     staleTime: SIX_HOURS_MS,
     refetchInterval: SIX_HOURS_MS,
     retry: false,
+  });
+}
+
+const PRESSURE_REFRESH_MS = 60_000;
+
+/** The host's disk and memory pressure, from `/api/identity` (bridged, so a relayed phone sees it). */
+export function useHostPressure(enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery<HostPressure | null>({
+    queryKey: keys(baseUrl).hostPressure,
+    queryFn: async () => (await getIdentity(baseUrl as string)).pressure ?? null,
+    enabled: enabled && baseUrl != null,
+    staleTime: PRESSURE_REFRESH_MS / 2,
+    refetchInterval: PRESSURE_REFRESH_MS,
+    retry: false,
+  });
+}
+
+/** Reclaim worktree space on the host; direct connections only (see `canReclaimFrom`). */
+export function useReclaimHostSpace() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (cwd?: string) => reclaimHostSpace(baseUrl as string, cwd),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).hostPressure });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).diagnostics });
+    },
   });
 }
 

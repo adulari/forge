@@ -62,7 +62,15 @@ import { isKnownGitRepo, lastProjectStorageKey } from "../lib/projectSelection";
 import { useHomeProject } from "../lib/queriesProjects";
 import { rememberableProject } from "../lib/worktreePaths";
 import { transportForBaseUrl } from "../lib/serverTargets";
-import { useCreateSession, useProjects } from "../lib/queries";
+import { useCreateSession, useProjects, useReclaimHostSpace } from "../lib/queries";
+import {
+  canReclaimFrom,
+  createWarning,
+  floorRefusal,
+  reclaimLabel,
+  reclaimResultMessage,
+  RELAY_RECLAIM_HINT,
+} from "../lib/hostPressure";
 import { getSecureItem, setSecureItem } from "../lib/secureStore";
 import { useTheme, useTokens } from "../theme/ThemeProvider";
 import { depthDark, depthLight, gutter, hexToRgba, radii, shadowStyle, space } from "../theme/tokens";
@@ -415,6 +423,8 @@ export default function NewSessionScreen() {
         res = await submit(baseBody);
       }
       if (incomingShareId) void consumeShare(incomingShareId);
+      const lowDisk = createWarning(res.pressure);
+      if (lowDisk) toast.show(lowDisk, { tone: "neutral" });
       if (activeServerId) {
         const project = worktreeMode === "existing" && trimmedCwd ? trimmedCwd : rememberableProject(res.cwd, trimmedCwd);
         void setSecureItem(lastProjectStorageKey(activeServerId), project);
@@ -461,6 +471,18 @@ export default function NewSessionScreen() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
+
+  const refusal = isOfflineHostQueue ? null : floorRefusal(create.error);
+  const reclaimHost = useReclaimHostSpace();
+  const reclaimAndRetry = useCallback(async () => {
+    try {
+      const outcome = await reclaimHost.mutateAsync(cwd.trim() || undefined);
+      create.reset();
+      toast.show(`${reclaimResultMessage(outcome)} Try again.`, { tone: "neutral" });
+    } catch {
+      toast.show("Couldn't reclaim space. Try `forge worktree reclaim` on the host.", { tone: "danger" });
+    }
+  }, [reclaimHost, cwd, create, toast]);
 
   const serverError = isOfflineHostQueue
     ? queueError
@@ -548,6 +570,19 @@ export default function NewSessionScreen() {
         <Text accessibilityRole="alert" style={[typeScale.sub, styles.errorText, { color: tokens.danger }]}>
           {serverError}
         </Text>
+      ) : null}
+      {refusal ? (
+        canReclaimFrom(baseUrl) ? (
+          <Button
+            label={reclaimHost.isPending ? "Reclaiming..." : reclaimLabel(refusal.gate)}
+            variant="secondary"
+            disabled={reclaimHost.isPending}
+            onPress={() => void reclaimAndRetry()}
+            accessibilityLabel="Reclaim worktree space on the host"
+          />
+        ) : (
+          <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{RELAY_RECLAIM_HINT}</Text>
+        )
       ) : null}
       <View style={styles.claudeRow}>
         <Button

@@ -14,6 +14,7 @@ import { noteHostResponse } from "./hostStatus";
 import { tFetch, TWebSocket } from "./transport";
 import type { DaemonUpdateInfo } from "./updateBanner";
 import { offsetChanges } from "./usageActivity";
+import type { HostPressure, ReclaimOutcome, WorktreeGate } from "./hostPressure";
 
 export class ApiError extends Error {
   status: number;
@@ -43,6 +44,8 @@ export interface HostIdentity {
   protocol?: number;
   /** Newest release this daemon has seen when it is newer than the daemon itself. */
   update_available?: string | null;
+  /** Disk and memory pressure on the host; absent from daemons that predate the sampler. */
+  pressure?: HostPressure | null;
 }
 
 export interface DiagnosticsResponse {
@@ -589,6 +592,8 @@ export interface CreateSessionResponse {
   title: string;
   cwd: string;
   worktree: string | null;
+  /** Set when the worktree was created while the host's disk was under its warn threshold. */
+  pressure?: WorktreeGate | null;
 }
 
 export interface ProjectRow {
@@ -867,6 +872,14 @@ export function getProjects(baseUrl: string): Promise<ProjectCatalog> {
 
 export function browseProjects(baseUrl: string, path?: string): Promise<BrowseProjectsResponse> {
   return request(baseUrl, `/api/projects/browse${qs({ path })}`);
+}
+
+/** Free what `forge worktree reclaim --artifacts --yes` would on the host (direct connections only). */
+export function reclaimHostSpace(baseUrl: string, cwd?: string): Promise<ReclaimOutcome> {
+  return request(baseUrl, "/api/host/reclaim", {
+    method: "POST",
+    body: JSON.stringify({ cwd }),
+  });
 }
 
 export function createSession(
