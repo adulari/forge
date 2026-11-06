@@ -88,7 +88,7 @@ impl Store {
         let mut reply = conn.prepare_cached(
             "SELECT substr(content, 1, ?2) FROM message
              WHERE session_id = ?1 AND active = 1 AND role = 'assistant'
-               AND visibility = 'llm' AND TRIM(content) != ''
+               AND visibility != 'llm_only' AND TRIM(content) != ''
              ORDER BY seq DESC LIMIT 1",
         )?;
         for row in &mut rows {
@@ -113,6 +113,31 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_summary_is_the_published_final_answer_not_earlier_narration() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        store.add_message(&sid, 0, Role::User, "go", None).unwrap();
+        store
+            .add_message(
+                &sid,
+                1,
+                Role::Assistant,
+                "Let me inspect the manifest.",
+                None,
+            )
+            .unwrap();
+        // A final answer is stored as a model-facing llm_only row plus the published ui copy.
+        store
+            .add_llm_only_message_full(&sid, 2, Role::Assistant, "Done: added it.", None, &[], None)
+            .unwrap();
+        store
+            .add_ui_note(&sid, 3, Role::Assistant, "Done: added it.")
+            .unwrap();
+        let rows = store.brief_sessions_since(0, 10).unwrap();
+        assert_eq!(rows[0].last_assistant.as_deref(), Some("Done: added it."));
+    }
 
     #[test]
     fn lists_only_sessions_active_since_with_their_tail_and_spend() {
