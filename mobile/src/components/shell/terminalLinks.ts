@@ -65,3 +65,19 @@ export function detectTerminalLinks(text: string): TerminalLinkPart[] {
   if (last < text.length) parts.push(...pathParts(text.slice(last)));
   return parts.length > 0 ? parts : [{ type: "text", text }];
 }
+
+/** What an OSC 8 target opens: web pages in a browser, `file://` URIs in the Files dock. */
+export function osc8Target(uri: string): TerminalLinkTarget | null {
+  if (/^https?:\/\//i.test(uri)) return { kind: "url", url: uri };
+  if (/^file:\/\//i.test(uri)) {
+    // Program output is untrusted: a malformed escape (`%zz`) throws, and this runs in render.
+    let path: string;
+    try {
+      path = decodeURIComponent(uri.replace(/^file:\/\/[^/]*/i, ""));
+    } catch {
+      return null;
+    }
+    return path ? { kind: "path", ref: { path, line: null, column: null } } : null;
+  }
+  return null;
+}
