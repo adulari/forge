@@ -380,7 +380,17 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             clear,
             disable,
             enable,
-        } => models(probe, all, clear, disable, enable).await,
+            report,
+            repo,
+            days,
+            json,
+        } => {
+            if report {
+                crate::cli::commands::models::model_report_cmd(repo, days, json)
+            } else {
+                models(probe, all, clear, disable, enable).await
+            }
+        }
         Command::Mesh {
             prompt,
             json,

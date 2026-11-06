@@ -432,6 +432,34 @@ pub(crate) async fn models(
     Ok(())
 }
 
+/// `forge models --report`: the per-model report card, from local counts only (no discovery, no
+/// network). Benchmark scores come from the cached catalog when there is one.
+pub(crate) fn model_report_cmd(repo: Option<String>, days: u32, json: bool) -> Result<()> {
+    let repo = repo
+        // A repo that no longer exists on disk can still have history, so fall back to the text.
+        .map(|path| {
+            std::fs::canonicalize(&path).map_or(path, |p| p.to_string_lossy().into_owned())
+        });
+    let catalog = load_cached_catalog_aged().map(|(catalog, _, _)| catalog);
+    let store = open_store()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let report = crate::model_report::build(
+        &store,
+        &|model| catalog.as_ref().and_then(|c| c.benchmark_for(model)),
+        days,
+        repo.as_deref(),
+        now,
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", crate::model_report::render(&report));
+    }
+    Ok(())
+}
+
 /// `forge benchmarks [--refresh]` — show measured model scores + catalog coverage (ADR-0011).
 pub(crate) async fn benchmarks_cmd(
     refresh: bool,

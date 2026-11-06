@@ -692,6 +692,21 @@ pub(crate) enum Command {
         /// Remove an entry added by `--disable`, letting the mesh route to it again, then exit.
         #[arg(long, value_name = "MODEL_OR_PROVIDER")]
         enable: Option<String>,
+        /// Print a report card per model: how each one did FOR YOU over the last `--days` days
+        /// (calls, share that completed, failed, failed over, median latency and cost, tool-error
+        /// rate) beside its benchmark score. Reads only counts from the local store, then exits.
+        #[arg(long)]
+        report: bool,
+        /// With `--report`, limit to sessions in a repository (default: the current directory
+        /// when given without a value; omit the flag for all repos).
+        #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = ".", requires = "report")]
+        repo: Option<String>,
+        /// With `--report`, how many trailing days to cover.
+        #[arg(long, default_value_t = 30, requires = "report")]
+        days: u32,
+        /// With `--report`, emit JSON instead of the table.
+        #[arg(long, requires = "report")]
+        json: bool,
     },
     /// Explain how the mesh routes — classification, scored candidates, quota pressure, the
     /// conservation roll, and the final pick. With a PROMPT, explains that prompt; without one,

@@ -98,6 +98,7 @@ mod mcp_agent;
 mod mcp_control;
 mod mcp_serve;
 mod mentions;
+mod model_report;
 mod onboarding;
 mod open_pr_hooks;
 mod ports;

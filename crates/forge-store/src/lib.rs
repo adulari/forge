@@ -38,6 +38,7 @@ mod maintenance;
 mod memory;
 mod migrations;
 mod model_health_store;
+mod model_report_store;
 mod notification_store;
 mod path_evidence_store;
 mod permission_decision_store;
@@ -103,6 +104,7 @@ pub use interrupted_turn_store::{
 };
 pub use maintenance::MaintenanceReport;
 pub use memory::{Memory, MemoryAdded};
+pub use model_report_store::ModelReportRow;
 pub use project_notes_store::{project_key, ProjectNotes, ProjectTodo, ScratchpadSave};
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 pub use transcript_read_store::HistoryFilter;
