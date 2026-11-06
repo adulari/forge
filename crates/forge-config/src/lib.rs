@@ -57,6 +57,7 @@ pub mod oauth;
 mod paths;
 pub mod power;
 pub mod pr;
+pub mod pressure;
 pub mod preview;
 pub mod privacy;
 pub mod project_actions;
@@ -239,6 +240,9 @@ pub struct Config {
     /// Ceilings on what one daemon runs at once (`[host] max_active_sessions` and friends).
     #[serde(default)]
     pub host: host::HostConfig,
+    /// Disk and memory pressure thresholds for the daemon's host (`[pressure]`).
+    #[serde(default)]
+    pub pressure: pressure::PressureConfig,
     /// Which shell terminal tabs and the agent's shell tool use (`[terminal]`).
     #[serde(default)]
     pub terminal: terminal::TerminalConfig,
@@ -2971,6 +2975,7 @@ impl Default for Config {
             preview: preview::PreviewConfig::default(),
             power: power::PowerConfig::default(),
             host: host::HostConfig::default(),
+            pressure: pressure::PressureConfig::default(),
             terminal: terminal::TerminalConfig::default(),
             actions: Vec::new(),
             codemode: codemode::CodemodeConfig::default(),

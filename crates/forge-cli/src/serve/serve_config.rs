@@ -94,6 +94,7 @@ const DIRECT_ONLY_SECTIONS: &[&str] = &[
     "codemode",
     "preview",
     "host",
+    "pressure",
     "pr",
     "self_mcp",
     "anywhere",

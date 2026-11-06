@@ -721,6 +721,7 @@ pub(crate) async fn serve_cmd(
     crate::push_tool::install_daemon_sink(crate::push_tool::channels_for(&state, true));
     crate::serve_control::install(&state);
     crate::power::start(registry.clone());
+    crate::host_pressure::start(state.clone());
     crate::host_caps::install_helper_limit();
     let app = daemon_router(state.clone());
 
@@ -1163,6 +1164,9 @@ struct HostIdentity {
     protocol: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     update_available: Option<String>,
+    /// Disk and memory pressure on this host; absent before the first sample or when sampling is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pressure: Option<crate::host_pressure::Pressure>,
 }
 
 async fn identity() -> axum::Json<HostIdentity> {
@@ -1171,6 +1175,7 @@ async fn identity() -> axum::Json<HostIdentity> {
         version: env!("CARGO_PKG_VERSION"),
         protocol: crate::remote::PROTOCOL_VERSION,
         update_available: crate::update_state::cached_offer(),
+        pressure: crate::host_pressure::current(),
     })
 }
 

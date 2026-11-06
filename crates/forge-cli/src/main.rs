@@ -87,6 +87,7 @@ mod fleet_peers;
 mod host_add;
 mod host_caps;
 mod host_lock;
+mod host_pressure;
 mod hosts;
 mod ide_host;
 mod image_input;
