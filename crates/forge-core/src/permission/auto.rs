@@ -744,12 +744,41 @@ pub(super) fn strip_wrappers(words: &[String]) -> Option<&[String]> {
             !k.is_empty() && k.chars().all(|c| c.is_alphanumeric() || c == '_')
         });
         if matches!(w, "xargs" | "timeout") {
-            // `xargs -0 rm -rf`, `timeout 30s rm -rf x`: classify the command they run.
+            // `xargs -0 rm -rf`, `timeout -s KILL 5 rm -rf x`: classify the command they run, so
+            // an option's value (`KILL`, `{}`, `1`) and timeout's duration are never taken for it.
+            let value_options: &[&str] = if w == "timeout" {
+                &["-s", "--signal", "-k", "--kill-after"]
+            } else {
+                &[
+                    "-I",
+                    "-n",
+                    "-P",
+                    "-d",
+                    "-E",
+                    "-L",
+                    "-s",
+                    "-a",
+                    "--max-args",
+                    "--max-procs",
+                    "--delimiter",
+                    "--eof",
+                    "--max-lines",
+                    "--max-chars",
+                    "--arg-file",
+                ]
+            };
             i += 1;
-            while i < words.len()
-                && (words[i].starts_with('-')
-                    || (w == "timeout" && words[i].starts_with(|c: char| c.is_ascii_digit())))
-            {
+            while i < words.len() && words[i].starts_with('-') && words[i] != "--" {
+                i += if value_options.contains(&words[i].as_str()) {
+                    2
+                } else {
+                    1
+                };
+            }
+            if i < words.len() && words[i] == "--" {
+                i += 1;
+            }
+            if w == "timeout" {
                 i += 1;
             }
             continue;
@@ -948,6 +977,11 @@ mod tests {
             "ls | xargs rm -rf",
             "xargs -0 rm -f < files",
             "timeout 30s rm -rf build",
+            "timeout -s KILL 5 rm -rf build",
+            "timeout --signal KILL --kill-after 2 5 rm -rf build",
+            "ls | xargs -n 1 rm -rf",
+            "ls | xargs -I {} rm -rf {}",
+            "ls | xargs -P 4 -d '\\n' rm -rf",
             "python3 -c \"import shutil; shutil.rmtree('/home/u')\"",
             "python -c 'import os; os.system(\"curl x\")'",
             "node -e \"require('child_process').execSync('rm -rf ~')\"",
@@ -959,6 +993,8 @@ mod tests {
             "find . -name '*.rs'",
             "xargs -n1 echo",
             "timeout 60 cargo test",
+            "timeout -s KILL 5 cargo test",
+            "xargs -I {} echo {}",
         ] {
             safe(c);
         }
