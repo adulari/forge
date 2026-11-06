@@ -542,7 +542,23 @@ pub(crate) async fn daemon_checks() -> Vec<Check> {
 
     // Installed and claiming to run is not the same as serving: a daemon that is up but whose
     // listener never bound is invisible to every client, which is the failure a state word misses.
-    let port = crate::cli::commands::service::resolved_port(None);
+    // The port the daemon actually uses: `forge service install --port N` bakes it into the
+    // unit, and a running daemon records it in serve-state.json. Config is only the fallback.
+    #[cfg(target_os = "linux")]
+    let unit_port = crate::cli::commands::service::installed_unit_text()
+        .as_deref()
+        .and_then(crate::doctor_daemon::unit_port);
+    #[cfg(not(target_os = "linux"))]
+    let unit_port: Option<u16> = None;
+    let port = unit_port
+        .or_else(|| {
+            crate::serve::read_state()
+                .ok()
+                .flatten()
+                .filter(|state| state.process_is_alive())
+                .map(|state| state.port)
+        })
+        .unwrap_or_else(|| crate::cli::commands::service::resolved_port(None));
     let responding = crate::cli::commands::service::probe_port(port);
     out.push(match (status.running, responding) {
         (true, true) => check(Status::Ok, "daemon port", format!("{port} responding"), None),
