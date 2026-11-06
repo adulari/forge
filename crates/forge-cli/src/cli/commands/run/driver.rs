@@ -586,6 +586,7 @@ async fn drive_session(
 
     let mut last_snap: Option<remote::Snapshot> = None;
     let mut stream_pacer = remote::StreamPacer::default();
+    let mut pending_mode: Option<ModeChange> = None;
     let mut project_init = forge_config::ProjectInitCache::default();
     let mut revision: u64 = 0;
     let mut child_links = crate::serve_agents::ChildLinks::default();
@@ -717,12 +718,27 @@ async fn drive_session(
                 st.app.note(&format!("⚠ {e}"));
             }
         }
+        // A running turn holds the session for its whole length; awaiting the lock here froze this
+        // loop (no input, no approvals, no snapshots) until the turn ended, and a turn parked on a
+        // permission prompt never ends without one. A change waits here and applies once the
+        // session is free; a newer change replaces an older one, which is answered at once.
         while let Ok(change) = mode_rx.try_recv() {
-            let label = st.session.lock().await.set_temper(change.mode).label();
-            st.app.set_temper(label);
-            dirty = true;
-            active = true;
-            let _ = change.reply.send(());
+            if let Some(older) = pending_mode.replace(change) {
+                let _ = older.reply.send(());
+            }
+        }
+        if let Some(change) = pending_mode.take() {
+            match st.session.try_lock() {
+                Ok(mut session) => {
+                    let label = session.set_temper(change.mode).label();
+                    drop(session);
+                    st.app.set_temper(label);
+                    dirty = true;
+                    active = true;
+                    let _ = change.reply.send(());
+                }
+                Err(_) => pending_mode = Some(change),
+            }
         }
         // 3. Keys queued by the drain (named keys + synthesized overlay commits) through the
         //    headless modal router — same precedence as the TUI key loop.
