@@ -9,6 +9,7 @@ import type { ColorTokens } from "../../theme/tokens";
 import { monoFamily, type } from "../../theme/typography";
 import { useTheme } from "../../theme/ThemeProvider";
 import { safeExternalHref } from "../../lib/linkSafety";
+import { EMPTY_INCREMENTAL, parseBlocksIncremental } from "../../lib/markdownIncremental";
 import { parseBlocks, type Block, type InlineNode } from "../../lib/markdownParse";
 import { CodeBlock } from "./CodeBlock";
 import { MarkdownImage, MarkdownMediaProvider } from "./MarkdownMedia";
@@ -106,12 +107,26 @@ export interface MarkdownProps {
   style?: StyleProp<TextStyle>;
   /** Also turn `@path` mentions into chips: set for the user's own prompts. */
   mentions?: boolean;
+  /** `content` grows at its end between renders (a reply being written): parse only the part
+   * after the last finished block instead of the whole text each time. */
+  incremental?: boolean;
 }
 
 /** What a block renders from. A streamed reply re-parses on every frame; blocks whose text did
  * not change keep their element (a finished code block is not re-highlighted per token), so only
  * the block being written re-renders. */
+const signatures = new WeakMap<Block, string>();
+
 function blockSignature(block: Block): string {
+  let signature = signatures.get(block);
+  if (signature === undefined) {
+    signature = computeSignature(block);
+    signatures.set(block, signature);
+  }
+  return signature;
+}
+
+function computeSignature(block: Block): string {
   switch (block.kind) {
     case "heading":
       return `h${block.level}:${block.text}`;
@@ -244,8 +259,14 @@ const MarkdownBlock = React.memo(
   (prev, next) => prev.signature === next.signature && prev.style === next.style && prev.blockKey === next.blockKey,
 );
 
-export function Markdown({ content, style, mentions = false }: MarkdownProps) {
-  const blocks = React.useMemo(() => parseBlocks(content, mentions), [content, mentions]);
+export function Markdown({ content, style, mentions = false, incremental = false }: MarkdownProps) {
+  const [settled] = React.useState(() => ({ state: EMPTY_INCREMENTAL }));
+  const blocks = React.useMemo(() => {
+    if (!incremental) return parseBlocks(content, mentions);
+    const out = parseBlocksIncremental(content, mentions, settled.state);
+    settled.state = out.state;
+    return out.blocks;
+  }, [content, mentions, incremental, settled]);
   return (
     <MarkdownMediaProvider>
       <View>
