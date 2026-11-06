@@ -12,6 +12,46 @@ mod permission_hooks;
 mod runtime_allow;
 mod tool_hooks;
 
+/// How often a running call's live tail is sampled for the UI.
+const LIVE_TAIL_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+/// A silent command still re-reports at this cadence so the elapsed clock keeps moving.
+const LIVE_TAIL_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Drive `fut` (a foreground tool call) while sampling its rolling output tail to the presenter.
+/// The deltas are UI-only; `fut`'s result is returned untouched. A free function so the caller can
+/// lend only its presenter field while the tool future borrows the registry.
+async fn stream_live_tail<F: std::future::Future>(
+    presenter: &mut dyn Presenter,
+    name: &str,
+    fut: F,
+) -> F::Output {
+    let tail = forge_tools::LiveTail::default();
+    let fut = forge_tools::scope_live_tail(tail.clone(), fut);
+    tokio::pin!(fut);
+    let started = std::time::Instant::now();
+    let mut ticker = tokio::time::interval(LIVE_TAIL_TICK);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+    let (mut last_version, mut last_emit) = (0, started);
+    loop {
+        tokio::select! {
+            out = &mut fut => return out,
+            _ = ticker.tick() => {
+                let (lines, version) = tail.sample();
+                if version == last_version && last_emit.elapsed() < LIVE_TAIL_HEARTBEAT {
+                    continue;
+                }
+                (last_version, last_emit) = (version, std::time::Instant::now());
+                presenter.emit(PresenterEvent::ToolOutputDelta {
+                    name: name.to_string(),
+                    lines,
+                    elapsed_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+        }
+    }
+}
+
 impl Session {
     /// Steer main-checkout paths into a linked worktree session and compute the roots this call
     /// may touch: the configured extras, plus the main checkout and temp dir for read-only tools.
@@ -611,22 +651,29 @@ impl Session {
                 unreachable!("tool `{}` resolved above", call.name)
             };
             let run = self.evidence_scope(tool.run_full(&effective_args));
-            let outcome = if call.name == "shell"
-                && (effective_args
-                    .get("background")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                    || forge_tools::harness::shell_autobackground())
-            {
-                // Only a job THIS call starts reports its exit to this session (see job_wake.rs).
-                let wake = self.job_wake.clone();
-                forge_tools::scope_job_exit_sink(
-                    std::sync::Arc::new(move |exit| wake.push(&exit)),
-                    run,
-                )
-                .await
+            let wake = self.job_wake.clone();
+            let exec = async {
+                if call.name == "shell"
+                    && (effective_args
+                        .get("background")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                        || forge_tools::harness::shell_autobackground())
+                {
+                    // Only a job THIS call starts reports its exit to this session (see job_wake.rs).
+                    forge_tools::scope_job_exit_sink(
+                        std::sync::Arc::new(move |exit| wake.push(&exit)),
+                        run,
+                    )
+                    .await
+                } else {
+                    run.await
+                }
+            };
+            let outcome = if call.name == "shell" {
+                stream_live_tail(self.presenter.as_mut(), &call.name, exec).await
             } else {
-                run.await
+                exec.await
             };
             match outcome {
                 Ok(out) => {

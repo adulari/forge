@@ -86,9 +86,10 @@ pub use open_pr::{
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
 pub use shell::{
-    job_tail, job_views, reap_orphan_tunnels, scope_job_exit_sink, set_preview_settings, stop_job,
-    JobExit, JobExitSink, JobView, PreviewSettings, ReapReason, ReapReport, ReapedTunnel,
-    RtkRewriter, ShellJobTool, ShellTool, TunnelRecord, JOB_HINT,
+    job_tail, job_views, reap_orphan_tunnels, scope_job_exit_sink, scope_live_tail,
+    set_preview_settings, stop_job, JobExit, JobExitSink, JobView, LiveTail, PreviewSettings,
+    ReapReason, ReapReport, ReapedTunnel, RtkRewriter, ShellJobTool, ShellTool, TunnelRecord,
+    JOB_HINT, LIVE_TAIL_LINES,
 };
 pub use web::{
     Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,

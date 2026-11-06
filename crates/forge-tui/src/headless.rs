@@ -202,6 +202,8 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::ToolStart { name, args } => {
                 out!("  ↳ {name}({})", clean(&args));
             }
+            // Live samples are for interactive cards; a script reads the final result line.
+            PresenterEvent::ToolOutputDelta { .. } => {}
             PresenterEvent::ToolResult {
                 name, ok, summary, ..
             } => {

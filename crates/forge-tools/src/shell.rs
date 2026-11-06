@@ -44,7 +44,9 @@ mod group;
 mod inline;
 mod job_view;
 mod job_wait;
+mod live;
 pub use job_view::{job_tail, job_views, stop_job, JobView};
+pub use live::{scope_live_tail, LiveTail, LIVE_TAIL_LINES};
 mod poll;
 mod proc_util;
 mod wait;
@@ -483,8 +485,9 @@ async fn run_command_inner(
     };
     let out_capture = SharedCapture::default();
     let err_capture = SharedCapture::default();
-    let out_task = tokio::spawn(read_capped(stdout, out_capture.clone()));
-    let err_task = tokio::spawn(read_capped(stderr, err_capture.clone()));
+    let live = live::current();
+    let out_task = tokio::spawn(read_capped(stdout, out_capture.clone(), live.clone()));
+    let err_task = tokio::spawn(read_capped(stderr, err_capture.clone(), live));
 
     let (status_line, exit_code, timed_out) =
         match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait()).await {

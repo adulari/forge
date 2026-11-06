@@ -979,3 +979,47 @@ fn statusline_command_without_output_reserves_no_row() {
         .insert("x".to_string(), String::new());
     assert_eq!(crate::app::render::statusline_height(&app), h);
 }
+
+#[test]
+fn a_running_shell_card_shows_its_live_tail_until_the_result_lands() {
+    let mut app = App {
+        fullscreen: true,
+        ..App::default()
+    };
+    app.on_turn_start();
+    app.busy = true;
+    app.apply(PresenterEvent::ToolStart {
+        name: "shell".into(),
+        args: r#"{"command":"cargo test"}"#.into(),
+    });
+    app.apply(PresenterEvent::ToolOutputDelta {
+        name: "shell".into(),
+        lines: vec!["running 4 tests".into(), "test a ... ok".into()],
+        elapsed_ms: 1500,
+    });
+    let card_text = |app: &App| {
+        let card = app.tool_cards.last().unwrap();
+        crate::app::tool_cards::card_lines(card, 120)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let text = card_text(&app);
+    assert!(text.contains("running 4 tests"), "{text}");
+    assert!(text.contains("test a ... ok"), "{text}");
+
+    app.apply(PresenterEvent::ToolResult {
+        name: "shell".into(),
+        ok: true,
+        summary: "exit 0".into(),
+        detail: None,
+    });
+    let text = card_text(&app);
+    assert!(!text.contains("running 4 tests"), "{text}");
+}

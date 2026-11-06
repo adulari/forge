@@ -5158,6 +5158,9 @@ mod tests {
     #[path = "shell_batching.rs"]
     mod shell_batching_tests;
 
+    #[path = "shell_live_tail.rs"]
+    mod shell_live_tail_tests;
+
     #[path = "live_cost.rs"]
     mod live_cost_tests;
 

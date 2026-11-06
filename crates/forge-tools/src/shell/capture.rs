@@ -59,12 +59,21 @@ pub(super) fn lock(capture: &SharedCapture) -> std::sync::MutexGuard<'_, Capture
 }
 
 /// Read an async stream to EOF into `into`.
-pub(super) async fn read_capped<R: AsyncRead + Unpin>(mut r: R, into: SharedCapture) {
+pub(super) async fn read_capped<R: AsyncRead + Unpin>(
+    mut r: R,
+    into: SharedCapture,
+    live: Option<super::live::LiveTail>,
+) {
     let mut chunk = [0u8; 8192];
     loop {
         match r.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
-            Ok(n) => lock(&into).push(&chunk[..n]),
+            Ok(n) => {
+                lock(&into).push(&chunk[..n]);
+                if let Some(live) = &live {
+                    live.push(&chunk[..n]);
+                }
+            }
         }
     }
 }

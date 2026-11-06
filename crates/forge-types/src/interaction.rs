@@ -208,6 +208,14 @@ pub enum PresenterEvent {
         name: String,
         args: String,
     },
+    /// A rolling tail of a foreground tool call's live output (the last few ANSI-stripped lines)
+    /// plus how long it has run, sampled a few times a second while the call is in flight. UI
+    /// only: never reaches the model's context or the store. The call's `ToolResult` supersedes it.
+    ToolOutputDelta {
+        name: String,
+        lines: Vec<String>,
+        elapsed_ms: u64,
+    },
     ToolResult {
         name: String,
         ok: bool,
