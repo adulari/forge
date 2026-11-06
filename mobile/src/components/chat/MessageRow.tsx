@@ -12,6 +12,7 @@ import { isHarnessNudge } from "../../lib/harnessNudge";
 import { formatAnyHarnessNotice, isAnyHarnessNotice } from "../../lib/harnessNotice";
 import { isJobNotice } from "../../lib/jobNotice";
 import { parseReasoning } from "../../lib/reasoning";
+import { ATTACH_MENTION_RE } from "../../lib/attachMentions";
 import { haptics } from "../../lib/haptics";
 import { useSessionStable } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
@@ -52,7 +53,6 @@ export interface MessageRowProps {
 // Images ride the same `@path` convention (server-side extension set mirrored in
 // `crates/forge-cli/src/image_input.rs`) — those render as an inline thumbnail (fetched from
 // `GET /api/upload`) instead of a file chip; everything else stays a file chip as before.
-const ATTACH_MENTION_RE = /^((?:@\S*\.forge\/uploads\/\S+ ?)+)\n([\s\S]*)$/;
 const IMAGE_MENTION_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 // Same convention as ATTACH_MENTION_RE, but not anchored to the trailing `\n<text>` — a
 // `PastSessionRow.preview` (History tab) can be server-truncated mid-mention and never carry
