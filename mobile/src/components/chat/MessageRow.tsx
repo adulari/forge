@@ -12,7 +12,7 @@ import { isHarnessNudge } from "../../lib/harnessNudge";
 import { formatAnyHarnessNotice, isAnyHarnessNotice } from "../../lib/harnessNotice";
 import { isJobNotice } from "../../lib/jobNotice";
 import { parseReasoning } from "../../lib/reasoning";
-import { ATTACH_MENTION_RE } from "../../lib/attachMentions";
+import { ATTACH_MENTION_RE, LEADING_ATTACH_MENTION_RE, uploadMentionPaths } from "../../lib/attachMentions";
 import { haptics } from "../../lib/haptics";
 import { useSessionStable } from "../../lib/sessionContext";
 import { useForgeline } from "../../theme/motion";
@@ -57,16 +57,15 @@ const IMAGE_MENTION_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 // Same convention as ATTACH_MENTION_RE, but not anchored to the trailing `\n<text>` — a
 // `PastSessionRow.preview` (History tab) can be server-truncated mid-mention and never carry
 // the full match, so it needs a lenient leading-strip instead of the exact chat-transcript parse.
-const LEADING_MENTION_RE = /^((?:@\S*\.forge\/uploads\/\S+\s*)+)/;
 
 /** Strips a leading upload-mention prefix from preview text, replacing an attachment-only
  * preview with a human-readable placeholder instead of leaking the raw `.forge/uploads/` path. */
 export function stripLeadingAttachMentions(text: string): string {
-  const m = text.match(LEADING_MENTION_RE);
+  const m = text.match(LEADING_ATTACH_MENTION_RE);
   if (!m) return text;
   const rest = text.slice(m[0].length).trim();
   if (rest) return rest;
-  const hasImage = m[1].trim().split(/\s+/).some((tok) => IMAGE_MENTION_RE.test(tok));
+  const hasImage = uploadMentionPaths(m[1]).some((path) => IMAGE_MENTION_RE.test(path));
   return hasImage ? "[image attached]" : "[file attached]";
 }
 
@@ -84,8 +83,7 @@ function mentionsFromContent(content: string): {
   if (!m) return { text: content, files: [], images: [] };
   const files: string[] = [];
   const images: ImageMention[] = [];
-  for (const tok of m[1].trim().split(/\s+/)) {
-    const path = tok.slice(1);
+  for (const path of uploadMentionPaths(m[1])) {
     const name = uploadDisplayName(path);
     if (IMAGE_MENTION_RE.test(path)) {
       images.push({ name, path });

@@ -264,7 +264,9 @@ pub(crate) fn prepend_attach_mentions(mentions: &mut Vec<String>, text: String) 
     }
     let m = mentions
         .drain(..)
-        .map(|p| format!("@{p}"))
+        // Braced when the path has whitespace (a workspace under "Trading Bots/"): an unbraced
+        // mention ends at the first space and the file would silently never reach the model.
+        .map(|p| crate::attach_paths::mention_for(std::path::Path::new(&p)))
         .collect::<Vec<_>>()
         .join(" ");
     format!("{m}\n{text}")
@@ -604,5 +606,24 @@ mod qr_overlay_tests {
             "the QR no longer claims keys"
         );
         assert!(keys.len() <= 1);
+    }
+}
+
+#[cfg(test)]
+mod mention_tests {
+    use super::*;
+
+    #[test]
+    fn an_upload_under_a_path_with_spaces_is_mentioned_braced() {
+        let mut mentions = vec!["/home/f/Trading Bots/r/.forge/uploads/s/1-notes.txt".to_string()];
+        assert_eq!(
+            prepend_attach_mentions(&mut mentions, "hi".into()),
+            "@{/home/f/Trading Bots/r/.forge/uploads/s/1-notes.txt}\nhi"
+        );
+        let mut plain = vec!["/r/.forge/uploads/s/2-a.txt".to_string()];
+        assert_eq!(
+            prepend_attach_mentions(&mut plain, "x".into()),
+            "@/r/.forge/uploads/s/2-a.txt\nx"
+        );
     }
 }
