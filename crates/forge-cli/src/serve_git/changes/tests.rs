@@ -162,6 +162,46 @@ async fn edits_that_predate_the_last_commit_do_not_claim_a_file() {
 }
 
 #[tokio::test]
+async fn committing_one_file_keeps_the_other_uncommitted_edits_attributed() {
+    let dir = repo_with(&[("a.txt", "a\n"), ("b.txt", "b\n")]);
+    let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+    let sid = live_session(&store, dir.path(), None);
+    std::fs::write(dir.path().join("a.txt"), "a\nagent\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b\nagent\n").unwrap();
+    edited(&store, &sid, "edit_file", "a.txt");
+    edited(&store, &sid, "edit_file", "b.txt");
+    // The user commits only b.txt (dated later than the edits); a.txt is still the agent's.
+    git_in(dir.path(), &["add", "b.txt"]);
+    let later = (chrono::Utc::now().timestamp() + 3_600).to_string();
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "b only",
+        ])
+        .env("GIT_COMMITTER_DATE", &later)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    std::fs::write(dir.path().join("b.txt"), "b\nagent\nhuman\n").unwrap();
+
+    let app = router(store, dir.path());
+    let (_, body) = http_get(
+        &app,
+        &format!("/api/projects/changes?cwd={}", dir.path().display()),
+    )
+    .await;
+    assert_eq!(paths(session(&body, &sid)), ["a.txt"]);
+    assert_eq!(paths(session(&body, "unattributed")), ["b.txt"]);
+}
+
+#[tokio::test]
 async fn a_worktree_session_reports_its_diff_against_the_fork_point() {
     let dir = repo_with(&[("a.txt", "a\n"), ("keep.txt", "k\n")]);
     let worktree = dir.path().join(".forge/worktrees/child");

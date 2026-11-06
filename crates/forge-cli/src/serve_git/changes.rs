@@ -230,12 +230,8 @@ fn shared_tree_changes(
 ) -> Vec<SessionChanges> {
     let branch = git_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
     let dirty = tree_files(root);
-    let since = git_stdout(root, &["log", "-1", "--format=%ct"])
-        .ok()
-        .and_then(|secs| secs.parse::<i64>().ok())
-        .unwrap_or(0);
     let ids: Vec<String> = members.iter().map(|s| s.id.clone()).collect();
-    let editors = editors_by_path(store, root, &ids, since);
+    let editors = editors_by_path(store, root, &ids, &dirty);
 
     let mut per_session: BTreeMap<String, Vec<ChangedFile>> = BTreeMap::new();
     let mut unattributed = Vec::new();
@@ -273,18 +269,25 @@ fn shared_tree_changes(
     rows
 }
 
-/// `relative path → sessions that edited it since `since``.
+/// Most dirty paths the per-file commit lookup passes to one `git log`; past it, files fall
+/// back to the last commit of the whole tree as their cutoff.
+const MAX_CUTOFF_PATHS: usize = 500;
+
+/// `relative path → sessions whose edits to it are still uncommitted`: an edit counts when it is
+/// newer than the last commit that touched that file. (The last commit of the whole tree is the
+/// wrong cutoff: committing one file would orphan every other session edit still in the tree.)
 fn editors_by_path(
     store: &forge_store::Store,
     root: &Path,
     session_ids: &[String],
-    since: i64,
+    dirty: &[ChangedFile],
 ) -> BTreeMap<String, BTreeSet<String>> {
-    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let events = store
-        .session_edit_events(session_ids, since)
-        .unwrap_or_default();
-    for event in events {
+    let dirty_paths: BTreeSet<&str> = dirty.iter().map(|f| f.path.as_str()).collect();
+    let mut edits: Vec<(String, String, i64)> = Vec::new();
+    for event in store
+        .session_edit_events(session_ids, 0)
+        .unwrap_or_default()
+    {
         let resolved = crate::blame::resolve_edit_path(&event.base_dir, &event.path);
         let Ok(relative) = normalize(&resolved)
             .strip_prefix(root)
@@ -292,11 +295,61 @@ fn editors_by_path(
         else {
             continue;
         };
-        map.entry(relative.to_string_lossy().replace('\\', "/"))
-            .or_default()
-            .insert(event.session_id);
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if dirty_paths.contains(relative.as_str()) {
+            edits.push((relative, event.session_id, event.created_at));
+        }
+    }
+    let cutoffs = last_commit_times(root, &edits);
+    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (path, session, at) in edits {
+        if at >= cutoffs.get(&path).copied().unwrap_or(0) {
+            map.entry(path).or_default().insert(session);
+        }
     }
     map
+}
+
+/// When each edited path was last committed, from one `git log` that only walks commits newer
+/// than the oldest edit (older commits cannot outdate any of them). A path missing from the
+/// result has no commit since its edits.
+fn last_commit_times(root: &Path, edits: &[(String, String, i64)]) -> BTreeMap<String, i64> {
+    let mut times = BTreeMap::new();
+    let Some(oldest) = edits.iter().map(|(_, _, at)| *at).min() else {
+        return times;
+    };
+    let paths: BTreeSet<&str> = edits.iter().map(|(path, _, _)| path.as_str()).collect();
+    if paths.len() > MAX_CUTOFF_PATHS {
+        let head = git_stdout(root, &["log", "-1", "--format=%ct"])
+            .ok()
+            .and_then(|secs| secs.parse::<i64>().ok())
+            .unwrap_or(0);
+        return paths.into_iter().map(|p| (p.to_string(), head)).collect();
+    }
+    let since = format!("--since=@{oldest}");
+    let mut args = vec![
+        "-c",
+        "core.quotePath=false",
+        "log",
+        since.as_str(),
+        "--format=%x01%ct",
+        "--name-only",
+        "--",
+    ];
+    args.extend(paths.iter().copied());
+    let Ok(raw) = git_raw(root, &args) else {
+        return times;
+    };
+    let mut current = 0i64;
+    // Newest first, so the first time a path shows up is its last commit.
+    for line in String::from_utf8_lossy(&raw).lines() {
+        if let Some(secs) = line.strip_prefix('\u{1}') {
+            current = secs.trim().parse().unwrap_or(0);
+        } else if !line.is_empty() {
+            times.entry(line.to_string()).or_insert(current);
+        }
+    }
+    times
 }
 
 /// Canonicalize, tolerating a file that no longer exists (a deleted file still has an edit record).
