@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
+use super::risk;
 use super::status::{parse_numstat_z, parse_status_z};
 use super::*;
 
@@ -42,6 +43,85 @@ pub(crate) struct ChangedFile {
     adds: usize,
     dels: usize,
     content_hash: String,
+    /// `"routine"` when every hunk is safe to accept in bulk, else `"look"`.
+    risk: &'static str,
+    /// One line for the first hunk that decided `risk`.
+    risk_reason: String,
+    look_hunks: usize,
+    routine_hunks: usize,
+}
+
+impl ChangedFile {
+    fn set_risk(&mut self, diff: Option<&GitDiffFile>) {
+        let (risk, reason, look, routine) = match diff {
+            Some(diff) => file_risk(diff),
+            None => (risk::LOOK, "not checked".to_string(), 0, 0),
+        };
+        self.risk = risk;
+        self.risk_reason = reason;
+        self.look_hunks = look;
+        self.routine_hunks = routine;
+    }
+}
+
+/// `(risk, reason, look hunks, routine hunks)` of one parsed file diff.
+fn file_risk(diff: &GitDiffFile) -> (&'static str, String, usize, usize) {
+    if diff.hunks.is_empty() {
+        let reason = if diff.binary {
+            "binary file"
+        } else if diff.kind == "deleted" {
+            "deletes a file"
+        } else if diff.kind == "renamed" {
+            "renamed file"
+        } else {
+            "no text changes"
+        };
+        return (risk::LOOK, reason.to_string(), 0, 0);
+    }
+    let look = diff.hunks.iter().filter(|h| h.risk == risk::LOOK).count();
+    let routine = diff.hunks.len() - look;
+    let decisive = diff
+        .hunks
+        .iter()
+        .find(|h| look > 0 && h.risk == risk::LOOK || look == 0)
+        .map_or(String::new(), |h| h.reason.clone());
+    let verdict = if look > 0 { risk::LOOK } else { risk::ROUTINE };
+    (verdict, decisive, look, routine)
+}
+
+/// Risk for the dirty files of a shared checkout: one `git diff HEAD` parsed and classified, and
+/// untracked files read the way the diff route renders them.
+fn annotate_tree_risk(root: &Path, files: &mut [ChangedFile]) {
+    const MAX_RAW: usize = 32 * 1024 * 1024;
+    let raw = git_raw(
+        root,
+        &[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "HEAD",
+            "--find-renames",
+            "--",
+        ],
+    )
+    .ok()
+    .filter(|raw| raw.len() <= MAX_RAW)
+    .map(|raw| String::from_utf8_lossy(&raw).into_owned())
+    .unwrap_or_default();
+    let parsed: BTreeMap<String, GitDiffFile> = super::diff::parse_unified_diff(&raw)
+        .into_iter()
+        .map(|file| (file.path.clone(), file))
+        .collect();
+    for file in files {
+        match parsed.get(&file.path) {
+            Some(diff) => file.set_risk(Some(diff)),
+            None if file.kind == "created" => {
+                let diff = super::diff::untracked_diff(root, &file.path, 0, super::MAX_DIFF_LINES);
+                file.set_risk(diff.ok().as_ref());
+            }
+            None => file.set_risk(None),
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -186,12 +266,20 @@ fn worktree_session_changes(session: LiveSession, worktree: &str) -> SessionChan
             let files = diff
                 .files
                 .iter()
-                .map(|file| ChangedFile {
-                    path: file.path.clone(),
-                    kind: file.kind.clone(),
-                    adds: file.adds,
-                    dels: file.dels,
-                    content_hash: content_hash(&Path::new(worktree).join(&file.path)),
+                .map(|file| {
+                    let mut row = ChangedFile {
+                        path: file.path.clone(),
+                        kind: file.kind.clone(),
+                        adds: file.adds,
+                        dels: file.dels,
+                        content_hash: content_hash(&Path::new(worktree).join(&file.path)),
+                        risk: risk::LOOK,
+                        risk_reason: String::new(),
+                        look_hunks: 0,
+                        routine_hunks: 0,
+                    };
+                    row.set_risk(Some(file));
+                    row
                 })
                 .collect::<Vec<_>>();
             (diff.branch, files)
@@ -229,7 +317,8 @@ fn shared_tree_changes(
     members: Vec<LiveSession>,
 ) -> Vec<SessionChanges> {
     let branch = git_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-    let dirty = tree_files(root);
+    let mut dirty = tree_files(root);
+    annotate_tree_risk(root, &mut dirty);
     let ids: Vec<String> = members.iter().map(|s| s.id.clone()).collect();
     let editors = editors_by_path(store, root, &ids, &dirty);
 
@@ -406,6 +495,10 @@ fn tree_files(root: &Path) -> Vec<ChangedFile> {
             kind: kind.to_string(),
             adds,
             dels,
+            risk: risk::LOOK,
+            risk_reason: String::new(),
+            look_hunks: 0,
+            routine_hunks: 0,
         });
     }
     files

@@ -83,6 +83,7 @@ pub(crate) mod changes;
 mod diff;
 pub(crate) mod hunk;
 mod message;
+mod risk;
 mod status;
 mod sync;
 #[cfg(test)]
@@ -190,6 +191,10 @@ pub(crate) struct GitBranchesResponse {
 #[derive(serde::Serialize)]
 pub(crate) struct GitDiffHunk {
     header: String,
+    /// `"routine"` (safe to accept in bulk) or `"look"`; see [`risk`].
+    risk: &'static str,
+    /// One line saying why: "lockfile churn", "deletes a test", ...
+    reason: String,
     /// Each line keeps its gutter character (`+`/`-`/` `) as its first byte.
     lines: Vec<String>,
 }

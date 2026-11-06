@@ -355,3 +355,63 @@ fn noise_path_matcher() {
         assert!(!is_noise_path(real), "{real}");
     }
 }
+
+#[tokio::test]
+async fn files_carry_a_risk_verdict_and_hunk_counts() {
+    let dir = repo_with(&[
+        ("Cargo.lock", "version = 1\n"),
+        (
+            "src/a.rs",
+            "use std::io;\nuse std::fs;\n\nfn f() {\n    1\n}\n",
+        ),
+        ("src/b.rs", "fn g() {\n    let a = read()?;\n}\n"),
+    ]);
+    let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+    let id = live_session(&store, dir.path(), None);
+    std::fs::write(dir.path().join("Cargo.lock"), "version = 2\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/a.rs"),
+        "use std::fs;\nuse std::io;\n\nfn f() {\n    1\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/b.rs"),
+        "fn g() {\n    let a = read();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/new.rs"), "fn n() {}\n").unwrap();
+    for path in ["Cargo.lock", "src/a.rs", "src/b.rs", "src/new.rs"] {
+        edited(&store, &id, "edit_file", path);
+    }
+
+    let app = router(store, dir.path());
+    let url = format!("/api/projects/changes?cwd={}", dir.path().display());
+    let (status, body) = http_get(&app, &url).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let files = session(&body, &id)["files"].as_array().unwrap().clone();
+    let verdict = |path: &str| {
+        let f = files.iter().find(|f| f["path"] == path).unwrap();
+        (
+            f["risk"].as_str().unwrap().to_string(),
+            f["risk_reason"].as_str().unwrap().to_string(),
+            f["look_hunks"].as_u64().unwrap(),
+            f["routine_hunks"].as_u64().unwrap(),
+        )
+    };
+    assert_eq!(
+        verdict("Cargo.lock"),
+        ("routine".into(), "lockfile churn".into(), 0, 1)
+    );
+    assert_eq!(
+        verdict("src/a.rs"),
+        ("routine".into(), "import reorder".into(), 0, 1)
+    );
+    assert_eq!(
+        verdict("src/b.rs"),
+        ("look".into(), "removes error handling".into(), 1, 0)
+    );
+    assert_eq!(
+        verdict("src/new.rs"),
+        ("look".into(), "new file".into(), 1, 0)
+    );
+}
