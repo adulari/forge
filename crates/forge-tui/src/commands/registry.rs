@@ -149,7 +149,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "models",
-        desc: "browse models by provider, with how each did for you over 30 days (completion, latency, cost, tool errors)",
+        desc: "browse models by provider, with how each did for you over 30 days",
         usage: "/models",
     },
     Command {
