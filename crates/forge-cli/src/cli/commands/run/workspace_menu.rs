@@ -337,6 +337,26 @@ fn switch_project(session: &SharedSession, app: &mut App, path: &Path, label: &s
     });
 }
 
+/// `m` / `d` on the "move this session into the repo it keeps working in" card. True when the key
+/// was the card's; every other key stays ordinary typing.
+pub(super) fn project_offer_key(session: &SharedSession, app: &mut App, key: KeyKind) -> bool {
+    match key {
+        KeyKind::Char('m' | 'M') => {
+            let Some(offer) = app.project_offer.take_accepted() else {
+                return false;
+            };
+            switch_project(session, app, &offer.path, &offer.name);
+            true
+        }
+        KeyKind::Char('d' | 'D') => {
+            app.project_offer.dismiss();
+            app.note("ok, not offering that project again in this session");
+            true
+        }
+        _ => false,
+    }
+}
+
 fn go_home(session: &SharedSession, app: &mut App) {
     match project_ops::home_dir() {
         Ok(dir) => switch_project(session, app, &dir, "Home"),

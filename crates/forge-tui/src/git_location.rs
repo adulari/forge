@@ -117,6 +117,23 @@ impl App {
         self.git_workspace.as_deref()
     }
 
+    /// Count a `shell` call toward the "move this session into the repo it keeps cd-ing into"
+    /// card. A no-op until the session's workspace is known.
+    pub(crate) fn observe_shell_for_project_offer(&mut self, args: &str) {
+        let (Some(cwd), Some(home)) = (
+            self.git_workspace.clone(),
+            std::env::var_os("HOME").map(PathBuf::from),
+        ) else {
+            return;
+        };
+        self.project_offer.observe_shell_args(
+            args,
+            &cwd,
+            &home,
+            &crate::project_offer::find_git_root,
+        );
+    }
+
     /// Point the statusline at `workspace` unless it already is. True when it moved.
     ///
     /// The session's workspace can change after startup: `forge chat --resume` with no id opens the

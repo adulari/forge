@@ -1836,6 +1836,18 @@ pub(crate) async fn run_chat_tui(
                 }
             }
 
+            // A session in a non-repo directory that keeps cd-ing into one repository: m moves
+            // it there, d stops asking. Only while the composer is empty, like the update card.
+            if pending.is_none()
+                && pending_question.is_none()
+                && !update_flow::other_modal_open(&app)
+                && app.project_offer.captures_keys(busy, app.input.is_empty())
+                && workspace_menu::project_offer_key(&session, &mut app, key)
+            {
+                dirty = true;
+                continue;
+            }
+
             // Effort slider is modal while open: ←/→ adjust level, Esc/Enter/Ctrl+R close.
             // `try_lock` on the writes below (not a blocking `.await`): same reasoning as
             // skip_model — a turn's task holds the session lock for its ENTIRE duration (every

@@ -78,6 +78,7 @@ pub use stream_json::{StreamInit, StreamInitSlot, StreamJsonPresenter};
 pub use usage_source::{ModelUsage, UsageSlot, UsageSource};
 pub mod diff_overlay;
 pub mod jobs_overlay;
+pub mod project_offer;
 mod qr_overlay;
 pub mod session_strip;
 pub mod sidebar;

@@ -420,6 +420,8 @@ pub struct App {
     pub ide_requested: bool,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
+    /// "This session keeps working in <repo> — move it there?" (`project_offer.rs`).
+    pub project_offer: crate::project_offer::ProjectOffer,
     /// The `/usage` overlay state.
     pub usage_overlay: UsageOverlay,
     /// The `/btw` answer card (`app_btw.rs`); `None` when no side question is on screen.
@@ -1492,6 +1494,9 @@ impl App {
                     ),
                 );
                 let origin = LineOrigin::tool_call(&name);
+                if name == "shell" {
+                    self.observe_shell_for_project_offer(&args);
+                }
                 self.interaction_ui.note_tool_call(&name, &args);
                 self.open_tool_card(origin, name, args);
             }
@@ -3166,6 +3171,7 @@ impl App {
         self.transcript_scroll = 0;
         self.transcript_follow = true;
         self.suggested_prompt = None; // stale once the session it was predicted for is gone
+        self.project_offer.reset();
         self.turn_activity = TurnActivity::default();
         let seen = self.transcript_ui.bridge_notice_seen;
         self.transcript_ui = Default::default();
