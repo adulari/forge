@@ -236,7 +236,7 @@ fn clamp_thumb(width: Option<u32>) -> Option<u32> {
     width.map(|w| w.clamp(MIN_THUMB, MAX_THUMB))
 }
 
-async fn serve(path: PathBuf, width: Option<u32>, cache: &'static str) -> Response {
+pub(crate) async fn serve(path: PathBuf, width: Option<u32>, cache: &'static str) -> Response {
     let thumb = clamp_thumb(width);
     let _permit = if thumb.is_some() {
         THUMBNAILS.acquire().await.ok()

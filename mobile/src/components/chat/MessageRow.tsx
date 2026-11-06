@@ -53,6 +53,8 @@ export interface MessageRowProps {
 // Images ride the same `@path` convention (server-side extension set mirrored in
 // `crates/forge-cli/src/image_input.rs`) — those render as an inline thumbnail (fetched from
 // `GET /api/upload`) instead of a file chip; everything else stays a file chip as before.
+// The chip is 72 points; 3x covers the densest phone screens.
+const UPLOAD_THUMB_PX = 216;
 const IMAGE_MENTION_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
 // Same convention as ATTACH_MENTION_RE, but not anchored to the trailing `\n<text>` — a
 // `PastSessionRow.preview` (History tab) can be server-truncated mid-mention and never carry
@@ -202,6 +204,9 @@ function MessageRowImpl({ row, attachments, onLongPress }: MessageRowProps) {
       image: true,
       uri: baseUrl
         ? `${baseUrl}/api/upload?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(img.path)}`
+        : undefined,
+      thumbUri: baseUrl
+        ? `${baseUrl}/api/upload?session=${encodeURIComponent(sessionId)}&path=${encodeURIComponent(img.path)}&w=${UPLOAD_THUMB_PX}`
         : undefined,
     })),
     ...mentionFiles.map((name, i) => ({

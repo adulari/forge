@@ -3077,6 +3077,10 @@ struct ServeUploadParams {
     session: String,
     #[serde(default)]
     path: String,
+    /// Thumbnail width: an image is downsampled to at most this many pixels wide (the history
+    /// shows 72-point squares; a phone photo upload can be 10 MiB).
+    #[serde(default)]
+    w: Option<u32>,
 }
 
 /// `GET /api/upload?session=<id>&path=<stored-path>` — stream back the raw bytes of a file
@@ -3136,6 +3140,14 @@ async fn serve_upload(
             axum::http::StatusCode::FORBIDDEN,
             "path is outside this session's uploads",
         );
+    }
+    if params.w.is_some() && guess_content_type(&params.path).starts_with("image/") {
+        return crate::serve_media::serve(
+            std::path::PathBuf::from(&params.path),
+            params.w,
+            "private, max-age=31536000, immutable",
+        )
+        .await;
     }
     let bytes = match tokio::fs::read(&params.path).await {
         Ok(b) => b,
@@ -6218,6 +6230,22 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert_eq!(&bytes[..], b"fake-png-bytes");
+
+        // With `w`, an image upload comes back downsampled for a thumbnail.
+        let big = uploads.join("124-big.png");
+        image::RgbImage::new(400, 300).save(&big).unwrap();
+        let req = axum::http::Request::get(format!(
+            "/tok/api/upload?session={session_id}&path={}&w=64",
+            big.display()
+        ))
+        .body(axum::body::Body::empty())
+        .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let thumb = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(image::load_from_memory(&thumb).unwrap().width(), 64);
 
         // A path outside THIS session's `.forge/uploads/` (a traversal / wrong-session attempt)
         // is a 403, never a 500 — even though the file genuinely exists on disk.
