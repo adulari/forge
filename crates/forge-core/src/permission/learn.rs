@@ -30,6 +30,8 @@ pub struct Shape {
 /// Programs that must never become a standing allow, whatever their arguments: they escalate,
 /// delete, move data off the machine, run another interpreter or shell, or run what they are told.
 const NEVER: &[&str] = &[
+    // Runs an arbitrary preprocessor per file (`rg --pre <cmd>`), so `rg *` would allow execution.
+    "rg",
     "sudo",
     "su",
     "doas",
@@ -147,9 +149,9 @@ const REFUSED_SUB: &[(&str, &[&str])] = &[
 
 /// Git is the one tool where a positive list is safer than a deny list: `push --force`, `reset
 /// --hard`, `clean -fd` and `checkout .` all live under ordinary-looking subcommands.
-const GIT_SUB: &[&str] = &[
-    "status", "diff", "log", "show", "add", "commit", "fetch", "blame",
-];
+/// `fetch` is left out: it reaches the network and `--upload-pack=<cmd>` runs a command, so a
+/// learned `git fetch *` would allow execution.
+const GIT_SUB: &[&str] = &["status", "diff", "log", "show", "add", "commit", "blame"];
 
 const RUNNERS: &[&str] = &["npm", "pnpm", "yarn", "bun"];
 
@@ -299,7 +301,12 @@ mod tests {
             Some("npm run build *")
         );
         assert_eq!(shape("pnpm run lint").as_deref(), Some("pnpm run lint *"));
-        assert_eq!(shape("rg -n TODO src").as_deref(), Some("rg *"));
+        assert_eq!(shape("rg -n TODO src"), None, "rg --pre runs commands");
+        assert_eq!(
+            shape("git fetch origin"),
+            None,
+            "git fetch --upload-pack runs commands"
+        );
         assert_eq!(shape("ls -la").as_deref(), Some("ls *"));
     }
 
