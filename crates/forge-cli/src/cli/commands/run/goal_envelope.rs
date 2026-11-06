@@ -171,8 +171,27 @@ pub(crate) fn reset_label(resets_at: i64) -> String {
         .map_or_else(String::new, |t| t.format("%a %H:%M").to_string())
 }
 
+/// When a goal waiting on a window resumes, as the pause message and the surfaces say it: the
+/// clock time alone within the next day, with the weekday beyond that.
+pub(crate) fn resume_clock(resets_at: i64, now: i64) -> String {
+    use chrono::TimeZone;
+    let Some(t) = chrono::Local.timestamp_opt(resets_at, 0).single() else {
+        return String::new();
+    };
+    let fmt = if (resets_at - now).abs() < 20 * 3600 {
+        "%H:%M"
+    } else {
+        "%a %H:%M"
+    };
+    t.format(fmt).to_string()
+}
+
 /// What the goal says when it pauses at the cap, or cannot verify the envelope.
 pub(crate) fn pause_message(envelope: &EnvelopeState, check: EnvelopeCheck) -> String {
+    pause_message_at(envelope, check, chrono::Utc::now().timestamp())
+}
+
+pub(crate) fn pause_message_at(envelope: &EnvelopeState, check: EnvelopeCheck, now: i64) -> String {
     let raise = format!("/goal budget {}", envelope.raise_hint());
     if check == EnvelopeCheck::Unverified {
         return format!(
@@ -182,13 +201,58 @@ pub(crate) fn pause_message(envelope: &EnvelopeState, check: EnvelopeCheck) -> S
         );
     }
     let phrase = envelope.slice_phrase();
-    match (envelope.is_usd(), envelope.resets_at) {
+    match (envelope.is_usd(), envelope.auto_resume_at()) {
         (false, Some(at)) => format!(
-            "Envelope spent ({phrase}). The window resets at {}, then /goal resume — or raise it \
-             with {raise}",
-            reset_label(at)
+            "Envelope spent ({phrase}). The goal resumes at {} when the window resets — or raise \
+             it with {raise} to continue now",
+            resume_clock(at, now)
         ),
         _ => format!("Envelope spent ({phrase}). Raise it with {raise}, then /goal resume"),
+    }
+}
+
+/// The note a goal leaves, in history and as a push, when it resumes at the window reset.
+pub(crate) const AUTO_RESUME_NOTE: &str = "Window reset — goal resumed";
+
+/// Record how a goal waiting for its window says when it resumes, so every surface can.
+pub(crate) fn mark_waiting(envelope: &mut EnvelopeState, now: i64) {
+    envelope.held = false;
+    envelope.resume_label = envelope
+        .auto_resume_at()
+        .map(|at| resume_clock(at, now))
+        .filter(|label| !label.is_empty());
+}
+
+/// True for a goal paused because its window envelope is spent, whose window has now reset.
+/// A goal the user paused, a `$` envelope, an unknown reset time or a held goal is never due.
+pub(crate) fn auto_resume_due(app: &forge_tui::App, now: i64) -> bool {
+    use forge_tui::goal_status::GoalPhase;
+    app.goal.as_ref().is_some_and(|g| {
+        g.phase == GoalPhase::Paused
+            && g.envelope
+                .as_ref()
+                .and_then(EnvelopeState::auto_resume_at)
+                .is_some_and(|at| at <= now)
+    })
+}
+
+/// Resume a goal whose window has reset, through the same path as `/goal resume`. `None` when no
+/// goal is due; otherwise the outcome that starts it, after the note in history.
+pub(crate) async fn auto_resume(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    app: &mut forge_tui::App,
+    now: i64,
+) -> Option<super::dispatch::DispatchOutcome> {
+    use super::dispatch::DispatchOutcome;
+    if !auto_resume_due(app, now) {
+        return None;
+    }
+    app.note(&format!("▶ {AUTO_RESUME_NOTE}"));
+    match super::goal_control::goal_control_outcome(session, app, forge_tui::GoalControl::Resume)
+        .await
+    {
+        Ok(outcome @ DispatchOutcome::StartGoal { .. }) => Some(outcome),
+        _ => None,
     }
 }
 
@@ -278,10 +342,21 @@ pub(crate) fn restore(app: &mut forge_tui::App, store: &forge_store::Store, sess
         reason,
         record.envelope,
     );
-    app.note(&format!(
-        "⏸ goal restored after a restart — {} — /goal resume continues it",
-        record.objective
-    ));
+    let waiting = app
+        .goal
+        .as_ref()
+        .and_then(|g| g.envelope.as_ref())
+        .and_then(|e| e.auto_resume_at().and(e.resume_label.clone()));
+    app.note(&match waiting {
+        Some(at) => format!(
+            "⏸ goal restored after a restart — {} — resumes at {at} when the window resets",
+            record.objective
+        ),
+        None => format!(
+            "⏸ goal restored after a restart — {} — /goal resume continues it",
+            record.objective
+        ),
+    });
 }
 
 #[cfg(test)]

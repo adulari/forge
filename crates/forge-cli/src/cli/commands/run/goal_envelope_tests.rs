@@ -65,7 +65,9 @@ fn the_cap_message_names_the_slice_the_reset_and_how_to_raise_it() {
         "{msg}"
     );
     assert!(msg.contains("/goal budget 30%w"), "{msg}");
-    assert!(msg.contains(&reset_label(4600)), "{msg}");
+    assert!(msg.contains("resumes at"), "{msg}");
+    assert!(!msg.contains("then /goal resume"), "{msg}");
+    assert!(msg.contains(&resume_clock(4600, 1000)), "{msg}");
 }
 
 #[test]
@@ -151,4 +153,129 @@ fn a_restart_restores_the_goal_paused_with_its_envelope_and_counters() {
     assert_eq!(goal.gates, vec!["cargo test".to_string()]);
     assert!(goal.envelope.as_ref().unwrap().spent);
     assert!(goal.reason.as_deref().unwrap().contains("restart"));
+}
+
+fn notes_of(app: &mut forge_tui::App) -> Vec<String> {
+    app.drain_flush().iter().map(|l| l.to_string()).collect()
+}
+
+async fn mock_session() -> Arc<tokio::sync::Mutex<Session>> {
+    super::super::driver::tests::isolate_store();
+    let session = build_session_with(
+        Box::new(forge_tui::HeadlessPresenter::default()),
+        true,
+        None,
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("build mock session");
+    Arc::new(tokio::sync::Mutex::new(session))
+}
+
+/// A goal paused at its cap, the way the loop leaves it: spent, with the window's reset time.
+fn paused_at_cap(spec: &str, resets_at: Option<i64>, now: i64) -> forge_tui::App {
+    let mut app = forge_tui::App::default();
+    let mut envelope =
+        EnvelopeState::new(EnvelopeSpec::parse(spec, None).unwrap(), 40.0, resets_at);
+    envelope.used = envelope.spec.slice + 1.0;
+    envelope.spent = true;
+    app.pending_envelope = Some(envelope);
+    app.goal_begin("sleep through it", &["true".to_string()], None, None);
+    app.goal_paused_by_envelope("spent");
+    if let Some(e) = app.goal.as_mut().and_then(|g| g.envelope.as_mut()) {
+        mark_waiting(e, now);
+    }
+    app
+}
+
+#[tokio::test]
+async fn a_goal_paused_at_the_cap_resumes_once_after_the_reset() {
+    let session = mock_session().await;
+    let mut app = paused_at_cap("claude:20%w", Some(5000), 1000);
+    assert!(
+        auto_resume(&session, &mut app, 4999).await.is_none(),
+        "not before"
+    );
+    let outcome = auto_resume(&session, &mut app, 5000).await;
+    assert!(matches!(
+        outcome,
+        Some(super::super::dispatch::DispatchOutcome::StartGoal { .. })
+    ));
+    let notes = notes_of(&mut app);
+    assert!(
+        notes.iter().any(|n| n.contains(AUTO_RESUME_NOTE)),
+        "{notes:?}"
+    );
+    let envelope = app.goal.as_ref().unwrap().envelope.clone().unwrap();
+    assert!(!envelope.spent && envelope.start.is_none(), "re-baselined");
+    app.goal_begin("sleep through it", &[], None, None);
+    assert!(
+        auto_resume(&session, &mut app, 9000).await.is_none(),
+        "only once"
+    );
+}
+
+#[tokio::test]
+async fn a_goal_the_user_paused_never_resumes_by_itself() {
+    let session = mock_session().await;
+    let mut app = paused_at_cap("claude:20%w", Some(5000), 1000);
+    assert!(auto_resume_due(&app, 6000));
+    let outcome = goal_control_outcome(&session, &mut app, forge_tui::GoalControl::Pause)
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        super::super::dispatch::DispatchOutcome::Handled
+    ));
+    assert!(!auto_resume_due(&app, 6000));
+    assert!(auto_resume(&session, &mut app, 6000).await.is_none());
+    // The user can still resume it by hand once the window has reset.
+    let by_hand = goal_control_outcome(&session, &mut app, forge_tui::GoalControl::Resume)
+        .await
+        .unwrap();
+    assert!(matches!(
+        by_hand,
+        super::super::dispatch::DispatchOutcome::StartGoal { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_usd_envelope_or_an_unknown_reset_never_resumes_by_itself() {
+    let session = mock_session().await;
+    let mut usd = paused_at_cap("$5", Some(5000), 1000);
+    assert!(auto_resume(&session, &mut usd, 9000).await.is_none());
+    let mut unknown = paused_at_cap("claude:20%w", None, 1000);
+    assert!(auto_resume(&session, &mut unknown, 9000).await.is_none());
+    let mut stopped = paused_at_cap("claude:20%w", Some(5000), 1000);
+    stopped.goal_ended(false, "stopped");
+    assert!(auto_resume(&session, &mut stopped, 9000).await.is_none());
+    let mut unspent = paused_at_cap("claude:20%w", Some(5000), 1000);
+    unspent
+        .goal
+        .as_mut()
+        .unwrap()
+        .envelope
+        .as_mut()
+        .unwrap()
+        .spent = false;
+    assert!(auto_resume(&session, &mut unspent, 9000).await.is_none());
+}
+
+#[tokio::test]
+async fn a_restart_before_the_reset_keeps_the_scheduled_resume() {
+    let session = mock_session().await;
+    let store = forge_store::Store::open_in_memory().unwrap();
+    let id = store.create_session("/tmp", "Default").unwrap();
+    let before = paused_at_cap("claude:20%w", Some(5000), 1000);
+    store
+        .set_session_goal_state(&id, GoalRecord::of(&before).as_deref())
+        .unwrap();
+    let mut after = forge_tui::App::default();
+    restore(&mut after, &store, &id);
+    let notes = notes_of(&mut after);
+    assert!(notes.iter().any(|n| n.contains("resumes at")), "{notes:?}");
+    assert!(auto_resume(&session, &mut after, 4000).await.is_none());
+    assert!(auto_resume(&session, &mut after, 5001).await.is_some());
 }

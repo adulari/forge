@@ -137,6 +137,14 @@ pub struct EnvelopeState {
     pub spent: bool,
     /// Set when the last check could not be verified.
     pub unverified: bool,
+    /// The user cancelled the automatic resume at the window reset (`/goal pause` on a goal that
+    /// was waiting for it).
+    #[serde(default)]
+    pub held: bool,
+    /// The reset time as the pausing host rendered it in local time (`04:00`), so a surface that
+    /// has no clock of its own can say "resumes at 04:00".
+    #[serde(default)]
+    pub resume_label: Option<String>,
 }
 
 impl EnvelopeState {
@@ -150,6 +158,8 @@ impl EnvelopeState {
             resets_at,
             spent: false,
             unverified: false,
+            held: false,
+            resume_label: None,
         }
     }
 
@@ -214,6 +224,8 @@ impl EnvelopeState {
                 resets_at: None,
                 spent: false,
                 unverified: false,
+                held: false,
+                resume_label: None,
             };
         }
     }
@@ -225,6 +237,17 @@ impl EnvelopeState {
         self.used = 0.0;
         self.spent = false;
         self.unverified = false;
+        self.held = false;
+        self.resume_label = None;
+    }
+
+    /// When a goal paused on this envelope resumes by itself: a spent window envelope whose reset
+    /// time is known and that the user has not held. A `$` envelope never resets.
+    pub fn auto_resume_at(&self) -> Option<i64> {
+        if self.is_usd() || !self.spent || self.held {
+            return None;
+        }
+        self.resets_at
     }
 
     /// `envelope 12/20% claude weekly` or `envelope $1.20/$5.00`.
@@ -426,6 +449,22 @@ mod tests {
         assert_eq!(env.spec.slice, 30.0);
         env.retarget(EnvelopeSpec::parse("$5", None).unwrap());
         assert_eq!(env.start, None);
+    }
+
+    #[test]
+    fn only_a_spent_window_with_a_known_reset_resumes_by_itself() {
+        let mut env = EnvelopeState::new(weekly(20.0), 40.0, Some(5000));
+        assert_eq!(env.auto_resume_at(), None, "not spent");
+        env.spent = true;
+        assert_eq!(env.auto_resume_at(), Some(5000));
+        env.held = true;
+        assert_eq!(env.auto_resume_at(), None, "held by the user");
+        env.held = false;
+        env.resets_at = None;
+        assert_eq!(env.auto_resume_at(), None, "unknown reset");
+        let mut usd = EnvelopeState::new(EnvelopeSpec::parse("$5", None).unwrap(), 0.0, Some(5000));
+        usd.spent = true;
+        assert_eq!(usd.auto_resume_at(), None, "a dollar envelope never resets");
     }
 
     #[test]

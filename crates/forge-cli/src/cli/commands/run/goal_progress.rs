@@ -429,6 +429,9 @@ pub(crate) async fn advance_goal(
         GoalStep::Pause { reason } => {
             app.note(&format!("⏸ {reason}"));
             app.goal_paused_by_envelope(&reason);
+            if let Some(envelope) = app.goal.as_mut().and_then(|g| g.envelope.as_mut()) {
+                goal_envelope::mark_waiting(envelope, chrono::Utc::now().timestamp());
+            }
             session.lock().await.set_active_goal(None);
             GoalNext::Stop
         }

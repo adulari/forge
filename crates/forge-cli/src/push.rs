@@ -339,6 +339,24 @@ pub(crate) struct PushMessage {
 }
 
 impl PushMessage {
+    /// A goal that waited out its window resumed by itself while nobody was looking.
+    pub(crate) fn goal_resumed(cur: &Snapshot) -> Self {
+        let title = if cur.title.is_empty() {
+            let short: String = cur.session_id.chars().take(8).collect();
+            format!("session {short}")
+        } else {
+            cur.title.clone()
+        };
+        Self {
+            kind: "done",
+            session: cur.session_id.clone(),
+            title,
+            body: "Window reset — goal resumed".to_string(),
+            seq: cur.prompt_seq,
+            ttl: TTL_COMPLETION,
+        }
+    }
+
     /// The cleartext JSON the service worker's `push` handler reads (encrypted on the wire).
     pub(crate) fn payload_json(&self) -> String {
         serde_json::json!({
@@ -922,6 +940,20 @@ mod tests {
         assert_eq!(msg3.seq, 2);
         // No prev frame at all (driver restart): a pending prompt still pushes.
         assert!(detect_trigger(None, &cur, None).is_some());
+    }
+
+    #[test]
+    fn a_goal_resumed_at_the_window_reset_pushes_a_done_notice() {
+        let cur = Snapshot {
+            title: "overnight refactor".into(),
+            prompt_seq: 4,
+            ..snap()
+        };
+        let msg = PushMessage::goal_resumed(&cur);
+        assert_eq!(msg.kind, "done");
+        assert_eq!(msg.title, "overnight refactor");
+        assert_eq!(msg.body, "Window reset — goal resumed");
+        assert_eq!(msg.ttl, TTL_COMPLETION);
     }
 
     #[test]

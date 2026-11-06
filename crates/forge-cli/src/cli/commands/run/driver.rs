@@ -821,6 +821,26 @@ async fn drive_session(
                 active = true;
             }
         }
+        // 5c. A goal paused on a spent window continues once the window has reset (also after a
+        // restart: the envelope and its reset time come back with the goal).
+        if st.turn_handle.is_none() && !st.busy {
+            let now = chrono::Utc::now().timestamp();
+            if let Some(outcome) = goal_envelope::auto_resume(&st.session, &mut st.app, now).await {
+                st.handle_outcome(outcome);
+                if let Some(snap) = &last_snap {
+                    let msg = crate::push::PushMessage::goal_resumed(snap);
+                    if crate::push::should_push(
+                        ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+                    ) {
+                        dispatch_push(&apns, &push, &session_id, snap, msg);
+                    } else {
+                        deferred_push.hold(msg);
+                    }
+                }
+                dirty = true;
+                active = true;
+            }
+        }
         if active {
             last_activity.store(now_secs(), Ordering::Relaxed);
         }

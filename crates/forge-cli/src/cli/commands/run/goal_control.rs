@@ -31,6 +31,17 @@ pub(crate) async fn goal_control_outcome(
         GoalControl::Pause => {
             if app.goal_request(GoalRequest::Pause) {
                 app.note("⏸ goal pauses after this turn — /goal resume continues it");
+            } else if let Some(envelope) = app
+                .goal
+                .as_mut()
+                .filter(|g| g.phase == GoalPhase::Paused)
+                .and_then(|g| g.envelope.as_mut())
+                .filter(|e| e.auto_resume_at().is_some())
+            {
+                envelope.held = true;
+                app.note(
+                    "⏸ auto-resume cancelled — /goal resume continues it once the window has reset",
+                );
             } else if app
                 .goal
                 .as_ref()

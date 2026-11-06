@@ -1168,6 +1168,43 @@ pub(crate) async fn run_chat_tui(
             }
         }
 
+        // A goal paused on a spent subscription window continues once the window has reset.
+        if turn_handle.is_none() && !busy {
+            let now = chrono::Utc::now().timestamp();
+            if let Some(DispatchOutcome::StartGoal {
+                prompt,
+                goal,
+                gates,
+                max_tokens,
+                max_minutes,
+            }) = goal_envelope::auto_resume(&session, &mut app, now).await
+            {
+                turn_gen += 1;
+                goal_state = Some(GoalState::begin(
+                    &mut app,
+                    turn_gen,
+                    goal,
+                    gates,
+                    max_tokens,
+                    max_minutes,
+                ));
+                app.note("🎯 goal started — Esc to stop");
+                arm_run_budget(&session, goal_state.as_ref().map(|s| &s.budget));
+                turn_handle = Some(spawn_turn_with(
+                    prompt,
+                    vec![GOAL_GUIDANCE.to_string()],
+                    Some(forge_types::TaskTier::Complex),
+                    &session,
+                    &done_tx,
+                    turn_gen,
+                    &mut app,
+                    &mut busy,
+                    &mut busy_since,
+                ));
+                dirty = true;
+            }
+        }
+
         // Tick the elapsed-time counter at 1 Hz during a running turn (it shows whole seconds)
         // and redraw only when it changes, instead of forcing a full repaint every 16 ms. This
         // runs for the whole turn, not just while the activity viewer is open, because the

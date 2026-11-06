@@ -193,3 +193,29 @@ fn raising_a_paused_envelope_takes_at_once_and_a_live_one_waits_for_the_loop() {
     let mut bare = started();
     assert!(!bare.goal_request_envelope(EnvelopeSpec::parse("$5", None).unwrap()));
 }
+
+#[test]
+fn a_goal_waiting_for_its_window_says_when_it_resumes() {
+    let mut app = enveloped();
+    let mut envelope = app.goal.as_ref().unwrap().envelope.clone().unwrap();
+    envelope.used = 21.0;
+    envelope.spent = true;
+    envelope.resets_at = Some(5000);
+    envelope.resume_label = Some("04:00".into());
+    app.goal_envelope_sync(&envelope);
+    app.goal_paused_by_envelope("spent");
+    let goal = app.goal.clone().unwrap();
+    assert!(
+        goal.chip(0, 0).ends_with(" · resumes at 04:00"),
+        "{}",
+        goal.chip(0, 0)
+    );
+    assert!(goal
+        .summary()
+        .contains("resumes at 04:00 when the window resets"));
+    envelope.held = true;
+    app.goal_envelope_sync(&envelope);
+    let held = app.goal.clone().unwrap();
+    assert!(!held.chip(0, 0).contains("resumes at"));
+    assert!(!held.summary().contains("resumes at"));
+}

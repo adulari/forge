@@ -124,7 +124,20 @@ impl GoalStatus {
                 Some(GoalRequest::Clear) => format!("{progress} · stopping{budget}"),
                 None => format!("{progress}{budget}"),
             },
+            GoalPhase::Paused => format!("paused · {progress}{budget}{}", self.resume_hint()),
             phase => format!("{} · {progress}{budget}", phase.label()),
+        }
+    }
+
+    /// ` · resumes at 04:00` while the goal waits for its window to reset and will continue by
+    /// itself.
+    fn resume_hint(&self) -> String {
+        match &self.envelope {
+            Some(e) if e.auto_resume_at().is_some() => e
+                .resume_label
+                .as_ref()
+                .map_or_else(String::new, |at| format!(" · resumes at {at}")),
+            _ => String::new(),
         }
     }
 
@@ -145,6 +158,11 @@ impl GoalStatus {
         }
         if let Some(envelope) = &self.envelope {
             out.push_str(&format!("\n   {}", envelope.meter()));
+            if self.phase == GoalPhase::Paused {
+                if let (Some(_), Some(at)) = (envelope.auto_resume_at(), &envelope.resume_label) {
+                    out.push_str(&format!("\n   resumes at {at} when the window resets"));
+                }
+            }
         }
         if !self.gates.is_empty() {
             out.push_str(&format!("\n   gates: {}", self.gates.join(", ")));

@@ -41,6 +41,10 @@ pub struct SnapEnvelope {
     pub unverified: bool,
     /// When the measured window resets, Unix seconds.
     pub resets_at: Option<i64>,
+    /// When a goal paused on this envelope continues by itself (the window reset), Unix seconds.
+    /// Absent when it will not: the user paused it, it is not spent, or the reset time is unknown.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resumes_at: Option<i64>,
 }
 
 impl From<&GoalStatus> for SnapGoal {
@@ -66,6 +70,7 @@ impl From<&GoalStatus> for SnapGoal {
                 spent: e.spent,
                 unverified: e.unverified,
                 resets_at: e.resets_at,
+                resumes_at: e.auto_resume_at(),
             }),
         }
     }
