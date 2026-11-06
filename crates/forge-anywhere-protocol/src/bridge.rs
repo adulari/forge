@@ -132,6 +132,13 @@ pub enum RouteId {
     /// so the bridge cannot be used to hand the agent arbitrary text beyond what it could already
     /// send with `SessionInput`.
     StartIssue,
+    /// `POST /api/issues/drain`: queue several issues to run a few at a time under an optional
+    /// spend envelope. The caller names issue numbers and numbers only, like [`Self::StartIssue`].
+    DrainIssues,
+    /// `GET /api/issues/drains`: every backlog drain with its per-issue progress.
+    ListIssueDrains,
+    /// `POST /api/issues/drain/cancel`: stop a drain starting more issues.
+    CancelIssueDrain,
     WebSocket,
     TerminalWebSocket,
 }

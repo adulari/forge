@@ -272,6 +272,9 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/issues?session=s1&state=open");
     await transport.fetch("fany://host-1/api/issues/detail?session=s1&number=4");
     await transport.fetch("fany://host-1/api/issues/start", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/issues/drain", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/issues/drains");
+    await transport.fetch("fany://host-1/api/issues/drain/cancel", { method: "POST", body: "{}" });
 
     expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
       ["workspace_entries", "?session=s1&path=src"],
@@ -292,6 +295,9 @@ describe("AnywhereTransport", () => {
       ["list_issues", "?session=s1&state=open"],
       ["issue_detail", "?session=s1&number=4"],
       ["start_issue", ""],
+      ["drain_issues", ""],
+      ["list_issue_drains", ""],
+      ["cancel_issue_drain", ""],
     ]);
     await expect(
       transport.fetch("fany://host-1/api/schedules", { method: "POST", body: "{}" }),

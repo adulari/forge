@@ -69,6 +69,9 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::ListIssues => exact(Method::GET, "/api/issues"),
         RouteId::IssueDetail => exact(Method::GET, "/api/issues/detail"),
         RouteId::StartIssue => exact(Method::POST, "/api/issues/start"),
+        RouteId::DrainIssues => exact(Method::POST, "/api/issues/drain"),
+        RouteId::ListIssueDrains => exact(Method::GET, "/api/issues/drains"),
+        RouteId::CancelIssueDrain => exact(Method::POST, "/api/issues/drain/cancel"),
         RouteId::SessionClaude | RouteId::ExportSessionClaude | RouteId::ContinueClaudeSession => {
             let id = single_path_parameter(request)?;
             let (method, path) = match request.route {
@@ -328,6 +331,13 @@ mod tests {
             (RouteId::ListIssues, "GET", "/api/issues"),
             (RouteId::IssueDetail, "GET", "/api/issues/detail"),
             (RouteId::StartIssue, "POST", "/api/issues/start"),
+            (RouteId::DrainIssues, "POST", "/api/issues/drain"),
+            (RouteId::ListIssueDrains, "GET", "/api/issues/drains"),
+            (
+                RouteId::CancelIssueDrain,
+                "POST",
+                "/api/issues/drain/cancel",
+            ),
         ] {
             let target = route_target(&request(route, method, &[])).unwrap();
             assert_eq!(target.path, path);

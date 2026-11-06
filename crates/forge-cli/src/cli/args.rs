@@ -524,10 +524,10 @@ pub(crate) enum Command {
         /// Start a session on this issue number instead of listing.
         #[arg(long, value_name = "N")]
         start: Option<u64>,
-        /// With --start: work in the project checkout instead of a new worktree.
-        #[arg(long, requires = "start")]
+        /// With --start or --drain: work in the project checkout instead of a new worktree.
+        #[arg(long)]
         no_worktree: bool,
-        /// With --start: PR Watch mode for the session.
+        /// With --start or --drain: PR Watch mode for the session.
         #[arg(long, value_parser = ["off", "fix", "merge"], default_value = "fix")]
         watch: String,
         /// With --start --watch merge: how to merge (squash, merge, rebase, auto).
@@ -536,6 +536,23 @@ pub(crate) enum Command {
         /// Which issues to list.
         #[arg(long, value_parser = ["open", "closed", "all"], default_value = "open")]
         state: String,
+        /// Drain a backlog: start these issues (comma-separated) a few at a time, each like
+        /// `--start`, the next as one finishes. `--watch`, `--method` and `--no-worktree` apply.
+        #[arg(long, value_name = "N,N,...", value_delimiter = ',', conflicts_with_all = ["start", "drain_status", "cancel_drain"])]
+        drain: Vec<u64>,
+        /// With --drain: how many issue sessions run at once (1-8).
+        #[arg(long, value_name = "N", requires = "drain", value_parser = clap::value_parser!(u8).range(1..=8))]
+        parallel: Option<u8>,
+        /// With --drain: stop starting issues once this slice of a subscription window is spent
+        /// (`claude:30%w`, `codex:15%w`, `$5`); starting resumes after the window resets.
+        #[arg(long, value_name = "SPEC", requires = "drain")]
+        budget: Option<String>,
+        /// Show every drain and where each issue stands.
+        #[arg(long, conflicts_with_all = ["start", "cancel_drain"])]
+        drain_status: bool,
+        /// Stop a drain starting more issues (sessions already running are left alone).
+        #[arg(long, value_name = "ID", conflicts_with = "start")]
+        cancel_drain: Option<String>,
         /// Daemon base URL. Defaults to the local daemon's loopback origin.
         #[arg(long)]
         url: Option<String>,

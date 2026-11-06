@@ -78,7 +78,11 @@ export type BridgeRoute =
   // GitHub issues through the host's `gh`; `start_issue` opens a session and arms PR Watch.
   | "list_issues"
   | "issue_detail"
-  | "start_issue";
+  | "start_issue"
+  // Backlog drain: several issues, a few at a time, under an optional spend envelope.
+  | "drain_issues"
+  | "list_issue_drains"
+  | "cancel_issue_drain";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -319,6 +323,9 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/issues": { GET: "list_issues" },
     "/api/issues/detail": { GET: "issue_detail" },
     "/api/issues/start": { POST: "start_issue" },
+    "/api/issues/drain": { POST: "drain_issues" },
+    "/api/issues/drains": { GET: "list_issue_drains" },
+    "/api/issues/drain/cancel": { POST: "cancel_issue_drain" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };

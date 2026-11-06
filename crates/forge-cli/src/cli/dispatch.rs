@@ -168,18 +168,28 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             watch,
             method,
             state,
+            drain,
+            parallel,
+            budget,
+            drain_status,
+            cancel_drain,
             url,
             token,
         } => {
-            crate::cli::commands::issues::issues_cmd(
+            crate::cli::commands::issues::issues_cmd(crate::cli::commands::issues::IssuesOpts {
                 start,
                 no_worktree,
                 watch,
                 method,
                 state,
+                drain,
+                parallel: parallel.map(usize::from),
+                budget,
+                drain_status,
+                cancel_drain,
                 url,
                 token,
-            )
+            })
             .await
         }
         Command::Api {

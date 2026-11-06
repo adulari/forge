@@ -68,3 +68,68 @@ export const getIssueDetail = (baseUrl: string, session: string, number: number)
 // Creating the worktree and the session can take a while on a big repository.
 export const startIssue = (baseUrl: string, body: IssueStartRequest) =>
   request<IssueStartResponse>(baseUrl, "/api/issues/start", { method: "POST", body: JSON.stringify(body) }, 90_000);
+
+export type DrainItemStatus =
+  | "queued"
+  | "running"
+  | "waiting"
+  | "pr_open"
+  | "merged"
+  | "done"
+  | "failed"
+  | "blocked"
+  | "cancelled";
+
+export interface DrainItem {
+  number: number;
+  status: DrainItemStatus;
+  session_id: string | null;
+  title: string | null;
+  pr_url: string | null;
+  outcome: string | null;
+}
+
+export interface DrainEnvelope {
+  meter: string;
+  label: string;
+  fill: number;
+  spent: boolean;
+  unverified: boolean;
+  resume_label: string | null;
+}
+
+export interface IssueDrain {
+  id: string;
+  cwd: string;
+  status: "active" | "paused" | "finished" | "cancelled";
+  parallel: number;
+  budget: string | null;
+  paused_reason: string | null;
+  created_at: number;
+  updated_at: number;
+  /** `Drain: 7 started, 4 merged, 2 waiting on you, 1 blocked`. */
+  line: string;
+  envelope: DrainEnvelope | null;
+  items: DrainItem[];
+}
+
+export interface IssueDrainRequest {
+  session: string;
+  numbers: number[];
+  parallel: number;
+  /** `claude:30%w`, `codex:15%w` or `$5`; omitted for no envelope. */
+  budget?: string;
+  worktree: boolean;
+  mode: PrWatchMode;
+  method?: PrWatchMethod;
+}
+
+export const getIssueDrains = (baseUrl: string) =>
+  request<{ drains: IssueDrain[] }>(baseUrl, "/api/issues/drains");
+
+// The daemon reads the quota window before it answers, which can take a few seconds.
+export const startIssueDrain = (baseUrl: string, body: IssueDrainRequest) =>
+  request<IssueDrain>(baseUrl, "/api/issues/drain", { method: "POST", body: JSON.stringify(body) }, 45_000);
+
+export const cancelIssueDrain = (baseUrl: string, id: string) =>
+  request<IssueDrain>(baseUrl, "/api/issues/drain/cancel", { method: "POST", body: JSON.stringify({ id }) });

@@ -34,9 +34,17 @@ fn pad(text: &str, to: usize) -> String {
     format!("{text}{}", " ".repeat(to.saturating_sub(width(text))))
 }
 
-fn row_line(r: &IssueRow, focused: bool, w: usize) -> Line<'static> {
+fn row_line(m: &IssuesMenu, r: &IssueRow, focused: bool, w: usize) -> Line<'static> {
+    let mark = if m.marked.contains(&r.number) {
+        "[x] "
+    } else {
+        "[ ] "
+    };
     let number = pad(&format!("#{}", r.number), 7);
-    let labels = if r.labels.is_empty() {
+    let drain_state = m.drain.as_ref().and_then(|d| d.item_label(r.number));
+    let labels = if let Some(state) = drain_state {
+        state.to_string()
+    } else if r.labels.is_empty() {
         String::new()
     } else {
         format!("[{}]", r.labels.join(", "))
@@ -47,7 +55,7 @@ fn row_line(r: &IssueRow, focused: bool, w: usize) -> Line<'static> {
         format!("{}c", r.comments)
     };
     let side_w = (w / 4).clamp(8, 28);
-    let title_w = w.saturating_sub(2 + 7 + side_w + 5 + 2).max(8);
+    let title_w = w.saturating_sub(2 + 4 + 7 + side_w + 5 + 2).max(8);
     let mut line = Line::from(vec![
         Span::styled(
             format!("{} ", if focused { g().prompt } else { " " }),
@@ -57,9 +65,24 @@ fn row_line(r: &IssueRow, focused: bool, w: usize) -> Line<'static> {
                 styles::faint()
             },
         ),
+        Span::styled(
+            mark.to_string(),
+            if m.marked.contains(&r.number) {
+                styles::brand()
+            } else {
+                styles::faint()
+            },
+        ),
         Span::styled(number, styles::muted()),
         Span::styled(pad(&trunc(&r.title, title_w), title_w + 1), styles::fg()),
-        Span::styled(pad(&trunc(&labels, side_w), side_w + 1), styles::faint()),
+        Span::styled(
+            pad(&trunc(&labels, side_w), side_w + 1),
+            if drain_state.is_some() {
+                styles::muted()
+            } else {
+                styles::faint()
+            },
+        ),
         Span::styled(comments, styles::faint()),
     ]);
     if focused {
@@ -78,17 +101,54 @@ fn options_line(m: &IssuesMenu) -> Line<'static> {
         Span::raw("   "),
         Span::styled("PR Watch ".to_string(), styles::muted()),
         Span::styled(format!(" {} ", m.watch.label()), styles::key_chip()),
+        Span::raw("   "),
+        Span::styled("At once ".to_string(), styles::muted()),
+        Span::styled(format!(" {} ", m.parallel), styles::key_chip()),
+        Span::raw("   "),
+        Span::styled("Budget ".to_string(), styles::muted()),
+        Span::styled(format!(" {} ", m.budget.label()), styles::key_chip()),
     ])
+}
+
+/// The drain's progress line, with its envelope meter and why it is paused.
+fn drain_line(m: &IssuesMenu, max: usize) -> Option<Line<'static>> {
+    let d = m.drain.as_ref()?;
+    let mut text = d.line.clone();
+    if let Some(meter) = &d.meter {
+        text.push_str(&format!("  {}  {meter}", g().sep));
+    }
+    if d.status == "paused" {
+        if let Some(reason) = &d.paused_reason {
+            text.push_str(&format!("  {}  {reason}", g().sep));
+        }
+    }
+    let style = if d.is_live() {
+        styles::brand()
+    } else {
+        styles::faint()
+    };
+    Some(Line::from(Span::styled(trunc(&text, max), style)))
 }
 
 fn footer(m: &IssuesMenu) -> String {
     if m.starting {
         return " Starting ".to_string();
     }
+    let sep = g().sep;
+    if !m.marked.is_empty() {
+        return format!(
+            " Space mark {sep} D drain {} {sep} +/- at once {sep} b budget {sep} u clear {sep} Esc close ",
+            m.marked.len()
+        );
+    }
+    let stop = if m.drain.as_ref().is_some_and(super::DrainView::is_live) {
+        format!(" {sep} x stop drain")
+    } else {
+        String::new()
+    };
     format!(
-        " {} move {sep} Enter start {sep} w worktree {sep} Tab watch {sep} r refresh {sep} Esc close ",
+        " {} move {sep} Enter start {sep} Space mark {sep} w worktree {sep} Tab watch {sep} r refresh{stop} {sep} Esc close ",
         g().up_down,
-        sep = g().sep
     )
 }
 
@@ -131,6 +191,16 @@ pub(crate) fn render_issues_menu(f: &mut Frame, app: &App, region: Rect) {
         return;
     }
     f.render_widget(Paragraph::new(options_line(m)), Rect { height: 1, ..inner });
+    if let Some(line) = drain_line(m, inner_w) {
+        f.render_widget(
+            Paragraph::new(line),
+            Rect {
+                y: inner.y + 1,
+                height: 1,
+                ..inner
+            },
+        );
+    }
     let notice_rows = u16::from(m.notice.is_some());
     let body = Rect {
         y: inner.y + 2,
@@ -160,7 +230,7 @@ pub(crate) fn render_issues_menu(f: &mut Frame, app: &App, region: Rect) {
             .enumerate()
             .skip(offset)
             .take(h)
-            .map(|(i, r)| row_line(r, i == m.cursor, inner_w))
+            .map(|(i, r)| row_line(m, r, i == m.cursor, inner_w))
             .collect();
         f.render_widget(Paragraph::new(lines), body);
     }

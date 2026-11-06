@@ -1,7 +1,16 @@
 // react-query hooks over apiIssues.ts. Bridged routes, so any signed-in connection works.
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { getIssueDetail, getIssueList, startIssue, type IssueState } from "./apiIssues";
+import {
+  cancelIssueDrain,
+  getIssueDetail,
+  getIssueDrains,
+  getIssueList,
+  startIssue,
+  startIssueDrain,
+  type IssueDrain,
+  type IssueState,
+} from "./apiIssues";
 import { useAuth } from "./auth";
 
 /** Open issues across every project the host knows, one `gh` call per distinct directory. */
@@ -35,5 +44,39 @@ export function useStartIssue() {
       void queryClient.invalidateQueries({ queryKey: ["sessions"] });
       void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });
     },
+  });
+}
+
+/** Every drain on the host, newest first. Polls while one is still going. */
+export function useIssueDrains() {
+  const { baseUrl } = useAuth();
+  return useQuery({
+    queryKey: ["issues", "drains", baseUrl],
+    queryFn: () => getIssueDrains(baseUrl as string).then((r) => r.drains),
+    enabled: baseUrl != null,
+    refetchInterval: (query) => (query.state.data?.some(isLiveDrain) ? 5_000 : false),
+  });
+}
+
+export const isLiveDrain = (drain: IssueDrain): boolean => drain.status === "active" || drain.status === "paused";
+
+export function useStartDrain() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof startIssueDrain>[1]) => startIssueDrain(baseUrl as string, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["issues", "drains"] });
+      void queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    },
+  });
+}
+
+export function useCancelDrain() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => cancelIssueDrain(baseUrl as string, id),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issues", "drains"] }),
   });
 }
