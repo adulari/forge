@@ -246,6 +246,9 @@ pub enum IdeAction {
     },
     /// Stage every routine hunk of these files, one hunk request each.
     AcceptRoutine(Vec<RoutineTarget>),
+    /// Take an accept back: unstage these hunks one request at a time (two `git apply --cached`
+    /// at once would fight over the index lock).
+    UnstageHunks(Vec<UndoRecord>),
     StagePaths {
         session_id: String,
         paths: Vec<String>,

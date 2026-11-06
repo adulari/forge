@@ -414,4 +414,25 @@ async fn files_carry_a_risk_verdict_and_hunk_counts() {
         verdict("src/new.rs"),
         ("look".into(), "new file".into(), 1, 0)
     );
+
+    // Staging is accepting: the staged file leaves the counts, whatever its hunks were.
+    assert!(std::process::Command::new("git")
+        .current_dir(dir.path())
+        .args(["add", "Cargo.lock", "src/b.rs"])
+        .status()
+        .unwrap()
+        .success());
+    let (_, body) = http_get(&app, &url).await;
+    let files = session(&body, &id)["files"].as_array().unwrap().clone();
+    let staged = |path: &str| {
+        let f = files.iter().find(|f| f["path"] == path).unwrap();
+        (
+            f["risk"].as_str().unwrap().to_string(),
+            f["risk_reason"].as_str().unwrap().to_string(),
+            f["look_hunks"].as_u64().unwrap() + f["routine_hunks"].as_u64().unwrap(),
+        )
+    };
+    assert_eq!(staged("Cargo.lock"), ("routine".into(), "staged".into(), 0));
+    assert_eq!(staged("src/b.rs"), ("routine".into(), "staged".into(), 0));
+    assert_eq!(staged("src/a.rs").1, "import reorder");
 }

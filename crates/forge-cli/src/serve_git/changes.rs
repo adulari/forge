@@ -89,20 +89,15 @@ fn file_risk(diff: &GitDiffFile) -> (&'static str, String, usize, usize) {
     (verdict, decisive, look, routine)
 }
 
-/// Risk for the dirty files of a shared checkout: one `git diff HEAD` parsed and classified, and
-/// untracked files read the way the diff route renders them.
+/// Risk for the dirty files of a shared checkout: the working tree against the index (what is
+/// still waiting for a decision), parsed and classified once, plus untracked files read the way
+/// the diff route renders them. A file whose changes are all staged has been accepted: it is
+/// listed as `routine` with nothing left to look at.
 fn annotate_tree_risk(root: &Path, files: &mut [ChangedFile]) {
     const MAX_RAW: usize = 32 * 1024 * 1024;
     let raw = git_raw(
         root,
-        &[
-            "-c",
-            "core.quotePath=false",
-            "diff",
-            "HEAD",
-            "--find-renames",
-            "--",
-        ],
+        &["-c", "core.quotePath=false", "diff", "--find-renames", "--"],
     )
     .ok()
     .filter(|raw| raw.len() <= MAX_RAW)
@@ -113,13 +108,14 @@ fn annotate_tree_risk(root: &Path, files: &mut [ChangedFile]) {
         .map(|file| (file.path.clone(), file))
         .collect();
     for file in files {
-        match parsed.get(&file.path) {
-            Some(diff) => file.set_risk(Some(diff)),
-            None if file.kind == "created" => {
-                let diff = super::diff::untracked_diff(root, &file.path, 0, super::MAX_DIFF_LINES);
-                file.set_risk(diff.ok().as_ref());
-            }
-            None => file.set_risk(None),
+        if let Some(diff) = parsed.get(&file.path) {
+            file.set_risk(Some(diff));
+        } else if super::diff::is_untracked(root, &file.path) {
+            let diff = super::diff::untracked_diff(root, &file.path, 0, super::MAX_DIFF_LINES);
+            file.set_risk(diff.ok().as_ref());
+        } else {
+            file.risk = risk::ROUTINE;
+            file.risk_reason = "staged".to_string();
         }
     }
 }

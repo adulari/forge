@@ -503,10 +503,18 @@ impl IdeApp {
         };
         let mut actions = Vec::new();
         let mut cleared = false;
+        let mut unstage = Vec::new();
         let mut pending = vec![record];
-        while let Some(record) = pending.pop() {
+        while let Some(mut record) = pending.pop() {
             for (session, path) in &record.unmark {
                 cleared |= unmark_reviewed(&mut self.marks, session, path);
+            }
+            pending.extend(std::mem::take(&mut record.with));
+            if record.action == HunkAction::Unstage {
+                if !record.steps.is_empty() {
+                    unstage.push(record);
+                }
+                continue;
             }
             for step in &record.steps {
                 actions.push(IdeAction::Hunk {
@@ -519,7 +527,9 @@ impl IdeApp {
                     is_undo: true,
                 });
             }
-            pending.extend(record.with);
+        }
+        if !unstage.is_empty() {
+            actions.push(IdeAction::UnstageHunks(unstage));
         }
         if cleared {
             actions.push(self.save_marks());

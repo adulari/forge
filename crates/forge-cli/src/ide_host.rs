@@ -440,6 +440,42 @@ impl Api {
         }));
     }
 
+    /// Take an accept back: unstage each recorded hunk, one request at a time. Reported as one
+    /// undo outcome; the first refusal is the one the user sees.
+    async fn unstage_hunks(&self, records: Vec<UndoRecord>) {
+        let mut result: Result<(), HunkFailure> = Ok(());
+        let first = records
+            .first()
+            .map(|r| (r.session_id.clone(), r.path.clone()));
+        for record in records {
+            for step in record.steps {
+                let body = serde_json::json!({
+                    "session": record.session_id,
+                    "path": record.path,
+                    "hunk_header": step.hunk_header,
+                    "patch": step.patch,
+                    "action": "unstage",
+                });
+                if let Err(error) =
+                    post(&self.http, &self.base, &self.token, "api/git/hunk", body).await
+                {
+                    if result.is_ok() {
+                        result = Err(classify(error));
+                    }
+                }
+            }
+        }
+        let (session_id, path) = first.unwrap_or_default();
+        self.send(IdeEvent::Hunk(HunkOutcome {
+            session_id,
+            path,
+            action: forge_tui::ide::hunk::HunkAction::Unstage,
+            undo: None,
+            is_undo: true,
+            result,
+        }));
+    }
+
     async fn discard(&self, session: String, path: String, undo: Option<UndoRecord>) {
         let body = serde_json::json!({ "session": session, "paths": [path] });
         let result = post(&self.http, &self.base, &self.token, "api/git/discard", body).await;

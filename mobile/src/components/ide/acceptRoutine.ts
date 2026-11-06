@@ -22,7 +22,7 @@ export interface AcceptPlan {
 export function planAcceptRoutine(rows: readonly QueueRow[], worktreeSessions: ReadonlySet<string>, readOnly: boolean): AcceptPlan {
   const plan: AcceptPlan = { stage: [], review: [] };
   for (const row of rows) {
-    if (row.tier === "reviewed" || (row.file.routineHunks ?? 0) === 0) continue;
+    if (row.tier === "reviewed" || row.tier === "conflict" || (row.file.routineHunks ?? 0) === 0) continue;
     if (worktreeSessions.has(row.sessionId)) {
       if ((row.file.lookHunks ?? 0) === 0) plan.review.push(row);
     } else if (!readOnly) {

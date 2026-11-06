@@ -168,22 +168,22 @@ fn the_outcome_toasts_and_u_unstages_the_same_hunks() {
         .unwrap_or_default();
     assert!(text.contains("staged 2 routine hunks"), "{text}");
     let actions = press(&mut app, 'u');
-    let undone: Vec<(String, HunkAction)> = actions
+    let batches: Vec<&Vec<hunk::UndoRecord>> = actions
         .iter()
         .filter_map(|a| match a {
-            IdeAction::Hunk {
-                path,
-                action,
-                is_undo: true,
-                ..
-            } => Some((path.clone(), *action)),
+            IdeAction::UnstageHunks(records) => Some(records),
             _ => None,
         })
         .collect();
-    assert_eq!(undone.len(), 2);
-    assert!(undone
-        .iter()
-        .all(|(_, action)| *action == HunkAction::Unstage));
+    assert_eq!(
+        batches.len(),
+        1,
+        "one sequential batch, not a request per hunk"
+    );
+    let mut paths: Vec<&str> = batches[0].iter().map(|r| r.path.as_str()).collect();
+    paths.sort_unstable();
+    assert_eq!(paths, ["Cargo.lock", "src/imports.rs"]);
+    assert!(batches[0].iter().all(|r| r.action == HunkAction::Unstage));
 }
 
 #[test]
