@@ -1103,7 +1103,7 @@ fn next_word_end(s: &str, mut pos: usize) -> usize {
     pos
 }
 
-fn sanitize_terminal_text(text: &str) -> String {
+pub(crate) fn sanitize_terminal_text(text: &str) -> String {
     text.chars()
         .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
         .collect()

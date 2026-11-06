@@ -110,14 +110,14 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::AssistantText(text) => {
                 self.end_reasoning();
                 self.mid_line = false;
-                out!("\n{text}");
+                out!("\n{}", clean(&text));
             }
             PresenterEvent::AssistantDelta(delta) => {
                 self.end_reasoning();
                 if !delta.is_empty() {
                     self.mid_line = !delta.ends_with('\n');
                 }
-                print!("{delta}");
+                print!("{}", clean(&delta));
                 let _ = std::io::stdout().flush();
             }
             PresenterEvent::Reasoning(delta) => {
@@ -126,7 +126,7 @@ impl Presenter for HeadlessPresenter {
                 if self.styled {
                     print!(
                         "{}",
-                        crate::theme::paint(crate::theme::t().palette.fg_muted, &delta)
+                        crate::theme::paint(crate::theme::t().palette.fg_muted, &clean(&delta))
                     );
                     let _ = std::io::stdout().flush();
                     self.reasoning_open = true;
@@ -147,7 +147,7 @@ impl Presenter for HeadlessPresenter {
                                 forge_types::JobNotice::Exit(exit) => {
                                     out!("  ⚙ {}", exit.summary());
                                     for l in &exit.tail {
-                                        out!("      {l}");
+                                        out!("      {}", clean(l));
                                     }
                                 }
                             }
@@ -162,17 +162,17 @@ impl Presenter for HeadlessPresenter {
                     }
                     None => {}
                 }
-                out!("  ⚡ steer: {text}");
+                out!("  ⚡ steer: {}", clean(&text));
             }
             PresenterEvent::Warning(msg) => {
                 if std::mem::take(&mut self.mid_line) {
                     out!();
                 }
-                out!("  ⚠ {msg}");
+                out!("  ⚠ {}", clean(&msg));
             }
             PresenterEvent::Error(msg) => {
                 // Red + distinct glyph so a hard failure can't be mistaken for the yellow warning.
-                let line = fold_for_terminal(&format!("  ✖ {msg}"));
+                let line = fold_for_terminal(&format!("  ✖ {}", clean(&msg)));
                 if self.styled && std::env::var_os("NO_COLOR").is_none() {
                     eprintln!(
                         "{}",
@@ -200,13 +200,13 @@ impl Presenter for HeadlessPresenter {
                 }
             }
             PresenterEvent::ToolStart { name, args } => {
-                out!("  ↳ {name}({args})");
+                out!("  ↳ {name}({})", clean(&args));
             }
             PresenterEvent::ToolResult {
                 name, ok, summary, ..
             } => {
                 let mark = if ok { "✓" } else { "✗" };
-                out!("  {mark} {name}: {summary}");
+                out!("  {mark} {name}: {}", clean(&summary));
             }
             // Headless prints only the summary, so a script needs the path to read the rest.
             PresenterEvent::ToolOutput { output, .. } => {
@@ -223,7 +223,7 @@ impl Presenter for HeadlessPresenter {
                 ));
             }
             PresenterEvent::SubagentStart { agent, task, .. } => {
-                out!("  ⤷ spawn [{agent}]: {task}");
+                out!("  ⤷ spawn [{agent}]: {}", clean(&task));
             }
             // Live per-child deltas are for the interactive TUI row; the line-based renderer
             // stays quiet and shows the final SubagentResult.
@@ -236,11 +236,14 @@ impl Presenter for HeadlessPresenter {
                 ..
             } => {
                 let mark = if ok { "✓" } else { "✗" };
-                out!("  {mark} agent [{agent}] (${cost_usd:.4}): {summary}");
+                out!(
+                    "  {mark} agent [{agent}] (${cost_usd:.4}): {}",
+                    clean(&summary)
+                );
             }
             PresenterEvent::Diff(diff) => {
                 // Plain unified-diff text for scripting/pipes (no ANSI).
-                out_inline!("{}", render::diff_to_plain(&diff));
+                out_inline!("{}", clean(&render::diff_to_plain(&diff)));
                 let _ = std::io::stdout().flush();
             }
             PresenterEvent::AssayProgress(msg) => {
@@ -562,6 +565,13 @@ fn parse_confirm_line(line: &str) -> ConfirmReply {
         _ => ConfirmOutcome::Deny,
     };
     ConfirmReply::with_note(outcome, note)
+}
+
+/// Model, tool and file text with control characters removed before it reaches the terminal:
+/// written raw, an escape sequence in a reply or a tool result could set the clipboard (OSC 52),
+/// retitle the window or move the cursor. Forge's own styling is added after this.
+fn clean(text: &str) -> String {
+    crate::app::sanitize_terminal_text(text)
 }
 
 #[cfg(test)]

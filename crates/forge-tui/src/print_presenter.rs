@@ -54,7 +54,10 @@ impl PrintPresenter {
         }
     }
 
+    /// Trace and error lines carry model and tool text, so control characters are dropped before
+    /// they reach a terminal (stdout keeps the answer verbatim for scripts).
     fn trace(&mut self, text: &str) {
+        let text = &crate::app::sanitize_terminal_text(text);
         if let Some(trace) = self.trace.as_mut() {
             let _ = writeln!(trace, "{text}");
             let _ = trace.flush();
@@ -63,6 +66,7 @@ impl PrintPresenter {
 
     /// Errors are never hidden: they go to the trace when there is one, else straight to stderr.
     fn error(&mut self, text: &str) {
+        let text = &crate::app::sanitize_terminal_text(text);
         match self.trace.as_mut() {
             Some(trace) => {
                 let _ = writeln!(trace, "  ✖ {text}");
