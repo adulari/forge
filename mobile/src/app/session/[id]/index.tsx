@@ -69,7 +69,7 @@ import { answerAlreadyShown, historyHasRealContentSince, shouldRetryEmptyHistory
 import { shouldMountTranscript } from "../../../lib/transcriptMountGate";
 import { reconcilePendingMessages, unqueuedPendingMessages } from "../../../lib/sessionReconciler";
 import { readOfflineQueue } from "../../../lib/serverStorageKeys";
-import { OFFLINE_QUEUE_CAP, newClientMsgId, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
+import { OFFLINE_QUEUE_CAP, newClientMsgId, offlineQueueKey, flushQueuedPrompts, parseOfflineQueue, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { collapsePrompts } from "../../../lib/promptRecall";
 import { type FollowUpMode } from "../../../lib/followUp";
 import { useFollowUpSetting } from "../../../lib/useFollowUpSetting";
@@ -287,8 +287,8 @@ export function SessionChat() {
       setPendingInterrupt(false);
     }
     if (offlineQueue.length > 0) {
-      for (const input of queuedPromptInputs(offlineQueue)) send(input);
-      setOfflineQueue([]);
+      const sent = flushQueuedPrompts(offlineQueue, send);
+      if (sent > 0) setOfflineQueue((prev) => prev.slice(sent));
     }
   }, [connectionState, offlineQueue, pendingInterrupt, pendingAnswer, snapshot?.prompt_seq, snapshot?.permission_prompt, snapshot?.question, send, clearPendingAnswer]);
 
@@ -394,15 +394,18 @@ export function SessionChat() {
   const queuedKey = (snapshot?.queued ?? []).join("\u0000");
   const shownPending = useMemo(() => unqueuedPendingMessages(pendingSent, queuedKey ? queuedKey.split("\u0000") : []), [pendingSent, queuedKey]);
   useEffect(() => {
-    if (shownPending.length === 0) return;
-    const timers = shownPending.map((p) =>
+    // A prompt still in the offline queue has not been sent yet; its clock starts at the flush.
+    const offlineTexts = new Set(offlineQueue.map((q) => q.text));
+    const waiting = shownPending.filter((p) => !offlineTexts.has(p.text));
+    if (waiting.length === 0) return;
+    const timers = waiting.map((p) =>
       setTimeout(() => {
         setPendingSent((prev) => prev.filter((x) => x.id !== p.id));
         toast.show("message didn't confirm — check connection", { tone: "danger" });
       }, PENDING_SENT_TIMEOUT_MS),
     );
     return () => timers.forEach(clearTimeout);
-  }, [shownPending, toast]);
+  }, [shownPending, offlineQueue, toast]);
 
   // REST history is authoritative once populated. A successful-but-empty page is not evidence
   // that the daemon transcript is empty, so retain the snapshot tail until history has rows.

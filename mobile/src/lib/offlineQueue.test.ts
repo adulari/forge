@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { purgeServerStorage, readOfflineQueue, readGapAck, type KeyValueStorage } from "./serverStorageKeys";
 import { gapAckKey, legacyGapAckKey } from "./historyGap";
-import { buildInitialPromptQueue, newClientMsgId, offlineQueueKey, parseOfflineQueue, queuedPromptInputs } from "./offlineQueue";
+import { buildInitialPromptQueue, flushQueuedPrompts, newClientMsgId, offlineQueueKey, parseOfflineQueue, queuedPromptInputs } from "./offlineQueue";
 
 describe("offline prompt queue", () => {
   it("migrates legacy strings and tolerates corrupt storage", () => {
@@ -113,5 +113,32 @@ describe("token-free storage keys", () => {
     });
     await purgeServerStorage(store, url);
     expect([...store.data.keys()].sort()).toEqual([offlineQueueKey(other, "s1"), "unrelated"].sort());
+  });
+});
+
+describe("flushQueuedPrompts", () => {
+  const queue = [
+    { text: "one", attachments: [], clientMsgId: "a" },
+    { text: "two", attachments: [], clientMsgId: "b" },
+    { text: "three", attachments: [], clientMsgId: "c" },
+  ];
+
+  it("sends everything in order when the socket takes it", () => {
+    const sent: string[] = [];
+    expect(flushQueuedPrompts(queue, (input) => (sent.push((input as { text: string }).text), true))).toBe(3);
+    expect(sent).toEqual(["one", "two", "three"]);
+  });
+
+  it("stops at the first refused send so the rest stay queued in order", () => {
+    const sent: string[] = [];
+    const n = flushQueuedPrompts(queue, (input) => {
+      const text = (input as { text: string }).text;
+      if (text === "two") return false;
+      sent.push(text);
+      return true;
+    });
+    expect(n).toBe(1);
+    expect(sent).toEqual(["one"]);
+    expect(queue.slice(n).map((q) => q.text)).toEqual(["two", "three"]);
   });
 });

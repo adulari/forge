@@ -59,6 +59,17 @@ export function parseOfflineQueue(raw: string | null): QueuedPrompt[] {
 }
 
 /** Convert stored prompts to wire inputs without changing FIFO ordering. */
+/** Send queued prompts in order, stopping at the first one the socket refuses so it and the ones
+ * after it stay queued (in order) for the next reconnect. Returns how many went out. */
+export function flushQueuedPrompts(queue: readonly QueuedPrompt[], send: (input: RemoteInput) => boolean): number {
+  let sent = 0;
+  for (const input of queuedPromptInputs(queue)) {
+    if (!send(input)) break;
+    sent += 1;
+  }
+  return sent;
+}
+
 export function queuedPromptInputs(queue: readonly QueuedPrompt[]): RemoteInput[] {
   return queue.map(({ text, attachments, clientMsgId }) => ({
     kind: "prompt",
