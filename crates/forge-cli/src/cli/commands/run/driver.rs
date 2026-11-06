@@ -454,6 +454,12 @@ fn dispatch_push(
     snap: &remote::Snapshot,
     msg: crate::push::PushMessage,
 ) {
+    tracing::info!(
+        session = session_id,
+        kind = msg.kind,
+        seq = msg.seq,
+        "push dispatched"
+    );
     if let Some(notifier) = apns {
         notifier.dispatch_live_activity(
             session_id.to_string(),
@@ -558,6 +564,11 @@ async fn drive_session(
         .as_ref()
         .map(|config| config.chat.follow_up)
         .unwrap_or_default();
+    let push_escalate = std::time::Duration::from_secs(
+        loaded_config
+            .as_ref()
+            .map_or(180, |config| config.remote.push_escalate_secs),
+    );
     let auto_setup = loaded_config
         .as_ref()
         .map(|config| config.project.auto_initialize)
@@ -927,9 +938,11 @@ async fn drive_session(
                 {
                     // A client that is attached but unattended (phone just locked, tab left open)
                     // would swallow this for good, so hold it for when the last client drops.
-                    if crate::push::should_push(
+                    let sent = crate::push::should_push(
                         ws_clients.load(std::sync::atomic::Ordering::Relaxed),
-                    ) {
+                    );
+                    deferred_push.track(&msg, sent, Instant::now());
+                    if sent {
                         dispatch_push(&apns, &push, &session_id, &snap, msg);
                     } else {
                         deferred_push.hold(msg);
@@ -944,9 +957,11 @@ async fn drive_session(
             }
             dirty = false;
         }
-        if let Some(msg) = deferred_push.release(
+        if let Some(msg) = deferred_push.tick(
             ws_clients.load(std::sync::atomic::Ordering::Relaxed),
             last_snap.as_ref(),
+            Instant::now(),
+            push_escalate,
         ) {
             if let Some(snap) = &last_snap {
                 dispatch_push(&apns, &push, &session_id, snap, msg);

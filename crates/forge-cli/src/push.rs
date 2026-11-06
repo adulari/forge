@@ -16,7 +16,9 @@
 //! drops its WS within seconds, so "a WS is connected" is a reliable proxy for "someone is
 //! watching" — while visibility reporting adds a protocol field and still lies for an unattended
 //! wall dashboard. Documented trade-off: a desktop tab left open in the background suppresses
-//! pushes to the phone.
+//! pushes to the phone — except that a decision (permission / question) still unanswered after
+//! `[remote] push_escalate_secs` (default 180, `0` = off) is pushed anyway, and once more at five
+//! times that delay ([`DeferredPush::tick`]).
 //!
 //! ## Delivery
 //!
@@ -490,12 +492,46 @@ fn without_urls(text: &str) -> String {
 
 /// The most recent pushable event that was suppressed because a client was attached. Delivered
 /// once, when the last client detaches, if it is still current; never delivered stale.
+///
+/// A pending decision (permission prompt / question) is also timed: a client that stays attached
+/// but unattended must not swallow it forever, so [`DeferredPush::tick`] sends it after the
+/// escalation delay anyway and nudges once more at [`RENUDGE_FACTOR`] times that delay.
 #[derive(Debug, Default)]
-pub(crate) struct DeferredPush(Option<PushMessage>);
+pub(crate) struct DeferredPush {
+    held: Option<PushMessage>,
+    decision: Option<DecisionClock>,
+}
+
+#[derive(Debug)]
+struct DecisionClock {
+    msg: PushMessage,
+    since: std::time::Instant,
+    /// 0 = nothing sent yet, 1 = announced once, 2 = re-nudged (done).
+    stage: u8,
+}
+
+/// The re-nudge fires at this multiple of the escalation delay (180 s default -> 15 min).
+const RENUDGE_FACTOR: u32 = 5;
+
+fn is_decision(msg: &PushMessage) -> bool {
+    matches!(msg.kind, "permission" | "question")
+}
 
 impl DeferredPush {
     pub(crate) fn hold(&mut self, msg: PushMessage) {
-        self.0 = Some(msg);
+        self.held = Some(msg);
+    }
+
+    /// Starts the unanswered-decision clock for `msg`; `sent` says it already went out.
+    pub(crate) fn track(&mut self, msg: &PushMessage, sent: bool, now: std::time::Instant) {
+        if !is_decision(msg) {
+            return;
+        }
+        self.decision = Some(DecisionClock {
+            msg: msg.clone(),
+            since: now,
+            stage: u8::from(sent),
+        });
     }
 
     /// Drops the held event once stale; releases it when no client is attached and it is current.
@@ -504,16 +540,58 @@ impl DeferredPush {
         connected_ws_clients: usize,
         cur: Option<&Snapshot>,
     ) -> Option<PushMessage> {
-        let msg = self.0.as_ref()?;
+        let msg = self.held.as_ref()?;
         if !cur.is_some_and(|c| push_is_current(msg, c)) {
-            self.0 = None;
+            self.held = None;
             return None;
         }
         if should_push(connected_ws_clients) {
-            self.0.take()
+            let msg = self.held.take()?;
+            if let Some(clock) = self.decision.as_mut().filter(|c| c.msg.seq == msg.seq) {
+                clock.stage = clock.stage.max(1);
+            }
+            Some(msg)
         } else {
             None
         }
+    }
+
+    /// [`Self::release`] plus the escalation: a still-pending decision whose clock ran past
+    /// `delay` is sent although clients are attached; once more at `delay * RENUDGE_FACTOR`.
+    /// A zero `delay` disables the escalation. Answered or replaced decisions send nothing.
+    pub(crate) fn tick(
+        &mut self,
+        connected_ws_clients: usize,
+        cur: Option<&Snapshot>,
+        now: std::time::Instant,
+        delay: std::time::Duration,
+    ) -> Option<PushMessage> {
+        if let Some(msg) = self.release(connected_ws_clients, cur) {
+            return Some(msg);
+        }
+        let clock = self.decision.as_mut()?;
+        if !cur.is_some_and(|c| push_is_current(&clock.msg, c)) {
+            self.decision = None;
+            return None;
+        }
+        if delay.is_zero() {
+            return None;
+        }
+        let waited = now.saturating_duration_since(clock.since);
+        let due = match clock.stage {
+            0 => waited >= delay,
+            1 => waited >= delay * RENUDGE_FACTOR,
+            _ => false,
+        };
+        if !due {
+            return None;
+        }
+        clock.stage += 1;
+        let msg = clock.msg.clone();
+        if self.held.as_ref().is_some_and(|h| h.seq == msg.seq) {
+            self.held = None;
+        }
+        Some(msg)
     }
 }
 
@@ -897,6 +975,83 @@ mod tests {
         assert_eq!(held.release(0, Some(&finished)), Some(msg.clone()));
         held.hold(msg);
         assert_eq!(held.release(0, Some(&busy)), None);
+    }
+
+    #[test]
+    fn an_unanswered_prompt_escalates_past_an_attached_client_then_nudges_once() {
+        use std::time::{Duration, Instant};
+        let delay = Duration::from_secs(2);
+        let (cur, msg) = attention();
+        let t0 = Instant::now();
+        let mut held = DeferredPush::default();
+        held.hold(msg.clone());
+        held.track(&msg, false, t0);
+        let at = |s| t0 + Duration::from_secs(s);
+        assert_eq!(held.tick(1, Some(&cur), at(1), delay), None, "too early");
+        assert_eq!(held.tick(1, Some(&cur), at(2), delay), Some(msg.clone()));
+        assert_eq!(held.tick(1, Some(&cur), at(3), delay), None, "once");
+        assert_eq!(
+            held.tick(0, Some(&cur), at(3), delay),
+            None,
+            "no double send on detach"
+        );
+        assert_eq!(
+            held.tick(1, Some(&cur), at(9), delay),
+            None,
+            "re-nudge not yet due"
+        );
+        assert_eq!(held.tick(1, Some(&cur), at(10), delay), Some(msg));
+        assert_eq!(
+            held.tick(1, Some(&cur), at(500), delay),
+            None,
+            "only one re-nudge"
+        );
+    }
+
+    #[test]
+    fn an_answered_prompt_never_escalates_and_zero_delay_disables_it() {
+        use std::time::{Duration, Instant};
+        let (cur, msg) = attention();
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(1000);
+        let mut off = DeferredPush::default();
+        off.hold(msg.clone());
+        off.track(&msg, false, t0);
+        assert_eq!(off.tick(1, Some(&cur), later, Duration::ZERO), None);
+        let mut answered = DeferredPush::default();
+        answered.hold(msg.clone());
+        answered.track(&msg, false, t0);
+        let done = Snapshot {
+            permission_prompt: None,
+            ..cur
+        };
+        assert_eq!(
+            answered.tick(1, Some(&done), later, Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            answered.tick(1, Some(&done), later, Duration::from_secs(1)),
+            None,
+            "the clock is gone"
+        );
+    }
+
+    #[test]
+    fn a_prompt_pushed_at_once_still_gets_the_one_renudge() {
+        use std::time::{Duration, Instant};
+        let (cur, msg) = attention();
+        let t0 = Instant::now();
+        let delay = Duration::from_secs(2);
+        let mut held = DeferredPush::default();
+        held.track(&msg, true, t0);
+        assert_eq!(
+            held.tick(0, Some(&cur), t0 + Duration::from_secs(3), delay),
+            None
+        );
+        assert_eq!(
+            held.tick(0, Some(&cur), t0 + Duration::from_secs(10), delay),
+            Some(msg)
+        );
     }
 
     fn snap() -> Snapshot {

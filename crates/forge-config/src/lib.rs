@@ -397,6 +397,12 @@ pub struct RemoteConfig {
     /// sessions read-only, as before.
     #[serde(default = "default_true")]
     pub interactive_local_sessions: bool,
+    /// Seconds a permission prompt or question may sit unanswered before its push is sent even
+    /// though a client is still attached (a desktop window left open all day would otherwise
+    /// swallow it for good). One more nudge follows at five times this delay if it is still
+    /// pending. `0` turns the escalation off: pushes then wait for the last client to detach.
+    #[serde(default = "default_push_escalate_secs")]
+    pub push_escalate_secs: u64,
     /// Extra `Host` header values the daemon accepts on its token routes (exact names, or
     /// `*.example.com`). IP literals, `localhost`, single-label names, `*.local`, `*.ts.net`, the
     /// well-known tunnel domains and `tunnel_hostname` are always accepted; any other name is
@@ -429,10 +435,15 @@ impl Default for RemoteConfig {
             publish_local_runs: default_true(),
             publish_local_sessions: default_true(),
             interactive_local_sessions: default_true(),
+            push_escalate_secs: default_push_escalate_secs(),
             allowed_hosts: Vec::new(),
             trusted_proxies: Vec::new(),
         }
     }
+}
+
+fn default_push_escalate_secs() -> u64 {
+    180
 }
 
 /// `[anywhere]` config block for the optional managed companion.
@@ -4342,6 +4353,16 @@ models = {}
         .expect("a config without min_tier parses");
         assert_eq!(plain.mesh.min_tier, None);
         assert_eq!(Config::default().mesh.min_tier, None);
+    }
+
+    #[test]
+    fn push_escalation_defaults_to_three_minutes_and_zero_disables_it() {
+        let whole: Config =
+            toml::from_str("permission_mode = \"accept-edits\"\n[mesh]\nmodels = {}\n").unwrap();
+        assert_eq!(whole.remote.push_escalate_secs, 180);
+        assert_eq!(RemoteConfig::default().push_escalate_secs, 180);
+        let off: RemoteConfig = toml::from_str("push_escalate_secs = 0\n").unwrap();
+        assert_eq!(off.push_escalate_secs, 0);
     }
 
     #[test]
