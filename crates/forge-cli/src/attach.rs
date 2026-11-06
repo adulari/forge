@@ -578,6 +578,7 @@ struct Renderer {
     was_busy: bool,
     shown_setup: Option<ClientSetup>,
     printed_live: Vec<String>,
+    held_live: Option<String>,
 }
 
 impl Renderer {
@@ -612,11 +613,24 @@ impl Renderer {
 
         // A running command's rolling tail: print each line once as it arrives, indented so it
         // reads as the call's output; the finished result follows in the transcript as usual.
+        // The last line may still be growing (the sampler appends the unterminated tail), so it is
+        // held back until another line follows it or the call ends; only settled lines are
+        // deduplicated, which keeps a redrawn last line from reprinting the whole block.
         let live = snap.live_tail.as_ref().map_or(&[][..], |t| &t.lines[..]);
-        for l in new_suffix(&self.printed_live, live) {
+        let (settled, last) = match live.split_last() {
+            Some((last, settled)) => (settled, Some(last)),
+            None => (&[][..], None),
+        };
+        for l in new_suffix(&self.printed_live, settled) {
             println!("  │ {l}");
         }
-        self.printed_live = live.to_vec();
+        if last.is_none() {
+            if let Some(held) = self.held_live.take() {
+                println!("  │ {held}");
+            }
+        }
+        self.printed_live = settled.to_vec();
+        self.held_live = last.cloned();
 
         if snap.worktree_setup != self.shown_setup {
             if let Some(setup) = &snap.worktree_setup {
@@ -876,7 +890,8 @@ mod tests {
         };
         renderer.render(&frame(1, &["a", "b"]), &mut pending);
         renderer.render(&frame(2, &["a", "b", "c"]), &mut pending);
-        assert_eq!(renderer.printed_live, vec!["a", "b", "c"]);
+        assert_eq!(renderer.printed_live, vec!["a", "b"]);
+        assert_eq!(renderer.held_live.as_deref(), Some("c"));
         renderer.render(
             &ClientSnapshot {
                 revision: Some(3),
@@ -885,6 +900,28 @@ mod tests {
             &mut pending,
         );
         assert!(renderer.printed_live.is_empty());
+        assert!(renderer.held_live.is_none());
+    }
+
+    #[test]
+    fn a_growing_last_line_never_replays_the_lines_before_it() {
+        let mut renderer = Renderer::default();
+        let mut pending = Pending::None;
+        let frame = |revision, lines: &[&str]| ClientSnapshot {
+            revision: Some(revision),
+            live_tail: Some(ClientLiveTail {
+                lines: lines.iter().map(|l| (*l).to_string()).collect(),
+            }),
+            ..ClientSnapshot::default()
+        };
+        renderer.render(&frame(1, &["a", "b", "t.py .."]), &mut pending);
+        assert_eq!(renderer.printed_live, vec!["a", "b"]);
+        renderer.render(&frame(2, &["a", "b", "t.py ...."]), &mut pending);
+        renderer.render(&frame(3, &["a", "b", "t.py ......"]), &mut pending);
+        assert_eq!(renderer.printed_live, vec!["a", "b"]);
+        assert_eq!(renderer.held_live.as_deref(), Some("t.py ......"));
+        renderer.render(&frame(4, &["a", "b", "t.py ......", "done"]), &mut pending);
+        assert_eq!(renderer.printed_live, vec!["a", "b", "t.py ......"]);
     }
 
     #[test]
