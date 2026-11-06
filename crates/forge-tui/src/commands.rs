@@ -834,6 +834,10 @@ mod tests {
                 budget: Some("codex:15%w".into()),
             }
         );
+        assert_eq!(
+            parse_command("/goal fix the user's login bug --budget claude:20%w"),
+            goal("fix the user's login bug", "claude:20%w")
+        );
         for bad in ["--budget", "--budget nonsense", "--budget claude:0%w"] {
             let action = parse_command(&format!("/goal harden it {bad}"));
             assert!(

@@ -89,20 +89,34 @@ fn take_budget(arg: &str) -> Result<(String, Option<String>), String> {
     if !arg.contains("--budget") {
         return Ok((arg.to_string(), None));
     }
-    let Ok(tokens) = shell_words::split(arg) else {
+    // A plain whitespace scan, not shell parsing: an apostrophe elsewhere in the objective
+    // ("fix the user's login bug") must not hide the flag.
+    let mut words: Vec<(usize, &str)> = Vec::new();
+    let mut start = None;
+    for (i, c) in arg.char_indices() {
+        match (c.is_whitespace(), start) {
+            (false, None) => start = Some(i),
+            (true, Some(st)) => {
+                words.push((st, &arg[st..i]));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(st) = start {
+        words.push((st, &arg[st..]));
+    }
+    let Some(at) = words.iter().position(|(_, w)| *w == "--budget") else {
         return Ok((arg.to_string(), None));
     };
-    let Some(at) = tokens.iter().position(|t| t == "--budget") else {
-        return Ok((arg.to_string(), None));
-    };
-    let spec = tokens.get(at + 1).ok_or_else(|| {
+    let (_, spec) = words.get(at + 1).copied().ok_or_else(|| {
         "--budget needs a value: claude:20%w, codex:15%w, claude:30%5h or $5".to_string()
     })?;
     forge_types::goal_envelope::EnvelopeSpec::parse(spec, None)?;
-    let mut rest = tokens.clone();
-    let spec = rest.remove(at + 1);
-    rest.remove(at);
-    Ok((shell_words::join(&rest), Some(spec)))
+    let from = words[at].0;
+    let to = words[at + 1].0 + spec.len();
+    let rest = format!("{} {}", arg[..from].trim_end(), arg[to..].trim_start());
+    Ok((rest.trim().to_string(), Some(spec.to_string())))
 }
 
 /// The steering verbs are whole-word matches, so a goal that merely starts with one of them
