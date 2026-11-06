@@ -470,7 +470,10 @@ impl DriverState {
             return;
         }
         self.busy = false;
-        self.turn_handle = None;
+        self.turn_panic = match self.turn_handle.take() {
+            Some(handle) => join_panic_message(handle).await,
+            None => None,
+        };
         self.steer_tracker
             .turn_finished(&mut self.queued_prompts, &self.steer, &mut self.app);
         crate::alloc_policy::release_free_memory();
@@ -673,4 +676,24 @@ impl DriverState {
         }
         changed
     }
+}
+
+/// The turn's `DoneGuard` fires while the task is still unwinding, so give the task a moment to
+/// finish and report a panic. Aborts (interrupts) and normal returns yield `None`.
+async fn join_panic_message(handle: tokio::task::JoinHandle<()>) -> Option<String> {
+    let joined = if handle.is_finished() {
+        handle.await
+    } else {
+        tokio::time::timeout(std::time::Duration::from_millis(500), handle)
+            .await
+            .ok()?
+    };
+    let payload = joined.err()?.try_into_panic().ok()?;
+    Some(
+        payload
+            .downcast_ref::<&str>()
+            .map(|m| (*m).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string()),
+    )
 }

@@ -369,6 +369,9 @@ struct DriverState {
     turn_gen: u64,
     last_auto_compact_gen: u64,
     turn_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Panic message of the turn that just ended, if it crashed; the driver loop turns it into a
+    /// turn error so the snapshot and push say "failed" instead of "done".
+    turn_panic: Option<String>,
     loop_state: Option<LoopState>,
     goal_state: Option<GoalState>,
     pending: Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmReply>)>,
@@ -515,6 +518,7 @@ async fn drive_session(
         turn_gen: 0,
         last_auto_compact_gen: 0,
         turn_handle: None,
+        turn_panic: None,
         loop_state: None,
         goal_state: None,
         pending: None,
@@ -698,6 +702,12 @@ async fn drive_session(
             dirty = true;
             active = true;
             st.on_turn_done(g).await;
+            if let Some(panic) = st.turn_panic.take() {
+                let m = format!("the turn crashed: {panic}");
+                turn_error = Some(m.clone());
+                push_remote_note(&mut st.notes, &format!("⚠ {m}"));
+                st.app.apply(forge_tui::PresenterEvent::Error(m));
+            }
         }
         // 5. Background overlay loads (/mesh, /usage) and slash-command results (/doctor, /diff).
         if st.poll_overlay_loads() {
@@ -1215,6 +1225,52 @@ pub(super) mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn a_panicked_turn_is_reported_as_a_crash_not_a_clean_finish() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        let done_tx = state.done_tx.clone();
+        let gen = state.turn_gen;
+        state.turn_handle = Some(tokio::spawn(async move {
+            let _done = DoneGuard(done_tx, gen);
+            panic!("kaboom");
+        }));
+        while !state.turn_handle.as_ref().unwrap().is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        state.on_turn_done(gen).await;
+
+        assert_eq!(state.turn_panic.as_deref(), Some("kaboom"));
+        assert!(!state.busy);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_turn_is_not_reported_as_a_crash() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        let gen = state.turn_gen;
+        let handle = tokio::spawn(std::future::pending());
+        handle.abort();
+        state.turn_handle = Some(handle);
+
+        state.on_turn_done(gen).await;
+
+        assert_eq!(state.turn_panic, None);
+    }
+
+    #[tokio::test]
+    async fn a_clean_turn_is_not_reported_as_a_crash() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        let gen = state.turn_gen;
+        state.turn_handle = Some(tokio::spawn(async {}));
+
+        state.on_turn_done(gen).await;
+
+        assert_eq!(state.turn_panic, None);
+    }
+
     async fn test_driver_state() -> DriverState {
         isolate_store();
         let session = super::build_session_with(
@@ -1244,6 +1300,7 @@ pub(super) mod tests {
             turn_gen: 10,
             last_auto_compact_gen: 0,
             turn_handle: None,
+            turn_panic: None,
             loop_state: None,
             goal_state: None,
             pending: None,
