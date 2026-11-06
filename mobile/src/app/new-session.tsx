@@ -336,6 +336,16 @@ export default function NewSessionScreen() {
     [activeServerId, create],
   );
 
+  // Set synchronously on submit and cleared only on failure: `create.isPending` turns false as
+  // soon as the create resolves, while the screen is still awaiting storage and the modal
+  // dismissal, and a second tap or Enter in that gap created a second session.
+  const submittingRef = useRef(false);
+  const [creating, setCreating] = useState(false);
+  const submitFailed = useCallback(() => {
+    submittingRef.current = false;
+    setCreating(false);
+  }, []);
+
   const handleSubmit = useCallback(() => {
     // Forge Anywhere: an offline host queues a remote job instead of creating a session
     // directly — queued jobs are immutable (cancel/replace only, never edit), so this is
@@ -359,9 +369,11 @@ export default function NewSessionScreen() {
       return;
     }
 
-    if (create.isPending) return;
+    if (create.isPending || submittingRef.current) return;
     if (worktreeMode === "existing" && !existingPath) return;
     if (worktreeMode === "new" && branchNameProblem(branch) !== null) return;
+    submittingRef.current = true;
+    setCreating(true);
     const trimmedCwd = cwd.trim();
     const trimmedTask = task.trim();
     const wt = worktreeRequest({ mode: worktreeMode, cwd: trimmedCwd, branch, existingPath });
@@ -391,7 +403,10 @@ export default function NewSessionScreen() {
       } catch (err) {
         // Any other failure (bad cwd, daemon down, ...) is a real error — `create.error` is
         // already set by the failed mutateAsync above and `serverError` below renders it.
-        if (!isUnsupportedPromptFieldError(err)) return;
+        if (!isUnsupportedPromptFieldError(err)) {
+          submitFailed();
+          return;
+        }
         // Pre-#1394 daemon: `deny_unknown_fields` rejected the whole body over `prompt`. Retry
         // without it — this is the exact request this screen always sent — then fall back to
         // the durable offline-prompt queue a live chat screen drains on its first socket-open
@@ -428,10 +443,11 @@ export default function NewSessionScreen() {
         router.dismissTo(`/session/${res.id}`);
       });
     })().catch(() => {
-      // A failed retry (the non-prompt path) leaves `create.error` set by mutateAsync — nothing
-      // further to do here, the error text is already what `serverError` renders.
+      // A failed retry (the non-prompt path) leaves `create.error` set by mutateAsync — the
+      // error text is already what `serverError` renders.
+      submitFailed();
     });
-  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktreeMode, branch, existingPath, effort, temper, mcpOff, activeServerId, baseUrl, consumeShare, incomingShareId]);
+  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktreeMode, branch, existingPath, effort, temper, mcpOff, activeServerId, baseUrl, consumeShare, incomingShareId, submitFailed]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -454,7 +470,7 @@ export default function NewSessionScreen() {
         ? "create failed"
         : null;
 
-  const submitPending = isOfflineHostQueue ? queuing : create.isPending;
+  const submitPending = isOfflineHostQueue ? queuing : create.isPending || creating;
   const worktreeIncomplete =
     !isOfflineHostQueue
     && ((worktreeMode === "existing" && !existingPath) || (worktreeMode === "new" && branchNameProblem(branch) !== null));
@@ -564,7 +580,7 @@ export default function NewSessionScreen() {
         </SafeAreaView>
 
         <Screen edges={["left", "right", "bottom"]} scroll keyboardAvoiding contentContainerStyle={styles.content}>
-          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} />
+          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={submitPending} onSubmitKey={handleSubmit} />
           {sharedCallout}
           {whereAndHow}
           <View style={styles.spacer} />
@@ -605,7 +621,7 @@ export default function NewSessionScreen() {
         </View>
 
         <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
-          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} wide />
+          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={submitPending} onSubmitKey={handleSubmit} wide />
           {sharedCallout}
           {whereAndHow}
         </ScrollView>
