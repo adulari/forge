@@ -356,6 +356,16 @@ fn publish(pressure: Option<Pressure>) {
     }
 }
 
+fn resample() -> &'static tokio::sync::Notify {
+    static NOTIFY: OnceLock<tokio::sync::Notify> = OnceLock::new();
+    NOTIFY.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Sample again now rather than at the next tick (after a reclaim freed space).
+pub(crate) fn request_resample() {
+    resample().notify_one();
+}
+
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -411,7 +421,10 @@ pub(crate) fn start(state: Arc<DaemonState>) {
                 tracker = Tracker::default();
                 publish(None);
             }
-            tokio::time::sleep(Duration::from_secs(cfg.sample_secs.max(5))).await;
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(cfg.sample_secs.max(5))) => {}
+                () = resample().notified() => {}
+            }
         }
     });
 }
@@ -430,6 +443,85 @@ async fn notify(state: &DaemonState, summary: &str, transition: Transition) {
         "host pressure: {summary}; push attempted ({})",
         detail.join(", ")
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Gating new worktree sessions
+// ---------------------------------------------------------------------------------------------
+
+/// Free space on the filesystem a new worktree would land on, when it is under a threshold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Gate {
+    /// `Warn` creates the session with a warning; `Floor` refuses it.
+    pub level: Level,
+    pub path: String,
+    pub free_bytes: u64,
+    pub total_bytes: u64,
+    pub summary: String,
+}
+
+/// Judge one filesystem for worktree creation. Pure; no hysteresis, because each request is
+/// asked afresh and a refusal that clears the moment a build frees a byte helps nobody.
+pub(crate) fn gate_for(cfg: &PressureConfig, disk: &DiskReading) -> Option<Gate> {
+    if !cfg.enabled {
+        return None;
+    }
+    let level = disk_level(cfg, disk.free, disk.total, 1.0);
+    (level > Level::Ok).then(|| Gate {
+        level,
+        path: disk.path.clone(),
+        free_bytes: disk.free,
+        total_bytes: disk.total,
+        summary: format!(
+            "{} has {} free of {} ({}%)",
+            disk.path,
+            human_bytes(disk.free),
+            human_bytes(disk.total),
+            percent(disk.free, disk.total),
+        ),
+    })
+}
+
+/// The gate for a worktree about to be created under `repo`, or `None` while there is room.
+pub(crate) fn gate_for_new_worktree(repo: &Path) -> Option<Gate> {
+    let cfg = forge_config::load().unwrap_or_default().pressure;
+    if !cfg.enabled {
+        return None;
+    }
+    let settings = forge_config::load_in(repo)
+        .map(|config| config.worktree)
+        .unwrap_or_default();
+    let target = forge_core::worktree_setup::worktree_path(repo, &settings, "new");
+    gate_for(&cfg, &read_disk("worktrees", &target)?)
+}
+
+/// What the create-session answer says about a gate, with the reclaimable amount when known.
+pub(crate) fn gate_details(gate: &Gate, reclaimable: Option<u64>) -> serde_json::Value {
+    serde_json::json!({
+        "level": gate.level,
+        "path": gate.path,
+        "free_bytes": gate.free_bytes,
+        "total_bytes": gate.total_bytes,
+        "summary": gate.summary,
+        "reclaimable_bytes": reclaimable,
+    })
+}
+
+pub(crate) fn refusal_message(gate: &Gate, reclaimable: Option<u64>) -> String {
+    let offer = match reclaimable {
+        Some(bytes) if bytes > 0 => {
+            format!(
+                " Reclaim can free {} from old worktrees.",
+                human_bytes(bytes)
+            )
+        }
+        Some(_) => " Nothing is provably safe to reclaim; free space by hand.".to_string(),
+        None => " Run `forge worktree reclaim --artifacts` to free space.".to_string(),
+    };
+    format!(
+        "not creating a worktree: {} — below the hard floor.{offer}",
+        gate.summary
+    )
 }
 
 /// The `forge doctor` line: a fresh reading of this machine, judged by the configured thresholds.
@@ -649,6 +741,39 @@ mod tests {
         assert_eq!(json["disks"][0]["level"], "floor");
         assert_eq!(json["disks"][0]["label"], "projects");
         assert!(json.get("memory").is_none());
+    }
+
+    #[test]
+    fn the_gate_warns_below_the_threshold_refuses_below_the_floor_and_can_be_switched_off() {
+        let cfg = PressureConfig::default();
+        let on = |free_gb: f64| {
+            let r = disk(free_gb, 100);
+            gate_for(&cfg, &r.disks[0])
+        };
+        assert_eq!(on(50.0), None);
+        assert_eq!(on(15.0).unwrap().level, Level::Warn);
+        let floor = on(2.0).unwrap();
+        assert_eq!(floor.level, Level::Floor);
+        assert!(
+            floor.summary.contains("2.0 GB free of 100.0 GB (2%)"),
+            "{}",
+            floor.summary
+        );
+        let off = PressureConfig {
+            enabled: false,
+            ..cfg
+        };
+        assert_eq!(gate_for(&off, &disk(1.0, 100).disks[0]), None);
+    }
+
+    #[test]
+    fn the_refusal_names_the_reclaim_offer_only_when_there_is_something_to_reclaim() {
+        let gate = gate_for(&PressureConfig::default(), &disk(2.0, 100).disks[0]).unwrap();
+        let with = refusal_message(&gate, Some(30 * G));
+        assert!(with.contains("Reclaim can free 30.0 GB"), "{with}");
+        assert!(refusal_message(&gate, Some(0)).contains("Nothing is provably safe"));
+        assert!(refusal_message(&gate, None).contains("forge worktree reclaim"));
+        assert_eq!(gate_details(&gate, Some(5))["reclaimable_bytes"], 5);
     }
 
     #[test]

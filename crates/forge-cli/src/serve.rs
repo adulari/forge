@@ -960,6 +960,7 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
         )
         .route(&format!("{base}/api/projects"), get(project_catalog))
         .route(&format!("{base}/api/identity"), get(identity))
+        .merge(crate::host_reclaim::routes(&base))
         .route(
             &format!("{base}/api/diagnostics"),
             get(crate::serve_diagnostics::diagnostics),
@@ -1373,6 +1374,14 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
     json_response(&rows)
 }
 
+async fn host_pressure_gate(repo: &std::path::Path) -> Option<crate::host_pressure::Gate> {
+    let repo = repo.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::host_pressure::gate_for_new_worktree(&repo))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// `POST /api/sessions` starts a session.
 async fn create_session(
     State(state): State<Arc<DaemonState>>,
@@ -1399,8 +1408,25 @@ async fn create_session(
         .filter(|p| !p.trim().is_empty())
         .filter(|_| req.resume.is_none());
     let is_resume_request = req.resume.is_some();
+    let worktree_cwd = (req.worktree || req.branch.is_some())
+        .then(|| req.cwd.clone().unwrap_or_else(|| state.default_cwd.clone()));
     match start_session(&state, req).await {
         Ok(handle) => {
+            let low_disk = match worktree_cwd.as_deref().filter(|_| !is_resume_request) {
+                Some(cwd) => host_pressure_gate(std::path::Path::new(cwd)).await,
+                None => None,
+            };
+            let pressure = match low_disk {
+                Some(gate) => {
+                    let reclaimable = crate::host_reclaim::preview_for(
+                        &state,
+                        std::path::Path::new(worktree_cwd.as_deref().unwrap_or_default()),
+                    )
+                    .await;
+                    Some(crate::host_pressure::gate_details(&gate, reclaimable))
+                }
+                None => None,
+            };
             let terminals = state.terminals.clone();
             let terminal_session = handle.session_id.clone();
             let terminal_cwd = handle.worktree.clone().unwrap_or_else(|| handle.cwd());
@@ -1428,6 +1454,7 @@ async fn create_session(
                 "title": handle.title(),
                 "cwd": handle.cwd(),
                 "worktree": handle.worktree,
+                "pressure": pressure,
             }))
         }
         Err(error) => error.into_response(),
@@ -1440,6 +1467,8 @@ pub(crate) struct StartSessionError {
     status: axum::http::StatusCode,
     code: Option<&'static str>,
     pub(crate) message: String,
+    /// Extra JSON fields merged into the error body (host-pressure refusals carry the reclaim offer).
+    details: Option<serde_json::Value>,
 }
 
 impl StartSessionError {
@@ -1448,6 +1477,7 @@ impl StartSessionError {
             status,
             code: None,
             message: message.into(),
+            details: None,
         }
     }
 
@@ -1460,10 +1490,31 @@ impl StartSessionError {
             status,
             code: Some(code),
             message,
+            details: None,
         }
     }
 
+    fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
     pub(crate) fn into_response(self) -> Response {
+        if let (Some(code), Some(serde_json::Value::Object(extra))) = (self.code, &self.details) {
+            let mut body = serde_json::json!({ "error": self.message, "code": code });
+            body.as_object_mut()
+                .expect("a json! object literal")
+                .extend(extra.clone());
+            return (
+                self.status,
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/json"),
+                    (axum::http::header::CACHE_CONTROL, "no-store"),
+                ],
+                body.to_string(),
+            )
+                .into_response();
+        }
         match self.code {
             Some(code) => err_response_coded(self.status, code, &self.message),
             None => err_response(self.status, &self.message),
@@ -1627,6 +1678,19 @@ pub(crate) async fn start_session(
                 StatusCode::BAD_REQUEST,
                 format!("worktree: {cwd} is not a git repository"),
             ));
+        }
+        if let Some(gate) = host_pressure_gate(cwd_path).await {
+            if gate.level == crate::host_pressure::Level::Floor {
+                let reclaimable = crate::host_reclaim::preview_for(state, cwd_path).await;
+                return Err(StartSessionError::coded(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "host_disk_floor",
+                    crate::host_pressure::refusal_message(&gate, reclaimable),
+                )
+                .with_details(serde_json::json!({
+                    "pressure": crate::host_pressure::gate_details(&gate, reclaimable),
+                })));
+            }
         }
         let branch = req.branch.clone();
         let created = crate::serve_worktree_start::create_off_thread(cwd_path, branch).await;
@@ -4597,6 +4661,158 @@ pub(crate) mod tests {
         handle.shutdown();
         handle.join(std::time::Duration::from_secs(5)).await;
         std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn pressure_state(repo: &std::path::Path) -> Arc<DaemonState> {
+        Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: repo.display().to_string(),
+            project_roots: vec![repo.to_path_buf()],
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        })
+    }
+
+    async fn call(
+        router: &Router,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn json_post(path: &str, body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::post(path)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// Host pressure end to end on the daemon routes: under the hard floor a worktree session is
+    /// refused with the reclaim offer and nothing is created; under only the warn threshold it is
+    /// created with the warning; the reclaim routes answer for known workspaces only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn low_disk_warns_then_refuses_new_worktree_sessions_with_a_reclaim_offer() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-press-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        let repo = dir.join("repo").canonicalize().unwrap();
+        let _git = init_repo(&repo, &[("README.md", "hi\n")]);
+        std::env::set_var("FORGE_DB", dir.join("press.db"));
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        let state = pressure_state(&repo);
+        let router = daemon_router(state.clone());
+        let create = || {
+            json_post(
+                "/tok/api/sessions",
+                serde_json::json!({ "cwd": repo, "worktree": true }),
+            )
+        };
+
+        // Every filesystem reads as full: below the floor.
+        for key in [
+            "FORGE_PRESSURE__DISK_WARN_FREE_PERCENT",
+            "FORGE_PRESSURE__DISK_FLOOR_FREE_PERCENT",
+        ] {
+            std::env::set_var(key, "100");
+        }
+        let (status, body) = call(&router, create()).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::INSUFFICIENT_STORAGE,
+            "{body}"
+        );
+        assert_eq!(body["code"], "host_disk_floor");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("reclaim"),
+            "{body}"
+        );
+        assert_eq!(body["pressure"]["level"], "floor");
+        assert!(body["pressure"]["reclaimable_bytes"].is_u64(), "{body}");
+        assert!(
+            !repo.join(".forge/worktrees").exists(),
+            "nothing was created"
+        );
+
+        // Only the warn threshold: created, with the warning attached.
+        std::env::set_var("FORGE_PRESSURE__DISK_FLOOR_FREE_PERCENT", "0");
+        std::env::set_var("FORGE_PRESSURE__DISK_FLOOR_FREE_GB", "0");
+        let (status, body) = call(&router, create()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["pressure"]["level"], "warn");
+        assert!(body["worktree"].as_str().is_some());
+
+        // Plenty of room: no warning at all.
+        std::env::set_var("FORGE_PRESSURE__DISK_WARN_FREE_PERCENT", "0");
+        std::env::set_var("FORGE_PRESSURE__DISK_WARN_FREE_GB", "0");
+        let (status, body) = call(&router, create()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body["pressure"].is_null(), "{body}");
+
+        // The reclaim offer: a preview for a known workspace, a refusal for any other path.
+        let (status, body) = call(
+            &router,
+            axum::http::Request::get(format!("/tok/api/host/pressure?cwd={}", repo.display()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body["reclaimable_bytes"].is_u64(), "{body}");
+        let (status, _) = call(
+            &router,
+            axum::http::Request::get("/tok/api/host/pressure?cwd=/etc")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        let (status, body) = call(
+            &router,
+            json_post("/tok/api/host/reclaim", serde_json::json!({ "cwd": repo })),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(
+            body["removed"], 0,
+            "live sessions' worktrees are never reclaimed"
+        );
+
+        for handle in state.registry.all().await {
+            handle.shutdown();
+            handle.join(std::time::Duration::from_secs(5)).await;
+        }
+        for key in [
+            "FORGE_PRESSURE__DISK_WARN_FREE_PERCENT",
+            "FORGE_PRESSURE__DISK_FLOOR_FREE_PERCENT",
+            "FORGE_PRESSURE__DISK_WARN_FREE_GB",
+            "FORGE_PRESSURE__DISK_FLOOR_FREE_GB",
+            "FORGE_DB",
+        ] {
+            std::env::remove_var(key);
+        }
+        match old_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

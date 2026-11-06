@@ -88,6 +88,7 @@ mod host_add;
 mod host_caps;
 mod host_lock;
 mod host_pressure;
+mod host_reclaim;
 mod hosts;
 mod ide_host;
 mod image_input;
