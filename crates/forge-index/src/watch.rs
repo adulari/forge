@@ -549,6 +549,27 @@ mod tests {
         Some(total)
     }
 
+    /// The process's inotify watch count once it has stopped moving. A watcher dropped by the
+    /// previous test closes its inotify fd on notify's own thread, a moment after `drop` returns;
+    /// reading the count in that window made the delta below off by that watcher's watches
+    /// (issue #1444).
+    fn settled_watch_count() -> Option<usize> {
+        let mut last = inotify_watch_count()?;
+        let mut stable_since = std::time::Instant::now();
+        let deadline = stable_since + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+            let now = inotify_watch_count()?;
+            if now != last {
+                last = now;
+                stable_since = std::time::Instant::now();
+            } else if stable_since.elapsed() >= Duration::from_millis(250) {
+                break;
+            }
+        }
+        Some(last)
+    }
+
     #[test]
     fn access_events_are_not_changes_but_a_finished_write_is() {
         // The reindexer's own reads (open / read / close-without-write) must never come back as
@@ -642,7 +663,7 @@ mod tests {
         assert!(dirs.contains(&root.join("src")));
         assert_eq!(dirs.len(), 2, "no build/VCS/dependency dirs: {dirs:?}");
 
-        let before = inotify_watch_count();
+        let before = settled_watch_count();
         let reindexes = Arc::new(AtomicUsize::new(0));
         let r2 = Arc::clone(&reindexes);
         let w = build_watcher_with(
@@ -655,8 +676,12 @@ mod tests {
             },
         )
         .expect("watcher starts");
-        if let (Some(before), Some(after)) = (before, inotify_watch_count()) {
-            assert_eq!(after - before, 2, "one inotify watch per source directory");
+        if let (Some(before), Some(after)) = (before, settled_watch_count()) {
+            assert_eq!(
+                after.checked_sub(before),
+                Some(2),
+                "one inotify watch per source directory ({before} before, {after} after)"
+            );
         }
 
         // Churn in target/ (what a cargo build does) never reaches the worker.
