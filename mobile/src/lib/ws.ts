@@ -207,6 +207,8 @@ export interface SnapshotEnvelope {
   unverified: boolean;
   /** When the measured window resets, Unix seconds. */
   resets_at: number | null;
+  /** When a goal paused on this envelope continues by itself, Unix seconds. Absent when it will not. */
+  resumes_at?: number | null;
 }
 
 /** A rule a permission prompt offers: `rule` exactly as it would be written (`cargo test *`),

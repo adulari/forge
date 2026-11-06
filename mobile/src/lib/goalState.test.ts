@@ -10,6 +10,7 @@ import {
   goalInput,
   goalMeta,
   liveElapsedSecs,
+  resumeLine,
   resolveGoal,
 } from "./goalState";
 import type { SnapshotGoal } from "./ws";
@@ -42,6 +43,30 @@ describe("envelope", () => {
     const goal = resolveGoal({ goal: wire(), notes: [] });
     expect(goal?.envelope).toBeNull();
     expect(goal && envelopeFraction(goal)).toBeNull();
+  });
+});
+
+describe("resumeLine", () => {
+  const spent = { unit: "percent" as const, used: 21, slice: 20, label: "claude weekly", meter: "envelope 21/20% claude weekly", spent: true, unverified: false, resets_at: 0 };
+  const now = new Date(2026, 10, 6, 23, 30).getTime();
+  const at = new Date(2026, 10, 7, 4, 0).getTime() / 1000;
+
+  it("says when a goal waiting for its window continues by itself", () => {
+    const goal = resolveGoal({ goal: wire({ state: "paused", envelope: { ...spent, resumes_at: at } }), notes: [] });
+    expect(goal && resumeLine(goal, now)).toBe("Resumes at 04:00");
+  });
+
+  it("stays silent when it will not resume by itself", () => {
+    const held = resolveGoal({ goal: wire({ state: "paused", envelope: spent }), notes: [] });
+    expect(held && resumeLine(held, now)).toBeNull();
+    const running = resolveGoal({ goal: wire({ state: "active", envelope: { ...spent, resumes_at: at } }), notes: [] });
+    expect(running && resumeLine(running, now)).toBeNull();
+  });
+
+  it("adds the weekday when the reset is a day or more away", () => {
+    const far = new Date(2026, 10, 9, 9, 0).getTime() / 1000;
+    const goal = resolveGoal({ goal: wire({ state: "paused", envelope: { ...spent, resumes_at: far } }), notes: [] });
+    expect(goal && resumeLine(goal, now)).toBe("Resumes at Mon 09:00");
   });
 });
 

@@ -148,6 +148,18 @@ export function envelopeFraction(goal: GoalView): number | null {
   return Math.max(0, Math.min(1, envelope.used / envelope.slice));
 }
 
+/** `Resumes at 04:00` for a goal paused on a spent window that continues by itself, else `null`.
+ * Past a day out the weekday is added. */
+export function resumeLine(goal: GoalView, nowMs: number): string | null {
+  const at = goal.envelope?.resumes_at;
+  if (goal.phase !== "paused" || at == null) return null;
+  const when = new Date(at * 1000);
+  const far = Math.abs(at * 1000 - nowMs) >= 20 * 3600 * 1000;
+  const clock = `${String(when.getHours()).padStart(2, "0")}:${String(when.getMinutes()).padStart(2, "0")}`;
+  const day = far ? `${["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][when.getDay()]} ` : "";
+  return `Resumes at ${day}${clock}`;
+}
+
 export function goalMeta(goal: GoalView, nowMs: number): string {
   const parts: string[] = [];
   if (goal.iteration != null) parts.push(`turn ${goal.iteration}`);

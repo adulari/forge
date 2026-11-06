@@ -16,6 +16,7 @@ import {
   goalInput,
   goalMeta,
   resolveGoal,
+  resumeLine,
 } from "../../lib/goalState";
 import { haptics } from "../../lib/haptics";
 import type { GoalPhase, RemoteInput, Snapshot } from "../../lib/ws";
@@ -124,6 +125,11 @@ function GoalBannerBody({ goal, send }: { goal: GoalView; send: GoalBannerProps[
         </Text>
         {status ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{status}</Text> : null}
         {goal.reason && (ended || goal.phase === "paused") ? <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>{goal.reason}</Text> : null}
+        {resumeLine(goal, Date.now()) ? (
+          <Text style={[styles.meta, { color: tokens.accent }]} numberOfLines={1} testID="goal-resume">
+            {resumeLine(goal, Date.now())}
+          </Text>
+        ) : null}
         <Text style={[styles.meta, { color: tokens.ink3 }]} numberOfLines={1} testID="goal-meta">
           {goalMeta(goal, now)}
         </Text>
