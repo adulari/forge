@@ -176,6 +176,12 @@ mod linux {
 
 /// How long the launch check may take before Forge stops waiting and opens the app.
 const LAUNCH_CHECK_TIMEOUT: Duration = Duration::from_secs(4);
+/// How long the main window stays hidden while the launch check is in flight. The web UI loads
+/// behind the hidden window, so a check that answers within this costs nothing; a slower one (a
+/// cold TLS connection, a flaky network) used to keep the window away for up to
+/// `LAUNCH_CHECK_TIMEOUT`. Past it the window opens and the check finishes in the background.
+const LAUNCH_HOLD: Duration = Duration::from_millis(500);
+const _: () = assert!(LAUNCH_HOLD.as_millis() < LAUNCH_CHECK_TIMEOUT.as_millis());
 /// The whole launch update (check + download + install); past it the app opens as it is.
 const LAUNCH_BUDGET: Duration = Duration::from_secs(20);
 /// How often a running app looks for a newer release.
@@ -296,10 +302,28 @@ pub fn start(app: AppHandle) {
 async fn launch_update(app: &AppHandle) -> Result<(), String> {
     let started = Instant::now();
     let updater = updater(app).map_err(|e| e.to_string())?;
-    let found = tokio::time::timeout(LAUNCH_CHECK_TIMEOUT, updater.check())
-        .await
-        .map_err(|_| "update check timed out".to_string())?
-        .map_err(|e| e.to_string())?;
+    let mut check = Box::pin(tokio::time::timeout(LAUNCH_CHECK_TIMEOUT, updater.check()));
+    let found = match tokio::time::timeout(LAUNCH_HOLD, &mut check).await {
+        Ok(answered) => answered
+            .map_err(|_| "update check timed out".to_string())?
+            .map_err(|e| e.to_string())?,
+        Err(_) => {
+            // No answer yet: show the app instead of a blank desktop and let the check finish.
+            // It is on screen and may already be in use, so a release found now is installed for
+            // the next launch, as the background loop does, rather than restarting under the user.
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.show();
+            }
+            let late = check
+                .await
+                .map_err(|_| "update check timed out".to_string())?
+                .map_err(|e| e.to_string())?;
+            if let Some(update) = late {
+                install_in_background(app, update).await;
+            }
+            return Ok(());
+        }
+    };
     let Some(update) = found else {
         return Ok(());
     };
@@ -320,6 +344,22 @@ async fn launch_update(app: &AppHandle) -> Result<(), String> {
         }
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => Err("update timed out".to_string()),
+    }
+}
+
+/// Download and install `update` for the next launch and tell the UI a restart is all that is left.
+async fn install_in_background(app: &AppHandle, update: tauri_plugin_updater::Update) {
+    eprintln!(
+        "forge: installing update {} in the background",
+        update.version
+    );
+    if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
+        #[cfg(target_os = "linux")]
+        crate::appimage_launcher::neutralize_current();
+        if let Ok(mut v) = INSTALLED_VERSION.lock() {
+            *v = Some(update.version.clone());
+        }
+        let _ = app.emit(INSTALLED_EVENT, update.version.clone());
     }
 }
 
@@ -365,18 +405,13 @@ async fn background_loop(app: AppHandle, policy: Policy) {
         if !should_install(&update.version, installed.as_deref()) {
             continue;
         }
-        eprintln!(
-            "forge: installing update {} in the background",
-            update.version
-        );
-        if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
-            #[cfg(target_os = "linux")]
-            crate::appimage_launcher::neutralize_current();
-            installed = Some(update.version.clone());
-            if let Ok(mut v) = INSTALLED_VERSION.lock() {
-                *v = Some(update.version.clone());
-            }
-            let _ = app.emit(INSTALLED_EVENT, update.version.clone());
+        let version = update.version.clone();
+        install_in_background(&app, update).await;
+        if INSTALLED_VERSION
+            .lock()
+            .is_ok_and(|v| v.as_deref() == Some(version.as_str()))
+        {
+            installed = Some(version);
         }
     }
 }
