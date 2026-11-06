@@ -56,6 +56,31 @@ struct ProviderRow {
     version: Option<String>,
     serving: Option<bool>,
     restart_required: bool,
+    /// The provider refused this key (expired, revoked, out of quota) and nothing has worked
+    /// since. Additive: absent keys read as "no verdict".
+    key_verdict: Option<KeyVerdictRow>,
+}
+
+#[derive(serde::Serialize)]
+struct KeyVerdictRow {
+    status: String,
+    headline: &'static str,
+    reason: String,
+    first_seen: i64,
+    last_seen: i64,
+}
+
+impl From<&forge_store::ProviderVerdict> for KeyVerdictRow {
+    fn from(v: &forge_store::ProviderVerdict) -> Self {
+        Self {
+            status: v.status.clone(),
+            headline: forge_provider::KeyFailure::from_word(&v.status)
+                .map_or("Key rejected", forge_provider::KeyFailure::headline),
+            reason: v.reason.clone(),
+            first_seen: v.first_seen,
+            last_seen: v.last_seen,
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -119,8 +144,8 @@ pub(super) struct AzureProviderRequest {
     label: Option<String>,
 }
 
-pub(super) async fn providers_page() -> Response {
-    match load_provider_response(None, false).await {
+pub(super) async fn providers_page(State(state): State<Arc<DaemonState>>) -> Response {
+    match load_provider_response(&state.store, None, false).await {
         Ok(response) => json_response(&response),
         Err(error) => err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &error),
     }
@@ -151,6 +176,7 @@ pub(super) async fn store_provider_key(
     })
     .await;
     mutation_response(
+        &state.store,
         result,
         Some("Stored securely. Raw key material is never returned by this API.".to_string()),
         false,
@@ -188,6 +214,7 @@ pub(super) async fn remove_provider_keys(
         _ => None,
     };
     mutation_response(
+        &state.store,
         result.map(|inner| inner.map(|_| ())),
         notice,
         false,
@@ -197,6 +224,7 @@ pub(super) async fn remove_provider_keys(
 }
 
 pub(super) async fn set_provider_enabled(
+    State(state): State<Arc<DaemonState>>,
     Path(provider): Path<String>,
     Json(request): Json<SetProviderEnabledRequest>,
 ) -> Response {
@@ -242,6 +270,7 @@ pub(super) async fn set_provider_enabled(
         _ => None,
     };
     mutation_response(
+        &state.store,
         result.map(|inner| inner.map(|_| ())),
         notice,
         false,
@@ -269,6 +298,7 @@ pub(super) async fn switch_oauth_account(
     })
     .await;
     mutation_response(
+        &state.store,
         result,
         Some("Active subscription account changed immediately.".to_string()),
         false,
@@ -301,6 +331,7 @@ pub(super) async fn remove_oauth_account(
     })
     .await;
     mutation_response(
+        &state.store,
         result,
         Some("Removed the selected subscription account from secure storage.".to_string()),
         false,
@@ -309,7 +340,10 @@ pub(super) async fn remove_oauth_account(
     .await
 }
 
-pub(super) async fn save_custom_provider(Json(request): Json<CustomProviderRequest>) -> Response {
+pub(super) async fn save_custom_provider(
+    State(state): State<Arc<DaemonState>>,
+    Json(request): Json<CustomProviderRequest>,
+) -> Response {
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let config = validated_custom_provider(request)?;
         let _mutation = mutation_lock()
@@ -321,6 +355,7 @@ pub(super) async fn save_custom_provider(Json(request): Json<CustomProviderReque
     })
     .await;
     mutation_response(
+        &state.store,
         result,
         Some(
             "Custom endpoint saved. Restart the Forge daemon before routing new sessions through it."
@@ -332,7 +367,10 @@ pub(super) async fn save_custom_provider(Json(request): Json<CustomProviderReque
     .await
 }
 
-pub(super) async fn remove_custom_provider(Path(namespace): Path<String>) -> Response {
+pub(super) async fn remove_custom_provider(
+    State(state): State<Arc<DaemonState>>,
+    Path(namespace): Path<String>,
+) -> Response {
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let namespace = validate_provider_id(&namespace)?;
         let exists = forge_config::user_custom_providers()
@@ -356,6 +394,7 @@ pub(super) async fn remove_custom_provider(Path(namespace): Path<String>) -> Res
     })
     .await;
     mutation_response(
+        &state.store,
         result,
         Some(
             "Custom endpoint and its Forge-owned keys were removed. Environment variables are \
@@ -368,7 +407,10 @@ pub(super) async fn remove_custom_provider(Path(namespace): Path<String>) -> Res
     .await
 }
 
-pub(super) async fn save_azure_provider(Json(request): Json<AzureProviderRequest>) -> Response {
+pub(super) async fn save_azure_provider(
+    State(state): State<Arc<DaemonState>>,
+    Json(request): Json<AzureProviderRequest>,
+) -> Response {
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let config = validated_azure_provider(request)?;
         let _mutation = mutation_lock()
@@ -380,6 +422,7 @@ pub(super) async fn save_azure_provider(Json(request): Json<AzureProviderRequest
     })
     .await;
     mutation_response(
+        &state.store,
         result,
         Some(
             "Azure provider saved. Restart the Forge daemon before routing new sessions through it."
@@ -391,7 +434,7 @@ pub(super) async fn save_azure_provider(Json(request): Json<AzureProviderRequest
     .await
 }
 
-pub(super) async fn remove_azure_provider() -> Response {
+pub(super) async fn remove_azure_provider(State(state): State<Arc<DaemonState>>) -> Response {
     let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         if forge_config::user_azure_config().is_none() {
             return Err("Azure provider was not configured".to_string());
@@ -410,6 +453,7 @@ pub(super) async fn remove_azure_provider() -> Response {
     })
     .await;
     mutation_response(
+        &state.store,
         result,
         Some(
             "Azure configuration and Forge-owned keys were removed. Environment variables are \
@@ -423,13 +467,14 @@ pub(super) async fn remove_azure_provider() -> Response {
 }
 
 async fn mutation_response<T>(
+    store: &Arc<forge_store::Store>,
     result: Result<Result<T, String>, tokio::task::JoinError>,
     notice: Option<String>,
     restart_required: bool,
     join_error: &'static str,
 ) -> Response {
     match result {
-        Ok(Ok(_)) => match load_provider_response(notice, restart_required).await {
+        Ok(Ok(_)) => match load_provider_response(store, notice, restart_required).await {
             Ok(response) => json_response(&response),
             Err(error) => err_response(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &error),
         },
@@ -439,13 +484,17 @@ async fn mutation_response<T>(
 }
 
 async fn load_provider_response(
+    store: &Arc<forge_store::Store>,
     notice: Option<String>,
     restart_required: bool,
 ) -> Result<ProvidersResponse, String> {
-    let response =
-        tokio::task::spawn_blocking(move || build_provider_response(notice, restart_required))
-            .await
-            .map_err(|_| "could not read provider configuration".to_string())?;
+    let store = store.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        let verdicts = store.provider_verdicts().unwrap_or_default();
+        build_provider_response(notice, restart_required, verdicts)
+    })
+    .await
+    .map_err(|_| "could not read provider configuration".to_string())?;
 
     let (claude, codex, antigravity) = tokio::join!(
         forge_provider::CliKind::ClaudeCode.cli_version(),
@@ -465,7 +514,11 @@ async fn load_provider_response(
     Ok(response)
 }
 
-fn build_provider_response(notice: Option<String>, restart_required: bool) -> ProvidersResponse {
+fn build_provider_response(
+    notice: Option<String>,
+    restart_required: bool,
+    verdicts: Vec<forge_store::ProviderVerdict>,
+) -> ProvidersResponse {
     let config = forge_config::load().unwrap_or_default();
     let disabled = &config.mesh.disabled;
     let mut providers = Vec::new();
@@ -538,6 +591,7 @@ fn build_provider_response(notice: Option<String>, restart_required: bool) -> Pr
             version: None,
             serving: None,
             restart_required: false,
+            key_verdict: None,
         });
     }
 
@@ -571,6 +625,7 @@ fn build_provider_response(notice: Option<String>, restart_required: bool) -> Pr
         version: crate::local::ollama_version(),
         serving: Some(ollama_serving),
         restart_required: false,
+        key_verdict: None,
     });
 
     let user_custom: HashMap<String, forge_config::CustomProviderConfig> =
@@ -599,6 +654,16 @@ fn build_provider_response(notice: Option<String>, restart_required: bool) -> Pr
         providers.push(azure_row(azure, disabled));
     }
 
+    for row in &mut providers {
+        if row.keyless || !matches!(row.kind, "api_key" | "custom" | "azure") {
+            continue;
+        }
+        row.key_verdict = verdicts
+            .iter()
+            .find(|v| v.provider == row.id)
+            .filter(|_| row.configured)
+            .map(KeyVerdictRow::from);
+    }
     ProvidersResponse {
         direct_only: true,
         restart_required,
@@ -687,6 +752,7 @@ fn api_key_row(
         version: None,
         serving: None,
         restart_required: pending_restart,
+        key_verdict: None,
     }
 }
 
@@ -726,6 +792,7 @@ fn azure_row(config: forge_config::AzureConfig, disabled: &[String]) -> Provider
         version: None,
         serving: None,
         restart_required: azure_provider_pending_restart(&config),
+        key_verdict: None,
     }
 }
 
@@ -786,6 +853,7 @@ fn oauth_row(
         version: None,
         serving: None,
         restart_required: false,
+        key_verdict: None,
     }
 }
 
@@ -925,5 +993,60 @@ mod tests {
         let response = router.oneshot(request).await.unwrap();
         assert_eq!(response.status(), axum::http::StatusCode::OK);
         assert!(forge_config::stored_api_key_fingerprints("bedrock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_providers_route_carries_a_key_verdict_until_the_key_is_replaced() {
+        use tower::ServiceExt;
+
+        let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(super::super::SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: std::env::temp_dir().display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        let router = super::super::daemon_router(state);
+        let get_bedrock = |router: axum::Router| async move {
+            let response = router
+                .oneshot(
+                    axum::http::Request::get("/tok/api/providers")
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            json["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == "bedrock")
+                .cloned()
+                .unwrap()
+        };
+
+        forge_config::store_api_key("bedrock", "route-verdict-key-1234").unwrap();
+        store
+            .set_provider_verdict("bedrock", "expired", "This API key has expired", 100)
+            .unwrap();
+        let row = get_bedrock(router.clone()).await;
+        assert_eq!(row["key_verdict"]["headline"], "Key expired — renew");
+        assert_eq!(row["key_verdict"]["reason"], "This API key has expired");
+        assert_eq!(row["key_verdict"]["first_seen"], 100);
+
+        store.clear_provider_verdict("bedrock").unwrap();
+        assert!(get_bedrock(router).await["key_verdict"].is_null());
+        forge_config::remove_api_key("bedrock").unwrap();
     }
 }

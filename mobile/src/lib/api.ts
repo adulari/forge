@@ -189,6 +189,16 @@ export interface ProviderRow {
   version: string | null;
   serving: boolean | null;
   restart_required: boolean;
+  /** Set when the provider itself refused this key; cleared by the next success. Optional so an
+   * older daemon, which never sends it, still type-checks as "no verdict". */
+  key_verdict?: ProviderKeyVerdict | null;
+}
+export interface ProviderKeyVerdict {
+  status: "expired" | "rejected" | "quota";
+  headline: string;
+  reason: string;
+  first_seen: number;
+  last_seen: number;
 }
 export interface ProvidersResponse {
   direct_only: true;
