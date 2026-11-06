@@ -625,6 +625,31 @@ fn the_ship_row_says_what_it_will_do_and_runs_it() {
 }
 
 #[test]
+fn a_failed_commit_gives_the_message_back() {
+    let mut app = app();
+    press(&mut app, '4');
+    app.apply(IdeEvent::GitStatus("a".into(), Ok(git_status(1, 0))));
+    app.commit.text = "feat: keep me".into();
+    let actions = app.commit_now();
+    assert!(
+        matches!(actions.first(), Some(IdeAction::Commit { message, .. }) if message == "feat: keep me")
+    );
+    assert!(app.commit.text.is_empty(), "cleared while in flight");
+    app.apply(IdeEvent::GitOp(Err("pre-commit hook failed".into())));
+    assert_eq!(
+        app.commit.text, "feat: keep me",
+        "restored after the failure"
+    );
+
+    app.commit_now();
+    app.apply(IdeEvent::GitOp(Ok("committed".into())));
+    assert!(
+        app.commit.text.is_empty(),
+        "a successful commit keeps it cleared"
+    );
+}
+
+#[test]
 fn the_coach_line_shows_once_advances_and_is_remembered() {
     let mut app = IdeApp::new("/repo", NOW);
     app.apply(IdeEvent::Reviewed(Default::default()));

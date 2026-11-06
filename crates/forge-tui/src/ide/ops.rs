@@ -259,8 +259,10 @@ impl IdeApp {
             );
             return Vec::new();
         }
-        self.commit = Input::default();
-        self.tools.suggested_body = None;
+        self.pending_commit = Some((
+            std::mem::take(&mut self.commit),
+            self.tools.suggested_body.take(),
+        ));
         vec![IdeAction::Commit {
             session_id: self.route_session(&session),
             message,

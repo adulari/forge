@@ -66,6 +66,9 @@ pub struct IdeApp {
     pub(crate) timeline_cursor: usize,
     pub(crate) composer: Input,
     pub(crate) commit: Input,
+    /// The message and suggested body of a commit in flight, put back if it fails (a pre-commit
+    /// hook refusing it must not cost the user what they typed).
+    pub(super) pending_commit: Option<(Input, Option<(String, String)>)>,
     pub(crate) undo: Vec<UndoRecord>,
     pub(crate) confirm: Option<Confirm>,
     pub(crate) toast: Option<Toast>,
@@ -114,6 +117,7 @@ impl IdeApp {
             timeline_cursor: 0,
             composer: Input::default(),
             commit: Input::default(),
+            pending_commit: None,
             undo: Vec::new(),
             confirm: None,
             toast: None,
@@ -310,8 +314,19 @@ impl IdeApp {
             IdeEvent::Hunk(outcome) => actions.extend(self.apply_hunk(outcome)),
             IdeEvent::GitOp(result) => {
                 match result {
-                    Ok(note) => self.say(ToastLevel::Ok, note),
-                    Err(e) => self.say(ToastLevel::Error, e),
+                    Ok(note) => {
+                        self.pending_commit = None;
+                        self.say(ToastLevel::Ok, note);
+                    }
+                    Err(e) => {
+                        if let Some((message, body)) = self.pending_commit.take() {
+                            if self.commit == Input::default() {
+                                self.commit = message;
+                                self.tools.suggested_body = body;
+                            }
+                        }
+                        self.say(ToastLevel::Error, e);
+                    }
                 }
                 actions.push(IdeAction::RefreshChanges);
                 if let Some(id) = self.panel_session() {
