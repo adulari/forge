@@ -335,8 +335,7 @@ pub fn approve_anywhere_pairing_with_cli(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = cmd
-        .output()
+    let output = output_within(&mut cmd, CLI_DEADLINE)
         .map_err(|error| format!("start Forge CLI approval: {error}"))?;
     if output.status.success() {
         return Ok(());
@@ -411,10 +410,10 @@ pub fn activate_forge_anywhere_host(name: String) -> Result<(), String> {
     }
     let forge_binary =
         find_forge_binary().ok_or_else(|| "Forge is not installed on this computer".to_string())?;
-    let output = std::process::Command::new(&forge_binary)
-        .args(["anywhere", "enable", "--name", host_name])
-        .stdin(std::process::Stdio::null())
-        .output()
+    let mut cmd = std::process::Command::new(&forge_binary);
+    cmd.args(["anywhere", "enable", "--name", host_name])
+        .stdin(std::process::Stdio::null());
+    let output = output_within(&mut cmd, CLI_DEADLINE)
         .map_err(|error| format!("start Forge Anywhere host activation: {error}"))?;
     if output.status.success() {
         return Ok(());
@@ -423,6 +422,83 @@ pub fn activate_forge_anywhere_host(name: String) -> Result<(), String> {
         "Forge Anywhere could not activate this host. Check the Forge Anywhere screen and retry."
             .to_string(),
     )
+}
+
+/// How long a `forge anywhere` call may take. Both enroll with the relay over the network; a stalled
+/// relay must end in an error the pairing screen can show, not a spinner that never stops.
+const CLI_DEADLINE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// `Command::output` with a deadline: the child is killed when it runs past `deadline`, and output
+/// is not waited on for more than a moment after it exits (a process it started in the background
+/// may keep the pipes open).
+fn output_within(
+    cmd: &mut std::process::Command,
+    deadline: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    use std::io::Read as _;
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    type Capture = (
+        std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+        std::sync::mpsc::Receiver<()>,
+    );
+    let reader = |pipe: Option<Box<dyn std::io::Read + Send>>| -> Capture {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let shared = buf.clone();
+        std::thread::spawn(move || {
+            if let Some(mut pipe) = pipe {
+                let mut chunk = [0u8; 8192];
+                while let Ok(n) = pipe.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    let mut out = shared.lock().unwrap_or_else(|e| e.into_inner());
+                    let room = (1usize << 20).saturating_sub(out.len()).min(n);
+                    out.extend_from_slice(&chunk[..room]);
+                }
+            }
+            let _ = tx.send(());
+        });
+        (buf, rx)
+    };
+    let collect = |(buf, done): Capture| {
+        let _ = done.recv_timeout(std::time::Duration::from_secs(2));
+        let out = buf.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        out
+    };
+    let stdout = reader(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    );
+    let stderr = reader(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+    );
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            break status;
+        }
+        if started.elapsed() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("timed out after {}s", deadline.as_secs()));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    Ok(std::process::Output {
+        status,
+        stdout: collect(stdout),
+        stderr: collect(stderr),
+    })
 }
 
 #[cfg(unix)]
@@ -500,6 +576,25 @@ pub fn start_forge_serve() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_cli_call_past_its_deadline_is_killed() {
+        let started = std::time::Instant::now();
+        let mut slow = std::process::Command::new("sh");
+        slow.args(["-c", "sleep 30"]);
+        let err = output_within(&mut slow, std::time::Duration::from_millis(300)).unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        let mut quick = std::process::Command::new("sh");
+        quick.args(["-c", "echo ok; echo warn >&2; (sleep 30 &)"]);
+        let out = output_within(&mut quick, std::time::Duration::from_secs(10)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "warn");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
 
     #[test]
     fn serve_state_parses_the_shape_forge_serve_writes() {
