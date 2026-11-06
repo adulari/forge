@@ -371,6 +371,9 @@ async fn run_board(
         let mut actions: Vec<BoardAction> = Vec::new();
         tokio::select! {
             _ = tick.tick() => {
+                if !pending_prompts.is_empty() {
+                    send_pending(&mut pool, &mut pending_prompts);
+                }
                 let animating = app.needs_animation();
                 app.apply(BoardEvent::Tick);
                 dirty |= animating || app.needs_animation();
@@ -480,7 +483,9 @@ fn apply_term(app: &mut BoardApp, event: TermEvent) -> Vec<BoardAction> {
 
 /// Hand every queued first prompt to its session's socket, once it exists.
 fn send_pending(pool: &mut sockets::SocketPool, pending: &mut HashMap<String, String>) {
-    for (id, json) in pending_prompt_frames(pending, &pool.open_ids()) {
+    // Only sockets that finished connecting: a registered socket still handshaking refuses the
+    // frame, and the prompt, already taken out of `pending`, was lost.
+    for (id, json) in pending_prompt_frames(pending, &pool.connected_ids()) {
         pool.send(&id, &json);
     }
 }

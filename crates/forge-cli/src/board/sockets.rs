@@ -165,8 +165,13 @@ impl SocketPool {
         }
     }
 
-    pub(crate) fn open_ids(&self) -> Vec<String> {
-        self.open.keys().cloned().collect()
+    /// Ids whose socket has finished its handshake and can take a frame right now.
+    pub(crate) fn connected_ids(&self) -> Vec<String> {
+        self.open
+            .iter()
+            .filter(|(_, socket)| socket.connected.load(std::sync::atomic::Ordering::Acquire))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Send one `RemoteInput` frame. A card whose socket is gone must SAY so — silently dropping a
@@ -315,6 +320,25 @@ mod tests {
         let snap = decode_snapshot(r#"{"session_id":"s1","busy":true}"#).expect("a legacy frame");
         assert_eq!(snap.revision, None, "resume simply starts from rev 0");
         assert!(snap.busy);
+    }
+
+    #[tokio::test]
+    async fn a_socket_still_connecting_is_not_offered_a_first_prompt() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Port 1 on loopback refuses, so this socket stays registered but never connects.
+        let mut pool = SocketPool::new("http://127.0.0.1:1".into(), "tok".into(), tx);
+        pool.sync(&["new-1".to_string()]);
+        assert!(pool.connected_ids().is_empty());
+        let mut pending =
+            std::collections::HashMap::from([("new-1".to_string(), "hi".to_string())]);
+        assert!(
+            crate::board::pending_prompt_frames(&mut pending, &pool.connected_ids()).is_empty()
+        );
+        assert!(
+            pending.contains_key("new-1"),
+            "the prompt waits for the socket"
+        );
+        pool.shutdown();
     }
 
     #[tokio::test]
