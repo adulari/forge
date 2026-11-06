@@ -411,6 +411,36 @@ fn tree_files(root: &Path) -> Vec<ChangedFile> {
     files
 }
 
+type HashCache = std::collections::HashMap<PathBuf, ((u64, u128), String)>;
+
+static HASH_CACHE: std::sync::Mutex<Option<HashCache>> = std::sync::Mutex::new(None);
+const HASH_CACHE_MAX: usize = 8192;
+/// A file touched this recently may still change within the same mtime tick, so it is re-read.
+const HASH_SETTLE_NANOS: u128 = 2_000_000_000;
+
+fn cached_hash(path: &Path, stamp: (u64, u128)) -> Option<String> {
+    let guard = HASH_CACHE.lock().ok()?;
+    let (seen, hash) = guard.as_ref()?.get(path)?;
+    (*seen == stamp).then(|| hash.clone())
+}
+
+fn remember_hash(path: &Path, stamp: (u64, u128), hash: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    if now.saturating_sub(stamp.1) < HASH_SETTLE_NANOS {
+        return;
+    }
+    let Ok(mut guard) = HASH_CACHE.lock() else {
+        return;
+    };
+    let cache = guard.get_or_insert_with(HashCache::new);
+    if cache.len() >= HASH_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(path.to_path_buf(), (stamp, hash.to_string()));
+}
+
 /// A short, stable digest of what is at `path` right now. `deleted` when nothing is.
 pub(super) fn content_hash(path: &Path) -> String {
     let Ok(meta) = std::fs::symlink_metadata(path) else {
@@ -423,10 +453,23 @@ pub(super) fn content_hash(path: &Path) -> String {
             hasher.update(target.to_string_lossy().as_bytes());
         }
     } else if meta.is_file() && meta.len() <= MAX_HASHED_BYTES {
+        let stamp = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| (meta.len(), d.as_nanos()));
+        if let Some(hit) = stamp.and_then(|s| cached_hash(path, s)) {
+            return hit;
+        }
         match std::fs::read(path) {
             Ok(bytes) => hasher.update(&bytes),
             Err(_) => return "unreadable".to_string(),
         }
+        let hash = hex::encode(&hasher.finalize()[..8]);
+        if let Some(stamp) = stamp {
+            remember_hash(path, stamp, &hash);
+        }
+        return hash;
     } else {
         let modified = meta
             .modified()
