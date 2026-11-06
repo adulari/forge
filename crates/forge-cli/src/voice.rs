@@ -25,9 +25,21 @@ type LoadedModel = (PathBuf, Arc<Transcriber>);
 
 /// `Clone` is shallow (an `Arc` bump) so the cache stays shared when `ServerState` (remote.rs)
 /// is cloned — `DaemonState` (serve.rs) is never cloned, only shared via `Arc<DaemonState>`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct VoiceState {
     loaded: Arc<Mutex<Option<LoadedModel>>>,
+    /// One transcription at a time: each runs whisper on every core, so concurrent uploads (two
+    /// devices, or one client retrying) only slow each other down and pile up memory.
+    running: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for VoiceState {
+    fn default() -> Self {
+        Self {
+            loaded: Arc::default(),
+            running: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
 }
 
 impl VoiceState {
@@ -71,6 +83,11 @@ pub(crate) async fn transcribe_upload(
         .model
         .parse()
         .map_err(|e: forge_voice::VoiceError| anyhow::anyhow!("{e}"))?;
+    let _turn = state
+        .running
+        .acquire()
+        .await
+        .context("voice transcription is shutting down")?;
     let samples =
         tokio::task::spawn_blocking(move || forge_voice::decode_audio(&bytes, hint.as_deref()))
             .await
