@@ -152,7 +152,7 @@ pub(super) struct LiveSession {
     pub(super) waiting: bool,
 }
 
-async fn live_sessions(state: &DaemonState) -> Vec<LiveSession> {
+pub(super) async fn live_sessions(state: &DaemonState) -> Vec<LiveSession> {
     let mut rows = Vec::new();
     let mut driven = BTreeSet::new();
     for handle in state.registry.all().await {
@@ -352,6 +352,76 @@ fn shared_tree_changes(
         rows.push(changes_row(synthetic, None, branch, unattributed));
     }
     rows
+}
+
+/// How one shared checkout's dirty files split for a session that wants to commit its own.
+pub(super) struct TreeSplit {
+    /// `(path, kind)` of the files attributed to the session alone.
+    pub(super) mine: Vec<(String, String)>,
+    /// Files the session edited that another session edited too.
+    pub(super) contested: Vec<String>,
+    /// Dirty files left alone: other sessions' and unattributed ones.
+    pub(super) others: Vec<String>,
+    /// The session has more files than the queue lists.
+    pub(super) truncated: bool,
+}
+
+/// Attribute the checkout at `root` and keep what `session` changed. `live` is every session the
+/// daemon knows; `session` itself need not be among them.
+pub(super) fn split_shared_tree(
+    store: &forge_store::Store,
+    root: &Path,
+    session: &str,
+    live: Vec<LiveSession>,
+) -> TreeSplit {
+    let mut members: Vec<LiveSession> = live
+        .into_iter()
+        .filter(|s| s.worktree.is_none() && project_root_of(s).as_deref() == Some(root))
+        .collect();
+    if !members.iter().any(|s| s.id == session) {
+        members.push(LiveSession {
+            id: session.to_string(),
+            title: String::new(),
+            cwd: root.to_string_lossy().into_owned(),
+            worktree: None,
+            busy: false,
+            waiting: false,
+        });
+    }
+    let rows = shared_tree_changes(store, root, members);
+    let mut split = TreeSplit {
+        mine: Vec::new(),
+        contested: Vec::new(),
+        others: Vec::new(),
+        truncated: false,
+    };
+    let mine: BTreeSet<&str> = rows
+        .iter()
+        .filter(|row| row.session_id == session)
+        .flat_map(|row| row.files.iter().map(|f| f.path.as_str()))
+        .collect();
+    for row in &rows {
+        if row.session_id == session {
+            split.truncated |= row.truncated > 0;
+            split
+                .mine
+                .extend(row.files.iter().map(|f| (f.path.clone(), f.kind.clone())));
+            continue;
+        }
+        for file in &row.files {
+            if mine.contains(file.path.as_str()) {
+                split.contested.push(file.path.clone());
+            } else {
+                split.others.push(file.path.clone());
+            }
+        }
+    }
+    split.mine.sort();
+    split.contested.sort();
+    split.contested.dedup();
+    split.others.sort();
+    split.others.dedup();
+    split
 }
 
 /// Most dirty paths the per-file commit lookup passes to one `git log`; past it, files fall

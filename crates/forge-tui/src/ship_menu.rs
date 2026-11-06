@@ -25,10 +25,96 @@ pub struct ShipStepLine {
     pub detail: String,
 }
 
+/// The files a ship would commit, as the daemon's preview names them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ShipPlan {
+    /// `index` | `worktree` | `session`
+    pub source: String,
+    /// `(path, kind)`; kind is created | modified | deleted | renamed.
+    pub files: Vec<(String, String)>,
+    /// Dirty files that stay out of the commit.
+    pub left_out: Vec<String>,
+}
+
+impl ShipPlan {
+    fn from_json(value: &serde_json::Value) -> Option<Self> {
+        if !value.is_object() {
+            return None;
+        }
+        let text = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+        Some(Self {
+            source: text(&value["source"]),
+            files: value["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|f| (text(&f["path"]), text(&f["kind"])))
+                .collect(),
+            left_out: value["left_out"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(text)
+                .collect(),
+        })
+    }
+
+    /// What the commit is drawn from, in a few words.
+    pub fn source_label(&self) -> &'static str {
+        match self.source.as_str() {
+            "index" => "the files you staged",
+            "session" => "this session's files",
+            _ => "all changes in the worktree",
+        }
+    }
+
+    /// The exact commit set: a heading, one line per file (at most `max_files`), then the
+    /// files left out.
+    pub fn lines(&self, max_files: usize) -> Vec<String> {
+        if self.files.is_empty() {
+            return vec!["No file changes: the commits already on the branch ship.".to_string()];
+        }
+        let mut lines = vec![format!(
+            "Commits {} file(s) from {}:",
+            self.files.len(),
+            self.source_label()
+        )];
+        for (path, kind) in self.files.iter().take(max_files) {
+            let mark = match kind.as_str() {
+                "created" => 'A',
+                "deleted" => 'D',
+                "renamed" => 'R',
+                _ => 'M',
+            };
+            lines.push(format!("  {mark} {path}"));
+        }
+        if self.files.len() > max_files {
+            lines.push(format!("  +{} more", self.files.len() - max_files));
+        }
+        if !self.left_out.is_empty() {
+            let shown: Vec<&str> = self.left_out.iter().take(3).map(String::as_str).collect();
+            let more = self.left_out.len().saturating_sub(shown.len());
+            lines.push(format!(
+                "Left out: {}{}",
+                shown.join(", "),
+                if more > 0 {
+                    format!(" +{more} more")
+                } else {
+                    String::new()
+                }
+            ));
+        }
+        lines
+    }
+}
+
 /// The daemon's answer, reduced to what a terminal shows.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShipOutcome {
     pub ok: bool,
+    /// The answer to a `preview` request: nothing was changed.
+    pub preview: bool,
+    pub plan: Option<ShipPlan>,
     pub steps: Vec<ShipStepLine>,
     /// `(step, reason)` of the refusal that stopped the run.
     pub refused: Option<(String, String)>,
@@ -62,6 +148,8 @@ impl ShipOutcome {
         });
         Self {
             ok: value["ok"].as_bool().unwrap_or(false),
+            preview: value["preview"].as_bool().unwrap_or(false),
+            plan: ShipPlan::from_json(&value["plan"]),
             steps,
             refused,
             pr_number: value["pr"]["number"].as_u64(),
@@ -187,14 +275,47 @@ pub struct ShipMenu {
     pub outcome: Option<ShipOutcome>,
     pub error: Option<String>,
     pub tick: u32,
+    /// Waiting for the daemon to say what the commit would hold.
+    pub previewing: bool,
+    /// Set by [`ShipMenu::open`] and retries; the driver sends the preview request and clears it.
+    pub needs_preview: bool,
+    /// The previewed commit set; Enter ships it.
+    pub plan: Option<ShipPlan>,
 }
 
 impl ShipMenu {
     pub fn open(&mut self) {
         *self = Self {
             open: true,
+            previewing: true,
+            needs_preview: true,
             ..Self::default()
         };
+    }
+
+    /// The daemon's answer to the preview request.
+    pub fn finish_preview(&mut self, result: Result<ShipOutcome, String>) {
+        self.previewing = false;
+        match result {
+            Ok(outcome) if outcome.ok => {
+                self.error = None;
+                self.outcome = None;
+                self.plan = Some(outcome.plan.unwrap_or_default());
+            }
+            Ok(outcome) => {
+                self.plan = None;
+                self.outcome = Some(outcome);
+            }
+            Err(error) => {
+                self.plan = None;
+                self.error = Some(error);
+            }
+        }
+    }
+
+    /// The preview is in and nothing has been shipped: Enter ships exactly this set.
+    pub fn confirmable(&self) -> bool {
+        self.plan.is_some() && self.outcome.is_none() && self.error.is_none()
     }
 
     pub fn close(&mut self) {
@@ -225,6 +346,9 @@ impl ShipMenu {
         if self.running {
             return ShipAction::None;
         }
+        if self.previewing && !matches!(key, KeyKind::Esc | KeyKind::Interrupt) {
+            return ShipAction::None;
+        }
         match key {
             KeyKind::Esc | KeyKind::Interrupt => {
                 self.close();
@@ -234,11 +358,19 @@ impl ShipMenu {
                 self.close();
                 ShipAction::Close
             }
-            KeyKind::Enter | KeyKind::Char('r') => {
+            KeyKind::Enter | KeyKind::Char('r') if self.confirmable() => {
                 self.running = true;
-                self.outcome = None;
-                self.error = None;
                 ShipAction::Start
+            }
+            KeyKind::Enter | KeyKind::Char('r') => {
+                *self = Self {
+                    open: true,
+                    previewing: true,
+                    needs_preview: true,
+                    tick: self.tick,
+                    ..Self::default()
+                };
+                ShipAction::None
             }
             _ => ShipAction::None,
         }

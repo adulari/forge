@@ -18,13 +18,13 @@ impl ShipMenuDriver {
         Self { tx, rx }
     }
 
-    fn spawn_ship(&self, session: String) {
+    fn spawn_ship(&self, session: String, preview: bool) {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let result = async {
                 let daemon = Daemon::resolve(None, None).map_err(|e| format!("{e:#}"))?;
                 let answer = daemon
-                    .ship(&session, &serde_json::json!({}))
+                    .ship(&session, &serde_json::json!({ "preview": preview }))
                     .await
                     .map_err(|e| format!("{e:#}"))?;
                 Ok(ShipOutcome::from_json(&answer))
@@ -41,11 +41,19 @@ impl ShipMenuDriver {
             return false;
         }
         let mut dirty = false;
-        while let Ok(result) = self.rx.try_recv() {
-            app.ship_menu.finish(result);
+        if std::mem::take(&mut app.ship_menu.needs_preview) {
+            self.spawn_ship(app.session_id.clone(), true);
             dirty = true;
         }
-        if app.ship_menu.running {
+        while let Ok(result) = self.rx.try_recv() {
+            if app.ship_menu.previewing {
+                app.ship_menu.finish_preview(result);
+            } else {
+                app.ship_menu.finish(result);
+            }
+            dirty = true;
+        }
+        if app.ship_menu.running || app.ship_menu.previewing {
             app.ship_menu.tick = app.ship_menu.tick.wrapping_add(1);
             dirty = true;
         }
@@ -54,7 +62,7 @@ impl ShipMenuDriver {
 
     pub(crate) fn key(&mut self, app: &mut App, key: KeyKind) {
         if app.ship_menu.key(key) == ShipAction::Start {
-            self.spawn_ship(app.session_id.clone());
+            self.spawn_ship(app.session_id.clone(), false);
         }
     }
 }

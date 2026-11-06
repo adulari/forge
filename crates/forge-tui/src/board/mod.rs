@@ -82,6 +82,8 @@ pub enum BoardEvent {
     Git(String, GitInfo),
     /// `GET /api/history?include_tools=1` for one session (newest first, as served).
     History(String, Vec<HistoryRow>),
+    /// The answer to [`BoardAction::ShipPreview`]: the commit set as text lines, or the refusal.
+    ShipPreview(String, Result<Vec<String>, String>),
     /// Feedback about an action the host performed, or a failure worth showing.
     Toast(ToastLevel, String),
     /// A delete the daemon refused: its full sentence, shown as a dialog (a toast clips it).
@@ -161,6 +163,9 @@ pub enum BoardAction {
     Merge(String),
     /// `POST /api/sessions/{id}/discard`.
     Discard(String),
+    /// `POST /api/sessions/{id}/ship` with `preview: true`; the host reports
+    /// [`BoardEvent::ShipPreview`] with the exact files the commit would hold.
+    ShipPreview(String),
     /// `POST /api/sessions/{id}/ship`: commit, push, open the PR, arm PR Watch in merge mode.
     Ship(String),
     /// Merge every `succeeded` worker of this dispatch in index order, stopping at the first

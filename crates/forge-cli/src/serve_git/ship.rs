@@ -44,6 +44,9 @@ pub(crate) struct ShipRequest {
     /// `squash` (default) | `merge` | `rebase` | `auto`.
     #[serde(default)]
     pub(crate) method: Option<String>,
+    /// Plan only: answer with the files the commit would hold and change nothing.
+    #[serde(default)]
+    pub(crate) preview: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -75,9 +78,29 @@ pub(crate) struct ShipPr {
     existing: bool,
 }
 
+#[derive(serde::Serialize, Clone, Debug)]
+pub(crate) struct PlannedFile {
+    pub(crate) path: String,
+    /// "created" | "modified" | "deleted" | "renamed"
+    pub(crate) kind: String,
+}
+
+/// What the commit step will hold, decided before anything is staged.
+#[derive(serde::Serialize, Clone, Debug)]
+pub(crate) struct CommitPlan {
+    /// `index` (already staged, committed as it is) | `worktree` | `session` (this session's
+    /// share of a shared checkout)
+    pub(crate) source: &'static str,
+    pub(crate) files: Vec<PlannedFile>,
+    /// Dirty files in the tree that stay out of the commit.
+    pub(crate) left_out: Vec<String>,
+}
+
 #[derive(serde::Serialize, Default)]
 pub(crate) struct ShipResponse {
     pub(crate) ok: bool,
+    pub(crate) preview: bool,
+    pub(crate) plan: Option<CommitPlan>,
     pub(crate) steps: Vec<Step>,
     pub(crate) branch: Option<String>,
     pub(crate) base: Option<String>,
@@ -135,9 +158,23 @@ fn default_base(root: &Path, requested: Option<&str>) -> Option<String> {
     .filter(|b| !b.is_empty())
 }
 
-/// Paths to stage: everything the session changed except Forge's own state and untracked build
-/// residue. `Err` for unresolved conflicts, which must not be committed.
-fn pending_paths(root: &Path) -> Result<Vec<String>, String> {
+struct Pending {
+    path: String,
+    kind: &'static str,
+}
+
+fn kind_of(x: u8, y: u8) -> &'static str {
+    match (x, y) {
+        (b'?', b'?') | (b'A', _) | (_, b'A') => "created",
+        (b'D', _) | (_, b'D') => "deleted",
+        (b'R', _) | (_, b'R') => "renamed",
+        _ => "modified",
+    }
+}
+
+/// Dirty paths other than Forge's own state and untracked build residue. `Err` for unresolved
+/// conflicts, which must not be committed.
+fn pending_paths(root: &Path) -> Result<Vec<Pending>, String> {
     let raw = git_raw(root, &["status", "--porcelain=v1", "-z", "-uall"])?;
     let text = String::from_utf8_lossy(&raw);
     let mut fields = text.split('\0');
@@ -157,21 +194,184 @@ fn pending_paths(root: &Path) -> Result<Vec<String>, String> {
         if path.starts_with(".forge/") || (x == b'?' && is_noise_path(path)) {
             continue;
         }
-        paths.push(path.to_string());
+        paths.push(Pending {
+            path: path.to_string(),
+            kind: kind_of(x, y),
+        });
     }
     Ok(paths)
 }
 
-fn stage_and_check(root: &Path) -> Result<bool, String> {
-    let paths = pending_paths(root)?;
-    if !paths.is_empty() {
-        let mut args = vec!["add", "-A", "--"];
-        args.extend(paths.iter().map(String::as_str));
-        git_raw(root, &args)?;
+/// Files already in the index, against HEAD.
+fn staged_files(root: &Path) -> Result<Vec<PlannedFile>, String> {
+    let raw = git_raw(root, &["diff", "--cached", "--name-status", "-z"])?;
+    let text = String::from_utf8_lossy(&raw);
+    let mut fields = text.split('\0').filter(|f| !f.is_empty());
+    let mut files = Vec::new();
+    while let Some(status) = fields.next() {
+        let Some(path) = fields.next() else { break };
+        let kind = match status.as_bytes()[0] {
+            b'A' => "created",
+            b'D' => "deleted",
+            b'R' | b'C' => "renamed",
+            _ => "modified",
+        };
+        // A rename lists the old path first and the new one second.
+        let path = if matches!(status.as_bytes()[0], b'R' | b'C') {
+            fields.next().unwrap_or(path)
+        } else {
+            path
+        };
+        files.push(PlannedFile {
+            path: path.to_string(),
+            kind: kind.to_string(),
+        });
     }
-    Ok(!git_stdout(root, &["diff", "--cached", "--name-only"])
-        .unwrap_or_default()
-        .is_empty())
+    Ok(files)
+}
+
+fn looks_like_secret(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if name == ".env" || name.starts_with(".env.") {
+        return !matches!(
+            name.rsplit('.').next(),
+            Some("example" | "sample" | "template" | "dist")
+        );
+    }
+    name.ends_with(".pem")
+        || name.ends_with(".key")
+        || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix) && !name.ends_with(".pub"))
+}
+
+/// How the session's checkout is shared, which decides whose files are the session's.
+pub(super) enum Scope {
+    /// The session has its own worktree: everything dirty in it is the session's.
+    Worktree,
+    /// A checkout other sessions may edit too; `live` is every session the daemon knows.
+    Shared {
+        live: Vec<crate::serve_git::changes::LiveSession>,
+    },
+}
+
+/// Decide what the commit holds: the index as it is when anything is staged, else the session's
+/// own dirty files. Refuses what cannot be separated cleanly and files that look like secrets.
+fn plan_commit(
+    store: &forge_store::Store,
+    root: &Path,
+    session: &str,
+    scope: Scope,
+) -> Result<CommitPlan, String> {
+    let pending = pending_paths(root)?;
+    let staged = staged_files(root)?;
+    if !staged.is_empty() {
+        let in_index: std::collections::BTreeSet<&str> =
+            staged.iter().map(|f| f.path.as_str()).collect();
+        let left_out = pending
+            .iter()
+            .filter(|p| !in_index.contains(p.path.as_str()))
+            .map(|p| p.path.clone())
+            .collect();
+        return Ok(CommitPlan {
+            source: "index",
+            files: staged,
+            left_out,
+        });
+    }
+    let (source, files, left_out) = match scope {
+        Scope::Worktree => (
+            "worktree",
+            pending
+                .iter()
+                .map(|p| PlannedFile {
+                    path: p.path.clone(),
+                    kind: p.kind.to_string(),
+                })
+                .collect::<Vec<_>>(),
+            Vec::new(),
+        ),
+        Scope::Shared { live } => {
+            let split = super::changes::split_shared_tree(store, root, session, live);
+            if !split.contested.is_empty() {
+                return Err(format!(
+                    "{} also changed by another session, so this session's files cannot be \
+                     separated: {}. Stage what to ship in the Review dock and ship again",
+                    if split.contested.len() == 1 {
+                        "a file was"
+                    } else {
+                        "files were"
+                    },
+                    split.contested.join(", ")
+                ));
+            }
+            if split.truncated {
+                return Err(
+                    "this session changed too many files to list; stage what to ship \
+                            in the Review dock and ship again"
+                        .to_string(),
+                );
+            }
+            let known: std::collections::BTreeSet<&str> =
+                pending.iter().map(|p| p.path.as_str()).collect();
+            let files = split
+                .mine
+                .into_iter()
+                .filter(|(path, _)| known.contains(path.as_str()))
+                .map(|(path, kind)| PlannedFile { path, kind })
+                .collect::<Vec<_>>();
+            (
+                "session",
+                files,
+                split
+                    .others
+                    .into_iter()
+                    .filter(|p| known.contains(p.as_str()))
+                    .collect(),
+            )
+        }
+    };
+    let secrets: Vec<&str> = files
+        .iter()
+        .filter(|f| looks_like_secret(&f.path) && super::diff::is_untracked(root, &f.path))
+        .map(|f| f.path.as_str())
+        .collect();
+    if !secrets.is_empty() {
+        return Err(format!(
+            "untracked files that look like secrets: {}. Add them to .gitignore, move them out \
+             of the repository, or stage them yourself if they are meant to be committed",
+            secrets.join(", ")
+        ));
+    }
+    Ok(CommitPlan {
+        source,
+        files,
+        left_out,
+    })
+}
+
+/// Stage the planned files into an index that holds nothing yet.
+fn stage_plan(root: &Path, plan: &CommitPlan) -> Result<(), String> {
+    if plan.source == "index" || plan.files.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["add", "-A", "--"];
+    args.extend(plan.files.iter().map(|f| f.path.as_str()));
+    git_raw(root, &args).map(|_| ())
+}
+
+/// Put the index back to what it was before [`stage_plan`]: empty against HEAD.
+fn unstage_plan(root: &Path, plan: &CommitPlan) {
+    if plan.source == "index" || plan.files.is_empty() {
+        return;
+    }
+    let mut args = vec!["reset", "-q", "--"];
+    args.extend(plan.files.iter().map(|f| f.path.as_str()));
+    if git_raw(root, &args).is_err() {
+        let mut args = vec!["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--"];
+        args.extend(plan.files.iter().map(|f| f.path.as_str()));
+        let _ = git_raw(root, &args);
+    }
 }
 
 fn clip_chars(text: &str, limit: usize) -> String {
@@ -284,6 +484,11 @@ fn pr_url_and_number(output: &str) -> (String, Option<u64>) {
     (url, number)
 }
 
+async fn unstage(root: &Path, plan: &CommitPlan) {
+    let (root, plan) = (root.to_path_buf(), plan.clone());
+    let _ = tokio::task::spawn_blocking(move || unstage_plan(&root, &plan)).await;
+}
+
 /// Run the ship steps for `session`. `Err` only for a request that could not start (unknown
 /// session, bad method); a refusal is an `Ok` response with `ok: false`.
 pub(crate) async fn ship_session(
@@ -310,6 +515,7 @@ pub(crate) async fn ship_session(
             ));
         }
     }
+    let live = super::changes::live_sessions(state).await;
 
     let probe_root = root.clone();
     let requested_base = request.base.clone();
@@ -347,59 +553,114 @@ pub(crate) async fn ship_session(
     }
     out.done("branch", format!("shipping `{branch}`"));
 
-    let stage_root = root.clone();
-    let staged = tokio::task::spawn_blocking(move || stage_and_check(&stage_root))
-        .await
-        .map_err(|_| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                "git failed".to_string(),
-            )
-        })?;
-    match staged {
+    let worktree = {
+        let store = state.store.clone();
+        let id = session.to_string();
+        let hosted = state
+            .registry
+            .get(session)
+            .await
+            .and_then(|handle| handle.worktree.clone());
+        match hosted {
+            Some(worktree) => Some(worktree),
+            None => tokio::task::spawn_blocking(move || store.session_worktree(&id).ok().flatten())
+                .await
+                .ok()
+                .flatten(),
+        }
+    };
+    let scope = match worktree {
+        Some(worktree) if Path::new(&worktree).is_dir() => Scope::Worktree,
+        _ => Scope::Shared { live },
+    };
+    let plan_root = root.clone();
+    let plan_store = state.store.clone();
+    let plan_session = session.to_string();
+    let planned = tokio::task::spawn_blocking(move || {
+        plan_commit(&plan_store, &plan_root, &plan_session, scope)
+    })
+    .await
+    .map_err(|_| {
+        (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "git failed".to_string(),
+        )
+    })?;
+    let plan = match planned {
+        Ok(plan) => plan,
         Err(reason) => return Ok(out.refuse("commit", reason)),
-        Ok(false) => out.skipped(
+    };
+    out.plan = Some(plan.clone());
+    if request.preview {
+        out.preview = true;
+        out.skipped(
+            "commit",
+            format!("preview: {} file(s) would be committed", plan.files.len()),
+        );
+        out.ok = true;
+        return Ok(out);
+    }
+
+    if plan.files.is_empty() {
+        out.skipped(
             "commit",
             "nothing to commit; shipping the commits already on the branch",
-        ),
-        Ok(true) => {
-            let message = match request
-                .message
-                .as_deref()
-                .map(str::trim)
-                .filter(|m| !m.is_empty())
-            {
-                Some(message) => message.to_string(),
-                None => match super::message::generate(state, session, &root, None).await {
-                    Ok(generated) => generated.message,
-                    Err(reason) => return Ok(out.refuse("commit", reason)),
-                },
-            };
-            let commit_root = root.clone();
-            let commit_message = message.clone();
-            let committed = tokio::task::spawn_blocking(move || {
-                git_raw(
-                    &commit_root,
-                    &["commit", "-m", commit_message.as_str(), "--"],
-                )?;
-                Ok::<_, String>(
-                    git_stdout(&commit_root, &["rev-parse", "HEAD"]).unwrap_or_default(),
-                )
-            })
+        );
+    } else {
+        let stage_root = root.clone();
+        let stage_plan_copy = plan.clone();
+        let staged = tokio::task::spawn_blocking(move || stage_plan(&stage_root, &stage_plan_copy))
             .await
             .map_err(|_| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    "git commit failed".to_string(),
+                    "git failed".to_string(),
                 )
             })?;
-            match committed {
-                Ok(sha) => {
-                    let subject = message.lines().next().unwrap_or_default().to_string();
-                    out.done("commit", format!("{} {subject}", &sha[..sha.len().min(7)]));
-                    out.commit = Some(ShipCommit { sha, message });
+        if let Err(reason) = staged {
+            unstage(&root, &plan).await;
+            return Ok(out.refuse("commit", reason));
+        }
+        let message = match request
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+        {
+            Some(message) => message.to_string(),
+            None => match super::message::generate(state, session, &root, None).await {
+                Ok(generated) => generated.message,
+                Err(reason) => {
+                    unstage(&root, &plan).await;
+                    return Ok(out.refuse("commit", reason));
                 }
-                Err(reason) => return Ok(out.refuse("commit", reason)),
+            },
+        };
+        let commit_root = root.clone();
+        let commit_message = message.clone();
+        let committed = tokio::task::spawn_blocking(move || {
+            git_raw(
+                &commit_root,
+                &["commit", "-m", commit_message.as_str(), "--"],
+            )?;
+            Ok::<_, String>(git_stdout(&commit_root, &["rev-parse", "HEAD"]).unwrap_or_default())
+        })
+        .await
+        .map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "git commit failed".to_string(),
+            )
+        })?;
+        match committed {
+            Ok(sha) => {
+                let subject = message.lines().next().unwrap_or_default().to_string();
+                out.done("commit", format!("{} {subject}", &sha[..sha.len().min(7)]));
+                out.commit = Some(ShipCommit { sha, message });
+            }
+            Err(reason) => {
+                unstage(&root, &plan).await;
+                return Ok(out.refuse("commit", reason));
             }
         }
     }

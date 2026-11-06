@@ -120,6 +120,7 @@ fn args(title: &str) -> Args {
         base: None,
         draft: false,
         allow_untracked: false,
+        allow_dirty: false,
         publish_images: true,
     }
 }

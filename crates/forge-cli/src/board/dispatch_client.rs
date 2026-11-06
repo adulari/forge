@@ -201,6 +201,30 @@ pub(crate) async fn merge(
     let _ = refresh.send(());
 }
 
+/// `POST /api/sessions/{id}/ship` with `preview: true`: the files the commit would hold, or the
+/// refusal that would stop the ship, delivered as [`BoardEvent::ShipPreview`].
+pub(crate) async fn ship_preview(
+    http: reqwest::Client,
+    base: String,
+    token: String,
+    id: String,
+    ev: mpsc::UnboundedSender<Ev>,
+) {
+    let url = session_url(&base, &token, &id, "ship");
+    let result = match post_json(&http, &url, &serde_json::json!({ "preview": true })).await {
+        Ok(value) => {
+            let outcome = forge_tui::ship_menu::ShipOutcome::from_json(&value);
+            if outcome.ok {
+                Ok(outcome.plan.map(|plan| plan.lines(12)).unwrap_or_default())
+            } else {
+                Err(forge_tui::ship_menu::headline(Some(&outcome), false))
+            }
+        }
+        Err(f) => Err(f.message),
+    };
+    let _ = ev.send(Ev::Board(BoardEvent::ShipPreview(id, result)));
+}
+
 /// `POST /api/sessions/{id}/ship`: a refusal is data (`ok: false`), shown as an error toast that
 /// names the step and reason; a success names the PR.
 pub(crate) async fn ship(

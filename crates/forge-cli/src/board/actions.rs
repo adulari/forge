@@ -160,6 +160,15 @@ pub(crate) fn perform(action: BoardAction, host: &mut Host<'_>) -> After {
                 host.refresh.clone(),
             ));
         }
+        BoardAction::ShipPreview(id) => {
+            tokio::spawn(dc::ship_preview(
+                host.http.clone(),
+                host.base.to_string(),
+                host.token.to_string(),
+                id,
+                host.ev.clone(),
+            ));
+        }
         BoardAction::Ship(id) => {
             tokio::spawn(dc::ship(
                 host.http.clone(),

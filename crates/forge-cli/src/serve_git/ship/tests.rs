@@ -76,6 +76,10 @@ fn fixture(mode: &str, permission: &str, pr_list: &str) -> Fixture {
 
     let work = match mode {
         "main" => main.clone(),
+        "shared" => {
+            sh(&main, &["checkout", "-q", "-b", "feat/cart"]);
+            main.clone()
+        }
         _ => {
             let wt = root.join("wt");
             sh(
@@ -123,7 +127,7 @@ esac
     let session = store
         .create_session(&main.display().to_string(), "default")
         .unwrap();
-    if mode != "main" {
+    if !matches!(mode, "main" | "shared") {
         store
             .set_session_worktree(&session, &work.display().to_string())
             .unwrap();
@@ -347,7 +351,11 @@ fn staging_skips_forge_state_and_untracked_residue_but_refuses_conflicts() {
     std::fs::create_dir_all(dir.path().join("__pycache__")).unwrap();
     std::fs::write(dir.path().join("__pycache__/m.pyc"), "x").unwrap();
     std::fs::write(dir.path().join("new.rs"), "n").unwrap();
-    let mut paths = pending_paths(dir.path()).unwrap();
+    let mut paths: Vec<String> = pending_paths(dir.path())
+        .unwrap()
+        .into_iter()
+        .map(|p| p.path)
+        .collect();
     paths.sort();
     assert_eq!(paths, ["a.txt", "new.rs"]);
 }
@@ -362,4 +370,189 @@ fn model_replies_split_into_a_title_and_a_body() {
     assert!(split_title_body("  \n").is_none());
     let (title, _) = commit_log_text(&["feat: a".into(), "fix: b".into()]);
     assert_eq!(title, "feat: a");
+}
+
+fn install_failing_hook(fx: &Fixture) {
+    let hooks = sh(&fx.work, &["rev-parse", "--git-common-dir"]);
+    let hook = PathBuf::from(&hooks).join("hooks/pre-commit");
+    let hook = if hook.is_absolute() {
+        hook
+    } else {
+        fx.work.join(hook)
+    };
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn edited(store: &forge_store::Store, session: &str, path: &str) {
+    let mid = store
+        .add_message(session, 0, forge_types::Role::Assistant, "edit", Some("m"))
+        .unwrap();
+    let args = serde_json::json!({ "path": path, "content": "x" }).to_string();
+    store
+        .record_tool_call(&mid, "write_file", &args, "ok", "allowed", "ok")
+        .unwrap();
+}
+
+fn second_session(fx: &Fixture) -> String {
+    let other = fx
+        .state
+        .store
+        .create_session(&fx.work.display().to_string(), "default")
+        .unwrap();
+    fx.state.store.set_session_local_live(&other, true).unwrap();
+    fx.state
+        .store
+        .touch_session_local_presence(&other, false)
+        .unwrap();
+    other
+}
+
+fn committed_files(fx: &Fixture) -> Vec<String> {
+    sh(&fx.work, &["show", "--name-only", "--format=", "HEAD"])
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_shared_tree_ships_only_the_shipping_sessions_files() {
+    let fx = fixture("shared", "WRITE", NO_PRS);
+    let other = second_session(&fx);
+    edited(&fx.state.store, &fx.session, "cart.rs");
+    edited(&fx.state.store, &other, "README.md");
+    std::fs::write(fx.work.join("stray.txt"), "by hand\n").unwrap();
+
+    let response = ship(&fx, ShipRequest::default()).await;
+    assert!(response.ok, "{:?}", response.refused.map(|r| r.reason));
+    assert_eq!(committed_files(&fx), ["cart.rs"]);
+    let status = sh(&fx.work, &["status", "--porcelain", "-uall"]);
+    assert!(status.contains("M README.md"), "{status}");
+    assert!(status.contains("?? stray.txt"), "{status}");
+    assert!(sh(&fx.work, &["diff", "--cached", "--name-only"]).is_empty());
+    let plan = response.plan.unwrap();
+    assert_eq!(plan.source, "session");
+    assert!(plan.left_out.contains(&"README.md".to_string()), "{plan:?}");
+}
+
+#[tokio::test]
+async fn a_file_two_sessions_touched_refuses_the_ship_and_lists_it() {
+    let fx = fixture("shared", "WRITE", NO_PRS);
+    let other = second_session(&fx);
+    edited(&fx.state.store, &fx.session, "cart.rs");
+    edited(&fx.state.store, &fx.session, "README.md");
+    edited(&fx.state.store, &other, "README.md");
+    let head = sh(&fx.work, &["rev-parse", "HEAD"]);
+
+    let response = ship(&fx, ShipRequest::default()).await;
+    let refused = response.refused.unwrap();
+    assert_eq!(refused.step, "commit");
+    assert!(refused.reason.contains("README.md"), "{}", refused.reason);
+    assert_eq!(sh(&fx.work, &["rev-parse", "HEAD"]), head);
+    assert!(sh(&fx.work, &["diff", "--cached", "--name-only"]).is_empty());
+    assert!(gh_calls(&fx).is_empty());
+}
+
+#[tokio::test]
+async fn a_partially_staged_index_is_committed_as_it_is() {
+    let fx = fixture("worktree", "WRITE", NO_PRS);
+    sh(&fx.work, &["add", "cart.rs"]);
+
+    let response = ship(&fx, ShipRequest::default()).await;
+    assert!(response.ok, "{:?}", response.refused.map(|r| r.reason));
+    assert_eq!(response.plan.unwrap().source, "index");
+    assert_eq!(committed_files(&fx), ["cart.rs"]);
+    assert!(sh(&fx.work, &["status", "--porcelain"]).contains("M README.md"));
+}
+
+#[tokio::test]
+async fn an_untracked_env_file_is_refused_and_nothing_is_staged() {
+    let fx = fixture("worktree", "WRITE", NO_PRS);
+    std::fs::write(fx.work.join(".env"), "TOKEN=1\n").unwrap();
+    std::fs::write(fx.work.join(".env.example"), "TOKEN=\n").unwrap();
+    let head = sh(&fx.work, &["rev-parse", "HEAD"]);
+
+    let response = ship(&fx, ShipRequest::default()).await;
+    let refused = response.refused.unwrap();
+    assert_eq!(refused.step, "commit");
+    assert!(refused.reason.contains(".env"), "{}", refused.reason);
+    assert!(
+        !refused.reason.contains(".env.example"),
+        "{}",
+        refused.reason
+    );
+    assert_eq!(sh(&fx.work, &["rev-parse", "HEAD"]), head);
+    assert!(sh(&fx.work, &["diff", "--cached", "--name-only"]).is_empty());
+}
+
+#[test]
+fn secret_looking_names_are_recognised() {
+    for yes in [
+        ".env",
+        "a/.env.local",
+        "k.pem",
+        "x/server.key",
+        "id_rsa",
+        "id_ed25519",
+    ] {
+        assert!(looks_like_secret(yes), "{yes}");
+    }
+    for no in [
+        ".env.example",
+        "id_rsa.pub",
+        "env.rs",
+        "keyboard.rs",
+        "src/main.rs",
+    ] {
+        assert!(!looks_like_secret(no), "{no}");
+    }
+}
+
+#[tokio::test]
+async fn a_preview_returns_the_commit_set_and_changes_nothing() {
+    let fx = fixture("worktree", "WRITE", NO_PRS);
+    let head = sh(&fx.work, &["rev-parse", "HEAD"]);
+    let status = sh(&fx.work, &["status", "--porcelain", "-uall"]);
+
+    let response = ship(
+        &fx,
+        ShipRequest {
+            preview: true,
+            ..ShipRequest::default()
+        },
+    )
+    .await;
+    assert!(response.ok && response.preview && response.commit.is_none());
+    let plan = response.plan.unwrap();
+    let mut files: Vec<_> = plan.files.iter().map(|f| f.path.as_str()).collect();
+    files.sort();
+    assert_eq!(files, ["README.md", "cart.rs"]);
+    assert_eq!(sh(&fx.work, &["rev-parse", "HEAD"]), head);
+    assert_eq!(sh(&fx.work, &["status", "--porcelain", "-uall"]), status);
+    assert!(sh(&fx.work, &["diff", "--cached", "--name-only"]).is_empty());
+    assert!(gh_calls(&fx).is_empty());
+    assert!(crate::serve_pr_watch::registry().get(&fx.session).is_none());
+}
+
+#[tokio::test]
+async fn a_refused_commit_hook_leaves_the_index_as_it_was() {
+    let fx = fixture("worktree", "WRITE", NO_PRS);
+    install_failing_hook(&fx);
+
+    let response = ship(&fx, ShipRequest::default()).await;
+    assert!(response.refused.unwrap().reason.contains("lint failed"));
+    assert!(
+        sh(&fx.work, &["diff", "--cached", "--name-only"]).is_empty(),
+        "nothing was staged before, nothing may be after"
+    );
+    assert!(sh(&fx.work, &["status", "--porcelain", "-uall"]).contains("?? cart.rs"));
+
+    sh(&fx.work, &["add", "README.md"]);
+    let response = ship(&fx, ShipRequest::default()).await;
+    assert!(response.refused.is_some());
+    assert_eq!(
+        sh(&fx.work, &["diff", "--cached", "--name-only"]),
+        "README.md"
+    );
 }

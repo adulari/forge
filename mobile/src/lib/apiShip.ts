@@ -13,8 +13,22 @@ export interface ShipStepRow {
   detail: string;
 }
 
+export type ShipFileKind = "created" | "modified" | "deleted" | "renamed";
+
+/** The files a ship commits, decided before anything is staged. */
+export interface ShipPlan {
+  /** `index` (already staged), `worktree`, or `session` (this session's share of a shared checkout). */
+  source: "index" | "worktree" | "session";
+  files: { path: string; kind: ShipFileKind }[];
+  /** Dirty files that stay out of the commit. */
+  left_out: string[];
+}
+
 export interface ShipResponse {
   ok: boolean;
+  /** Answer to a `preview` request: nothing was changed. */
+  preview?: boolean;
+  plan?: ShipPlan | null;
   steps: ShipStepRow[];
   branch: string | null;
   base: string | null;
@@ -31,6 +45,8 @@ export interface ShipRequest {
   base?: string;
   draft?: boolean;
   method?: PrWatchMethod;
+  /** Plan only: answer with the files the commit would hold and change nothing. */
+  preview?: boolean;
 }
 
 export const shipSession = (baseUrl: string, sessionId: string, body: ShipRequest) =>

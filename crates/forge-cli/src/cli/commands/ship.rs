@@ -55,6 +55,11 @@ pub(crate) async fn ship_cmd(
     );
     let answer = daemon.ship(&id, &body).await?;
     let outcome = ShipOutcome::from_json(&answer);
+    if let Some(plan) = &outcome.plan {
+        for line in plan.lines(50) {
+            println!("{line}");
+        }
+    }
     for line in outcome.summary_lines() {
         println!("{line}");
     }

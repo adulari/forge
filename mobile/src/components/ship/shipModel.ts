@@ -1,6 +1,6 @@
 // The Ship sheet as plain data: the four progress rows (committed, pushed, PR, watching), what each
 // says in every state, and the headline. Pure so vitest covers it without react-native.
-import type { ShipResponse, ShipStepKey } from "../../lib/apiShip";
+import type { ShipPlan, ShipResponse, ShipStepKey } from "../../lib/apiShip";
 
 export type ShipRowKey = Exclude<ShipStepKey, "branch">;
 export type ShipRowState = "pending" | "active" | "done" | "skipped" | "refused" | "blocked";
@@ -55,5 +55,36 @@ export function shipRequestBody(title: string): { title?: string } {
 }
 
 export function shipFinished(response: ShipResponse | null): boolean {
-  return response != null && (response.ok || response.refused != null);
+  return response != null && !response.preview && (response.ok || response.refused != null);
+}
+
+const SOURCE: Record<ShipPlan["source"], string> = {
+  index: "the files you staged",
+  session: "this session's files",
+  worktree: "all changes in the worktree",
+};
+
+const MARK = { created: "A", modified: "M", deleted: "D", renamed: "R" } as const;
+
+export interface ShipPlanView {
+  heading: string;
+  files: { mark: string; path: string }[];
+  leftOut: string | null;
+}
+
+/** The exact commit set for the sheet, shown before the user confirms. */
+export function shipPlanView(plan: ShipPlan): ShipPlanView {
+  const heading =
+    plan.files.length === 0
+      ? "No file changes: the commits already on the branch ship."
+      : `Commits ${plan.files.length} ${plan.files.length === 1 ? "file" : "files"} from ${SOURCE[plan.source]}`;
+  const leftOut =
+    plan.left_out.length === 0
+      ? null
+      : `Left out: ${plan.left_out.slice(0, 5).join(", ")}${plan.left_out.length > 5 ? ` +${plan.left_out.length - 5} more` : ""}`;
+  return {
+    heading,
+    files: plan.files.map((f) => ({ mark: MARK[f.kind] ?? "M", path: f.path })),
+    leftOut,
+  };
 }

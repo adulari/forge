@@ -30,6 +30,10 @@ fn footer(m: &ShipMenu) -> String {
     let sep = g().sep;
     if m.running {
         " Shipping ".to_string()
+    } else if m.previewing {
+        " Checking the commit set ".to_string()
+    } else if m.confirmable() {
+        format!(" Enter ship {sep} Esc close ")
     } else if m.succeeded() {
         format!(" Enter done {sep} Esc close ")
     } else if m.outcome.is_some() || m.error.is_some() {
@@ -47,7 +51,14 @@ pub(crate) fn render_ship_menu(f: &mut Frame, app: &App, region: Rect) {
     surface::dim_backdrop(f, region);
     let card_w = region.width.saturating_sub(2).clamp(1, 100);
     let inner_w = (card_w as usize).saturating_sub(2 + 2 * crate::overlays::PAD_X as usize);
-    let want = 9u16;
+    let plan_lines = m
+        .plan
+        .as_ref()
+        .filter(|_| m.confirmable())
+        .map(|plan| plan.lines((region.height as usize).saturating_sub(12).clamp(3, 12)));
+    let want = plan_lines
+        .as_ref()
+        .map_or(9u16, |l| (l.len() as u16 + 3).max(9));
     let padded = want + 2 + 2 * crate::overlays::PAD_Y;
     let card_h = if padded >= crate::overlays::SHORT_REGION {
         padded
@@ -77,7 +88,13 @@ pub(crate) fn render_ship_menu(f: &mut Frame, app: &App, region: Rect) {
         None => {
             let refused = m.outcome.as_ref().is_some_and(|o| !o.ok);
             (
-                headline(m.outcome.as_ref(), m.running),
+                if m.previewing {
+                    "Checking what would be committed…".to_string()
+                } else if m.confirmable() {
+                    "Commit, push, open the PR and let Forge merge it when checks pass.".to_string()
+                } else {
+                    headline(m.outcome.as_ref(), m.running)
+                },
                 if refused {
                     styles::err()
                 } else {
@@ -90,6 +107,21 @@ pub(crate) fn render_ship_menu(f: &mut Frame, app: &App, region: Rect) {
         Paragraph::new(Line::from(Span::styled(trunc(&head.0, inner_w), head.1))),
         Rect { height: 1, ..inner },
     );
+    if let Some(plan) = plan_lines {
+        let lines: Vec<Line> = plan
+            .iter()
+            .map(|l| Line::from(Span::styled(trunc(l, inner_w), styles::fg())))
+            .collect();
+        f.render_widget(
+            Paragraph::new(lines),
+            Rect {
+                y: inner.y + 2,
+                height: inner.height.saturating_sub(2),
+                ..inner
+            },
+        );
+        return;
+    }
     let lines: Vec<Line> = rows(m.outcome.as_ref(), m.running)
         .into_iter()
         .map(|row| {

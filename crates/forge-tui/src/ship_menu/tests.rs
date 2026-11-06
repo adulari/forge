@@ -21,6 +21,7 @@ fn shipped() -> ShipOutcome {
         refused: None,
         pr_number: Some(9),
         pr_url: Some("https://github.com/a/b/pull/9".into()),
+        ..ShipOutcome::default()
     }
 }
 
@@ -54,10 +55,83 @@ fn the_daemons_answer_is_read_into_an_outcome() {
     assert_eq!(ok.pr_number, Some(9));
 }
 
-#[test]
-fn enter_starts_once_and_the_menu_ignores_keys_while_running() {
+fn previewed(files: &[(&str, &str)]) -> ShipOutcome {
+    ShipOutcome {
+        ok: true,
+        preview: true,
+        plan: Some(ShipPlan {
+            source: "session".into(),
+            files: files
+                .iter()
+                .map(|(p, k)| (p.to_string(), k.to_string()))
+                .collect(),
+            left_out: vec!["other.rs".into()],
+        }),
+        ..ShipOutcome::default()
+    }
+}
+
+fn confirmable_menu() -> ShipMenu {
     let mut menu = ShipMenu::default();
     menu.open();
+    menu.finish_preview(Ok(previewed(&[("a.rs", "modified"), ("b.rs", "created")])));
+    menu
+}
+
+#[test]
+fn opening_asks_for_a_preview_and_enter_waits_for_it() {
+    let mut menu = ShipMenu::default();
+    menu.open();
+    assert!(menu.previewing && menu.needs_preview);
+    assert_eq!(
+        menu.key(KeyKind::Enter),
+        ShipAction::None,
+        "no shipping blind"
+    );
+    assert!(!menu.running);
+    menu.finish_preview(Ok(previewed(&[("a.rs", "modified")])));
+    assert!(menu.confirmable());
+}
+
+#[test]
+fn the_preview_lists_the_exact_files_and_what_is_left_out() {
+    let menu = confirmable_menu();
+    let lines = menu.plan.unwrap().lines(10);
+    assert_eq!(lines[0], "Commits 2 file(s) from this session's files:");
+    assert_eq!(lines[1], "  M a.rs");
+    assert_eq!(lines[2], "  A b.rs");
+    assert_eq!(lines[3], "Left out: other.rs");
+    let json = ShipOutcome::from_json(&serde_json::json!({
+        "ok": true, "preview": true, "steps": [], "refused": null,
+        "plan": {"source": "index", "files": [{"path": "x", "kind": "deleted"}], "left_out": []}
+    }));
+    assert!(json.preview);
+    assert_eq!(
+        json.plan.unwrap().files,
+        [("x".to_string(), "deleted".to_string())]
+    );
+}
+
+#[test]
+fn a_refused_preview_shows_the_reason_and_enter_asks_again() {
+    let mut menu = ShipMenu::default();
+    menu.open();
+    menu.needs_preview = false;
+    menu.finish_preview(Ok(ShipOutcome {
+        refused: Some((
+            "commit".into(),
+            "README.md was changed by two sessions".into(),
+        )),
+        ..ShipOutcome::default()
+    }));
+    assert!(!menu.confirmable());
+    assert_eq!(menu.key(KeyKind::Enter), ShipAction::None);
+    assert!(menu.previewing && menu.needs_preview, "retry re-previews");
+}
+
+#[test]
+fn enter_starts_once_and_the_menu_ignores_keys_while_running() {
+    let mut menu = confirmable_menu();
     assert_eq!(menu.key(KeyKind::Enter), ShipAction::Start);
     assert!(menu.running);
     assert_eq!(menu.key(KeyKind::Enter), ShipAction::None);
@@ -67,8 +141,7 @@ fn enter_starts_once_and_the_menu_ignores_keys_while_running() {
 
 #[test]
 fn a_refusal_can_be_retried_and_a_success_closes_on_enter() {
-    let mut menu = ShipMenu::default();
-    menu.open();
+    let mut menu = confirmable_menu();
     menu.key(KeyKind::Enter);
     menu.finish(Ok(ShipOutcome {
         ok: false,
@@ -77,7 +150,14 @@ fn a_refusal_can_be_retried_and_a_success_closes_on_enter() {
         ..ShipOutcome::default()
     }));
     assert!(!menu.running && !menu.succeeded());
-    assert_eq!(menu.key(KeyKind::Enter), ShipAction::Start, "retry");
+    assert_eq!(
+        menu.key(KeyKind::Enter),
+        ShipAction::None,
+        "retry previews first"
+    );
+    assert!(menu.previewing);
+    menu.finish_preview(Ok(previewed(&[("a.rs", "modified")])));
+    assert_eq!(menu.key(KeyKind::Enter), ShipAction::Start);
     menu.finish(Ok(shipped()));
     assert!(menu.succeeded());
     assert_eq!(menu.key(KeyKind::Enter), ShipAction::Close);
@@ -86,13 +166,12 @@ fn a_refusal_can_be_retried_and_a_success_closes_on_enter() {
 
 #[test]
 fn a_transport_error_is_shown_and_retryable() {
-    let mut menu = ShipMenu::default();
-    menu.open();
+    let mut menu = confirmable_menu();
     menu.key(KeyKind::Enter);
     menu.finish(Err("could not reach the daemon".into()));
     assert_eq!(menu.error.as_deref(), Some("could not reach the daemon"));
-    assert_eq!(menu.key(KeyKind::Char('r')), ShipAction::Start);
-    assert!(menu.error.is_none());
+    assert_eq!(menu.key(KeyKind::Char('r')), ShipAction::None);
+    assert!(menu.error.is_none() && menu.previewing);
 }
 
 #[test]

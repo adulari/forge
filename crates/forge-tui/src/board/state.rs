@@ -185,6 +185,8 @@ impl BoardApp {
                 });
                 self.focus = Focus::Confirm;
             }
+            BoardEvent::ShipPreview(id, Ok(lines)) => self.confirm_ship(id, &lines),
+            BoardEvent::ShipPreview(_, Err(reason)) => self.toast(ToastLevel::Error, reason),
             BoardEvent::Toast(level, text) => self.toast(level, text),
             BoardEvent::DeleteRefused(text) => {
                 self.confirm = Some(Confirm {

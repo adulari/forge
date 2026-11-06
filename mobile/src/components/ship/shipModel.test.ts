@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ShipResponse } from "../../lib/apiShip";
-import { shipFinished, shipHeadline, shipRequestBody, shipRows } from "./shipModel";
+import { shipFinished, shipHeadline, shipPlanView, shipRequestBody, shipRows } from "./shipModel";
 
 const base: ShipResponse = {
   ok: true,
@@ -107,5 +107,34 @@ describe("shipFinished", () => {
     expect(shipFinished(null)).toBe(false);
     expect(shipFinished(base)).toBe(true);
     expect(shipFinished({ ...base, ok: false, refused: { step: "push", reason: "x" } })).toBe(true);
+  });
+});
+
+describe("shipPlanView", () => {
+  it("lists the exact files, what they are drawn from, and what is left out", () => {
+    const view = shipPlanView({
+      source: "session",
+      files: [
+        { path: "src/a.rs", kind: "modified" },
+        { path: "src/b.rs", kind: "created" },
+      ],
+      left_out: ["other.rs", "x.rs"],
+    });
+    expect(view.heading).toBe("Commits 2 files from this session's files");
+    expect(view.files).toEqual([
+      { mark: "M", path: "src/a.rs" },
+      { mark: "A", path: "src/b.rs" },
+    ]);
+    expect(view.leftOut).toBe("Left out: other.rs, x.rs");
+  });
+
+  it("says so when only commits already on the branch ship", () => {
+    const view = shipPlanView({ source: "index", files: [], left_out: [] });
+    expect(view.heading).toContain("already on the branch");
+    expect(view.leftOut).toBeNull();
+  });
+
+  it("never treats a preview answer as a finished ship", () => {
+    expect(shipFinished({ ...base, preview: true })).toBe(false);
   });
 });

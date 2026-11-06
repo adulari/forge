@@ -365,7 +365,7 @@ fn shared_key(app: &mut BoardApp, key: KeyEvent) -> Vec<BoardAction> {
         KeyCode::Char('z') => app.toggle_zoom(),
         KeyCode::Char('w') => app.request_merge(),
         KeyCode::Char('X') => app.request_discard(),
-        KeyCode::Char('S') => app.request_ship(),
+        KeyCode::Char('S') => return app.request_ship(),
         KeyCode::Char('A') => app.request_merge_finished(),
         KeyCode::Char(d @ '1'..='9') => {
             return app.answer_option(d.to_digit(10).unwrap_or(0) as usize);
@@ -634,10 +634,7 @@ fn button(app: &mut BoardApp, b: Button) -> Vec<BoardAction> {
             app.request_merge();
             Vec::new()
         }
-        Button::Ship => {
-            app.request_ship();
-            Vec::new()
-        }
+        Button::Ship => app.request_ship(),
         Button::Discard => {
             app.request_discard();
             Vec::new()

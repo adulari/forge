@@ -10,7 +10,14 @@ import { Badge, type BadgeTone } from "../ds/Badge";
 import { Button } from "../ds/Button";
 import { Input } from "../ds/Input";
 import { Sheet } from "../ds/Sheet";
-import { shipFinished, shipHeadline, shipRequestBody, shipRows, type ShipRowState } from "./shipModel";
+import {
+  shipFinished,
+  shipHeadline,
+  shipPlanView,
+  shipRequestBody,
+  shipRows,
+  type ShipRowState,
+} from "./shipModel";
 
 const BADGE: Record<ShipRowState, { label: string; tone: BadgeTone }> = {
   pending: { label: "waiting", tone: "neutral" },
@@ -33,6 +40,8 @@ export function ShipSheet({ visible, onClose, sessionId }: Props) {
   const tokens = useTokens();
   const direct = usePrAvailable();
   const ship = useShipSession();
+  const preview = useShipSession();
+  const [plan, setPlan] = useState<ShipResponse | null>(null);
   const [title, setTitle] = useState("");
   const [response, setResponse] = useState<ShipResponse | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -42,18 +51,40 @@ export function ShipSheet({ visible, onClose, sessionId }: Props) {
     setTitle("");
     setResponse(null);
     setFailure(null);
+    setPlan(null);
     ship.reset();
+    preview.reset();
+    if (sessionId && direct) {
+      preview.mutate(
+        { sessionId, request: { preview: true } },
+        { onSuccess: setPlan, onError: (error) => setFailure(error.message) },
+      );
+    }
     // Reset only when the sheet opens for a session; `ship` is a fresh object on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, sessionId]);
 
   const running = ship.isPending;
+  const previewing = preview.isPending;
+  const confirmable = plan?.ok === true && plan.plan != null && !response && !failure;
+  const planView = confirmable && plan?.plan ? shipPlanView(plan.plan) : null;
   const rows = shipRows(response, running);
   const finished = shipFinished(response);
   const url = response?.pr?.url ?? null;
 
-  const start = () => {
+  const recheck = () => {
     if (!sessionId) return;
+    setFailure(null);
+    setResponse(null);
+    setPlan(null);
+    preview.mutate(
+      { sessionId, request: { preview: true } },
+      { onSuccess: setPlan, onError: (error) => setFailure(error.message) },
+    );
+  };
+
+  const start = () => {
+    if (!sessionId || !confirmable) return;
     setFailure(null);
     setResponse(null);
     ship.mutate(
@@ -76,9 +107,32 @@ export function ShipSheet({ visible, onClose, sessionId }: Props) {
         ) : (
           <>
             <Text style={[typeScale.sub, { color: failure || (response && !response.ok) ? tokens.danger : tokens.ink3 }]}>
-              {failure ?? shipHeadline(response, running)}
+              {failure ??
+                (previewing
+                  ? "Checking what would be committed…"
+                  : plan && !plan.ok && !response
+                    ? shipHeadline(plan, false)
+                    : shipHeadline(response, running))}
             </Text>
-            {!running && !finished ? (
+            {planView ? (
+              <View style={[styles.row, { borderColor: tokens.border }]} accessibilityLabel="Files to commit">
+                <Text style={[typeScale.body, { color: tokens.ink }]}>{planView.heading}</Text>
+                {planView.files.slice(0, 30).map((file) => (
+                  <Text key={file.path} style={[typeScale.monoMeta, { color: tokens.ink3 }]} numberOfLines={1}>
+                    {file.mark} {file.path}
+                  </Text>
+                ))}
+                {planView.files.length > 30 ? (
+                  <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]}>+{planView.files.length - 30} more</Text>
+                ) : null}
+                {planView.leftOut ? (
+                  <Text style={[typeScale.monoMeta, { color: tokens.ink3 }]} numberOfLines={2}>
+                    {planView.leftOut}
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
+            {!running && !finished && confirmable ? (
               <Input
                 label="Pull request title (optional)"
                 value={title}
@@ -109,11 +163,19 @@ export function ShipSheet({ visible, onClose, sessionId }: Props) {
               {url ? (
                 <Button label="Open pull request" variant="secondary" onPress={() => void Linking.openURL(url).catch(() => undefined)} />
               ) : null}
-              {finished && !response?.ok ? <Button label="Try again" variant="secondary" onPress={start} /> : null}
+              {(finished && !response?.ok) || (!confirmable && !previewing && !finished) ? (
+                <Button label={finished ? "Try again" : "Check again"} variant="secondary" onPress={recheck} />
+              ) : null}
               {finished ? (
                 <Button label="Done" variant="primary" onPress={onClose} />
               ) : (
-                <Button label="Ship" variant="primary" onPress={start} loading={running} disabled={running || sessionId == null} />
+                <Button
+                  label="Ship"
+                  variant="primary"
+                  onPress={start}
+                  loading={running}
+                  disabled={running || previewing || !confirmable || sessionId == null}
+                />
               )}
             </View>
           </>
