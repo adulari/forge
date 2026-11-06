@@ -793,6 +793,37 @@ fn requires_reasoning_echo(model: &str) -> bool {
     model.starts_with("deepseek::") || model.starts_with("kimi::")
 }
 
+/// Whether this provider's API rejects `reasoning_content` on an assistant message.
+///
+/// Groq answers the second request of any tool turn with `'messages.N' : property
+/// 'reasoning_content' is unsupported` (weekly e2e, 2026-11-02). Deny-list rather than allow-list:
+/// genai's shared OpenAI serializer emits the field for every OpenAI-compatible adapter (OpenAI,
+/// Groq, Fireworks, Together, Nebius, xAI, DeepSeek, Moonshot, MiMo, Aihubmix, OpenRouter, Zai,
+/// BigModel, Aliyun, OpenCode Zen, custom gateways), and the field has always been sent to all of
+/// them. Only Groq is confirmed to reject it; the rest either need it or are unverified, so an
+/// allow-list would silently drop it from providers that rely on it (MiMo, Zai, Zen/OpenRouter
+/// routes to thinking models, custom gateways). Add a provider here once it is shown to reject it.
+fn rejects_reasoning_echo(model: &str) -> bool {
+    model.starts_with("groq::")
+}
+
+/// The request transcript for `model`: captured reasoning goes back to providers that take it and
+/// is dropped for those that reject it.
+fn genai_messages_for(model: &str, messages: &[Message], opts_echo: bool) -> Vec<ChatMessage> {
+    if rejects_reasoning_echo(model) {
+        let stripped: Vec<Message> = messages
+            .iter()
+            .cloned()
+            .map(|mut m| {
+                m.reasoning = None;
+                m
+            })
+            .collect();
+        return to_genai_messages(&stripped, false);
+    }
+    to_genai_messages(messages, requires_reasoning_echo(model) || opts_echo)
+}
+
 /// Whether this model's API takes `tool_choice: "required"`.
 ///
 /// Kimi Code verified live (2026-09-16): K3 on a session that kept announcing its next step and
@@ -855,7 +886,8 @@ fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMess
                 // message — and it is the case that matters, because a tool call with no prose
                 // would otherwise carry no reasoning at all and DeepSeek rejects the next request.
                 // genai renders this as the `ContentPart::ReasoningContent` its adapters serialize
-                // to `reasoning_content`; providers that never ask for it ignore the part.
+                // to `reasoning_content`. Not every provider tolerates it (Groq rejects the request),
+                // so `genai_messages_for` strips the reasoning before this runs for those.
                 let reasoning_rides_on_calls = !m.tool_calls.is_empty();
                 // `Some("")` where the API demands the field but the reply streamed no reasoning:
                 // presence is what DeepSeek checks, and a tool-calling reply often has none.
@@ -1084,10 +1116,7 @@ impl GenAiProvider {
     ) -> Result<ModelResponse, ProviderError> {
         let model_name = to_genai_model(model);
 
-        let mut genai_messages = to_genai_messages(
-            messages,
-            requires_reasoning_echo(&model_name) || opts.echo_reasoning,
-        );
+        let mut genai_messages = genai_messages_for(&model_name, messages, opts.echo_reasoning);
         // Opt-in per provider (`[reasoning_prefill]`); absent for every provider by default.
         // Keyed on Forge's namespace, which is what `[reasoning_prefill]` names: genai's differs for
         // some providers (`bedrock` is `bedrock_api` by now), and the entry silently never applied.
@@ -1718,6 +1747,30 @@ mod tests {
 
         // Providers that never ask for it must not gain empty fields.
         assert!(reasoning_parts(&to_genai_messages(&messages, false)).is_empty());
+    }
+
+    #[test]
+    fn groq_never_gets_reasoning_content_but_deepseek_does() {
+        let call = forge_types::ToolCall {
+            id: "call_0".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": "/etc/hostname"}),
+        };
+        let thought =
+            Message::assistant_tool_calls("checking", vec![call]).with_reasoning("need the file");
+        let msgs = vec![Message::user("go"), thought];
+
+        for echo in [false, true] {
+            let groq = genai_messages_for("groq::openai/gpt-oss-120b", &msgs, echo);
+            assert!(reasoning_parts(&groq).is_empty(), "echo={echo}");
+        }
+        let ds = genai_messages_for("deepseek::deepseek-v4-pro", &msgs, false);
+        assert_eq!(
+            reasoning_parts(&ds),
+            vec![String::new(), "need the file".to_string()]
+        );
+        let other = genai_messages_for("zai::glm-5", &msgs, false);
+        assert_eq!(reasoning_parts(&other), vec!["need the file".to_string()]);
     }
 
     // Captured shape: a DeepSeek reply behind a custom gateway that streamed `reasoning_content`
