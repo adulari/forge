@@ -332,7 +332,7 @@ pub const PROTOCOL_VERSION: u32 = 10;
 
 pub(crate) mod ci;
 mod event_log;
-mod goal;
+pub(crate) mod goal;
 mod thread_error;
 pub use ci::SnapCi;
 use event_log::lock_event_log;

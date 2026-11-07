@@ -250,6 +250,8 @@ struct ContractWorld {
     root: std::path::PathBuf,
     draft: String,
     creates: bool,
+    /// The scripted worker turn (0-based) that fixes `server.py` to answer `ok v2`.
+    fix_server_at: Option<usize>,
     turns: Arc<AtomicUsize>,
     prompts: Arc<std::sync::Mutex<Vec<String>>>,
     evaluations: Arc<AtomicUsize>,
@@ -280,6 +282,13 @@ impl Provider for ContractWorld {
             if let Some(prompt) = messages.iter().rev().find(|m| m.role == Role::User) {
                 self.prompts.lock().unwrap().push(prompt.content.clone());
             }
+            if self.fix_server_at == Some(n) {
+                let path = self.root.join("server.py");
+                let fixed = std::fs::read_to_string(&path)
+                    .unwrap()
+                    .replace("ok v1", "ok v2");
+                std::fs::write(path, fixed).unwrap();
+            }
             if self.creates {
                 let name = ["a.txt", "b.txt", "c.txt"][n.min(2)];
                 std::fs::write(self.root.join(name), "x").unwrap();
@@ -303,6 +312,10 @@ struct World {
 }
 
 fn world(draft: &str, creates: bool) -> World {
+    world_fixing(draft, creates, None)
+}
+
+fn world_fixing(draft: &str, creates: bool, fix_server_at: Option<usize>) -> World {
     let dir = tempfile::tempdir().unwrap();
     let turns = Arc::new(AtomicUsize::new(0));
     let prompts: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
@@ -314,6 +327,7 @@ fn world(draft: &str, creates: bool) -> World {
             root: dir.path().to_path_buf(),
             draft: draft.to_string(),
             creates,
+            fix_server_at,
             turns: turns.clone(),
             prompts: prompts.clone(),
             evaluations: evaluations.clone(),
@@ -448,4 +462,88 @@ fn the_mission_flag_rides_in_the_goal_text_until_the_run_starts() {
     let spec = parse_goal_prompt("/goal --mission ship it").unwrap();
     assert!(!spec.contract);
     assert_eq!(spec.goal, "--mission ship it");
+}
+
+const QA_SERVER: &str = r#"import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200); self.end_headers(); self.wfile.write(b"ok v1")
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+"#;
+
+const QA_CONTRACT: &str = r#"{"assertions":[
+  {"assertion":"server.py exists","check":"test -f server.py"},
+  {"assertion":"server.py serves /health","check":"grep -q do_GET server.py"},
+  {"assertion":"the workspace is a directory","check":"test -d ."},
+  {"assertion":"/health answers ok v2","behaviour":{
+    "run":"echo $$ > pid.txt; exec python3 server.py $FORGE_QA_PORT",
+    "probe":"GET http://127.0.0.1:$FORGE_QA_PORT/health","expect":"ok v2"}}]}"#;
+
+fn pid_gone(pid: i32) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// The F11 drill: QA fails on `ok v1` with proof, the scripted worker fixes the server, QA passes
+/// on `ok v2`, nothing is left running, and the proof shows in `forge goal show` and the snapshot.
+#[tokio::test]
+async fn qa_fails_on_the_old_answer_then_passes_after_the_fix_and_leaks_nothing() {
+    let mut w = world_fixing(QA_CONTRACT, false, Some(1));
+    std::fs::write(w.dir.path().join("server.py"), QA_SERVER).unwrap();
+    let end = run_world(&mut w, contract_spec()).await;
+    assert_eq!(end, GoalRunEnd::Met);
+    assert_eq!(w.turns.load(Ordering::SeqCst), 2);
+    let prompts = w.prompts.lock().unwrap().clone();
+    assert!(prompts[1].contains("assertion 4 failed"), "{}", prompts[1]);
+    assert!(
+        prompts[1].contains("ok v1"),
+        "proof reaches the worker: {}",
+        prompts[1]
+    );
+    let pid: i32 = std::fs::read_to_string(w.dir.path().join("pid.txt"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(pid_gone(pid), "the server outlived the QA run");
+
+    let mut contract = forge_types::goal_contract::GoalContract::new(
+        forge_types::goal_contract::parse_contract(QA_CONTRACT).unwrap(),
+    );
+    contract.approved = true;
+    let results = w.session.validate_goal_contract(&contract).await;
+    contract.record(results, 2);
+    assert!(contract.all_passed(), "{:?}", contract.results);
+    let record = serde_json::json!({
+        "objective": "serve ok v2 on /health", "gates": [], "max_tokens": null,
+        "max_minutes": null, "iteration": 2, "tokens_used": 0, "elapsed_secs": 3,
+        "reason": null, "envelope": null, "contract": contract, "phase": "achieved"
+    })
+    .to_string();
+    let shown = super::goal_show::render_record("qa-drill", &record).unwrap();
+    assert!(shown.contains("proof: ok v2"), "{shown}");
+    let snap = crate::remote::goal::SnapContract::from(&contract);
+    let json = serde_json::to_string_pretty(&snap).unwrap();
+    assert!(
+        json.contains("ok v2") && json.contains("\"behaviour\": true"),
+        "{json}"
+    );
+    if let Ok(out) = std::env::var("FORGE_QA_DRILL_OUT") {
+        let out = std::path::Path::new(&out);
+        let first_failure = prompts[1].clone();
+        std::fs::write(
+            out.join("worker-prompt-after-qa-failure.txt"),
+            first_failure,
+        )
+        .unwrap();
+        std::fs::write(out.join("goal-show.txt"), &shown).unwrap();
+        std::fs::write(out.join("snapshot-contract.json"), &json).unwrap();
+        std::fs::write(
+            out.join("leaked-pid.txt"),
+            format!("server pid {pid} gone: {}\n", pid_gone(pid)),
+        )
+        .unwrap();
+    }
 }
