@@ -259,7 +259,7 @@ mod tests {
         let warnings = expert_warnings(&config);
         let keys: Vec<&str> = warnings.iter().map(|w| w.key.as_str()).collect();
         assert_eq!(keys, ["harness.expert.model", "harness.expert.budget"]);
-        assert!(warnings[0].text.contains("set [harness.expert] budget"));
+        assert!(warnings[0].text.contains("set harness.expert.budget"));
         config.harness.expert.budget = "codex:5%w".into();
         assert!(expert_warnings(&config).is_empty());
     }

@@ -121,8 +121,7 @@ pub(crate) fn resolve_config(
     };
     if budget.is_empty() {
         return Err(format!(
-            "{model} is a subscription model: set [harness.expert] budget (for example \
-             \"{family}:5%w\") to allow it"
+            "{model} needs a budget: set harness.expert.budget, for example \"{family}:5%w\""
         ));
     }
     let spec = EnvelopeSpec::parse(budget, Some(family))
@@ -132,8 +131,7 @@ pub(crate) fn resolve_config(
             Ok(Some((model.to_string(), Some(spec))))
         }
         _ => Err(format!(
-            "[harness.expert] budget must be a {family} window slice (for example \
-             \"{family}:5%w\") for {model}"
+            "the budget for {model} must be a {family} slice such as \"{family}:5%w\""
         )),
     }
 }

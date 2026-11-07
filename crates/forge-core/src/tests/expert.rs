@@ -347,7 +347,7 @@ async fn a_subscription_expert_without_a_budget_is_refused_and_told_once() {
     r.session.run_turn("read everything").await.unwrap();
     assert!(r.expert_models().is_empty());
     assert_eq!(
-        r.warnings("expert unavailable: codex-oauth::gpt-5.6-sol is a subscription"),
+        r.warnings("expert unavailable: codex-oauth::gpt-5.6-sol needs a budget: set harness.expert.budget"),
         1
     );
 }

@@ -301,7 +301,7 @@ pub(crate) fn config_saved_status(path: &str) -> String {
 
 fn saved_status_with(path: &str, problem: Option<&str>) -> String {
     match problem {
-        Some(why) => format!("⚠ saved {path}, but the expert is unavailable: {why}"),
+        Some(why) => format!("⚠ saved {path}, expert still off: {why}"),
         None => format!("✓ saved {path}"),
     }
 }
@@ -5724,10 +5724,10 @@ mod tests {
         );
         let warned = saved_status_with(
             "harness.expert.model",
-            Some("codex-oauth::gpt-5.6-sol is a subscription model: set [harness.expert] budget"),
+            Some("codex-oauth::gpt-5.6-sol needs a budget: set harness.expert.budget"),
         );
-        assert!(warned.starts_with("⚠ saved harness.expert.model, but the expert is unavailable:"));
-        assert!(warned.contains("set [harness.expert] budget"));
+        assert!(warned.starts_with("⚠ saved harness.expert.model, expert still off:"));
+        assert!(warned.contains("set harness.expert.budget"));
         assert_eq!(
             config_saved_status("tui.theme"),
             "✓ saved tui.theme",

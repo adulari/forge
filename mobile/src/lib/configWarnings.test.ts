@@ -6,14 +6,14 @@ import { configWarning } from "./configWarnings";
 const response: ConfigResponse = {
   fields: [],
   warnings: [
-    { key: "harness.expert.model", text: "codex-oauth::gpt-5.6-sol is a subscription model: set [harness.expert] budget" },
-    { key: "harness.expert.budget", text: "codex-oauth::gpt-5.6-sol is a subscription model: set [harness.expert] budget" },
+    { key: "harness.expert.model", text: "codex-oauth::gpt-5.6-sol needs a budget: set harness.expert.budget" },
+    { key: "harness.expert.budget", text: "codex-oauth::gpt-5.6-sol needs a budget: set harness.expert.budget" },
   ],
 };
 
 describe("configWarning", () => {
   it("finds the warning for the expert model and budget rows", () => {
-    expect(configWarning(response, "harness.expert.budget")).toContain("set [harness.expert] budget");
+    expect(configWarning(response, "harness.expert.budget")).toContain("set harness.expert.budget");
     expect(configWarning(response, "harness.expert.model")).not.toBeNull();
   });
 
