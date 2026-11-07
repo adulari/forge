@@ -91,6 +91,26 @@ is stored, so a hold pressed mid-update is not lost.
 - Hand-ordering is per repository queue and by one move-to-front; there is no arbitrary drag
   to a position.
 
+## When the goal changes workers
+
+A fresh-worker relay (docs/features/goal-contract.md) moves custody of the PR with the goal. In one
+store transaction the successor gets the worktree and the fleet slot and the predecessor is done,
+with no worktree record (as after a Move). The watch, with its place in the queue, follows the end
+of the hand-off chain on the next sweep (or as soon as the daemon hosts the worker), so the update
+step's idle check, conflict and verification hand-offs and fix turns all reach the worker that
+holds the goal. Shipping a session that handed its goal on is refused and names the holder.
+Archiving a session hands its watch to the holder, or disarms it when the goal never moved.
+
+A queue member whose session is not in the registry (not restored after a restart, archived, open
+in a terminal) is hosted on demand; when that is not possible it is skipped with "its session is
+not hosted: <why>" so the PRs behind it keep landing. The owner's retry makes the daemon try again.
+
+The update step keeps a marker in the worktree's git dir while its own `git merge` runs. If the
+daemon dies in that window, the next step (or the daemon's start) sees `MERGE_HEAD` beside the
+marker, runs `git merge --abort`, notes "rolled back an interrupted update; retrying" and tries
+again. A merge without the marker is the session's own and is left alone. The drill is
+`~/.cache/forge-burn-demo/run4/custody/run.sh before|after`.
+
 ## Tests
 
 `crates/forge-cli/src/serve_merge_queue/tests.rs` runs the whole flow against a local bare
