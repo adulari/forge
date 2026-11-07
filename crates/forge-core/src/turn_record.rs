@@ -172,6 +172,14 @@ impl Session {
                 format!("⚠ Turn failed: {text}")
             }
             Ok(_) if reason.starts_with("final_answer") => return,
+            // A hard guard or forced stop already published its reason as the turn's last
+            // message (model_loop.rs); a second note would repeat it.
+            Ok(outcome)
+                if (self.turn_hard_guard_abort || self.turn_forced_stop.is_some())
+                    && !outcome.text.trim().is_empty() =>
+            {
+                return
+            }
             Ok(_) => stop_note(&reason),
         };
         let _ = self.store.note_turn_stopped(&self.id, &note);
