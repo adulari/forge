@@ -401,26 +401,38 @@ async fn drive_turn(
             return Err(e);
         }
     };
-    let run = session.run_turn_with(&prompt, &guidance, turn.tier);
-    tokio::pin!(run);
-    tokio::select! {
-        r = &mut run => match r.context("running agent turn") {
-            Ok(outcome) => fail_if_incomplete(outcome).map(|()| false),
-            Err(e) => {
-                if machine {
-                    println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
+    let mut finished = None;
+    let result = {
+        let run = session.run_turn_with(&prompt, &guidance, turn.tier);
+        tokio::pin!(run);
+        tokio::select! {
+            r = &mut run => match r.context("running agent turn") {
+                Ok(outcome) => {
+                    finished = Some(outcome);
+                    Ok(false)
                 }
-                Err(e)
+                Err(e) => {
+                    if machine {
+                        println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
+                    }
+                    Err(e)
+                }
+            },
+            _ = interrupt_signal() => {
+                if machine {
+                    println!("{}", forge_tui::error_result_line("interrupted"));
+                } else {
+                    eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — turn stopped (what streamed above is not saved to the session)\x1b[0m");
+                }
+                Ok(true)
             }
-        },
-        _ = interrupt_signal() => {
-            if machine {
-                println!("{}", forge_tui::error_result_line("interrupted"));
-            } else {
-                eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — turn stopped (what streamed above is not saved to the session)\x1b[0m");
-            }
-            Ok(true)
         }
+    };
+    match finished {
+        Some(outcome) => {
+            fail_if_incomplete(outcome, session.last_end_reason().as_deref()).map(|()| false)
+        }
+        None => result,
     }
 }
 
@@ -460,9 +472,9 @@ async fn interrupt_signal() {
 /// A headless one-shot run is unattended: a turn that stopped with tracked tasks still open has
 /// NOT done the job, and exiting 0 makes an orchestrator (or a human reading `$?`) treat it as if
 /// it had. Turn it into a process failure carrying the harness's ERROR line.
-fn fail_if_incomplete(outcome: forge_types::LoopOutcome) -> Result<()> {
+fn fail_if_incomplete(outcome: forge_types::LoopOutcome, end_reason: Option<&str>) -> Result<()> {
     use forge_types::StopReason;
-    if matches!(
+    let stopped_short = matches!(
         outcome.stop_reason,
         StopReason::TasksUnfinished
             | StopReason::MaxSteps
@@ -470,7 +482,17 @@ fn fail_if_incomplete(outcome: forge_types::LoopOutcome) -> Result<()> {
             | StopReason::NoOutput
             | StopReason::Stalled
             | StopReason::DaemonShutdown
-    ) {
+            | StopReason::ProviderDown
+    );
+    // The stored end reason also catches a "final answer" that left a step undone or tasks open.
+    if stopped_short || end_reason.is_some_and(forge_core::end_fails_run) {
+        if outcome.text.trim().is_empty() {
+            anyhow::bail!(
+                "{}",
+                forge_core::stop_note(end_reason.unwrap_or(outcome.stop_reason.as_str()))
+                    .trim_start_matches("⚠ ")
+            );
+        }
         anyhow::bail!(outcome.text);
     }
     Ok(())
@@ -716,6 +738,42 @@ mod tests {
                 .await
                 .is_none(),
             "an explicit machine-readable format must not be answered with prose"
+        );
+    }
+
+    fn outcome(reason: forge_types::StopReason, text: &str) -> forge_types::LoopOutcome {
+        forge_types::LoopOutcome {
+            text: text.into(),
+            stop_reason: reason,
+        }
+    }
+
+    #[test]
+    fn a_run_fails_for_every_end_that_did_not_finish() {
+        use forge_types::StopReason as S;
+        assert!(fail_if_incomplete(outcome(S::FinalAnswer, "done"), Some("final_answer")).is_ok());
+        for reason in [S::Stalled, S::TasksUnfinished, S::ProviderDown, S::NoOutput] {
+            assert!(
+                fail_if_incomplete(outcome(reason, "x"), None).is_err(),
+                "{reason:?}"
+            );
+        }
+        for end in [
+            "final_answer_mid_intent",
+            "final_answer_open_tasks",
+            "provider_down",
+        ] {
+            assert!(
+                fail_if_incomplete(outcome(S::FinalAnswer, "x"), Some(end)).is_err(),
+                "{end}"
+            );
+        }
+        let blank = fail_if_incomplete(outcome(S::ProviderDown, " "), Some("provider_down"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            blank.starts_with("Turn stopped (model provider unreachable)"),
+            "{blank}"
         );
     }
 }
