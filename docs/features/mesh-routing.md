@@ -1188,6 +1188,44 @@ budget — `mesh.pin_outage_wait_secs`, default 600 s (`crates/forge-config/src/
 via separate counters, since an outage recovers in minutes and must not eat the rate-limit
 budget. `0` disables outage backoff (immediate `FailTurn`).
 
+**Riding out an outage of hours (`mesh.outage_wait_secs`).** The pinned budget above is sized for
+a blip. When the provider is still down after it (a pinned turn), or when every model of an
+unpinned chain failed as an outage, the turn keeps going: it re-sends its own request, so the same
+turn resumes at the same step with the tool results sent once, every 15 s doubling to a 5 min cap
+(±20%, a server `Retry-After` clamped to 15-300 s), until `mesh.outage_wait_secs` (default
+`28800` = 8 h, measured from when the outage began) has passed. `0` keeps the old behaviour: the
+turn ends when the hot backoff does. A run's `--max-minutes` / `/goal` deadline and a benchmark's
+turn deadline cut the wait short, so bounded runs never wait the full eight hours
+(`crates/forge-core/src/outage_wait.rs`).
+
+A connection refused, a DNS failure or a reset is an outage too. It used to end a pinned turn after
+one 5 s backoff as "its provider rejected it twice", because it answers instantly with the same
+text every time; only a provider that actually answered can reject a model now
+(`ProviderError::is_unreachable`). A gateway that answers `Retry-After: 1` no longer exhausts the
+40-attempt cap inside a minute: the cap now hands over to the long wait.
+
+What each surface shows while it waits:
+
+- **Chat history**: one stored note when the wait starts (`⏸ <model>: provider down since 10:18
+  (503 no_capacity), retrying every <=5 min until 18:18. Esc to stop.`) and one when it ends (`▶
+  <model> back after 4h09m, turn resumed`). A daemon restart in the middle of the wait still
+  re-drives the turn: these notes do not count as the end of a turn.
+- **TUI**: the status bar reads `InferHub down since 10:18 · next try 10:43 · until 18:18 · Esc
+  stops`. Esc cancels the wait like any turn.
+- **Desktop, web and mobile**: a banner on the session from the snapshot's additive `outage` field
+  (provider, model, `since_unix`, `next_try_unix`, `until_unix`, `attempts`, `reason`); `activity`
+  reads `provider down — waiting`.
+- **Print and stream-json**: one line per probe (`provider_outage` / `provider_recovered` system
+  events in stream-json).
+- **Push**: one push when an outage passes two minutes (`<provider> down since 10:18, retrying
+  until 18:18`) and one on recovery, at most one episode per turn, held while a client is attached
+  exactly like the other pushes.
+- **Giving up** ends the turn with the new stop reason `provider_down` and a normal failed-turn
+  note. `continue` resumes it; `/goal` pauses (resumable) instead of counting the turn as no
+  progress.
+
+Not covered: subagents keep their own failover loop without the long wait.
+
 **Gateway routing failures and silent waits.** A gateway that is up but cannot route the request
 (`503 No provider route is available`, `502 provider_routes_exhausted`, `upstream unavailable`,
 `no healthy upstream`, `provider unavailable`) is `ProviderError::Overloaded`, not
@@ -1463,6 +1501,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `rate_limit_wait_secs` | 75 | Longest in-turn wait for the best model's rate-limit reset (`lib.rs:1317`) |
 | `pin_failover` | `false` | Escape hatch: allow cross-model failover off a pin (§9) (`lib.rs:1292`) |
 | `pin_outage_wait_secs` | 600 | Pinned transient-outage wait budget; 0 disables (§9) (`lib.rs:1301`) |
+| `outage_wait_secs` | 28800 | How long a turn keeps re-sending its request after the hot backoff while the provider is down (8 h); 0 disables (§9) |
 | `subagents.inherit_pin` | `true` | When a pin is active, subagents inherit it strictly (§9) (`crates/forge-config/src/lib.rs` `SubagentsConfig`) |
 | `subagents.inherit_pin` (per session) | — | `/subagents free\|pinned` overrides the default for one session; persisted (§9.1) |
 | `adaptive_effort` | `true` | Low reasoning effort for the step after a successful read-only tool round (adaptive-effort.md) |
