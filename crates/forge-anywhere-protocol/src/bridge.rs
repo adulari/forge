@@ -37,6 +37,12 @@ pub enum RouteId {
     ListModels,
     /// `GET /api/models/report?days=<n>&repo=<path>`: per-model report card from local counts. Read-only.
     ModelReport,
+    /// `GET /api/sessions/{id}/turns?limit=<n>`: how the session's recent turns ended, with a plain
+    /// label and the way out for each. Read-only.
+    SessionTurns,
+    /// `GET /api/turns/summary?days=<n>&session=<id>`: counts by end reason and the recent turns
+    /// that did not finish. Read-only.
+    TurnsSummary,
     ReadConfig,
     UpdateConfig,
     ListHooks,

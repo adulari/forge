@@ -141,6 +141,10 @@ mod tests {
 pub struct LastTurnEnd {
     pub reason: String,
     pub label: String,
+    /// What to do about it, in a sentence ("send continue to finish them").
+    pub advice: String,
+    /// Whether sending `continue` picks the work back up (the banner offers it).
+    pub resumable: bool,
     pub at: i64,
 }
 
@@ -151,10 +155,41 @@ impl LastTurnEnd {
         if matches!(reason, "final_answer" | "interrupted" | "plan_presented") {
             return None;
         }
+        let (label, advice) = forge_core::describe_end(reason);
         Some(Self {
             reason: reason.to_string(),
-            label: forge_core::describe_end(reason).0,
+            label,
+            advice,
+            resumable: forge_core::is_resumable(reason),
             at: row.ended_at.unwrap_or(row.started_at),
         })
+    }
+}
+
+#[cfg(test)]
+mod last_turn_end_tests {
+    use super::*;
+
+    fn row(reason: &str) -> forge_store::TurnRow {
+        forge_store::TurnRow {
+            id: 1,
+            session_id: "s".into(),
+            prompt_seq: 1,
+            started_at: 10,
+            ended_at: Some(20),
+            end_reason: Some(reason.into()),
+            detail_json: None,
+            last_role_shape: None,
+        }
+    }
+
+    #[test]
+    fn the_banner_carries_the_advice_and_whether_continue_helps() {
+        let stalled = LastTurnEnd::from_row(&row("stalled")).unwrap();
+        assert_eq!(stalled.label, "no progress");
+        assert!(stalled.resumable && stalled.advice.contains("continue"));
+        let budget = LastTurnEnd::from_row(&row("budget_exhausted")).unwrap();
+        assert!(!budget.resumable);
+        assert!(LastTurnEnd::from_row(&row("final_answer")).is_none());
     }
 }

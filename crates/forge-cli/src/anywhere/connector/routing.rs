@@ -24,6 +24,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::ListSkills => exact(Method::GET, "/api/skills"),
         RouteId::ListModels => exact(Method::GET, "/api/models"),
         RouteId::ModelReport => exact(Method::GET, "/api/models/report"),
+        RouteId::TurnsSummary => exact(Method::GET, "/api/turns/summary"),
         RouteId::ReadConfig => exact(Method::GET, "/api/config"),
         RouteId::UpdateConfig => exact(Method::PUT, "/api/config"),
         RouteId::ListHooks => exact(Method::GET, "/api/hooks"),
@@ -101,11 +102,15 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
                 query: query_parameter(&request.parameters, 2)?,
             })
         }
-        RouteId::SessionDiff | RouteId::SessionAgents | RouteId::SessionJobs => {
+        RouteId::SessionDiff
+        | RouteId::SessionAgents
+        | RouteId::SessionJobs
+        | RouteId::SessionTurns => {
             let id = single_path_parameter(request)?;
             let leaf = match request.route {
                 RouteId::SessionDiff => "diff",
                 RouteId::SessionAgents => "agents",
+                RouteId::SessionTurns => "turns",
                 _ => "jobs",
             };
             Ok(RouteTarget {
@@ -387,7 +392,7 @@ mod tests {
 
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 24] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 26] = [
             (
                 RouteId::Blame,
                 "GET",
@@ -479,6 +484,20 @@ mod tests {
                 &["?days=7"],
                 Method::GET,
                 "/api/models/report",
+            ),
+            (
+                RouteId::SessionTurns,
+                "GET",
+                &["session_7", "?limit=5"],
+                Method::GET,
+                "/api/sessions/session_7/turns",
+            ),
+            (
+                RouteId::TurnsSummary,
+                "GET",
+                &["?days=7"],
+                Method::GET,
+                "/api/turns/summary",
             ),
             (RouteId::Identity, "GET", &[], Method::GET, "/api/identity"),
             (

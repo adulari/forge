@@ -162,6 +162,7 @@ mod serve_skills_confine;
 mod serve_spend;
 mod serve_terminal;
 mod serve_terminal_util;
+mod serve_turns;
 mod serve_update;
 mod serve_workspace;
 mod serve_workspace_pdf;
