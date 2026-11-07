@@ -178,6 +178,7 @@ pub(crate) fn build_snapshot_frame(
         closed: false,
         parent: None,
         thread_error: None,
+        last_turn_end: None,
         history_gap: None,
         worktree_setup: ident.worktree_setup,
         worktree_base: ident.worktree_base,

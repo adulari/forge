@@ -536,6 +536,24 @@ pub(crate) fn detect_trigger(
     None
 }
 
+/// The "failed" push for a prompt that never became a turn (a hook block, a rejected input).
+pub(crate) fn unrun_message(cur: &Snapshot, text: &str) -> PushMessage {
+    let title = if cur.title.is_empty() {
+        let short: String = cur.session_id.chars().take(8).collect();
+        format!("session {short}")
+    } else {
+        cur.title.clone()
+    };
+    PushMessage {
+        kind: "failed",
+        session: cur.session_id.clone(),
+        title,
+        body: truncate_chars(text.trim_start_matches('⚠').trim(), BODY_MAX_CHARS),
+        seq: cur.prompt_seq,
+        ttl: TTL_COMPLETION,
+    }
+}
+
 /// True while `msg` still describes the live state of `cur`: the prompt it announced is still
 /// pending (same `prompt_seq`), or the turn it announced is still finished with nothing newer.
 pub(crate) fn push_is_current(msg: &PushMessage, cur: &Snapshot) -> bool {
@@ -601,6 +619,12 @@ fn is_decision(msg: &PushMessage) -> bool {
     matches!(msg.kind, "permission" | "question")
 }
 
+/// A failed turn is escalated like a decision (sent after the delay although a client is attached,
+/// which overnight may be a tab nobody reads), but only once: nothing is waiting on the person.
+fn is_escalatable(msg: &PushMessage) -> bool {
+    is_decision(msg) || msg.kind == "failed"
+}
+
 impl DeferredPush {
     pub(crate) fn hold(&mut self, msg: PushMessage) {
         self.held = Some(msg);
@@ -608,7 +632,14 @@ impl DeferredPush {
 
     /// Starts the unanswered-decision clock for `msg`; `sent` says it already went out.
     pub(crate) fn track(&mut self, msg: &PushMessage, sent: bool, now: std::time::Instant) {
-        if !is_decision(msg) {
+        if !is_escalatable(msg) {
+            if self
+                .decision
+                .as_ref()
+                .is_some_and(|c| c.msg.kind == "failed")
+            {
+                self.decision = None;
+            }
             return;
         }
         self.decision = Some(DecisionClock {
@@ -664,7 +695,7 @@ impl DeferredPush {
         let waited = now.saturating_duration_since(clock.since);
         let due = match clock.stage {
             0 => waited >= delay,
-            1 => waited >= delay * RENUDGE_FACTOR,
+            1 => is_decision(&clock.msg) && waited >= delay * RENUDGE_FACTOR,
             _ => false,
         };
         if !due {
@@ -1135,6 +1166,44 @@ mod tests {
         assert_eq!(
             held.tick(0, Some(&cur), t0 + Duration::from_secs(10), delay),
             Some(msg)
+        );
+    }
+
+    #[test]
+    fn a_stalled_turn_pushes_failed_with_the_reason_and_escalates_once() {
+        use std::time::{Duration, Instant};
+        let prev = Snapshot {
+            busy: true,
+            prompt_seq: 4,
+            ..snap()
+        };
+        let cur = Snapshot {
+            busy: false,
+            prompt_seq: 4,
+            ..snap()
+        };
+        let reason = "Turn stopped (no progress): edits are kept; send continue";
+        let msg = detect_trigger(Some(&prev), &cur, Some(reason)).expect("a push");
+        assert_eq!(msg.kind, "failed");
+        assert!(msg.body.contains("no progress"));
+
+        let t0 = Instant::now();
+        let delay = Duration::from_secs(2);
+        let mut held = DeferredPush::default();
+        held.track(&msg, false, t0);
+        held.hold(msg.clone());
+        assert_eq!(
+            held.tick(1, Some(&cur), t0 + Duration::from_secs(1), delay),
+            None
+        );
+        assert_eq!(
+            held.tick(1, Some(&cur), t0 + Duration::from_secs(3), delay),
+            Some(msg)
+        );
+        assert_eq!(
+            held.tick(1, Some(&cur), t0 + Duration::from_secs(60), delay),
+            None,
+            "a failed turn is announced once, never re-nudged"
         );
     }
 

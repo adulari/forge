@@ -53,6 +53,10 @@ pub(crate) fn mark_interrupted(
     ledger: &mut RedriveLedger,
     id: &str,
 ) -> bool {
+    // A turn still open belongs to the process that just died: record why before anything else.
+    if let Err(error) = store.close_open_session_turns_as(id, "daemon_restart_or_crash") {
+        tracing::warn!(session = %id, %error, "could not close the turn the restart cut off");
+    }
     let tail = store.session_tail_state(id).unwrap_or(TailState::Finished);
     if !matches!(tail, TailState::Interrupted(_)) || owned_by_dispatch(store, id) {
         return false;
@@ -123,6 +127,18 @@ mod tests {
     use forge_types::Role;
 
     const CUT_OFF: TailState = TailState::Interrupted(InterruptedTail::UnansweredPrompt);
+
+    #[test]
+    fn the_restart_sweep_closes_the_turn_the_dead_process_left_open() {
+        let store = Store::open_in_memory().unwrap();
+        let id = store.create_session("/repo", "default").unwrap();
+        store.add_message(&id, 0, Role::User, "go", None).unwrap();
+        store.open_turn(&id, 0).unwrap();
+        mark_interrupted(&store, &mut RedriveLedger::default(), &id);
+        let turn = &store.recent_turns(&id, 1).unwrap()[0];
+        assert_eq!(turn.end_reason.as_deref(), Some("daemon_restart_or_crash"));
+        assert_eq!(turn.last_role_shape.as_deref(), Some("unanswered_prompt"));
+    }
 
     #[test]
     fn ledger_claims_an_interrupted_session_once() {

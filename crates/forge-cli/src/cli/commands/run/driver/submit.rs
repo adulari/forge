@@ -55,16 +55,15 @@ impl DriverState {
     /// One remote input — the headless mirror of `run_chat_tui`'s remote drain, minus the
     /// host-terminal cases (`/remote` toggling, host clipboard).
     pub(super) async fn handle_input(&mut self, input: remote::RemoteInput) -> Result<()> {
-        if self.draining.load(Ordering::Acquire)
-            && matches!(
-                input,
-                remote::RemoteInput::Prompt { .. }
-                    | remote::RemoteInput::Steer { .. }
-                    | remote::RemoteInput::FollowUp { .. }
-                    | remote::RemoteInput::Queue { .. }
-            )
-        {
-            return Ok(());
+        if self.draining.load(Ordering::Acquire) {
+            if let remote::RemoteInput::Prompt { text, .. }
+            | remote::RemoteInput::Steer { text }
+            | remote::RemoteInput::FollowUp { text }
+            | remote::RemoteInput::Queue { text, .. } = &input
+            {
+                self.queue_for_next_daemon(text);
+                return Ok(());
+            }
         }
         match input {
             remote::RemoteInput::Prompt { text, attachments } => {
@@ -391,6 +390,23 @@ impl DriverState {
         Ok(())
     }
 
+    /// A prompt that arrives while the daemon drains cannot run here. It joins the stored queue the
+    /// next daemon restores, and the person is told, instead of the prompt vanishing.
+    fn queue_for_next_daemon(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some((store, id)) = &self.interrupt_record {
+            let mut stored = store.session_queued_prompts(id).unwrap_or_default();
+            stored.push(forge_store::QueuedPrompt::text(text));
+            if let Err(error) = store.set_session_queued_prompts(id, &stored) {
+                tracing::warn!(session = %id, %error, "could not keep a prompt sent during the drain");
+                return;
+            }
+        }
+        self.record_unrun("⏳ queued: runs after the restart.", false);
+    }
+
     /// Run what the queue holds, in typed order, until a turn is running or the queue is empty.
     /// Queued commands go through normal idle dispatch.
     pub(super) async fn drain_queue(&mut self) {
@@ -398,7 +414,7 @@ impl DriverState {
             match dequeue_next(&mut self.queued_prompts, &mut self.app) {
                 Some(Queued::Command(line)) => {
                     if let Err(e) = Box::pin(self.submit_line(line, None)).await {
-                        self.app.note(&format!("⚠ {e}"));
+                        self.record_unrun(&format!("⚠ Queued command failed: {e}"), true);
                     }
                 }
                 Some(Queued::Prompt(next)) => self.start_turn(&next),
@@ -446,9 +462,10 @@ impl DriverState {
             )
             .await
             {
-                Err(reason) => self
-                    .app
-                    .note(&format!("⎇ prompt blocked by hook: {reason}")),
+                Err(reason) => self.record_unrun(
+                    &format!("⚠ Prompt not run: blocked by a hook ({reason})."),
+                    true,
+                ),
                 Ok(prompt) => self.start_turn(&prompt),
             }
             return Ok(());
@@ -498,9 +515,10 @@ impl DriverState {
         )
         .await
         {
-            Err(reason) => self
-                .app
-                .note(&format!("⎇ prompt blocked by hook: {reason}")),
+            Err(reason) => self.record_unrun(
+                &format!("⚠ Prompt not run: blocked by a hook ({reason})."),
+                true,
+            ),
             Ok(prompt) => {
                 // Expand `@path` mentions exactly like the TUI submit path.
                 attach_at_images(&prompt, Some(&hook_workspace), &self.session, &mut self.app)

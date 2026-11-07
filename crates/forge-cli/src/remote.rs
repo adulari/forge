@@ -336,7 +336,7 @@ mod thread_error;
 use event_log::lock_event_log;
 pub use event_log::{EventLog, SnapshotFrame, EVENT_LOG_CAP};
 pub use goal::SnapGoal;
-pub use thread_error::{HistoryGap, ThreadError};
+pub use thread_error::{HistoryGap, LastTurnEnd, ThreadError};
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
@@ -717,6 +717,10 @@ pub struct Snapshot {
     /// Why the last turn failed, set from the turn's end until the next turn starts (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_error: Option<ThreadError>,
+    /// How the last turn ended when it did not finish cleanly (additive): the reason it stopped
+    /// and a plain label, kept until the next turn ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_end: Option<LastTurnEnd>,
     /// Set on the one resync frame a reconnecting client gets when the host could not replay what
     /// it missed (additive). Per connection, never part of the shared broadcast frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -869,6 +873,7 @@ impl Default for Snapshot {
             closed: false,
             parent: None,
             thread_error: None,
+            last_turn_end: None,
             history_gap: None,
             worktree_setup: None,
             worktree_base: None,

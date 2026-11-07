@@ -432,6 +432,10 @@ struct DriverState {
     setup_told: Option<String>,
     /// Where a user interrupt records itself, so a restart can tell it from a crash.
     interrupt_record: Option<(std::sync::Arc<forge_store::Store>, String)>,
+    /// The newest non-clean turn end, read from the store when a turn finishes.
+    last_turn_end: Option<remote::LastTurnEnd>,
+    /// A prompt that never ran, waiting for the loop to push it as a failure.
+    pending_unrun: Option<String>,
 }
 
 /// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
@@ -595,6 +599,8 @@ async fn drive_session(
         last_auto_compact_gen: 0,
         turn_handle: None,
         turn_panic: None,
+        last_turn_end: None,
+        pending_unrun: None,
         loop_state: None,
         goal_state: None,
         pending: None,
@@ -626,6 +632,7 @@ async fn drive_session(
         interrupt_record: Some((interrupt_store, session_id.clone())),
     };
 
+    st.refresh_last_turn_end();
     let mut last_snap: Option<remote::Snapshot> = None;
     let mut stream_pacer = remote::StreamPacer::default();
     let mut pending_mode: Option<forge_types::PermissionMode> = None;
@@ -775,7 +782,7 @@ async fn drive_session(
                     }
                     if let forge_tui::PresenterEvent::Error(m) = &e {
                         turn_error = Some(m.clone());
-                        st.record_turn_failure(m);
+                        // The turn-end note is written by the session core (turn_record.rs).
                         // A turn-ending error only reached `view.transcript` (scrollback) before
                         // this — never `Snapshot::notes`, the remote toast/banner mechanism the
                         // mobile app renders (see the doc comment on `mobile/src/app/session/
@@ -813,7 +820,7 @@ async fn drive_session(
             dirty = true;
             active = true;
             if let Err(e) = st.handle_input(input).await {
-                st.app.note(&format!("⚠ {e}"));
+                st.record_unrun(&format!("⚠ Input not handled: {e}"), true);
             }
         }
         // A running turn holds the session for its whole length; awaiting the lock here froze this
@@ -850,6 +857,7 @@ async fn drive_session(
             dirty = true;
             active = true;
             st.on_turn_done(g).await;
+            st.refresh_last_turn_end();
             if let Some(panic) = st.turn_panic.take() {
                 let m = format!("the turn crashed: {panic}");
                 turn_error = Some(m.clone());
@@ -966,6 +974,7 @@ async fn drive_session(
                 .as_deref()
                 .filter(|_| !snap.busy)
                 .map(remote::ThreadError::from_message);
+            snap.last_turn_end = st.last_turn_end.clone().filter(|_| !snap.busy);
             if last_snap.as_ref() != Some(&snap) && !stream_pacer.hold(last_snap.as_ref(), &snap) {
                 stream_pacer.sent();
                 revision += 1;
@@ -980,9 +989,12 @@ async fn drive_session(
                 // across every configured channel (Web Push + native APNs) — the broadcast below
                 // never waits on delivery. Computed once regardless of which channels are
                 // configured, so native-only (no Web Push) deployments still notify.
-                if let Some(msg) =
-                    crate::push::detect_trigger(last_snap.as_ref(), &snap, turn_error.as_deref())
-                {
+                let stopped = st.unfinished_stop_text();
+                if let Some(msg) = crate::push::detect_trigger(
+                    last_snap.as_ref(),
+                    &snap,
+                    turn_error.as_deref().or(stopped.as_deref()),
+                ) {
                     // A client that is attached but unattended (phone just locked, tab left open)
                     // would swallow this for good, so hold it for when the last client drops.
                     let sent = crate::push::should_push(
@@ -1003,6 +1015,17 @@ async fn drive_session(
                 let _ = snapshot_tx.send(frame);
             }
             dirty = false;
+        }
+        if let (Some(text), Some(snap)) = (st.pending_unrun.take(), &last_snap) {
+            let msg = crate::push::unrun_message(snap, &text);
+            let sent =
+                crate::push::should_push(ws_clients.load(std::sync::atomic::Ordering::Relaxed));
+            deferred_push.track(&msg, sent, Instant::now());
+            if sent {
+                dispatch_push(&apns, &push, &session_id, snap, msg);
+            } else {
+                deferred_push.hold(msg);
+            }
         }
         if let Some(msg) = deferred_push.tick(
             ws_clients.load(std::sync::atomic::Ordering::Relaxed),
@@ -1102,6 +1125,48 @@ impl DriverState {
             &mut self.busy,
             &mut self.busy_since,
         ));
+    }
+
+    /// A prompt or command that never became a turn: leave it in the stored history, show it to
+    /// remote clients and, when `push`, announce it as a failed turn so it is not silent.
+    fn record_unrun(&mut self, text: &str, push: bool) {
+        if let Some((store, id)) = &self.interrupt_record {
+            let stored = store
+                .next_message_seq(id)
+                .and_then(|seq| store.add_ui_note(id, seq, forge_types::Role::System, text));
+            if let Err(error) = stored {
+                tracing::warn!(session = %id, %error, "could not record a prompt that did not run");
+            }
+        }
+        push_remote_note(&mut self.notes, text);
+        self.app.note(text);
+        if push {
+            self.pending_unrun = Some(text.to_string());
+        }
+    }
+
+    /// The plain reason the last turn stopped short without an Error event (a stall, an unfinished
+    /// task list, a step limit), so its push says "failed" instead of "done".
+    fn unfinished_stop_text(&self) -> Option<String> {
+        use forge_types::StopReason as S;
+        let reason = self.app.last_stop_reason?;
+        if matches!(reason, S::FinalAnswer | S::Interrupted | S::DaemonShutdown) {
+            return None;
+        }
+        let (label, advice) = forge_core::describe_end(reason.as_str());
+        Some(format!("Turn stopped ({label}): {advice}"))
+    }
+
+    /// Re-read how the newest turn ended; a clean answer clears the banner.
+    fn refresh_last_turn_end(&mut self) {
+        let Some((store, id)) = &self.interrupt_record else {
+            return;
+        };
+        self.last_turn_end = store
+            .last_closed_turn(id)
+            .ok()
+            .flatten()
+            .and_then(|row| remote::LastTurnEnd::from_row(&row));
     }
 
     fn record_turn_failure(&self, error: &str) {
@@ -1480,6 +1545,8 @@ pub(super) mod tests {
             last_auto_compact_gen: 0,
             turn_handle: None,
             turn_panic: None,
+            last_turn_end: None,
+            pending_unrun: None,
             loop_state: None,
             goal_state: None,
             pending: None,
@@ -1639,6 +1706,58 @@ pub(super) mod tests {
             .lock()
             .expect("driver task lock poisoned")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_prompt_sent_while_draining_is_kept_for_the_next_daemon() {
+        let mut state = test_driver_state().await;
+        let store = state.session.lock().await.store.clone();
+        let id = state.session.lock().await.session_id().to_string();
+        state.interrupt_record = Some((store.clone(), id.clone()));
+        state.draining.store(true, Ordering::Release);
+
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "fix the flaky test".into(),
+                attachments: None,
+            })
+            .await
+            .unwrap();
+
+        let stored = store.session_queued_prompts(&id).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "fix the flaky test");
+        assert!(!state.busy, "nothing ran in the dying daemon");
+        let newest = store.load_messages(&id).unwrap().pop().unwrap();
+        assert_eq!(newest.content, "⏳ queued: runs after the restart.");
+        assert!(state.pending_unrun.is_none(), "queued is not a failure");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_never_runs_leaves_a_stored_note_and_a_failed_push() {
+        let mut state = test_driver_state().await;
+        let store = state.session.lock().await.store.clone();
+        let id = state.session.lock().await.session_id().to_string();
+        state.interrupt_record = Some((store.clone(), id.clone()));
+
+        state.record_unrun("⚠ Prompt not run: blocked by a hook (no).", true);
+
+        let newest = store.load_messages(&id).unwrap().pop().unwrap();
+        assert!(newest.content.starts_with("⚠ Prompt not run"));
+        assert!(state.pending_unrun.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_stop_reaches_the_push_trigger_as_a_reason() {
+        use forge_types::StopReason;
+        let mut state = test_driver_state().await;
+        state.app.last_stop_reason = Some(StopReason::FinalAnswer);
+        assert_eq!(state.unfinished_stop_text(), None);
+        state.app.last_stop_reason = Some(StopReason::Interrupted);
+        assert_eq!(state.unfinished_stop_text(), None);
+        state.app.last_stop_reason = Some(StopReason::Stalled);
+        let text = state.unfinished_stop_text().expect("a stall is not done");
+        assert!(text.starts_with("Turn stopped (no progress)"), "{text}");
     }
 
     #[tokio::test]

@@ -133,3 +133,28 @@ mod tests {
         assert_eq!(long.summary.chars().count(), 140);
     }
 }
+
+/// How the session's last turn ended when it did not finish cleanly, for a banner on the session
+/// screen: the stable `reason` (the `turn.end_reason` value), a plain `label`, and when (unix
+/// seconds).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LastTurnEnd {
+    pub reason: String,
+    pub label: String,
+    pub at: i64,
+}
+
+impl LastTurnEnd {
+    /// `None` for a turn that answered, was stopped on purpose, or is still running.
+    pub fn from_row(row: &forge_store::TurnRow) -> Option<Self> {
+        let reason = row.end_reason.as_deref()?;
+        if matches!(reason, "final_answer" | "interrupted" | "plan_presented") {
+            return None;
+        }
+        Some(Self {
+            reason: reason.to_string(),
+            label: forge_core::describe_end(reason).0,
+            at: row.ended_at.unwrap_or(row.started_at),
+        })
+    }
+}

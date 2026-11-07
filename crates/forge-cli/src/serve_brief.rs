@@ -21,6 +21,8 @@ const MAX_SESSIONS: usize = 40;
 const MAX_WINDOW_SECS: i64 = 30 * 24 * 60 * 60;
 const SUMMARY_CHARS: usize = 140;
 const FAILED_NOTE: &str = "⚠ Turn failed:";
+/// The core's note for a turn that stopped short without an error (turn_record.rs).
+const STOPPED_NOTE: &str = "⚠ Turn stopped";
 
 pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
     Router::new().route(&format!("{base}/api/brief"), get(brief))
@@ -137,6 +139,9 @@ fn classify(row: &BriefSessionRow, live: Option<&Live>) -> (Outcome, Option<Stri
         .then_some(row.last_content.as_deref())
         .flatten();
     if let Some(reason) = note.and_then(|n| n.strip_prefix(FAILED_NOTE)) {
+        return (Outcome::Failed, Some(first_line(reason, SUMMARY_CHARS)));
+    }
+    if let Some(reason) = note.and_then(|n| n.strip_prefix(STOPPED_NOTE)) {
         return (Outcome::Failed, Some(first_line(reason, SUMMARY_CHARS)));
     }
     if note.is_some_and(|n| n.starts_with(RESTART_INTERRUPT_NOTE)) {
