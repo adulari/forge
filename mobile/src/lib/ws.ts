@@ -218,6 +218,10 @@ export interface SnapshotAssertion {
   state: "pass" | "fail" | "pending";
   reason: string;
   proof: string;
+  /** Path of a screenshot a behaviour (QA) probe took; served by the evidence image route. */
+  artifact?: string | null;
+  /** True for a behaviour assertion the QA runner starts and probes. */
+  behaviour?: boolean;
 }
 
 export interface SnapshotContract {

@@ -78,6 +78,9 @@ pub(crate) fn detail(contract: &GoalContract, id: u32) -> Option<String> {
         if !r.reason.is_empty() {
             out.push_str(&format!("\n  why: {}", r.reason));
         }
+        if let Some(path) = &r.artifact {
+            out.push_str(&format!("\n  screenshot: {path}"));
+        }
         if r.proof.trim().is_empty() {
             out.push_str("\n  proof: (no output)");
         } else {
@@ -122,6 +125,7 @@ mod tests {
                     command: format!("test -f t{id}"),
                     expect: "exit 0".into(),
                     contains: None,
+                    behaviour: None,
                 })
                 .collect(),
         );
@@ -133,12 +137,14 @@ mod tests {
                     passed: true,
                     proof: String::new(),
                     reason: String::new(),
+                    artifact: None,
                 },
                 AssertionResult {
                     id: 2,
                     passed: false,
                     proof: "line one\ntest: t2: No such file".into(),
                     reason: "exit 1".into(),
+                    artifact: None,
                 },
             ],
             1,

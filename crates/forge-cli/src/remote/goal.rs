@@ -141,6 +141,11 @@ pub struct SnapAssertion {
     pub reason: String,
     /// The tail of the check's output.
     pub proof: String,
+    /// A screenshot a behaviour probe took: the path the evidence image route serves.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
+    /// True for a behaviour assertion the QA runner executes.
+    pub behaviour: bool,
 }
 
 impl From<&forge_types::goal_contract::GoalContract> for SnapContract {
@@ -170,6 +175,8 @@ impl From<&forge_types::goal_contract::GoalContract> for SnapContract {
                         },
                         reason: result.map(|r| r.reason.clone()).unwrap_or_default(),
                         proof: result.map(|r| r.proof.clone()).unwrap_or_default(),
+                        artifact: result.and_then(|r| r.artifact.clone()),
+                        behaviour: a.behaviour.is_some(),
                     }
                 })
                 .collect(),
@@ -303,12 +310,14 @@ mod tests {
                 passed: true,
                 proof: String::new(),
                 reason: String::new(),
+                artifact: None,
             },
             AssertionResult {
                 id: 2,
                 passed: false,
                 proof: "no such file".into(),
                 reason: "exit 1".into(),
+                artifact: None,
             },
         ]);
         let v = serde_json::to_value(SnapGoal::from(app.goal.as_ref().unwrap())).unwrap();
@@ -345,6 +354,7 @@ mod tests {
             passed: true,
             proof: String::new(),
             reason: String::new(),
+            artifact: None,
         };
         contract.record(vec![pass(1), pass(2)], 1);
         contract.advance_milestone();

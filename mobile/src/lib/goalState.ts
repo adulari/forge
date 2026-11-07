@@ -213,6 +213,10 @@ export interface ContractRow {
   command: string;
   /** Why it failed, then the last line of proof; empty for a pass without output. */
   detail: string;
+  /** Screenshot a behaviour probe took, for the evidence image route; `null` without one. */
+  artifact: string | null;
+  /** The QA runner (not the worker) checks this row by running the thing. */
+  behaviour: boolean;
 }
 
 /** The contract table the panel draws, one row per assertion; `null` when the goal has none. */
@@ -233,6 +237,8 @@ export function contractRows(goal: GoalView): ContractRow[] | null {
       mark: a.state === "pass" ? "✓" : a.state === "fail" ? "✗" : "·",
       command: a.command,
       detail,
+      artifact: a.artifact ?? null,
+      behaviour: a.behaviour === true,
     };
   });
 }

@@ -485,6 +485,7 @@ mod mission {
                 } else {
                     "exit 1".into()
                 },
+                artifact: None,
             })
             .collect();
         contract.record(results, 1);

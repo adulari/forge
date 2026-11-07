@@ -195,6 +195,7 @@ fn contract_goal(app: &mut forge_tui::App) {
                 } else {
                     String::new()
                 },
+                artifact: None,
             })
             .collect(),
     );

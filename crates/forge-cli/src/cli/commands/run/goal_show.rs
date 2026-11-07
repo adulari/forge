@@ -102,6 +102,7 @@ mod tests {
                     } else {
                         "exit 1".into()
                     },
+                    artifact: None,
                 })
                 .collect(),
             1,
@@ -146,6 +147,7 @@ mod tests {
             passed: true,
             proof: String::new(),
             reason: String::new(),
+            artifact: None,
         };
         contract.record(vec![pass(1), pass(2)], 1);
         contract.advance_milestone();

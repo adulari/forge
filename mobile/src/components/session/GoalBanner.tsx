@@ -30,6 +30,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { monoFamily, type as typeScale } from "../../theme/typography";
 import { GoalSheet } from "../chat/GoalSheet";
+import { ScreenshotThumb } from "../chat/ScreenshotThumb";
 import { MiniPressable } from "../chat/MiniPressable";
 import { Card } from "../ds/Card";
 import { StatusDot } from "../ds/StatusDot";
@@ -231,6 +232,7 @@ function ContractRowView({ row }: { row: ContractRow }) {
             {row.detail}
           </Text>
         ) : null}
+        {row.artifact ? <ScreenshotThumb path={row.artifact} /> : null}
       </View>
     </View>
   );

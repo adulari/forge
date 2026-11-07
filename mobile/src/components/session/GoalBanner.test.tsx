@@ -36,6 +36,9 @@ vi.mock("../../lib/haptics", () => ({ haptics: { select: vi.fn(), deny: vi.fn() 
 vi.mock("../../theme/ThemeProvider", () => ({
   useTokens: () => ({ ink: "ink", ink2: "ink2", ink3: "ink3", accent: "accent", danger: "danger", success: "success", border: "border", bg3: "bg3" }),
 }));
+vi.mock("../chat/ScreenshotThumb", () => ({
+  ScreenshotThumb: ({ path }: { path: string }) => React.createElement("img", { alt: path }),
+}));
 vi.mock("../chat/MiniPressable", () => ({
   MiniPressable: (props: Props & { testID?: string; onPress?: () => void }) => {
     if (props.testID && props.onPress) buttons.set(props.testID, props.onPress);
@@ -110,6 +113,33 @@ describe("GoalBanner", () => {
     expect(html).toContain("Envelope spent (20% of Claude weekly)");
     expect(html).toContain("envelope 20/20% claude weekly");
     expect(buttons.has("goal-resume")).toBe(true);
+  });
+
+  it("shows a QA behaviour row with its probe proof and screenshot", () => {
+    const contract = {
+      headline: "0/1 pass",
+      approved: true,
+      rounds: 1,
+      passed: 0,
+      total: 1,
+      checked_at: 1_700_000_000,
+      assertions: [
+        {
+          id: 1,
+          text: "/health says ok v2",
+          command: "behaviour: run `server`, probe `GET /health`",
+          expect: "ok v2",
+          state: "fail" as const,
+          reason: 'probe output does not contain "ok v2"',
+          proof: "probe: GET /health\nHTTP 200\nok v1",
+          artifact: "/ev/qa-1.png",
+          behaviour: true,
+        },
+      ],
+    };
+    const { html } = render(snapshot({ goal: goal({ contract }) }));
+    expect(html).toContain("ok v1");
+    expect(html).toContain("/ev/qa-1.png");
   });
 
   it("draws the contract table with a mark, the check and the proof per assertion", () => {

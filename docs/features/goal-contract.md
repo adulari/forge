@@ -234,3 +234,37 @@ next milestone; hooks in `goal_progress.rs`), `RelayReason::Milestone` in `goal_
 
 Relaying a goal that has no driver (headless `forge run`; its missions run in one session). Editing
 a running mission's milestones. The relay settings are config only.
+
+## 10. Behaviour assertions (QA)
+
+A second assertion kind for goals about something that runs ("the server answers /health", "the
+CLI prints X"). The read-only validator cannot check those, and the worker must not grade itself,
+so a QA runner does it.
+
+```json
+{"assertion": "/health says ok v2",
+ "behaviour": {"run": "python3 server.py $FORGE_QA_PORT",
+               "probe": "GET http://127.0.0.1:$FORGE_QA_PORT/health",
+               "expect": "ok v2", "cleanup": "optional", "ready": "optional: port | line:<text>"}}
+```
+
+- **When.** After every read-only check passes. Until then a behaviour assertion fails with
+  `not run: the read-only checks must pass first`.
+- **Run.** `run` starts in the session workspace in its own process group with `FORGE_QA_PORT` (a
+  free port) and `FORGE_QA_DIR` (a scratch directory, removed afterwards). Output goes to a log.
+  The permission safety floor and deny rules still apply (`refused` otherwise); the approved card
+  showed the commands. Timeout: `contract_check_timeout_secs`.
+- **Probe.** `GET <url>` (built-in HTTP client), `screenshot <url>` (the `browser` tool, headless;
+  the image is filed in the session evidence folder), or any shell command (exit 0 = answered).
+  Without `ready` the probe is retried until it answers; with `ready` it runs once the port opens
+  or the log line appears. A run that exits non-zero fails with its log as proof; one that exits 0
+  is a setup step.
+- **Proof.** The probe output tail (and screenshot path) is stored in the result and fed back as
+  the failure prompt. Cleanup always runs, then the whole process group is killed.
+- **Skipped.** A `screenshot` probe with no browser tool counts as passed with proof
+  `skipped: <reason>`; the reason is visible everywhere.
+- **Shows.** `/contract` (full proof, `screenshot:` path), `/goal status`, `forge goal show`,
+  `Snapshot.goal.contract.assertions[].artifact|behaviour`, and the phone/desktop goal panel (proof
+  line plus the screenshot through the evidence image route).
+- **Drafting.** The drafter is told to propose behaviour assertions for runnable goals.
+- **Code.** `forge-types/src/goal_contract/behaviour.rs`, `forge-core/src/goal_qa.rs`.
