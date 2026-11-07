@@ -576,6 +576,7 @@ mod tests {
         let store = std::sync::Arc::new(forge_store::Store::open_in_memory().unwrap());
         let parent = store.create_session("/tmp", "Default").unwrap();
         let ctx = AgentCtx {
+            outage_deadline: None,
             provider: std::sync::Arc::new(Scripted(
                 "{\"ranking\":[{\"label\":\"A\",\"score\":5},{\"label\":\"B\",\"score\":4}]}",
             )),

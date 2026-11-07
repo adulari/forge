@@ -67,6 +67,7 @@ impl Session {
         ));
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
+            outage_deadline: self.outage_deadline(),
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
             store: Arc::clone(&self.store),
@@ -297,6 +298,7 @@ impl Session {
         };
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
+            outage_deadline: self.outage_deadline(),
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
             store: Arc::clone(&self.store),
@@ -399,6 +401,7 @@ impl Session {
         ));
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
+            outage_deadline: self.outage_deadline(),
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
             store: Arc::clone(&self.store),
@@ -519,6 +522,7 @@ impl Session {
         ));
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
+            outage_deadline: self.outage_deadline(),
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
             store: Arc::clone(&self.store),
@@ -707,6 +711,7 @@ impl Session {
         ));
         let repo_root = self.workspace.root().to_path_buf();
         let ctx = subagent::AgentCtx {
+            outage_deadline: self.outage_deadline(),
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
             store: Arc::clone(&self.store),

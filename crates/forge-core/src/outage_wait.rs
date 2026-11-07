@@ -104,7 +104,46 @@ fn reason_of(err: &forge_provider::ProviderError) -> String {
     }
 }
 
+/// One subagent's wait through a provider outage: the same schedule and allowance as the parent
+/// turn, bounded by the parent's run and turn deadlines so a spawned agent never outlives them.
+pub(crate) struct ChildOutage {
+    until: Instant,
+    attempts: u32,
+}
+
+impl ChildOutage {
+    pub(crate) fn begin(allowance: Duration, deadline: Option<std::time::Instant>) -> Self {
+        let now = Instant::now();
+        Self {
+            until: horizon(now, now, allowance, deadline, None),
+            attempts: 0,
+        }
+    }
+
+    /// How long to sleep before the next probe, or `None` once the horizon has passed.
+    pub(crate) fn next_wait(&mut self, err: &forge_provider::ProviderError) -> Option<Duration> {
+        let remaining = self.until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        self.attempts += 1;
+        Some(delay(self.attempts, err.retry_after(), wall_clock_jitter()).min(remaining))
+    }
+}
+
 impl Session {
+    /// The earlier of the run budget's deadline and the turn deadline: what a child's outage
+    /// wait must not outlast.
+    pub(crate) fn outage_deadline(&self) -> Option<std::time::Instant> {
+        [
+            self.run_budget.and_then(|budget| budget.deadline),
+            self.turn_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
     /// Called when a model request failed as an outage and the hot backoff has nothing left.
     /// `already_down` is how long the outage has already run (the hot phase). Sleeps until the
     /// next probe and returns true, or returns false when waiting is disabled, not applicable,
@@ -366,6 +405,21 @@ mod tests {
         assert!(!is_outage(&E::Unavailable(
             "maximum context length exceeded".into()
         )));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_child_wait_stops_at_the_allowance_and_at_the_parent_deadline() {
+        use forge_provider::ProviderError as E;
+        let down = E::Unavailable("could not connect".into());
+        let mut within = ChildOutage::begin(secs(100), None);
+        let first = within.next_wait(&down).expect("inside the allowance");
+        assert!(first <= secs(100));
+        tokio::time::sleep(secs(101)).await;
+        assert!(within.next_wait(&down).is_none());
+
+        let soon = std::time::Instant::now() + secs(20);
+        let mut bounded = ChildOutage::begin(secs(8 * 3600), Some(soon));
+        assert!(bounded.next_wait(&down).expect("before the deadline") <= secs(20));
     }
 
     #[test]

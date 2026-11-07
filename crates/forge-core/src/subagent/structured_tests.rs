@@ -219,6 +219,7 @@ impl Setup {
         let mut config = Config::default();
         config.harness.subagent_output_schema = self.flag;
         let ctx = AgentCtx {
+            outage_deadline: None,
             provider: self.provider.clone(),
             router: Arc::new(Pick {
                 model: self.model,
@@ -504,6 +505,7 @@ fn orchestrate_ctx(provider: Arc<Scripted>, flag: bool) -> AgentCtx {
     let mut config = Config::default();
     config.harness.subagent_output_schema = flag;
     AgentCtx {
+        outage_deadline: None,
         provider,
         router: Arc::new(Pick {
             model: "good::model",

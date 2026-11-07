@@ -50,6 +50,7 @@ impl Session {
         );
         apply_skill_model(&mut agents, &fork);
         let ctx = subagent::AgentCtx {
+            outage_deadline: self.outage_deadline(),
             provider: Arc::clone(&self.provider),
             router: Arc::clone(&self.router),
             store: Arc::clone(&self.store),

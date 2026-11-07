@@ -212,6 +212,7 @@ impl LazySubagents {
         );
         let parent_id = store.create_session(".", &format!("{:?}", config.permission_mode))?;
         let ctx = AgentCtx {
+            outage_deadline: None,
             provider,
             router,
             store,
