@@ -502,6 +502,21 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Queue { cmd } => queue_cmd(cmd),
         Command::Scoreboard => scoreboard_cmd(),
         Command::Stats { cmd } => stats_cmd(cmd),
+        Command::Turns {
+            since,
+            session,
+            limit,
+            json,
+            backfill,
+            write,
+        } => turns_cmd(crate::cli::commands::turns::TurnsArgs {
+            since,
+            session,
+            limit,
+            json,
+            backfill,
+            write,
+        }),
         Command::Tour { demo } => tour_cmd(demo),
         Command::Trust { path, revoke, list } => {
             crate::cli::commands::trust::trust_cmd(path, revoke, list)

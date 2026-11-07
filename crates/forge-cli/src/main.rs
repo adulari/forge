@@ -51,6 +51,7 @@ pub(crate) use cli::commands::sessions_delete::sessions_delete_cmd;
 pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
 pub(crate) use cli::commands::stats::stats_cmd;
 pub(crate) use cli::commands::tour::tour_cmd;
+pub(crate) use cli::commands::turns::turns_cmd;
 pub(crate) use cli::commands::voice::voice_cmd;
 
 mod alloc_policy;

@@ -44,6 +44,7 @@ pub(crate) mod switch;
 mod tests;
 pub(crate) mod tour;
 pub(crate) mod trust;
+pub(crate) mod turns;
 pub(crate) mod voice;
 pub(crate) mod worktree;
 

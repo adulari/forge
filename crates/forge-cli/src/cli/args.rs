@@ -1005,6 +1005,30 @@ pub(crate) enum Command {
         cmd: StatsCmd,
     },
 
+    /// How turns ended: counts by end reason and the last turns that did not finish
+    /// (`final_answer`, `stalled`, `provider_error`, `interrupted`, ...). `--backfill` classifies
+    /// history from before turns were recorded; it prints unless `--write` is given.
+    Turns {
+        /// Look back this far (`7d`, `12h`, `30m`).
+        #[arg(long, default_value = "7d")]
+        since: String,
+        /// Only this session (id or unique prefix).
+        #[arg(long)]
+        session: Option<String>,
+        /// How many unfinished turns to list.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+        /// Classify historical turns from the transcript (shape only).
+        #[arg(long)]
+        backfill: bool,
+        /// With `--backfill`: store the result instead of printing it.
+        #[arg(long, requires = "backfill")]
+        write: bool,
+    },
+
     /// A 2-minute guided tour of Forge — what it does and the commands to try, no API keys
     /// needed. `--demo` also runs a real offline turn (mock model) in a scratch directory so
     /// you can watch the loop work.
