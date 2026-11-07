@@ -243,6 +243,29 @@ export interface PrWatch {
   /** Merge queue standing; only merge-mode watches carry it. */
   queue?: PrQueueInfo | null;
   hold?: string | null;
+  /** The independent review of the PR's current head; absent until a merge is about to happen. */
+  review?: PrReview | null;
+}
+
+export interface PrReviewFinding {
+  severity: string;
+  file: string;
+  line: number | null;
+  title: string;
+  why: string;
+  fix?: string;
+  /** At or above the configured severity: this one holds the merge. */
+  blocking: boolean;
+}
+
+export interface PrReview {
+  head_sha: string;
+  verdict: "clean" | "findings" | "error";
+  findings: PrReviewFinding[];
+  model: string | null;
+  error: string | null;
+  fix_sent: boolean;
+  rounds: number;
 }
 
 export type PrQueueState = "queued" | "head" | "checks" | "held" | "skipped";
@@ -266,6 +289,8 @@ export interface PrQueueRow {
   last_update: string | null;
   /** The owner paused this row; it keeps no position and does not block the queue. */
   held?: boolean;
+  /** `review clean` / `review: 2 confirmed, fixing`; absent before the PR is reviewed. */
+  review?: string | null;
 }
 
 export interface PrRepoQueue {

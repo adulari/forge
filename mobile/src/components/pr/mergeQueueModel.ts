@@ -1,4 +1,5 @@
 import type { PrQueueAction, PrQueueRow, PrRepoQueue } from "../../lib/apiPr";
+import { withReview } from "./prReviewModel";
 import type { WatchTone } from "./prWatchModel";
 
 export interface QueueRowStatus {
@@ -20,6 +21,13 @@ export function isWaiting(row: PrQueueRow): boolean {
 }
 
 export function rowStatus(row: PrQueueRow): QueueRowStatus {
+  const status = baseStatus(row);
+  if (!row.review || !isWaiting(row)) return status;
+  const blocked = row.review.includes("confirmed") || row.review.includes("failed");
+  return { ...status, tone: blocked ? "warn" : status.tone, detail: withReview(status.detail, row.review) };
+}
+
+function baseStatus(row: PrQueueRow): QueueRowStatus {
   const state = effectiveState(row);
   const detail = row.reason;
   switch (state) {

@@ -10,6 +10,7 @@ import { type as typeScale } from "../../theme/typography";
 import { Badge } from "../ds/Badge";
 import { Segmented } from "../ds/Segmented";
 import { useToast } from "../ds/ToastHost";
+import { blockingFindings, findingPlace } from "./prReviewModel";
 import { WATCH_METHODS, WATCH_MODES, watchStatus } from "./prWatchModel";
 
 export function PrWatchPanel({ sessionId }: { sessionId: string }) {
@@ -50,6 +51,11 @@ export function PrWatchPanel({ sessionId }: { sessionId: string }) {
       {status.detail ? (
         <Text style={[typeScale.monoMeta, { color: status.tone === "danger" ? tokens.danger : tokens.ink3 }]}>{status.detail}</Text>
       ) : null}
+      {blockingFindings(watch?.review).map((finding) => (
+        <Text key={`${finding.file}:${finding.line}:${finding.title}`} style={[typeScale.monoMeta, { color: tokens.warn }]}>
+          {`[${finding.severity}] ${findingPlace(finding)} ${finding.title}`}
+        </Text>
+      ))}
     </View>
   );
 }

@@ -1,4 +1,5 @@
 import type { PrWatch, PrWatchMethod, PrWatchMode } from "../../lib/apiPr";
+import { reviewLabel, withReview } from "./prReviewModel";
 
 export const WATCH_MODES: { value: PrWatchMode; label: string }[] = [
   { value: "off", label: "Off" },
@@ -22,6 +23,14 @@ export interface WatchStatus {
 }
 
 export function watchStatus(watch: PrWatch | null): WatchStatus {
+  const status = baseStatus(watch);
+  const review = watch?.state === "watching" ? reviewLabel(watch.review) : null;
+  if (!review) return status;
+  const tone = watch?.review?.verdict === "clean" ? status.tone : "warn";
+  return { ...status, tone: status.tone === "danger" ? status.tone : tone, detail: withReview(status.detail, review) };
+}
+
+function baseStatus(watch: PrWatch | null): WatchStatus {
   if (!watch || watch.mode === "off") return { label: "Not watching", tone: "neutral", detail: null };
   const pr = watch.pr_number != null ? `#${watch.pr_number}` : "the pull request";
   if (watch.state === "merged") return { label: "Merged", tone: "success", detail: `${pr} merged; the session is marked done.` };
