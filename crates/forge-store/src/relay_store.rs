@@ -404,7 +404,7 @@ mod tests {
         assert!(store.session_daemon_live(&c).unwrap());
         assert_eq!(store.relay_tail(&a).unwrap(), c);
         assert_eq!(store.relay_tail(&c).unwrap(), c);
-        let done = store.session_lifecycle(&[a.clone()]).unwrap();
+        let done = store.session_lifecycle(std::slice::from_ref(&a)).unwrap();
         assert!(done[&a].1.is_some(), "the predecessor is done");
     }
 

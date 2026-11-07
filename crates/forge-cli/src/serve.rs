@@ -2095,7 +2095,7 @@ const RESURRECT_LIMIT: usize = 16;
 ///
 /// Best-effort by design: a session whose cwd has since been deleted, or whose worktree is gone,
 /// must not stop the daemon from starting. Failures are reported and skipped.
-async fn resurrect_fleet(state: Arc<DaemonState>) {
+pub(crate) async fn resurrect_fleet(state: Arc<DaemonState>) {
     let live = match state.store.daemon_live_sessions() {
         Ok(live) => live,
         Err(error) => {

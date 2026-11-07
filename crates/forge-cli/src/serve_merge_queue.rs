@@ -11,7 +11,11 @@
 
 mod changelog;
 mod update;
-pub(crate) use update::Verify;
+pub(crate) use update::{recover_interrupted_update, Verify};
+#[cfg(test)]
+mod custody_drill;
+#[cfg(test)]
+mod custody_tests;
 #[cfg(test)]
 mod tests;
 
@@ -130,6 +134,32 @@ fn waiting(w: &Watch) -> bool {
     w.queue
         .as_ref()
         .is_some_and(|q| !matches!(q.state, QueueState::Skipped | QueueState::Held))
+}
+
+/// What a skip for "nobody hosts this session" records as the head it skipped at: it can never
+/// equal a real commit, so the first poll after the session is hosted again puts the PR back.
+const UNHOSTED: &str = "<unhosted>";
+
+/// Take a PR whose session the daemon cannot host out of the queue, so the PRs behind it are not
+/// held up by a head nobody will ever drive. The owner's retry makes the daemon try again.
+pub(crate) fn skip_unhosted(w: &mut Watch, why: &str) {
+    let Some(info) = w.queue.as_mut() else { return };
+    let reason = format!("its session is not hosted: {why}");
+    info.state = QueueState::Skipped;
+    info.skipped_head = Some(UNHOSTED.into());
+    info.retried_seq = info.retry_seq;
+    info.reason = Some(reason.clone());
+    w.hold = Some(format!("out of the merge queue: {reason}"));
+    w.last_action = Some(format!("skipped by the merge queue: {reason}"));
+}
+
+/// Already skipped for an unhosted session and not retried since: nothing to attempt.
+pub(crate) fn parked_unhosted(w: &Watch) -> bool {
+    w.queue.as_ref().is_some_and(|q| {
+        q.state == QueueState::Skipped
+            && q.skipped_head.as_deref() == Some(UNHOSTED)
+            && q.retry_seq == q.retried_seq
+    })
 }
 
 fn pr_label(w: &Watch) -> String {

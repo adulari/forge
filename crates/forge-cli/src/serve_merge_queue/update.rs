@@ -84,6 +84,59 @@ fn abort_merge(root: &Path) {
     }
 }
 
+/// The marker the update step keeps in the worktree's git dir while its own `git merge` runs.
+/// A `MERGE_HEAD` with the marker beside it was left by a daemon that died mid-update; one
+/// without it is somebody's own merge (the session resolving a hand-off) and is never touched.
+fn update_marker(root: &Path) -> Option<PathBuf> {
+    let path = git(root, &["rev-parse", "--git-path", "forge-update-merge"]);
+    if !path.ok || path.stdout.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(path.stdout);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
+}
+
+/// Held while the update step's merge runs; every way out of the step drops it, a crash does not.
+struct UpdateMarker(Option<PathBuf>);
+
+impl UpdateMarker {
+    fn set(root: &Path) -> Self {
+        let path = update_marker(root);
+        if let Some(path) = &path {
+            let _ = std::fs::write(path, "");
+        }
+        Self(path)
+    }
+}
+
+impl Drop for UpdateMarker {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Roll back a merge a crashed update left behind. `Some(note)` when it did, so the caller can
+/// say so and try the step again on the next tick.
+pub(crate) fn recover_interrupted_update(root: &Path) -> Option<String> {
+    let marker = update_marker(root)?;
+    if !marker.exists() {
+        return None;
+    }
+    let had_merge = merge_in_progress(root);
+    abort_merge(root);
+    if merge_in_progress(root) {
+        return Some("an interrupted update could not be rolled back".into());
+    }
+    let _ = std::fs::remove_file(&marker);
+    had_merge.then(|| "rolled back an interrupted update; retrying".to_string())
+}
+
 fn tail(text: &str) -> String {
     if text.len() <= TAIL_BYTES {
         return text.to_string();
@@ -234,6 +287,9 @@ pub(crate) fn run_step(root: &Path, base: &str, verify: &[Verify]) -> Step {
     if branch == base {
         return Step::Skip(format!("the session is on the base branch {base}"));
     }
+    if let Some(note) = recover_interrupted_update(root) {
+        return Step::Wait(note);
+    }
     if merge_in_progress(root) {
         return Step::Wait("a merge is already in progress in the worktree".into());
     }
@@ -260,6 +316,7 @@ pub(crate) fn run_step(root: &Path, base: &str, verify: &[Verify]) -> Step {
 
     let mut resolved = Vec::new();
     if needs_merge {
+        let _marker = UpdateMarker::set(root);
         let merge = git(root, &["merge", "--no-edit", &origin_base]);
         if !merge.ok {
             let unmerged: Vec<String> = git(root, &["diff", "--name-only", "--diff-filter=U"])

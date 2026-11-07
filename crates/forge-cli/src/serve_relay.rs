@@ -20,7 +20,10 @@ pub(crate) fn start(state: &Arc<DaemonState>) {
                 ..Default::default()
             };
             let response = create_session(State(state.clone()), Ok(axum::Json(request))).await;
-            if !response.status().is_success() {
+            if response.status().is_success() {
+                crate::serve_custody::successor_hosted(&state, &id).await;
+            } else {
+                crate::serve_custody::settle(&state);
                 // The successor stays in the fleet flag set by the relay, so the next daemon
                 // start retries it.
                 eprintln!(

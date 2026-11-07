@@ -147,6 +147,7 @@ pub(crate) async fn archive_session(
             &format!("archiving session failed: {error}"),
         );
     }
+    crate::serve_custody::on_archive(&state, &id);
     json_response(&serde_json::json!({ "ok": true }))
 }
 

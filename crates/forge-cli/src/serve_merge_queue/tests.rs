@@ -6,7 +6,7 @@ use super::*;
 use crate::serve_pr::Gh;
 use crate::serve_pr_watch::advance;
 
-fn git(dir: &Path, args: &[&str]) -> String {
+pub(super) fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -23,26 +23,26 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
-const CHANGELOG: &str = "# Changelog\n\n## Unreleased\n\n- initial release\n";
+pub(super) const CHANGELOG: &str = "# Changelog\n\n## Unreleased\n\n- initial release\n";
 
 /// A bare remote, one clone per PR session and a fake `gh` that answers from the remote.
-struct World {
-    dir: tempfile::TempDir,
-    clones: Vec<PathBuf>,
+pub(super) struct World {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) clones: Vec<PathBuf>,
 }
 
 impl World {
-    fn bare(&self) -> PathBuf {
+    pub(super) fn bare(&self) -> PathBuf {
         self.dir.path().join("remote.git")
     }
 
-    fn new(prs: &[(&str, &str)]) -> Self {
+    pub(super) fn new(prs: &[(&str, &str)]) -> Self {
         Self::build(prs, false)
     }
 
     /// With `actions`, the seed commit carries a `.forge/config.toml` whose `Verify` action is
     /// `verify.sh`: it logs the tree it ran against and fails on any `broken-*.txt`.
-    fn build(prs: &[(&str, &str)], actions: bool) -> Self {
+    pub(super) fn build(prs: &[(&str, &str)], actions: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         git(root, &["init", "-q", "--bare", "-b", "main", "remote.git"]);
@@ -141,11 +141,11 @@ esac
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    fn gh(&self) -> Gh {
+    pub(super) fn gh(&self) -> Gh {
         Gh::with_program(self.dir.path().join("gh"))
     }
 
-    fn gh_log(&self) -> String {
+    pub(super) fn gh_log(&self) -> String {
         std::fs::read_to_string(self.dir.path().join("gh.log")).unwrap_or_default()
     }
 
@@ -155,7 +155,7 @@ esac
 
     /// Records which PRs' code is in the tree it verifies, and refuses leftover markers or
     /// diverged changelog copies.
-    fn verify(&self) -> Vec<Verify> {
+    pub(super) fn verify(&self) -> Vec<Verify> {
         vec![Verify {
             name: "verify".into(),
             command: format!(
@@ -221,12 +221,12 @@ fn watches(n: usize) -> Vec<Watch> {
         .collect()
 }
 
-fn main_file(w: &World, path: &str) -> String {
+pub(super) fn main_file(w: &World, path: &str) -> String {
     git(&w.bare(), &["show", &format!("main:{path}")])
 }
 
 /// PR4's session resolves its conflict by hand and pushes: the PR re-enters and lands last.
-fn resolve_four_by_hand(w: &World) {
+pub(super) fn resolve_four_by_hand(w: &World) {
     let wt = &w.clones[1];
     let merge = Command::new("git")
         .arg("-C")
@@ -501,7 +501,7 @@ fn act(ws: &mut [Watch], session: &str, action: Action) -> Result<String, Action
     result
 }
 
-fn merged_order(w: &World) -> Vec<String> {
+pub(super) fn merged_order(w: &World) -> Vec<String> {
     w.gh_log()
         .lines()
         .filter(|l| l.starts_with("pr merge"))
@@ -671,7 +671,7 @@ use crate::serve::tests::FORGE_DB_LOCK;
 use crate::serve::{start_session, CreateSessionReq, DaemonState, SessionRegistry};
 use crate::serve_pr_watch::{registry, sweep};
 
-fn mock_state(dir: &Path) -> std::sync::Arc<DaemonState> {
+pub(super) fn mock_state(dir: &Path) -> std::sync::Arc<DaemonState> {
     std::sync::Arc::new(DaemonState {
         registry: std::sync::Arc::new(SessionRegistry::new()),
         terminals: std::sync::Arc::new(crate::serve_terminal::TerminalRegistry::new()),
@@ -688,7 +688,7 @@ fn mock_state(dir: &Path) -> std::sync::Arc<DaemonState> {
 }
 
 /// One daemon session per clone, each with a merge-mode watch armed in clone order.
-async fn arm_sessions(state: &DaemonState, w: &World) -> Vec<String> {
+pub(super) async fn arm_sessions(state: &DaemonState, w: &World) -> Vec<String> {
     let mut ids = Vec::new();
     for (i, clone) in w.clones.iter().enumerate() {
         let handle = start_session(
@@ -707,18 +707,23 @@ async fn arm_sessions(state: &DaemonState, w: &World) -> Vec<String> {
     ids
 }
 
-fn watch_of(id: &str) -> Watch {
+pub(super) fn watch_of(id: &str) -> Watch {
     registry().get(id).expect("armed")
 }
 
-async fn sweeps(state: &std::sync::Arc<DaemonState>, w: &World, rounds: i64, start: i64) {
+pub(super) async fn sweeps(
+    state: &std::sync::Arc<DaemonState>,
+    w: &World,
+    rounds: i64,
+    start: i64,
+) {
     let gh = w.gh();
     for round in 0..rounds {
         sweep(state, &gh, start + round * 60).await;
     }
 }
 
-fn disarm(ids: &[String]) {
+pub(super) fn disarm(ids: &[String]) {
     for id in ids {
         registry().arm(id, Mode::Off, "squash", 0);
     }

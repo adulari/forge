@@ -143,13 +143,13 @@ impl Registry {
         }
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Watch>> {
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Watch>> {
         self.watches
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn persist(&self, watches: &HashMap<String, Watch>) {
+    pub(crate) fn persist(&self, watches: &HashMap<String, Watch>) {
         let Some(path) = &self.path else { return };
         let mut rows: Vec<&Watch> = watches.values().collect();
         rows.sort_by(|a, b| {
@@ -397,6 +397,8 @@ pub(crate) fn start(state: &Arc<DaemonState>) {
     crate::serve_pr_review::install(state);
     let state = state.clone();
     tokio::spawn(async move {
+        crate::serve_custody::settle(&state);
+        crate::serve_custody::recover_interrupted_updates(&state).await;
         let gh = Gh::system();
         let mut tick = tokio::time::interval(TICK);
         loop {
@@ -419,8 +421,13 @@ fn is_force_push(prompt: &str) -> bool {
 }
 
 pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
+    crate::serve_custody::settle(state);
     for watch in registry().all().into_iter().filter(Watch::active) {
-        let Some(handle) = state.registry.get(&watch.session_id).await else {
+        let hosted = state.registry.get(&watch.session_id).await;
+        let Some(handle) = (match hosted {
+            Some(handle) => Some(handle),
+            None => crate::serve_custody::unhosted(state, &watch).await,
+        }) else {
             continue;
         };
         let snapshot = handle.snapshot_rx.borrow().snapshot.clone();

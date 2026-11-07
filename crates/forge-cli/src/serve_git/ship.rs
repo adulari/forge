@@ -507,6 +507,15 @@ pub(crate) async fn ship_session(
     let root = crate::serve_git::session_repo_root(state, session).await?;
     let mut out = ShipResponse::default();
 
+    if let Ok(tail) = state.store.relay_tail(session) {
+        if tail != session {
+            return Ok(out.refuse(
+                "branch",
+                format!("this goal moved to {tail}; ship from there"),
+            ));
+        }
+    }
+
     if let Some(handle) = state.registry.get(session).await {
         if handle.snapshot_rx.borrow().snapshot.busy {
             return Ok(out.refuse(
