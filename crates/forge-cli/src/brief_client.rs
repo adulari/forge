@@ -112,10 +112,13 @@ pub(crate) fn session_line(s: &BriefSession, now: i64) -> String {
 }
 
 pub(crate) fn render(brief: &Brief) -> String {
-    let drain = brief
+    let mut drain = brief
         .drain
         .as_ref()
         .map_or_else(String::new, |d| format!("  {}\n", d.line));
+    if let Some(q) = &brief.queue {
+        drain.push_str(&format!("  {}\n", q.line));
+    }
     if brief.sessions.is_empty() {
         if drain.is_empty() {
             return format!("{}: nothing happened.", title_line(brief));
@@ -188,6 +191,7 @@ mod tests {
             },
             sessions: Vec::new(),
             drain: None,
+            queue: None,
         };
         assert_eq!(
             headline(&brief),
@@ -223,6 +227,7 @@ mod tests {
                 status: "active".into(),
                 queued: 0,
             }),
+            queue: None,
         };
         let out = render(&brief);
         assert!(out.contains("Drain: 7 started, 4 merged, 2 waiting on you, 1 blocked"));

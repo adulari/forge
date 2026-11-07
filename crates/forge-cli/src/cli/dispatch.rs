@@ -489,6 +489,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             mcp_serve::run(http, bind).await
         }
         Command::Browser(op) => crate::cli::commands::browser::browser_cmd(op).await,
+        Command::Prs { op } => crate::cli::commands::prs::prs_cmd(op).await,
         Command::Worktree { op } => crate::cli::commands::worktree::worktree_cmd(op),
         Command::Lattice { op } => lattice_cmd(op).await,
         Command::Import { source } => import_cmd(source),

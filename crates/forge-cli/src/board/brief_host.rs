@@ -39,7 +39,10 @@ pub(crate) fn away_window(last_visit: Option<i64>, now: i64) -> Option<i64> {
 pub(crate) fn card_of(brief: &Brief) -> BriefCard {
     BriefCard {
         title: title_line(brief),
-        headline: headline(brief),
+        headline: match &brief.queue {
+            Some(q) => format!("{} · {}", headline(brief), q.line),
+            None => headline(brief),
+        },
         lines: brief
             .sessions
             .iter()
@@ -68,7 +71,9 @@ pub(crate) async fn show_brief(
     ev: mpsc::UnboundedSender<Ev>,
 ) {
     let event = match fetch_brief(&base, &token, since).await {
-        Ok(brief) if !brief.sessions.is_empty() => BoardEvent::Brief(card_of(&brief)),
+        Ok(brief) if !brief.sessions.is_empty() || brief.queue.is_some() => {
+            BoardEvent::Brief(card_of(&brief))
+        }
         Ok(brief) if manual => BoardEvent::Toast(
             ToastLevel::Info,
             format!(

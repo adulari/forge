@@ -97,6 +97,12 @@ pub(crate) struct DrainBrief {
     pub(crate) queued: usize,
 }
 
+/// The merge queue, as one line: `Merge queue: 3 waiting, next PR #12 (checks), 1 handed back`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct QueueBrief {
+    pub(crate) line: String,
+}
+
 #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Brief {
     pub(crate) since: i64,
@@ -105,6 +111,8 @@ pub(crate) struct Brief {
     pub(crate) sessions: Vec<BriefSession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) drain: Option<DrainBrief>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) queue: Option<QueueBrief>,
 }
 
 fn first_line(text: &str, limit: usize) -> String {
@@ -244,6 +252,7 @@ pub(crate) fn build(
         totals,
         sessions,
         drain: None,
+        queue: None,
     }
 }
 
@@ -299,6 +308,8 @@ async fn brief(
         }
         let mut brief = build(rows, &live, &changes, since, now);
         brief.drain = crate::serve_drain::brief_line(crate::serve_drain::registry(), since);
+        brief.queue =
+            crate::serve_merge_queue::brief_line(&crate::serve_pr_watch::registry().all());
         Ok(brief)
     })
     .await;

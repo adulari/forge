@@ -23,6 +23,7 @@ pub(crate) mod models;
 pub(crate) mod notes;
 pub(crate) mod oauth_flow;
 pub(crate) mod provider;
+pub(crate) mod prs;
 pub(crate) mod queue;
 pub(crate) mod replay;
 pub(crate) mod run;

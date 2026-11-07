@@ -899,6 +899,12 @@ pub(crate) enum Command {
     },
     #[command(subcommand, about = "Attach Forge to a logged-in browser")]
     Browser(crate::browser_args::BrowserOp),
+    /// Pull requests Forge is watching. `forge prs queue` shows the merge queue: which PR lands
+    /// next, which wait behind it, and which were handed back to their session. Needs the daemon.
+    Prs {
+        #[command(subcommand)]
+        op: PrsOp,
+    },
     /// Git worktrees — what they cost on disk, and reclaiming the ones that are safe to remove.
     Worktree {
         #[command(subcommand)]
@@ -1342,6 +1348,22 @@ pub(crate) enum GitCmd {
     },
     /// Print the hook script, for calling from your own hook when `core.hooksPath` is set.
     Hook,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PrsOp {
+    /// The merge queue per repository: position, state and reason for every PR in `merge` mode.
+    Queue {
+        /// Print the daemon's JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+        /// Daemon base URL. Defaults to the local daemon's loopback origin.
+        #[arg(long)]
+        url: Option<String>,
+        /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]

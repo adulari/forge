@@ -212,6 +212,13 @@ impl Daemon {
         Ok(DrainLine::of(&value))
     }
 
+    /// `GET /api/pr/queue`: the merge queue of every repository the daemon watches.
+    pub(crate) async fn merge_queue(&self) -> Result<Value> {
+        let http = local_http_client(&self.base);
+        let url = format!("{}/{}/api/pr/queue", self.base, self.token);
+        self.call(http.get(url)).await
+    }
+
     /// `POST /api/sessions/{id}/ship`: the daemon's answer, refusals included (`ok: false`).
     pub(crate) async fn ship(&self, session: &str, body: &Value) -> Result<Value> {
         let http = local_http_client(&self.base);
