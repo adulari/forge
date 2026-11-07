@@ -181,6 +181,15 @@ pub(crate) fn build_snapshot_frame(
         history_gap: None,
         worktree_setup: ident.worktree_setup,
         worktree_base: ident.worktree_base,
+        outage: app.provider_outage.as_ref().map(|o| remote::SnapOutage {
+            provider: forge_config::provider_of(&o.model).to_string(),
+            model: o.model.clone(),
+            since_unix: o.since,
+            next_try_unix: o.next_try,
+            until_unix: o.until,
+            attempts: o.attempt,
+            reason: o.reason.clone(),
+        }),
         live_tail: view.live_tail.map(|t| remote::SnapLiveTail {
             tool: t.tool,
             lines: t.lines,

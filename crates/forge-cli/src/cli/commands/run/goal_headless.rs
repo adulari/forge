@@ -106,7 +106,18 @@ pub(crate) async fn run_goal_headless(
             Some(forge_types::TaskTier::Complex),
         );
         let outcome = tokio::select! {
-            r = turn => r.context("running goal turn")?,
+            r = turn => match r {
+                Ok(outcome) => outcome,
+                // The provider stayed down for the whole outage allowance: the goal is paused,
+                // not failed, and a re-run picks it up once the provider is back.
+                Err(forge_core::CoreError::ProviderDown { .. }) => {
+                    return Ok(GoalRunEnd::NotMet(
+                        "⏸ goal paused — the provider stayed down; run it again once it is back"
+                            .to_string(),
+                    ));
+                }
+                Err(e) => return Err(e).context("running goal turn"),
+            },
             _ = &mut interrupted => return Ok(interrupted_end()),
         };
         drop(outcome);

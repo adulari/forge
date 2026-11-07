@@ -510,7 +510,7 @@ pub(crate) fn spawn_turn(
             sess.attach_images(images);
         }
         if let Err(e) = sess.run_turn(&prompt).await {
-            sess.notify_error(&format!("turn failed: {e}"));
+            sess.notify_turn_error(&format!("turn failed: {e}"), &e);
         }
     })
 }
@@ -548,7 +548,7 @@ pub(crate) fn spawn_resume_turn(
         let _done = DoneGuard(dt, gen);
         let mut sess = s.lock().await;
         if let Err(e) = sess.run_turn_resuming(&prompt).await {
-            sess.notify_error(&format!("turn failed: {e}"));
+            sess.notify_turn_error(&format!("turn failed: {e}"), &e);
         }
     })
 }
@@ -586,7 +586,7 @@ pub(crate) fn spawn_turn_with(
             sess.attach_images(images);
         }
         if let Err(e) = sess.run_turn_with(&prompt, &guidance, tier).await {
-            sess.notify_error(&format!("turn failed: {e}"));
+            sess.notify_turn_error(&format!("turn failed: {e}"), &e);
         }
     })
 }

@@ -396,6 +396,22 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
     }
 }
 
+/// Why a goal pauses when the provider stayed down for the whole outage allowance.
+const PROVIDER_DOWN_PAUSE: &str =
+    "goal paused — the provider stayed down; /goal resume continues it once it is back";
+
+/// Pause the goal, resumably, when the turn that just ended gave up on a down provider. Nothing
+/// about the goal went wrong and the turn did no work, so it must not be counted as a turn
+/// without progress (six of those stop the goal as stalled). True when it paused.
+pub(crate) fn pause_if_provider_down(app: &mut forge_tui::App) -> bool {
+    if app.last_stop_reason != Some(forge_types::StopReason::ProviderDown) {
+        return false;
+    }
+    app.note(&format!("⏸ {PROVIDER_DOWN_PAUSE}"));
+    app.goal_paused_by_envelope(PROVIDER_DOWN_PAUSE);
+    true
+}
+
 /// Advance a goal run whose in-flight generation just finished: after a turn, evaluate it (when
 /// the evaluator is on); after the evaluation (or with it off), decide.
 pub(crate) async fn advance_goal(
@@ -406,6 +422,10 @@ pub(crate) async fn advance_goal(
 ) -> GoalNext {
     if let Some(stop) = apply_goal_requests(gs, session, app).await {
         return stop;
+    }
+    if !gs.eval.evaluating && pause_if_provider_down(app) {
+        session.lock().await.set_active_goal(None);
+        return GoalNext::Stop;
     }
     if !gs.eval.evaluating {
         gs.eval.pending_tokens = app.turn_in + app.turn_out;

@@ -2359,7 +2359,7 @@ pub(crate) async fn run_chat_tui(
                                     );
                                 }
                                 if let Err(e) = sess.run_turn_with(&p, &[], None).await {
-                                    sess.notify_error(&format!("turn failed: {e}"));
+                                    sess.notify_turn_error(&format!("turn failed: {e}"), &e);
                                 }
                             }));
                         } else {

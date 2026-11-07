@@ -638,6 +638,7 @@ async fn drive_session(
     // edge pushes "failed" instead of "done". Cleared when the next turn starts.
     let mut turn_error: Option<String> = None;
     let mut deferred_push = crate::push::DeferredPush::default();
+    let mut outage_pusher = crate::push::OutagePusher::default();
 
     let queue_store = st.session.lock().await.store.clone();
     let mut persisted_queue: Vec<forge_store::QueuedPrompt> = Vec::new();
@@ -730,6 +731,48 @@ async fn drive_session(
                 UiMsg::Event(e) => {
                     st.steer_tracker
                         .observe(&e, &mut st.queued_prompts, &mut st.app);
+                    // A long provider outage pushes once when it passes two minutes and once on
+                    // recovery, through the same hold-while-attached path as `goal_resumed`.
+                    let outage_msg = match (&e, &last_snap) {
+                        (
+                            forge_tui::PresenterEvent::ProviderOutage {
+                                model,
+                                since,
+                                until,
+                                ..
+                            },
+                            Some(snap),
+                        ) if outage_pusher.outage_probe(now_secs().max(0) as u64, *since) => {
+                            Some(crate::push::PushMessage::provider_outage(
+                                snap,
+                                forge_config::provider_of(model),
+                                &crate::push::clock_label(*since),
+                                &crate::push::clock_label(*until),
+                            ))
+                        }
+                        (
+                            forge_tui::PresenterEvent::ProviderRecovered { model, down_secs },
+                            Some(snap),
+                        ) if outage_pusher.recovered() => {
+                            Some(crate::push::PushMessage::provider_recovered(
+                                snap,
+                                forge_config::provider_of(model),
+                                &forge_core::outage_wait::span(std::time::Duration::from_secs(
+                                    *down_secs,
+                                )),
+                            ))
+                        }
+                        _ => None,
+                    };
+                    if let (Some(msg), Some(snap)) = (outage_msg, &last_snap) {
+                        if crate::push::should_push(
+                            ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+                        ) {
+                            dispatch_push(&apns, &push, &session_id, snap, msg);
+                        } else {
+                            deferred_push.hold(msg);
+                        }
+                    }
                     if let forge_tui::PresenterEvent::Error(m) = &e {
                         turn_error = Some(m.clone());
                         st.record_turn_failure(m);
@@ -930,6 +973,7 @@ async fn drive_session(
                 // A fresh turn starting clears the previous turn's failure latch.
                 if snap.busy && last_snap.as_ref().is_none_or(|p| !p.busy) {
                     turn_error = None;
+                    outage_pusher.new_turn();
                 }
                 // Actionable notifications: needs-a-decision / turn-done / turn-failed
                 // transitions, debounced to zero-connected-clients, dispatched fire-and-forget

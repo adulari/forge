@@ -735,6 +735,23 @@ pub struct Snapshot {
     /// does not know the key ignores it. Never part of the transcript or the model's context.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub live_tail: Option<SnapLiveTail>,
+    /// Set while the turn waits out a provider outage (additive, `mesh.outage_wait_secs`): which
+    /// provider is down, since when, and when the next probe and the end of the wait are. A
+    /// client shows it as a banner on the session. Absent otherwise and from older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outage: Option<SnapOutage>,
+}
+
+/// A turn waiting out a provider outage. Times are unix seconds.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapOutage {
+    pub model: String,
+    pub provider: String,
+    pub since_unix: u64,
+    pub next_try_unix: u64,
+    pub until_unix: u64,
+    pub attempts: u32,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -856,6 +873,7 @@ impl Default for Snapshot {
             worktree_setup: None,
             worktree_base: None,
             live_tail: None,
+            outage: None,
         }
     }
 }

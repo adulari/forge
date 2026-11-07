@@ -359,6 +359,45 @@ impl PushMessage {
         }
     }
 
+    fn session_title(cur: &Snapshot) -> String {
+        if cur.title.is_empty() {
+            let short: String = cur.session_id.chars().take(8).collect();
+            format!("session {short}")
+        } else {
+            cur.title.clone()
+        }
+    }
+
+    /// The turn has been waiting out a provider outage for a while: say so once, while it is
+    /// still waiting, instead of letting the session look dead.
+    pub(crate) fn provider_outage(
+        cur: &Snapshot,
+        provider: &str,
+        since: &str,
+        until: &str,
+    ) -> Self {
+        Self {
+            kind: "outage",
+            session: cur.session_id.clone(),
+            title: Self::session_title(cur),
+            body: format!("{provider} down since {since}, retrying until {until}"),
+            seq: cur.prompt_seq,
+            ttl: TTL_COMPLETION,
+        }
+    }
+
+    /// The provider answered again and the turn carries on where it was.
+    pub(crate) fn provider_recovered(cur: &Snapshot, provider: &str, down: &str) -> Self {
+        Self {
+            kind: "recovered",
+            session: cur.session_id.clone(),
+            title: Self::session_title(cur),
+            body: format!("{provider} back after {down} — turn resumed"),
+            seq: cur.prompt_seq,
+            ttl: TTL_COMPLETION,
+        }
+    }
+
     /// The cleartext JSON the service worker's `push` handler reads (encrypted on the wire).
     pub(crate) fn payload_json(&self) -> String {
         serde_json::json!({
@@ -369,6 +408,49 @@ impl PushMessage {
             "seq": self.seq,
         })
         .to_string()
+    }
+}
+
+/// `HH:MM` local time of a unix timestamp, for a push body.
+pub(crate) fn clock_label(unix_secs: u64) -> String {
+    chrono::DateTime::<chrono::Local>::from(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs),
+    )
+    .format("%H:%M")
+    .to_string()
+}
+
+/// An outage shorter than this is a blip that clears itself; only a longer one is worth a push.
+pub(crate) const OUTAGE_PUSH_AFTER_SECS: u64 = 120;
+
+/// One outage push and one recovery push per turn, whatever number of probes the wait makes.
+#[derive(Debug, Default)]
+pub(crate) struct OutagePusher {
+    announced: bool,
+    outstanding: bool,
+}
+
+impl OutagePusher {
+    /// A new turn begins: its first long outage may push again.
+    pub(crate) fn new_turn(&mut self) {
+        *self = Self::default();
+    }
+
+    /// A probe of the wait at `now_unix`, for an outage that began at `since_unix`. True exactly
+    /// once per turn: the first probe after the outage has lasted [`OUTAGE_PUSH_AFTER_SECS`].
+    pub(crate) fn outage_probe(&mut self, now_unix: u64, since_unix: u64) -> bool {
+        if self.announced || now_unix.saturating_sub(since_unix) < OUTAGE_PUSH_AFTER_SECS {
+            return false;
+        }
+        self.announced = true;
+        self.outstanding = true;
+        true
+    }
+
+    /// The provider is back. True only when the outage was announced, so a recovery nobody was
+    /// told about the start of is not pushed either.
+    pub(crate) fn recovered(&mut self) -> bool {
+        std::mem::take(&mut self.outstanding)
     }
 }
 
@@ -463,6 +545,8 @@ pub(crate) fn push_is_current(msg: &PushMessage, cur: &Snapshot) -> bool {
     match msg.kind {
         "question" => cur.question.is_some(),
         "permission" => cur.permission_prompt.is_some(),
+        "outage" => cur.busy && cur.outage.is_some(),
+        "recovered" => cur.busy,
         _ => !cur.busy && cur.permission_prompt.is_none() && cur.question.is_none(),
     }
 }
@@ -1095,6 +1179,75 @@ mod tests {
         assert_eq!(msg3.seq, 2);
         // No prev frame at all (driver restart): a pending prompt still pushes.
         assert!(detect_trigger(None, &cur, None).is_some());
+    }
+
+    #[test]
+    fn an_outage_pushes_once_after_two_minutes_and_its_recovery_once() {
+        let mut pusher = OutagePusher::default();
+        let since = 1_000;
+        assert!(
+            !pusher.outage_probe(since + 15, since),
+            "a blip is not news"
+        );
+        assert!(!pusher.outage_probe(since + 119, since));
+        assert!(pusher.outage_probe(since + 120, since));
+        assert!(
+            !pusher.outage_probe(since + 600, since),
+            "one push per turn"
+        );
+        assert!(pusher.recovered());
+        assert!(!pusher.recovered(), "one recovery push");
+        assert!(
+            !pusher.outage_probe(since + 900, since),
+            "a second episode in the same turn"
+        );
+        pusher.new_turn();
+        assert!(pusher.outage_probe(since + 900, since));
+    }
+
+    #[test]
+    fn a_recovery_nobody_was_told_the_start_of_is_not_pushed() {
+        let mut pusher = OutagePusher::default();
+        assert!(!pusher.recovered());
+    }
+
+    #[test]
+    fn outage_pushes_name_the_provider_and_stay_current_while_they_hold() {
+        let cur = Snapshot {
+            busy: true,
+            title: "overnight".into(),
+            prompt_seq: 2,
+            outage: Some(crate::remote::SnapOutage {
+                model: "inferhub::flash".into(),
+                provider: "inferhub".into(),
+                since_unix: 1,
+                next_try_unix: 2,
+                until_unix: 3,
+                attempts: 1,
+                reason: "503 no_capacity".into(),
+            }),
+            ..snap()
+        };
+        let down = PushMessage::provider_outage(&cur, "InferHub", "10:18", "18:18");
+        assert_eq!(
+            (down.kind, down.body.as_str()),
+            ("outage", "InferHub down since 10:18, retrying until 18:18")
+        );
+        assert!(push_is_current(&down, &cur));
+        let back = PushMessage::provider_recovered(&cur, "InferHub", "4h09m");
+        assert_eq!(
+            (back.kind, back.body.as_str()),
+            ("recovered", "InferHub back after 4h09m — turn resumed")
+        );
+        let ended = Snapshot {
+            busy: false,
+            outage: None,
+            ..cur.clone()
+        };
+        assert!(
+            !push_is_current(&down, &ended),
+            "a finished turn drops the outage push"
+        );
     }
 
     #[test]

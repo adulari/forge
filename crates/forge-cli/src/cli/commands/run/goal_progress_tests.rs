@@ -336,3 +336,40 @@ mod envelope {
         ));
     }
 }
+
+#[test]
+fn a_turn_that_ended_provider_down_pauses_the_goal_without_counting_it() {
+    let mut app = forge_tui::App::default();
+    app.goal_begin("ship it", &[], None, None);
+    app.apply(forge_tui::PresenterEvent::Done {
+        final_text: String::new(),
+        stop_reason: forge_types::StopReason::ProviderDown,
+    });
+    assert!(pause_if_provider_down(&mut app));
+    let goal = app
+        .goal
+        .as_ref()
+        .expect("the goal is kept for /goal resume");
+    assert_eq!(goal.phase, forge_tui::goal_status::GoalPhase::Paused);
+    assert!(goal
+        .reason
+        .as_deref()
+        .is_some_and(|r| r.contains("provider stayed down")));
+}
+
+#[test]
+fn every_other_stop_reason_leaves_the_goal_running() {
+    for reason in [
+        forge_types::StopReason::FinalAnswer,
+        forge_types::StopReason::NoOutput,
+        forge_types::StopReason::Stalled,
+    ] {
+        let mut app = forge_tui::App::default();
+        app.goal_begin("ship it", &[], None, None);
+        app.apply(forge_tui::PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: reason,
+        });
+        assert!(!pause_if_provider_down(&mut app), "{reason:?}");
+    }
+}
