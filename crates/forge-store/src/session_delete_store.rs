@@ -251,6 +251,7 @@ fn delete_tree(conn: &rusqlite::Connection, targets: &[DeleteTarget]) -> Result<
                AND operation = 'upsert'",
             [id],
         )?;
+        Store::drop_recall_index(&tx, id)?;
         tx.execute("DELETE FROM session WHERE id = ?1", [id])?;
     }
     tx.commit()?;
