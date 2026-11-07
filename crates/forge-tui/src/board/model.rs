@@ -52,6 +52,9 @@ impl Column {
 pub enum Health {
     /// A permission prompt or question is pending.
     Waiting,
+    /// The turn is waiting out a provider outage (`mesh.outage_wait_secs`); nothing is wrong with
+    /// the session, but a person should know the provider is down.
+    ProviderDown,
     /// Busy but showing loop/stall symptoms, or silent for a long time.
     Stalled,
     /// Last turn stopped badly (no output, step/budget cap, interrupted) and nothing has run since.
@@ -66,6 +69,7 @@ impl Health {
     pub fn label(self) -> &'static str {
         match self {
             Self::Waiting => "needs decision",
+            Self::ProviderDown => "provider down",
             Self::Stalled => "stalled",
             Self::Failed => "stopped badly",
             Self::Busy => "working",
@@ -185,10 +189,13 @@ pub fn live_card(row: &FleetRow, snap: Option<&LiveSnapshot>, now: i64) -> Card 
         .and_then(|s| s.last_stop_reason.clone())
         .or_else(|| row.last_stop_reason.clone());
     let signals = live_signals(row, snap, now);
+    let down = busy && live_outage(row, snap).is_some();
     let stalled = busy && signals.iter().any(|s| s.level == SignalLevel::Danger);
     let failed = !busy && !waiting && outcome.as_deref() == Some("failed");
     let health = if waiting {
         Health::Waiting
+    } else if down {
+        Health::ProviderDown
     } else if stalled {
         Health::Stalled
     } else if failed {
@@ -199,7 +206,9 @@ pub fn live_card(row: &FleetRow, snap: Option<&LiveSnapshot>, now: i64) -> Card 
         Health::Idle
     };
     let column = match health {
-        Health::Waiting | Health::Stalled | Health::Failed => Column::Attention,
+        Health::Waiting | Health::ProviderDown | Health::Stalled | Health::Failed => {
+            Column::Attention
+        }
         Health::Busy => Column::Working,
         Health::Idle | Health::Finished => Column::Ready,
     };
@@ -307,6 +316,11 @@ pub fn past_card(row: &PastRow) -> Card {
     }
 }
 
+/// The outage the session is waiting out, from its snapshot when the board has one, else its fleet row.
+fn live_outage<'a>(row: &'a FleetRow, snap: Option<&'a LiveSnapshot>) -> Option<&'a RowOutage> {
+    snap.map_or(row.outage.as_ref(), |s| s.outage.as_ref())
+}
+
 /// The signals for a live session, most severe first. Every one of these is something a person
 /// had to dig out of the journal or the store by hand at least once.
 pub fn live_signals(row: &FleetRow, snap: Option<&LiveSnapshot>, now: i64) -> Vec<Signal> {
@@ -324,7 +338,15 @@ pub fn live_signals(row: &FleetRow, snap: Option<&LiveSnapshot>, now: i64) -> Ve
             .unwrap_or("decision");
         out.push(Signal::danger(format!("waiting on a {what}")));
     }
-    if busy && !waiting {
+    let outage = busy.then(|| live_outage(row, snap)).flatten();
+    if let Some(o) = outage {
+        out.push(Signal::warn(format!(
+            "{} down since {}",
+            o.provider,
+            crate::outage_text::clock(o.since_unix)
+        )));
+    }
+    if busy && !waiting && outage.is_none() {
         let quiet = now.saturating_sub(row.last_activity);
         if quiet >= STALL_AFTER_SECS {
             out.push(Signal::danger(format!("silent for {}", fmt_age(quiet))));

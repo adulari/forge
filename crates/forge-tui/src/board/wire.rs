@@ -41,6 +41,9 @@ pub struct FleetRow {
     /// Runs in a terminal rather than hosted by the daemon; archive/mode are unavailable.
     #[serde(default)]
     pub terminal: bool,
+    /// Set while the session's turn waits out a provider outage.
+    #[serde(default)]
+    pub outage: Option<RowOutage>,
     /// The plan-and-dispatch run this session belongs to, when it belongs to one.
     #[serde(default)]
     pub dispatch_id: Option<String>,
@@ -50,6 +53,19 @@ pub struct FleetRow {
     /// 1-based item number, workers only.
     #[serde(default)]
     pub dispatch_index: Option<usize>,
+}
+
+/// A provider outage a session is waiting out: the fleet row's and the snapshot's shared shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct RowOutage {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub since_unix: u64,
+    #[serde(default)]
+    pub next_try_unix: u64,
+    #[serde(default)]
+    pub until_unix: u64,
 }
 
 /// One row of `GET /api/dispatches` — a plan-and-dispatch run and its items.
@@ -317,6 +333,8 @@ pub struct LiveSnapshot {
     pub prompt_seq: u64,
     #[serde(default)]
     pub notes: Vec<String>,
+    #[serde(default)]
+    pub outage: Option<RowOutage>,
     #[serde(default)]
     pub revision: Option<u64>,
     #[serde(default)]

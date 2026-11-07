@@ -24,6 +24,7 @@ const INDENT: u16 = 4;
 pub(super) fn status_pill(health: Health) -> Option<(String, Style)> {
     let (text, tone) = match health {
         Health::Waiting => ("needs you", styles::err()),
+        Health::ProviderDown => ("provider down", styles::warn()),
         Health::Stalled => ("stalled", styles::warn()),
         Health::Failed => ("failed", styles::err()),
         Health::Busy | Health::Idle | Health::Finished => return None,
@@ -35,7 +36,7 @@ pub(super) fn status_pill(health: Health) -> Option<(String, Style)> {
 pub(super) fn health_pill(health: Health) -> (String, Style) {
     let tone = match health {
         Health::Waiting | Health::Failed => styles::err(),
-        Health::Stalled => styles::warn(),
+        Health::Stalled | Health::ProviderDown => styles::warn(),
         Health::Idle => styles::ok(),
         Health::Busy => styles::muted(),
         Health::Finished => styles::faint(),

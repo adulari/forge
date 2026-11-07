@@ -135,6 +135,43 @@ fn busy_with_danger_signal_classifies_as_stalled_attention() {
 }
 
 #[test]
+fn a_session_waiting_out_an_outage_is_attention_with_its_since_time_not_stalled() {
+    let r = FleetRow {
+        busy: true,
+        last_activity: NOW - 7_000,
+        outage: Some(crate::board::wire::RowOutage {
+            provider: "inferhub".into(),
+            since_unix: 1_700_000_000,
+            ..Default::default()
+        }),
+        ..row("s1")
+    };
+    let c = live_card(&r, None, NOW);
+    assert_eq!(c.health, Health::ProviderDown);
+    assert_eq!(c.column, Column::Attention);
+    let since = crate::outage_text::clock(1_700_000_000);
+    assert_eq!(
+        c.signals.first().map(|s| s.text.clone()),
+        Some(format!("inferhub down since {since}"))
+    );
+    assert!(
+        !c.signals.iter().any(|s| s.text.starts_with("silent")),
+        "a long quiet during an outage is not a stall"
+    );
+    let ok = live_card(
+        &FleetRow {
+            outage: None,
+            ..r.clone()
+        },
+        None,
+        NOW,
+    );
+    assert_eq!(ok.health, Health::Stalled);
+    let waiting = FleetRow { waiting: true, ..r };
+    assert_eq!(live_card(&waiting, None, NOW).health, Health::Waiting);
+}
+
+#[test]
 fn past_row_classifies_as_done_finished() {
     let p = PastRow {
         id: "p1".into(),

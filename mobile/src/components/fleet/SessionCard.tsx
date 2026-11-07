@@ -21,7 +21,7 @@ import { ApiError, type MergeDirtyConflictResponse, type SessionRow } from "../.
 import { useAuth } from "../../lib/auth";
 import { useHasDraft } from "../../lib/drafts";
 import { providerIdOf } from "../../lib/providerFamily";
-import { diffLabel, failedTurn, projectAccent, projectName } from "../../lib/sidebarModel";
+import { diffLabel, failedTurn, projectAccent, projectName, providerDownLabel } from "../../lib/sidebarModel";
 import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useDiscardSession, useMergeSession, usePrefetchSessionHistory } from "../../lib/queries";
 import { transportForBaseUrl } from "../../lib/serverTargets";
@@ -127,6 +127,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const { scheme } = useTheme();
   const hasDraft = useHasDraft(row.id);
   const failed = failedTurn(row);
+  const downLabel = providerDownLabel(row);
   const providerId = providerIdOf(row);
   const project = projectName(row.cwd);
   const diff = diffLabel(row.diff_added, row.diff_removed);
@@ -309,7 +310,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                   onPress={goToSession}
                   onLongPress={openActions}
                   accessibilityRole={Platform.OS === "web" ? undefined : "button"}
-                  accessibilityLabel={`${title}, ${state}${failed ? ", last turn failed" : ""}${hasDraft ? ", unsent draft" : ""}, ${row.cwd}`}
+                  accessibilityLabel={`${title}, ${state}${failed ? ", last turn failed" : ""}${downLabel ? `, provider ${downLabel}` : ""}${hasDraft ? ", unsent draft" : ""}, ${row.cwd}`}
                   accessibilityState={{ selected }}
                   style={styles.cardPressable}
                 >
@@ -330,6 +331,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                       {title}
                     </Text>
                     {failed ? <Badge label="failed" tone="danger" /> : null}
+                    {downLabel ? <Badge label={downLabel} tone="warn" /> : null}
                     {row.pr_watch ? <Badge label={row.pr_watch === "merge" ? "watching - merge" : "watching"} tone="accent" /> : null}
                     <ActionRunningIndicator sessionId={row.id} variant="chip" />
                     {hasDraft ? (
@@ -522,6 +524,7 @@ export const SessionCard = React.memo(SessionCardBase, (prev, next) => {
     a.diff_added === b.diff_added &&
     a.diff_removed === b.diff_removed &&
     a.last_turn_outcome === b.last_turn_outcome &&
+    a.outage?.since_unix === b.outage?.since_unix &&
     a.last_activity === b.last_activity
   );
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { SessionRow } from "./api";
-import { buildProjectGroups, diffLabel, failedTurn, filterByWorkspace, projectAccent, projectName, sortSessions, splitDone, walkNodes, type ScopedSession } from "./sidebarModel";
+import { buildProjectGroups, diffLabel, failedTurn, filterByWorkspace, projectAccent, projectName, providerDownLabel, sessionStateWord, sortSessions, splitDone, walkNodes, type ScopedSession } from "./sidebarModel";
 
 function entry(id: string, over: Partial<SessionRow> = {}, serverId = "s1"): ScopedSession {
   return {
@@ -146,6 +146,28 @@ describe("labels", () => {
     expect(failedTurn({ busy: false, waiting: false, last_turn_outcome: "failed" })).toBe(true);
     expect(failedTurn({ busy: true, waiting: false, last_turn_outcome: "failed" })).toBe(false);
     expect(failedTurn({ busy: false, waiting: false, last_turn_outcome: "success" })).toBe(false);
+  });
+});
+
+describe("provider outage", () => {
+  const down = { provider: "inferhub", since_unix: 1_700_000_000 };
+
+  it("labels a busy session waiting out an outage and nothing else", () => {
+    const label = providerDownLabel({ busy: true, waiting: false, outage: down });
+    expect(label).toMatch(/^down since \d\d:\d\d$/);
+    expect(sessionStateWord({ busy: true, waiting: false, last_turn_outcome: null, outage: down })).toBe(`provider ${label}`);
+    expect(providerDownLabel({ busy: true, waiting: false, outage: null })).toBeNull();
+    expect(providerDownLabel({ busy: false, waiting: false, outage: down })).toBeNull();
+    expect(providerDownLabel({ busy: true, waiting: true, outage: down })).toBeNull();
+  });
+
+  it("orders a down session after one that needs a decision and ahead of the rest", () => {
+    const rows = [
+      entry("newest", { last_activity: 300 }),
+      entry("down", { last_activity: 100, busy: true, outage: down }),
+      entry("asks", { last_activity: 50, waiting: true }),
+    ];
+    expect(sortSessions(rows, "updated").map((e) => e.row.id)).toEqual(["asks", "down", "newest"]);
   });
 });
 

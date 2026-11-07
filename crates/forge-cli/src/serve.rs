@@ -522,6 +522,10 @@ struct SessionRow {
     last_turn_outcome: Option<String>,
     /// The precise stop reason behind `last_turn_outcome` — see [`forge_types::StopReason`].
     last_stop_reason: Option<String>,
+    /// Set while the session's turn waits out a provider outage: which provider, since when.
+    /// Additive; absent otherwise, so an older client never reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outage: Option<crate::remote::SnapOutage>,
     cost_usd: f64,
     /// Context-window fill (v7 fleet fields), same numbers the statusline gauge shows.
     context_tokens: u64,
@@ -556,6 +560,7 @@ fn sort_session_rows(rows: &mut [SessionRow]) {
         a.terminal
             .cmp(&b.terminal)
             .then(b.waiting.cmp(&a.waiting))
+            .then(b.outage.is_some().cmp(&a.outage.is_some()))
             .then(b.busy.cmp(&a.busy))
             .then(b.created_at.cmp(&a.created_at))
             .then_with(|| a.id.cmp(&b.id))
@@ -1324,6 +1329,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             waiting: snap.permission_prompt.is_some() || snap.question.is_some(),
             last_turn_outcome: snap.last_turn_outcome.clone(),
             last_stop_reason: snap.last_stop_reason.clone(),
+            outage: snap.outage.clone(),
             cost_usd: snap.cost_usd,
             context_tokens: snap.context_tokens,
             context_limit: snap.context_limit,
@@ -1356,6 +1362,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             waiting: false,
             last_turn_outcome: None,
             last_stop_reason: None,
+            outage: None,
             cost_usd: 0.0,
             context_tokens: 0,
             context_limit: None,
@@ -7244,6 +7251,7 @@ pub(crate) mod tests {
             waiting,
             last_turn_outcome: Some("failed".into()),
             last_stop_reason: Some("no_output".into()),
+            outage: None,
             cost_usd: 0.5,
             context_tokens: 18_200,
             context_limit: Some(200_000),
@@ -7295,6 +7303,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_session_waiting_out_an_outage_sorts_after_decisions_and_carries_its_provider() {
+        let mk = |id: &str, waiting: bool, down: bool, created_at: i64| SessionRow {
+            id: id.into(),
+            title: String::new(),
+            cwd: "/w".into(),
+            worktree: None,
+            busy: true,
+            waiting,
+            last_turn_outcome: None,
+            last_stop_reason: None,
+            outage: down.then(|| crate::remote::SnapOutage {
+                model: "inferhub::flash".into(),
+                provider: "inferhub".into(),
+                since_unix: 1_700_000_000,
+                next_try_unix: 1_700_000_300,
+                until_unix: 1_700_028_800,
+                attempts: 3,
+                reason: "503 no_capacity".into(),
+            }),
+            cost_usd: 0.0,
+            context_tokens: 0,
+            context_limit: None,
+            model: "m".into(),
+            permission_mode: Some("default".into()),
+            created_at,
+            last_activity: created_at,
+            read_only: false,
+            terminal: false,
+            dispatch: Default::default(),
+            meta: Default::default(),
+        };
+        let mut rows = vec![
+            mk("newest-busy", false, false, 30),
+            mk("down", false, true, 10),
+            mk("asks", true, false, 5),
+        ];
+        sort_session_rows(&mut rows);
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["asks", "down", "newest-busy"]
+        );
+        let v: serde_json::Value = serde_json::to_value(&rows[1]).unwrap();
+        assert_eq!(v["outage"]["provider"], "inferhub");
+        assert_eq!(v["outage"]["since_unix"], 1_700_000_000_u64);
+        let quiet = serde_json::to_value(&rows[2]).unwrap();
+        assert!(
+            quiet.get("outage").is_none(),
+            "absent when the provider is up"
+        );
+    }
+
+    #[test]
     fn fleet_rows_sort_terminal_sessions_after_every_daemon_hosted_one() {
         let mk =
             |id: &str, terminal: bool, waiting: bool, busy: bool, created_at: i64| SessionRow {
@@ -7306,6 +7366,7 @@ pub(crate) mod tests {
                 waiting,
                 last_turn_outcome: None,
                 last_stop_reason: None,
+                outage: None,
                 cost_usd: 0.0,
                 context_tokens: 0,
                 context_limit: None,

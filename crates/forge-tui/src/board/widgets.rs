@@ -286,7 +286,7 @@ pub(super) fn health_glyph(card: &Card, tick: u64) -> (String, Color) {
             color::err(),
         ),
         Health::Busy => (spinner(tick).to_string(), color::fg_muted()),
-        Health::Stalled => (glyphs.warn.into(), color::warn()),
+        Health::Stalled | Health::ProviderDown => (glyphs.warn.into(), color::warn()),
         Health::Failed => (glyphs.fail.into(), color::err()),
         Health::Idle => (glyphs.live_dot.into(), color::ok()),
         Health::Finished => (glyphs.ok.into(), color::fg_muted()),
@@ -296,7 +296,7 @@ pub(super) fn health_glyph(card: &Card, tick: u64) -> (String, Color) {
 pub(super) fn health_tone(health: Health) -> SurfaceTone {
     match health {
         Health::Waiting => SurfaceTone::Danger,
-        Health::Stalled | Health::Failed => SurfaceTone::Warning,
+        Health::ProviderDown | Health::Stalled | Health::Failed => SurfaceTone::Warning,
         Health::Busy => SurfaceTone::Tool,
         Health::Idle => SurfaceTone::Success,
         Health::Finished => SurfaceTone::Brand,

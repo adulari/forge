@@ -2,6 +2,7 @@
 // the session they came from, ordered by the chosen sort, with the per-project change totals.
 // Pure so the grouping rules are tested without rendering anything.
 import type { SessionRow } from "./api";
+import { outageClock } from "./providerOutage";
 import type { ScopedRow } from "./fleetScope";
 import type { SidebarSort } from "./shellPrefs";
 import { parseWorktreePath, repoRootOf } from "./worktreePaths";
@@ -52,6 +53,7 @@ function sortKey(row: SessionRow, sort: SidebarSort): number {
 export function sortSessions(entries: readonly ScopedSession[], sort: SidebarSort): ScopedSession[] {
   return [...entries].sort((a, b) => {
     if (a.row.waiting !== b.row.waiting) return a.row.waiting ? -1 : 1;
+    if (providerDown(a.row) !== providerDown(b.row)) return providerDown(a.row) ? -1 : 1;
     if (!!a.row.starred !== !!b.row.starred) return a.row.starred ? -1 : 1;
     return sortKey(b.row, sort) - sortKey(a.row, sort) || a.row.id.localeCompare(b.row.id);
   });
@@ -175,8 +177,20 @@ export function failedTurn(row: Pick<SessionRow, "busy" | "waiting" | "last_turn
   return !row.busy && !row.waiting && row.last_turn_outcome === "failed";
 }
 
-export function sessionStateWord(row: Pick<SessionRow, "busy" | "waiting" | "last_turn_outcome">): string {
+/** A busy session whose turn is waiting out a provider outage: not stuck, but a person should know. */
+export function providerDown(row: Pick<SessionRow, "busy" | "waiting" | "outage">): boolean {
+  return row.busy && !row.waiting && !!row.outage;
+}
+
+/** `down since 10:18`, or null while the provider is up. */
+export function providerDownLabel(row: Pick<SessionRow, "busy" | "waiting" | "outage">): string | null {
+  return providerDown(row) && row.outage ? `down since ${outageClock(row.outage.since_unix)}` : null;
+}
+
+export function sessionStateWord(row: Pick<SessionRow, "busy" | "waiting" | "last_turn_outcome" | "outage">): string {
   if (row.waiting) return "needs you";
+  const down = providerDownLabel(row);
+  if (down) return `provider ${down}`;
   if (row.busy) return "working";
   return failedTurn(row) ? "last turn failed" : "idle";
 }

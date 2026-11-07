@@ -736,8 +736,9 @@ pub struct Totals {
 /// Ordering weight inside a column: the loudest signal first, waiting ahead of everything.
 fn severity(c: &Card) -> u8 {
     let base = match c.health {
-        super::model::Health::Waiting => 6,
-        super::model::Health::Stalled => 5,
+        super::model::Health::Waiting => 7,
+        super::model::Health::Stalled => 6,
+        super::model::Health::ProviderDown => 5,
         super::model::Health::Failed => 4,
         super::model::Health::Busy => 3,
         super::model::Health::Idle => 2,
