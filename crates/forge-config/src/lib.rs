@@ -472,6 +472,13 @@ pub struct AnywhereConfig {
     /// category is per device and off by default.
     #[serde(default)]
     pub account_sync: AccountSyncConfig,
+    /// Let a paired device ship over the relay: commit a session's files, push, open the PR and
+    /// hand it to the merge queue (`POST /api/sessions/{id}/ship`, `POST /api/pr/watch`). Off by
+    /// default: commit and push from away from this machine is the owner's decision, and the
+    /// relay carries it with the owner's whole token, so it is switched here and never over the
+    /// relay itself.
+    #[serde(default)]
+    pub allow_ship_over_relay: bool,
 }
 
 /// `[anywhere.account_sync]`: per-device opt-ins for syncing setup across the account's machines.
@@ -521,6 +528,7 @@ impl Default for AnywhereConfig {
             sync: true,
             service_url: None,
             account_sync: AccountSyncConfig::default(),
+            allow_ship_over_relay: false,
         }
     }
 }
@@ -546,6 +554,7 @@ const ANYWHERE_KNOWN_KEYS: &[&str] = &[
     "sync",
     "service_url",
     "account_sync",
+    "allow_ship_over_relay",
 ];
 
 /// Unrecognized keys in `raw_toml`'s `[anywhere]` table, each paired with the closest known key

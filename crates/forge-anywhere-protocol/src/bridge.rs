@@ -154,6 +154,32 @@ pub enum RouteId {
     /// body names a session (or PR number) and one of four verbs; it carries no text the agent
     /// would act on, and the daemon scopes it like every other `/api/pr/` write.
     PrQueueAction,
+    // Ship from the phone. The PR reads (`status`, `list`, `detail`, `diff`, `watch`, `watches`)
+    // are always bridged: they only show what `gh` already says about the host's repository.
+    // The two writes that follow commit and push the host's repository, which is what the git
+    // routes above refuse; they are bridged but the host refuses them unless its owner set
+    // `[anywhere] allow_ship_over_relay = true` (docs/features/ship-over-anywhere.md). That
+    // switch is this protocol's "own decision" for commit/push over the relay.
+    /// `GET /api/pr/status?session=`: the checked-out branch's PR with its checks rolled up.
+    PrStatus,
+    /// `GET /api/pr/list?session=[&state=]`: the repository's pull requests.
+    PrList,
+    /// `GET /api/pr/detail?session=&number=`: one PR's summary, comments, commits and files.
+    PrDetail,
+    /// `GET /api/pr/diff?session=&number=`: a PR's patch as diff rows.
+    PrDiff,
+    /// `GET /api/pr/watch?session=`: the session's PR Watch, or `null`.
+    PrWatchGet,
+    /// `GET /api/pr/watches`: every armed PR Watch.
+    PrWatches,
+    /// `POST /api/pr/watch`: arm or disarm PR Watch (`off|fix|merge`). Gated by the host's
+    /// `allow_ship_over_relay`, because `merge` hands the PR to the host's merge queue.
+    PrWatchSet,
+    /// `POST /api/sessions/{id}/ship`: commit the session's files, push, open or reuse the PR and
+    /// arm PR Watch in merge mode. Gated by the host's `allow_ship_over_relay`.
+    SessionShip,
+    /// `POST /api/sessions/{id}/done`: mark a session done (a lifecycle flag, nothing runs).
+    SessionDone,
     WebSocket,
     TerminalWebSocket,
 }
@@ -318,6 +344,28 @@ mod tests {
             .expect("encode response")
             .get("body_blob")
             .is_none());
+    }
+
+    #[test]
+    fn ship_and_pr_routes_use_stable_snake_case_names() {
+        for (route, name) in [
+            (RouteId::PrStatus, "pr_status"),
+            (RouteId::PrList, "pr_list"),
+            (RouteId::PrDetail, "pr_detail"),
+            (RouteId::PrDiff, "pr_diff"),
+            (RouteId::PrWatchGet, "pr_watch_get"),
+            (RouteId::PrWatches, "pr_watches"),
+            (RouteId::PrWatchSet, "pr_watch_set"),
+            (RouteId::SessionShip, "session_ship"),
+            (RouteId::SessionDone, "session_done"),
+        ] {
+            let encoded = serde_json::to_value(route).expect("encode route");
+            assert_eq!(encoded, name);
+            assert_eq!(
+                serde_json::from_value::<RouteId>(encoded).expect("decode route"),
+                route
+            );
+        }
     }
 
     #[test]

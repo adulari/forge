@@ -75,6 +75,13 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::CancelIssueDrain => exact(Method::POST, "/api/issues/drain/cancel"),
         RouteId::PrQueue => exact(Method::GET, "/api/pr/queue"),
         RouteId::PrQueueAction => exact(Method::POST, "/api/pr/queue/action"),
+        RouteId::PrStatus => exact(Method::GET, "/api/pr/status"),
+        RouteId::PrList => exact(Method::GET, "/api/pr/list"),
+        RouteId::PrDetail => exact(Method::GET, "/api/pr/detail"),
+        RouteId::PrDiff => exact(Method::GET, "/api/pr/diff"),
+        RouteId::PrWatchGet => exact(Method::GET, "/api/pr/watch"),
+        RouteId::PrWatches => exact(Method::GET, "/api/pr/watches"),
+        RouteId::PrWatchSet => exact(Method::POST, "/api/pr/watch"),
         RouteId::SessionClaude | RouteId::ExportSessionClaude | RouteId::ContinueClaudeSession => {
             let id = single_path_parameter(request)?;
             let (method, path) = match request.route {
@@ -141,7 +148,9 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         | RouteId::MergeSession
         | RouteId::DiscardSession
         | RouteId::SetSessionMode
-        | RouteId::SessionMessage => {
+        | RouteId::SessionMessage
+        | RouteId::SessionShip
+        | RouteId::SessionDone => {
             if request.parameters.is_empty() || request.parameters.len() > 2 {
                 bail!("session route requires one path parameter and an optional query");
             }
@@ -153,6 +162,8 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
                 RouteId::DiscardSession => "discard",
                 RouteId::SetSessionMode => "mode",
                 RouteId::SessionMessage => "message",
+                RouteId::SessionShip => "ship",
+                RouteId::SessionDone => "done",
                 _ => unreachable!(),
             };
             Ok(RouteTarget {
@@ -181,6 +192,30 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         | RouteId::SessionInput
         | RouteId::WebSocket
         | RouteId::TerminalWebSocket => bail!("route is not an HTTP bridge route"),
+    }
+}
+
+/// The two routes that commit, push or hand a PR to the merge queue from away from the machine.
+/// The host refuses them unless `[anywhere] allow_ship_over_relay` is on.
+pub(super) fn needs_ship_opt_in(route: RouteId) -> bool {
+    matches!(route, RouteId::SessionShip | RouteId::PrWatchSet)
+}
+
+/// Why a gated route was refused, as the JSON body the apps key on (`code`) and show (`error`).
+pub(super) fn ship_opt_in_refusal(request_id: [u8; 16]) -> BridgeResponse {
+    BridgeResponse {
+        request_id,
+        status: 403,
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: serde_json::json!({
+            "error": "Ship over Anywhere is off on this host: enable it in host settings \
+                      ([anywhere] allow_ship_over_relay = true)",
+            "code": "ship_over_relay_off",
+            "setting": "anywhere.allow_ship_over_relay",
+        })
+        .to_string()
+        .into_bytes(),
+        body_blob: None,
     }
 }
 
@@ -621,6 +656,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every ship and PR route maps to exactly one method and path, and refuses the others.
+    #[test]
+    fn ship_and_pr_routes_map_to_exactly_one_method_and_path() {
+        let cases: [(RouteId, &str, &[&str], &str); 9] = [
+            (RouteId::PrStatus, "GET", &["?session=s1"], "/api/pr/status"),
+            (
+                RouteId::PrList,
+                "GET",
+                &["?session=s1&state=open"],
+                "/api/pr/list",
+            ),
+            (
+                RouteId::PrDetail,
+                "GET",
+                &["?session=s1&number=4"],
+                "/api/pr/detail",
+            ),
+            (
+                RouteId::PrDiff,
+                "GET",
+                &["?session=s1&number=4"],
+                "/api/pr/diff",
+            ),
+            (
+                RouteId::PrWatchGet,
+                "GET",
+                &["?session=s1"],
+                "/api/pr/watch",
+            ),
+            (RouteId::PrWatches, "GET", &[], "/api/pr/watches"),
+            (RouteId::PrWatchSet, "POST", &[], "/api/pr/watch"),
+            (
+                RouteId::SessionShip,
+                "POST",
+                &["session_7"],
+                "/api/sessions/session_7/ship",
+            ),
+            (
+                RouteId::SessionDone,
+                "POST",
+                &["session_7"],
+                "/api/sessions/session_7/done",
+            ),
+        ];
+        for (route, method, parameters, path) in cases {
+            let bridged = request(route, method, parameters);
+            let target = route_target(&bridged).unwrap();
+            assert_eq!(target.path, path, "{route:?}");
+            assert_eq!(target.method.as_str(), method, "{route:?}");
+            assert!(validate_command_request(&bridged).is_ok(), "{route:?}");
+            for other in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                if other != method {
+                    assert!(
+                        validate_command_request(&request(route, other, parameters)).is_err(),
+                        "{route:?} must refuse {other}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ship_routes_reject_path_traversal_and_stray_parameters() {
+        for route in [RouteId::SessionShip, RouteId::SessionDone] {
+            for bad in ["../x", "a/b", "", "s 1", "s%2f", "..", "s?x=1"] {
+                assert!(
+                    route_target(&request(route, "POST", &[bad])).is_err(),
+                    "{route:?} must reject session id {bad:?}"
+                );
+            }
+            assert!(route_target(&request(route, "POST", &[])).is_err());
+            assert!(route_target(&request(route, "POST", &["s", "?a=1", "extra"])).is_err());
+        }
+        for route in [RouteId::PrStatus, RouteId::PrWatchGet] {
+            assert!(route_target(&request(route, "GET", &["session=s1"])).is_err());
+            assert!(route_target(&request(route, "GET", &["?session=s1#frag"])).is_err());
+        }
+        assert!(route_target(&request(RouteId::PrWatchSet, "POST", &["?a=1", "x"])).is_err());
+    }
+
+    #[test]
+    fn only_ship_and_watch_write_need_the_relay_opt_in() {
+        for route in [RouteId::SessionShip, RouteId::PrWatchSet] {
+            assert!(needs_ship_opt_in(route), "{route:?}");
+        }
+        for route in [
+            RouteId::PrStatus,
+            RouteId::PrList,
+            RouteId::PrDetail,
+            RouteId::PrDiff,
+            RouteId::PrWatchGet,
+            RouteId::PrWatches,
+            RouteId::SessionDone,
+            RouteId::PrQueue,
+            RouteId::PrQueueAction,
+            RouteId::GitHunk,
+        ] {
+            assert!(!needs_ship_opt_in(route), "{route:?}");
+        }
+        let refusal = ship_opt_in_refusal([3; 16]);
+        assert_eq!(refusal.status, 403);
+        let body: serde_json::Value = serde_json::from_slice(&refusal.body).unwrap();
+        assert_eq!(body["code"], "ship_over_relay_off");
+        assert_eq!(body["setting"], "anywhere.allow_ship_over_relay");
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("allow_ship_over_relay"));
     }
 
     #[test]

@@ -1506,6 +1506,20 @@ async fn dispatch_http_inner(
     local_base_url: &str,
     request: &BridgeRequest,
 ) -> Result<BridgeResponse> {
+    let allow_ship = needs_ship_opt_in(request.route)
+        && forge_config::load()
+            .map(|config| config.anywhere.allow_ship_over_relay)
+            .unwrap_or(false);
+    dispatch_http_with_policy(local_base_url, request, allow_ship).await
+}
+
+/// `allow_ship` is the host's `[anywhere] allow_ship_over_relay`, passed in so a test can run
+/// both settings without touching the process environment.
+async fn dispatch_http_with_policy(
+    local_base_url: &str,
+    request: &BridgeRequest,
+    allow_ship: bool,
+) -> Result<BridgeResponse> {
     if request.route == RouteId::Health {
         return Ok(BridgeResponse {
             request_id: request.request_id,
@@ -1520,6 +1534,9 @@ async fn dispatch_http_inner(
         Method::from_bytes(request.method.as_bytes()).context("invalid method")?;
     if supplied_method != target.method {
         bail!("bridge method does not match its allowlisted route");
+    }
+    if needs_ship_opt_in(request.route) && !allow_ship {
+        return Ok(ship_opt_in_refusal(request.request_id));
     }
     let mut url = Url::parse(local_base_url).context("parse local daemon URL")?;
     let base_path = url.path().trim_end_matches('/');
