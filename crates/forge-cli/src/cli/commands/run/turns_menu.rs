@@ -50,8 +50,8 @@ pub(crate) fn rows(
         },
         PickerRow {
             id: "summary".into(),
-            title: format!("this project, last {WINDOW_DAYS} days"),
-            subtitle: counts_line(project_counts),
+            title: "this project".into(),
+            subtitle: format!("last {WINDOW_DAYS} days, {}", counts_line(project_counts)),
         },
     ];
     for row in unfinished {
@@ -63,12 +63,8 @@ pub(crate) fn rows(
         };
         rows.push(PickerRow {
             id: format!("turn:{}", row.id),
-            title: format!("{}  {}", when(row.started_at), view.label),
-            subtitle: format!(
-                "{}  ·  {}  ·  {mine}",
-                view.advice,
-                view.shape_label.as_deref().unwrap_or("-")
-            ),
+            title: when(row.started_at),
+            subtitle: format!("{}  ·  {}  ·  {mine}", view.label, view.advice),
         });
     }
     if unfinished.is_empty() {
@@ -110,7 +106,7 @@ pub(crate) fn accept(app: &mut forge_tui::App, row: &PickerRow) {
         return;
     };
     app.note(&format!(
-        "turn {}: {}. {}",
+        "turn {} ({}): {}",
         id,
         row.title.trim(),
         row.subtitle.replace("  ·  ", " - ")
@@ -148,8 +144,10 @@ mod tests {
         assert_eq!(rows[0].title, "this session");
         assert_eq!(rows[0].subtitle, "6 turns: 5 finished, 1 no progress");
         assert!(rows[1].subtitle.contains("2 model provider unreachable"));
+        assert!(rows[1].title.chars().count() <= 14);
         assert_eq!(rows[2].id, "turn:7");
-        assert!(rows[2].title.ends_with("no progress"));
+        assert!(rows[2].title.chars().count() <= 14, "{}", rows[2].title);
+        assert!(rows[2].subtitle.starts_with("no progress"));
         assert!(rows[2].subtitle.contains("send continue"));
         assert!(rows[2].subtitle.ends_with("this session"));
         assert!(rows[3].subtitle.ends_with("zzzz9999"));
