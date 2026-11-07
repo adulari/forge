@@ -41,8 +41,8 @@ impl Default for ExpertTriggers {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpertConfig {
     /// The expert. Empty means no expert (the DONE review keeps using `[harness.advisor]`).
-    /// A subscription model (`codex-oauth::*`, `codex-cli::*`, `claude-cli::*`) is allowed here
-    /// and only here, and only with a `budget`.
+    /// A `codex-oauth::*` subscription model is allowed here and only here, and only with a
+    /// `budget`. A CLI bridge (`claude-cli::*`, `codex-cli::*`) is refused: it runs as an agent.
     #[serde(default)]
     pub model: String,
     #[serde(default)]

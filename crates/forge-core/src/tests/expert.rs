@@ -8,7 +8,7 @@ use forge_types::goal_envelope::{EnvelopeCheck, EnvelopeSpec};
 
 const CHEAP: &str = "direct::scripted";
 const EXPERT: &str = "anthropic::expert-test";
-const CODEX_EXPERT: &str = "codex-cli::expert-test";
+const CODEX_EXPERT: &str = "codex-oauth::expert-test";
 const ADVICE: &str = r#"{"diagnosis":"you keep reading lines of big.txt that hold nothing","next_step":"grep for TODO in src/ instead"}"#;
 
 type Plan = Box<dyn Fn(usize) -> Option<(String, Vec<forge_types::ToolCall>)> + Send + Sync>;
@@ -561,9 +561,6 @@ fn only_a_meterable_subscription_with_a_matching_budget_resolves() {
         .unwrap()
         .is_some());
     assert!(resolve_config(&cfg("codex-oauth::gpt-5.6-sol", "claude:5%w")).is_err());
-    assert!(resolve_config(&cfg("claude-cli::opus", "claude:10%5h"))
-        .unwrap()
-        .is_some());
     assert!(
         resolve_config(&cfg("kimi::k3", "codex:5%w")).is_err(),
         "no usage meter"
@@ -572,6 +569,24 @@ fn only_a_meterable_subscription_with_a_matching_budget_resolves() {
     assert!(resolve_config(&cfg("anthropic::sonnet", "$2"))
         .unwrap()
         .is_some());
+}
+
+#[test]
+fn a_cli_bridge_expert_is_refused_because_it_would_run_as_a_tool_using_agent() {
+    use crate::expert::resolve_config;
+    let cfg = |model: &str, budget: &str| forge_config::expert::ExpertConfig {
+        model: model.into(),
+        budget: budget.into(),
+        ..Default::default()
+    };
+    for (model, budget) in [
+        ("claude-cli::opus", "claude:10%5h"),
+        ("codex-cli::gpt-5.6-sol", "codex:5%w"),
+        ("agy-cli::gemini", ""),
+    ] {
+        let err = resolve_config(&cfg(model, budget)).expect_err(model);
+        assert!(err.contains("CLI bridge"), "{model}: {err}");
+    }
 }
 
 #[test]

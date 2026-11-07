@@ -104,6 +104,14 @@ pub(crate) fn resolve_config(
              for usable ids or `forge auth` to add a provider"
         ));
     }
+    // A bridge runs the full tool-using agent with a sink nobody reads, so the "advisor" could
+    // edit, run shell and spawn agents unseen; every other tool-less side call refuses it too.
+    if forge_provider::is_cli_bridge(model) {
+        return Err(format!(
+            "{model} is a CLI bridge, which runs as a tool-using agent and cannot be a \
+             read-only expert; use codex-oauth or an API model"
+        ));
+    }
     if !is_subscription_model(model) {
         if budget.is_empty() {
             return Ok(Some((model.to_string(), None)));
@@ -121,7 +129,7 @@ pub(crate) fn resolve_config(
     let Some(family) = subscription_family(model) else {
         return Err(format!(
             "{model} is a subscription Forge cannot meter, so it cannot be the expert; use \
-             codex-oauth, codex-cli or claude-cli, or an API model"
+             codex-oauth or an API model"
         ));
     };
     if budget.is_empty() {

@@ -27,7 +27,8 @@ tool = true
 ## Which model, and the subscription opt-in
 
 The expert may be an API model (`anthropic::`, `bedrock::`, ...) or, only here, a subscription model:
-`codex-oauth::*`, `codex-cli::*` or `claude-cli::*`. A subscription model is refused unless
+`codex-oauth::*`. A CLI bridge (`claude-cli::*`, `codex-cli::*`, `agy-cli::*`) is refused: it
+runs as a tool-using agent, so it could edit or run commands unseen. A subscription model is refused unless
 `budget` is a slice of that family's window (`codex:5%w`, `claude:10%5h`, same spelling as a goal
 envelope). Other subscriptions (Kimi, OpenCode Go, ...) have no usage meter and cannot be the
 expert. A configuration that cannot be used is ignored with one `expert unavailable: <why>`
