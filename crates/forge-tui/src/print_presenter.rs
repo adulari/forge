@@ -128,6 +128,17 @@ impl Presenter for PrintPresenter {
             )),
             PresenterEvent::Warning(msg) => self.trace(&format!("  ⚠ {msg}")),
             PresenterEvent::Error(msg) => self.error(&msg),
+            PresenterEvent::ProviderOutage {
+                model,
+                since,
+                next_try,
+                until,
+                reason,
+                ..
+            } => self.trace(&crate::outage_line(&model, since, next_try, until, &reason)),
+            PresenterEvent::ProviderRecovered { model, down_secs } => {
+                self.trace(&crate::recovered_line(&model, down_secs));
+            }
             PresenterEvent::ModelSearch { model, retrying } => {
                 let what = if retrying {
                     "retrying…"

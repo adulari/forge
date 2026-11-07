@@ -37,6 +37,7 @@ vtparse = "0.6"
 [target.'cfg(unix)'.dependencies]
 # Ctrl+Z hands the terminal back and stops the process with SIGTSTP.
 libc.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
 # In-memory secret_store for tests (resolver=2: does not leak into production builds).

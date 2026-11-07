@@ -32,7 +32,9 @@ impl App {
             context_limit: self.context_limit,
             streaming: streaming_tail(&self.streaming).to_string(),
             streaming_offset: streaming_offset(&self.streaming),
-            activity: if self.busy {
+            activity: if self.busy && self.provider_outage.is_some() {
+                "provider down — waiting".to_string()
+            } else if self.busy {
                 self.turn_phase_label().to_string()
             } else {
                 String::new()

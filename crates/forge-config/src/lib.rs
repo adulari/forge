@@ -1946,6 +1946,14 @@ pub struct MeshConfig {
     /// immediately with the real error, same as a permanent error (pinned-outage-resilience §1).
     #[serde(default = "default_pin_outage_wait_secs")]
     pub pin_outage_wait_secs: u64,
+    /// How long (seconds) a turn keeps waiting for a DOWN provider after the hot backoff above is
+    /// spent, so an overnight run survives an outage of hours: the turn re-sends its own request
+    /// every 15s doubling to 5 min until the provider answers, then carries on where it was. A
+    /// pinned turn enters this after `pin_outage_wait_secs`; an unpinned one when every model of
+    /// its chain failed as an outage. Also bounded by a run's `--max-minutes` / `/goal` deadline.
+    /// Default 8h. `0` disables it: the turn ends when the hot backoff does, as before.
+    #[serde(default = "default_outage_wait_secs")]
+    pub outage_wait_secs: u64,
     /// Default bench duration (seconds) when a transient failure (rate-limit / 5xx) gives no
     /// server `Retry-After`. Kept short because free-tier rate limits typically reset per MINUTE
     /// (NVIDIA NIM, Groq, Gemini RPM) — a long bench would strand the best free models and push
@@ -2440,6 +2448,10 @@ fn default_rate_limit_wait_secs() -> u64 {
     75
 }
 
+fn default_outage_wait_secs() -> u64 {
+    8 * 60 * 60
+}
+
 fn default_pin_outage_wait_secs() -> u64 {
     // ~10 minutes: generous enough to ride out a real provider blip/redeploy without silently
     // switching a pinned model, short enough that a genuinely dead provider still fails the turn
@@ -2896,6 +2908,7 @@ impl Default for Config {
                 failover: default_failover(),
                 pin_failover: false,
                 pin_outage_wait_secs: default_pin_outage_wait_secs(),
+                outage_wait_secs: default_outage_wait_secs(),
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),

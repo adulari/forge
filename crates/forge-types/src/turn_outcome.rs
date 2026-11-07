@@ -28,6 +28,11 @@ pub enum StopReason {
     /// for long enough, even after a nudge. Edits are kept and `continue` starts a fresh window.
     /// Never a success: the work the person asked for is not known to be done.
     Stalled,
+    /// The model's provider stayed down for the whole outage allowance
+    /// (`mesh.outage_wait_secs`) and the turn gave up waiting. Nothing the person asked for was
+    /// wrong or lost: `continue` resumes it, and `/goal` pauses instead of counting it as no
+    /// progress.
+    ProviderDown,
 }
 
 impl StopReason {
@@ -42,6 +47,7 @@ impl StopReason {
             Self::NoOutput => "no_output",
             Self::TasksUnfinished => "tasks_unfinished",
             Self::Stalled => "stalled",
+            Self::ProviderDown => "provider_down",
         }
     }
 
@@ -57,7 +63,8 @@ impl StopReason {
             | Self::Interrupted
             | Self::NoOutput
             | Self::TasksUnfinished
-            | Self::Stalled => "failed",
+            | Self::Stalled
+            | Self::ProviderDown => "failed",
         }
     }
 

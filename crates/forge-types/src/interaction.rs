@@ -204,6 +204,23 @@ pub enum PresenterEvent {
         model: String,
         retrying: bool,
     },
+    /// The turn's provider is down and the turn is waiting it out (`mesh.outage_wait_secs`). Sent
+    /// before every probe of the long wait so a surface can show "down since / next try / until"
+    /// and keep the countdown honest. Times are unix seconds.
+    ProviderOutage {
+        model: String,
+        since: u64,
+        next_try: u64,
+        attempt: u32,
+        until: u64,
+        reason: String,
+    },
+    /// The provider answered again after a [`PresenterEvent::ProviderOutage`] wait; the turn
+    /// carries on.
+    ProviderRecovered {
+        model: String,
+        down_secs: u64,
+    },
     ToolStart {
         name: String,
         args: String,

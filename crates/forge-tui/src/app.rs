@@ -160,6 +160,24 @@ impl TurnPhase {
     }
 }
 
+/// What the status bar shows while a turn waits out a provider outage. Times are unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderOutageView {
+    pub model: String,
+    pub since: u64,
+    pub next_try: u64,
+    pub attempt: u32,
+    pub until: u64,
+    pub reason: String,
+}
+
+impl ProviderOutageView {
+    /// `InferHub down since 10:18 · next try 10:43 · until 18:18 · Esc stops`.
+    pub fn status_line(&self) -> String {
+        crate::outage_text::status_line(&self.model, self.since, self.next_try, self.until)
+    }
+}
+
 /// Live, per-turn observability derived from real presenter events. The counters make hidden model
 /// reasoning visibly alive, while `last_event_tick` distinguishes an active stream from a request
 /// that has produced no UI events for a long time.
@@ -214,6 +232,10 @@ pub struct App {
     /// searching for a replacement. Set on a `ModelSearch` event, cleared the moment real output
     /// (assistant text / a tool call) arrives, so it shows only during the recovery, never after.
     pub model_search: Option<(String, bool)>,
+    /// The provider outage the turn is waiting out (`mesh.outage_wait_secs`): drives the status
+    /// bar's "down since / next try / until" line. Cleared on recovery and the moment real output
+    /// arrives, like `model_search`.
+    pub provider_outage: Option<ProviderOutageView>,
     pub cost_usd: f64,
     /// Live token counter (tui-token-counter.md): session totals + current context fill.
     pub session_in: u64,
@@ -1344,6 +1366,7 @@ impl App {
             }
             PresenterEvent::ProviderProgress => {
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.provider_events =
                     self.turn_activity.provider_events.saturating_add(1);
                 self.set_turn_activity(
@@ -1356,6 +1379,7 @@ impl App {
             }
             PresenterEvent::ProviderToolInput { name, chars } => {
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.provider_events =
                     self.turn_activity.provider_events.saturating_add(1);
                 let name = tool_display_name(&name).to_string();
@@ -1370,6 +1394,7 @@ impl App {
             }
             PresenterEvent::ProviderThinking { tokens } => {
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.provider_events =
                     self.turn_activity.provider_events.saturating_add(1);
                 self.turn_activity.thinking_tokens = tokens;
@@ -1397,6 +1422,29 @@ impl App {
             // Failover in progress: keep a single animated indicator instead of one warning per
             // hop. The model that just failed is recorded only for the (dim) hint; the status bar's
             // own routing line shows the model now being tried.
+            PresenterEvent::ProviderOutage {
+                model,
+                since,
+                next_try,
+                attempt,
+                until,
+                reason,
+            } => {
+                self.provider_outage = Some(ProviderOutageView {
+                    model,
+                    since,
+                    next_try,
+                    attempt,
+                    until,
+                    reason,
+                });
+                self.set_turn_activity(TurnPhase::Recovering, "provider down — waiting");
+            }
+            PresenterEvent::ProviderRecovered { .. } => {
+                self.provider_outage = None;
+                self.model_search = None;
+                self.set_turn_activity(TurnPhase::ContactingModel, "provider back — resuming");
+            }
             PresenterEvent::ModelSearch { model, retrying } => {
                 self.model_search = Some((model, retrying));
                 self.set_turn_activity(
@@ -1412,6 +1460,7 @@ impl App {
             PresenterEvent::AssistantText(text) => {
                 let text = sanitize_terminal_text(&text);
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.response_chars += text.chars().count();
                 self.set_turn_activity(TurnPhase::Finalizing, "complete response received");
                 self.flush_reasoning();
@@ -1420,6 +1469,7 @@ impl App {
             }
             PresenterEvent::Reasoning(delta) => {
                 self.model_search = None;
+                self.provider_outage = None;
                 let delta = sanitize_terminal_text(&delta);
                 self.transcript_ui
                     .reasoning_since
@@ -1433,6 +1483,7 @@ impl App {
             PresenterEvent::AssistantDelta(delta) => {
                 let delta = sanitize_terminal_text(&delta);
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.response_chars += delta.chars().count();
                 self.throughput
                     .on_delta(delta.chars().count(), std::time::Instant::now());
@@ -1481,6 +1532,7 @@ impl App {
             PresenterEvent::ToolStart { name, args } => {
                 let name = tool_cards::bare_tool_name(&name).to_string();
                 self.model_search = None;
+                self.provider_outage = None;
                 if self.streaming_active {
                     self.finish_streaming_text();
                 }
@@ -1866,6 +1918,7 @@ impl App {
             }
             PresenterEvent::Done { stop_reason, .. } => {
                 self.model_search = None;
+                self.provider_outage = None;
                 // An interrupt aborts the turn's task, so a compaction it was running never sends
                 // CompactionFinished; without this the band stayed up, restarting with each turn.
                 self.compaction = None;

@@ -182,6 +182,35 @@ impl Presenter for HeadlessPresenter {
                     eprintln!("{line}");
                 }
             }
+            PresenterEvent::ProviderOutage {
+                model,
+                since,
+                next_try,
+                until,
+                reason,
+                ..
+            } => {
+                let text = crate::outage_line(&model, since, next_try, until, &reason);
+                if self.styled {
+                    out!(
+                        "{}",
+                        crate::theme::paint(crate::theme::t().palette.fg_muted, &text)
+                    );
+                } else {
+                    out!("{text}");
+                }
+            }
+            PresenterEvent::ProviderRecovered { model, down_secs } => {
+                let text = crate::recovered_line(&model, down_secs);
+                if self.styled {
+                    out!(
+                        "{}",
+                        crate::theme::paint(crate::theme::t().palette.fg_muted, &text)
+                    );
+                } else {
+                    out!("{text}");
+                }
+            }
             PresenterEvent::ModelSearch { model, retrying } => {
                 // Headless has no animated indicator; a concise dim line keeps the failover
                 // record. A same-model retry must not claim a switch is happening (a pin pins).
