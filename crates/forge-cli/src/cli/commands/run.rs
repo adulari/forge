@@ -5043,6 +5043,46 @@ pub(crate) async fn run_chat_tui(
                 if let Some(mut gs) = goal_state.take() {
                     if gs.gen == g {
                         let next = advance_goal(&mut gs, &session, &mut app, &project_cwd).await;
+                        if let GoalNext::Relay(plan) = &next {
+                            let started = goal_relay::switch_in_place(
+                                &session,
+                                Some(&mut tui),
+                                &mut app,
+                                plan,
+                            )
+                            .await;
+                            if let Some(DispatchOutcome::StartGoal {
+                                prompt,
+                                goal,
+                                gates,
+                                max_tokens,
+                                max_minutes,
+                            }) = started
+                            {
+                                turn_gen += 1;
+                                goal_state = Some(GoalState::begin(
+                                    &mut app,
+                                    turn_gen,
+                                    goal,
+                                    gates,
+                                    max_tokens,
+                                    max_minutes,
+                                ));
+                                arm_run_budget(&session, goal_state.as_ref().map(|s| &s.budget));
+                                last_prompt = Some(prompt.clone());
+                                turn_handle = Some(spawn_turn_with(
+                                    prompt,
+                                    vec![GOAL_GUIDANCE.to_string()],
+                                    Some(forge_types::TaskTier::Complex),
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                            }
+                        }
                         let steer =
                             |app: &mut forge_tui::App| dequeue_prompt(&mut queued_prompts, app);
                         if let Some(step) = launch_goal_step(

@@ -65,6 +65,15 @@ pub(crate) fn goal_show_cmd(session: Option<&str>, json: bool) -> Result<()> {
         println!("{stored}");
     } else {
         print!("{}", render_record(&id, &stored)?);
+        let links = super::goal_relay::relay_links(&store, &id);
+        if let Some(chain) = super::goal_relay::chain_line(&links) {
+            let ids: Vec<String> = links
+                .iter()
+                .enumerate()
+                .map(|(i, l)| format!("S{} {}", i + 1, l.session_id))
+                .collect();
+            println!("\nfresh-worker relay: {chain}\n   {}", ids.join(" · "));
+        }
     }
     Ok(())
 }

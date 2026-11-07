@@ -37,7 +37,22 @@ pub(crate) fn relay_links(store: &forge_store::Store, session_id: &str) -> Vec<G
     out
 }
 
-/// What the next stop of a handed-off goal says.
+/// `S1 handed off (wedged) -> S2 holds the goal`, or `None` for a goal that never changed worker.
+pub(crate) fn chain_line(links: &[GoalRelayLink]) -> Option<String> {
+    if links.is_empty() {
+        return None;
+    }
+    Some(
+        links
+            .iter()
+            .enumerate()
+            .map(|(i, link)| link.line(i + 1, "holds the goal"))
+            .collect::<Vec<_>>()
+            .join(" -> "),
+    )
+}
+
+/// The first eight characters of a session id.
 fn short(id: &str) -> &str {
     &id[..id.len().min(8)]
 }
@@ -170,4 +185,71 @@ pub(crate) async fn successor_outcome(
         max_tokens: goal.max_tokens,
         max_minutes: goal.max_minutes,
     })
+}
+
+/// The interactive terminal has one live session, so the successor takes its place: switch to it,
+/// bring back its goal record and start the goal from the brief. `None` when the switch failed
+/// (the predecessor stays on screen with the hand-off noted).
+pub(crate) async fn switch_in_place(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    tui: Option<&mut forge_tui::Tui>,
+    app: &mut forge_tui::App,
+    plan: &RelayPlan,
+) -> Option<DispatchOutcome> {
+    let row = forge_tui::PickerRow {
+        id: plan.successor_id.clone(),
+        title: String::new(),
+        subtitle: String::new(),
+    };
+    if let Err(error) =
+        super::pickers::picker_accept(forge_tui::PickerKind::Sessions, &row, session, tui, app)
+            .await
+    {
+        app.note(&format!("⚠ could not switch to the fresh worker: {error}"));
+        return None;
+    }
+    if session.lock().await.id() != plan.successor_id {
+        return None;
+    }
+    app.goal_clear();
+    let store = open_store().ok()?;
+    goal_envelope::restore(app, &store, &plan.successor_id);
+    successor_outcome(session, app).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_chain_reads_as_one_line_and_is_absent_without_a_relay() {
+        assert_eq!(chain_line(&[]), None);
+        let links = vec![
+            GoalRelayLink {
+                session_id: "a".into(),
+                handed_off: Some("wedged".into()),
+            },
+            GoalRelayLink {
+                session_id: "b".into(),
+                handed_off: Some("worn".into()),
+            },
+            GoalRelayLink {
+                session_id: "c".into(),
+                handed_off: None,
+            },
+        ];
+        assert_eq!(
+            chain_line(&links).as_deref(),
+            Some("S1 handed off (wedged) -> S2 handed off (worn) -> S3 holds the goal")
+        );
+    }
+
+    #[test]
+    fn a_stop_message_loses_its_lead() {
+        assert_eq!(
+            stop_detail("🎯 goal wedged — assertions 2 still fail after 3 validations"),
+            "assertions 2 still fail after 3 validations"
+        );
+        assert_eq!(stop_detail("no lead"), "no lead");
+    }
 }
