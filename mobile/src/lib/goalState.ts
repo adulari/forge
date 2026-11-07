@@ -1,4 +1,12 @@
-import type { GoalPhase, RemoteInput, Snapshot, SnapshotContract, SnapshotEnvelope, SnapshotGoal } from "./ws";
+import type {
+  GoalPhase,
+  RemoteInput,
+  Snapshot,
+  SnapshotContract,
+  SnapshotEnvelope,
+  SnapshotGoal,
+  SnapshotRelayLink,
+} from "./ws";
 
 export interface GoalView {
   objective: string;
@@ -18,6 +26,8 @@ export interface GoalView {
   envelope: SnapshotEnvelope | null;
   /** The validation contract table, when the goal was started with one. */
   contract: SnapshotContract | null;
+  /** The fresh-worker relay chain, oldest session first; empty when the goal never changed worker. */
+  relay: SnapshotRelayLink[];
 }
 
 /** The goal an older host announces only through the CLI's transient notes. */
@@ -58,6 +68,7 @@ function fromWire(goal: SnapshotGoal): GoalView {
     pending: goal.pending,
     envelope: goal.envelope ?? null,
     contract: goal.contract ?? null,
+    relay: goal.relay ?? [],
   };
 }
 
@@ -81,6 +92,7 @@ export function resolveGoal(snapshot: Pick<Snapshot, "goal" | "notes"> | null): 
     pending: null,
     envelope: null,
     contract: null,
+    relay: [],
   };
 }
 
@@ -91,6 +103,7 @@ export const GOAL_PHASE_LABEL: Record<GoalPhase, string> = {
   complete: "complete",
   failed: "failed",
   cancelled: "cancelled",
+  handed_off: "handed off",
 };
 
 export type GoalAction = "pause" | "resume" | "stop" | "edit" | "clear";
@@ -103,6 +116,7 @@ export function goalActions(goal: GoalView): GoalAction[] {
     return goal.pending ? ["stop"] : ["pause", "edit", "stop"];
   }
   if (goal.phase === "paused") return ["resume", "edit", "clear"];
+  if (goal.phase === "handed_off") return [];
   return ["clear"];
 }
 
@@ -224,4 +238,16 @@ export function contractRows(goal: GoalView): ContractRow[] | null {
 /** `Contract · 2/3 pass`, or `Contract · 3 assertions` before the validator has run. */
 export function contractHeadline(goal: GoalView): string | null {
   return goal.contract ? `Contract · ${goal.contract.headline}` : null;
+}
+
+/** `S1 handed off (wedged) → S2 running`; `null` for a goal that never changed worker. */
+export function relayLine(goal: GoalView): string | null {
+  if (goal.relay.length === 0) return null;
+  return goal.relay
+    .map((link, i) => {
+      if (link.reason) return `S${i + 1} handed off (${link.reason})`;
+      const tip = link.state === "active" ? "running" : (GOAL_PHASE_LABEL[link.state] ?? link.state);
+      return `S${i + 1} ${tip}`;
+    })
+    .join(" → ");
 }

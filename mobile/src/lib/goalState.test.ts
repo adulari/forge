@@ -13,6 +13,7 @@ import {
   goalMeta,
   goalStartCommand,
   liveElapsedSecs,
+  relayLine,
   resumeLine,
   resolveGoal,
 } from "./goalState";
@@ -186,5 +187,30 @@ describe("goalStartCommand", () => {
   it("asks for a contract only when the switch is on", () => {
     expect(goalStartCommand("  ship it ", false)).toBe("/goal ship it");
     expect(goalStartCommand("ship it", true)).toBe("/goal --contract ship it");
+  });
+});
+
+describe("relay", () => {
+  it("draws the chain of workers the goal has run in", () => {
+    const goal = resolveGoal({
+      goal: wire({
+        state: "active",
+        relay: [
+          { session_id: "aaaa1111", state: "handed_off", reason: "wedged" },
+          { session_id: "bbbb2222", state: "handed_off", reason: "worn" },
+          { session_id: "cccc3333", state: "active" },
+        ],
+      }),
+      notes: [],
+    });
+    expect(goal && relayLine(goal)).toBe("S1 handed off (wedged) → S2 handed off (worn) → S3 running");
+  });
+
+  it("is absent for a goal that never changed worker and offers no controls once handed off", () => {
+    const plain = resolveGoal({ goal: wire(), notes: [] });
+    expect(plain && relayLine(plain)).toBeNull();
+    const gone = resolveGoal({ goal: wire({ state: "handed_off", relay: [{ session_id: "a", state: "handed_off", reason: "wedged" }] }), notes: [] });
+    expect(gone && goalActions(gone)).toEqual([]);
+    expect(gone?.phase).toBe("handed_off");
   });
 });

@@ -17,6 +17,7 @@ import {
   goalActions,
   goalInput,
   goalMeta,
+  relayLine,
   resolveGoal,
   resumeLine,
 } from "../../lib/goalState";
@@ -126,6 +127,11 @@ function GoalBannerBody({ goal, send }: { goal: GoalView; send: GoalBannerProps[
           {goal.objective}
         </Text>
         {status ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{status}</Text> : null}
+        {relayLine(goal) ? (
+          <Text style={[styles.meta, { color: tokens.accent }]} numberOfLines={2} testID="goal-relay">
+            {relayLine(goal)}
+          </Text>
+        ) : null}
         {goal.reason && (ended || goal.phase === "paused") ? <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>{goal.reason}</Text> : null}
         {resumeLine(goal, Date.now()) ? (
           <Text style={[styles.meta, { color: tokens.accent }]} numberOfLines={1} testID="goal-resume">

@@ -171,7 +171,15 @@ export interface FormAnswer {
   note?: string | null;
 }
 
-export type GoalPhase = "active" | "paused" | "budget_limit" | "complete" | "failed" | "cancelled";
+export type GoalPhase = "active" | "paused" | "budget_limit" | "complete" | "failed" | "cancelled" | "handed_off";
+
+/** One session of a goal's fresh-worker relay chain. `reason` (`wedged`, `stalled`, `worn`) is why
+ * that session handed the goal on; absent for the session that holds it now. */
+export interface SnapshotRelayLink {
+  session_id: string;
+  state: GoalPhase;
+  reason?: string;
+}
 
 /** Additive: the `/goal` run as the host tracks it. Absent from an older host and before any goal
  * starts; a client then falls back to the transient notes (see `lib/goalState.ts`). */
@@ -196,6 +204,8 @@ export interface SnapshotGoal {
   /** The validation contract of a `/goal --contract` run and the validator's latest results.
    * Absent when the goal has none or the host predates it. */
   contract?: SnapshotContract | null;
+  /** The sessions the goal has run in, oldest first. Absent for a goal that never changed worker. */
+  relay?: SnapshotRelayLink[];
 }
 
 /** One row of a goal contract: `state` is `pass`, `fail`, or `pending` before the validator has
