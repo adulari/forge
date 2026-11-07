@@ -78,6 +78,9 @@ pub enum RouteId {
     Blame,
     /// `GET /api/sessions/{id}/jobs`.
     SessionJobs,
+    /// `GET /api/sessions/{id}/history/search?q=`: ranked word search over a session's whole
+    /// history, folded rows included. Read-only.
+    SessionHistorySearch,
     /// `GET /api/sessions/{id}/jobs/{job}/tail`. Two path parameters: the session id, the job id.
     SessionJobTail,
     /// `GET /api/projects/changes?cwd=`.

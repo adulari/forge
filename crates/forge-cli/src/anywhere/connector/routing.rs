@@ -105,12 +105,14 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::SessionDiff
         | RouteId::SessionAgents
         | RouteId::SessionJobs
-        | RouteId::SessionTurns => {
+        | RouteId::SessionTurns
+        | RouteId::SessionHistorySearch => {
             let id = single_path_parameter(request)?;
             let leaf = match request.route {
                 RouteId::SessionDiff => "diff",
                 RouteId::SessionAgents => "agents",
                 RouteId::SessionTurns => "turns",
+                RouteId::SessionHistorySearch => "history/search",
                 _ => "jobs",
             };
             Ok(RouteTarget {
@@ -320,6 +322,7 @@ mod tests {
             (RouteId::Blame, &[][..]),
             (RouteId::ProjectChanges, &[][..]),
             (RouteId::SessionJobs, &["s"][..]),
+            (RouteId::SessionHistorySearch, &["s"][..]),
         ] {
             for method in ["POST", "PUT", "PATCH", "DELETE"] {
                 assert!(
@@ -392,7 +395,7 @@ mod tests {
 
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 26] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 27] = [
             (
                 RouteId::Blame,
                 "GET",
@@ -408,6 +411,13 @@ mod tests {
                 "/api/projects/changes",
             ),
             (RouteId::GitHunk, "POST", &[], Method::POST, "/api/git/hunk"),
+            (
+                RouteId::SessionHistorySearch,
+                "GET",
+                &["session_7", "?q=backoff"],
+                Method::GET,
+                "/api/sessions/session_7/history/search",
+            ),
             (
                 RouteId::SessionJobs,
                 "GET",

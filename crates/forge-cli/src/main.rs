@@ -137,6 +137,7 @@ mod serve_git;
 #[cfg(test)]
 mod serve_going_away;
 mod serve_history;
+mod serve_history_search;
 mod serve_hosts;
 mod serve_ide;
 mod serve_import;
