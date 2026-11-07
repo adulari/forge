@@ -1,7 +1,8 @@
 # Feature: `/goal --contract`, a validation contract and an independent validator
 
-> **Status: shipped (slice S1 of Missions).** Off by default. `/goal --contract <objective>`
-> turns it on for one goal; `[goal] contract = true` turns it on for every goal.
+> **Status: shipped (slices S1 to S3 of Missions).** Off by default. `/goal --contract <objective>`
+> turns it on for one goal; `[goal] contract = true` turns it on for every goal. Sections 7 and 8
+> add the fresh-worker relay and missions (`/goal --mission`).
 
 ## 1. Problem (JTBD)
 > When I hand Forge a big goal and go to bed, I want what "done" means written down before the
@@ -87,6 +88,7 @@ contract = false                  # true: every /goal drafts a contract (same as
 contract_check_timeout_secs = 60  # per check, clamped 1..600
 relay_after_compactions = 4       # hand the goal on once the session was compacted this often; 0 = never for wear
 max_relays = 3                    # fresh-worker hand-offs one goal may make; 0 = relay off
+mission_max_milestones = 6        # most milestones a /goal --mission may have, clamped 2..12
 ```
 
 ## 6. Implementation
@@ -166,7 +168,69 @@ the successor back, finds its goal record and its stored brief, and starts the g
 the first turn it is an ordinary session and comes back paused like any other goal. A predecessor
 whose own record was not yet written is shown as handed off because the relation exists.
 
-## 8. Not in this slice
+## 8. Missions (milestones)
 
-Milestone sequencing and the contract per milestone. Relaying a goal that has no driver (headless
-`forge run`). The phone's start sheet has a contract switch; the relay settings are config only.
+> Slice S3 of Missions. `/goal --mission <objective>` (and the Mission switch on the phone's goal
+> start sheet, which sends the same line). Off unless asked for.
+
+A big goal as one flat list of assertions makes one session carry the whole job. A mission splits
+it into milestones that run in order, each by a fresh worker with a narrow context.
+
+**Draft and approve.** One side call (the contract drafter's model and safety rules) writes
+2 to `mission_max_milestones` (default 6) milestones, each with a title and 2 to 6 assertions
+under the same rules as section 2: a concrete read-only check, unrunnable or write checks dropped
+(one redraft first). A milestone left with fewer than two assertions is dropped, and fewer than two
+milestones is no mission (the goal does not start). The whole mission is shown on one approval
+card, a step per milestone listing its checks; Approve, Cancel or type changes (three revisions)
+work as for a contract, and an unattended run (headless, no client, Bypass) accepts the card as it
+does for a contract.
+
+**Run.** A mission is one `GoalContract` whose `mission` field says which assertions belong to
+which milestone (assertions are numbered once across the mission) and which milestone is current.
+Milestone 1 runs in the current session. After each worker turn the validator runs the assertions
+of the current milestone and of every earlier one; it makes no model call, as before.
+
+- Anything failing goes back as the next prompt. A broken assertion of an earlier milestone is a
+  regression: the prompt says so, lists it first and tells the worker to fix it before finishing
+  the milestone. Because earlier milestones are re-checked at every validation, the regression
+  check always happens at the boundary too.
+- When the current milestone and all earlier ones pass, the mission moves to the next milestone,
+  which starts in a fresh worker session through the relay of section 7 (reason `milestone`,
+  detail `milestone N passed`). The brief is the same deterministic brief, plus the mission line
+  (`you are on milestone 2/4 - <title>`, the later milestones' titles) and only the active
+  assertions. The goal record handed to the successor already names the new current milestone.
+- The mission is achieved when the last milestone is current and every assertion of every
+  milestone passes; the `--gate` commands then run as usual.
+- A milestone hand-off is not a failure: it does not count against `max_relays`, and a wedge still
+  relays up to that cap. With `max_relays = 0`, or in a headless `forge run "/goal --mission ..."`
+  that has no driver to host a second session, the next milestone starts in the same session with
+  a prompt naming what passed and what the next milestone must prove.
+- The wedge rule, budgets, the envelope and the iteration ceiling apply across the whole mission.
+
+**Where it shows.**
+
+- Progress line `milestone 2/4: 3/5 pass` (the current milestone's tally): the composer chip,
+  `/goal status`, the `/contract` overlay title, `forge goal show`, the snapshot, the phone and
+  desktop goal panel.
+- The table groups assertions under `milestone N/M - <title> [done 2/2 | current 1/3 pass |
+  upcoming, 3 assertions]`; the `/contract` overlay prefixes each row `M2/4`.
+- Snapshot: `Snapshot.goal.contract.mission` (`current`, `total`, `progress`, and per milestone
+  `index`, `title`, `state` `done|active|upcoming`, `passed`, `total`, `assertion_ids`); absent for
+  a flat contract. The phone panel draws a `Mission` line and a header per milestone.
+- Push at each boundary: "mission: milestone 1/4 passed - the next one starts in a fresh worker".
+
+**Persistence.** The mission lives inside the contract in `session.goal_state` (no new table, no
+migration): the milestone list, which assertions belong to each, the current milestone and the
+latest results. A daemon restart restores the goal paused on the same milestone, and a successor
+created at a boundary but not yet started comes back from its stored brief and goal record as in
+section 7.
+
+**Code.** `crates/forge-types/src/goal_contract/mission.rs` (model, tolerant parser, prompts, the
+milestone-aware table), `crates/forge-core/src/goal_mission.rs` (draft and approval),
+`crates/forge-cli/src/cli/commands/run/goal_mission.rs` (the `--mission` flag, the step to the
+next milestone; hooks in `goal_progress.rs`), `RelayReason::Milestone` in `goal_relay.rs`.
+
+## 9. Not in this slice
+
+Relaying a goal that has no driver (headless `forge run`; its missions run in one session). Editing
+a running mission's milestones. The relay settings are config only.
