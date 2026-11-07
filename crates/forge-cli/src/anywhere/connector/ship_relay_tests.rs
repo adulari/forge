@@ -487,3 +487,47 @@ async fn a_signed_ship_command_is_dropped_by_the_host_when_the_opt_in_is_off() {
     assert_eq!(fx.commits_on_branch(), 0);
     assert_eq!(fx.gh_calls(), "");
 }
+
+/// A daemon whose ship and CI run take as long as a real repo's CI plan does (minutes), and whose
+/// other routes hang. The clock is paused, so the waits cost no real time.
+async fn slow_daemon() -> String {
+    let slow = |minutes: u64| {
+        post(move || async move {
+            tokio::time::sleep(std::time::Duration::from_secs(minutes * 60)).await;
+            Json(serde_json::json!({ "ok": true }))
+        })
+    };
+    let app = Router::new()
+        .route("/tok/api/sessions/{id}/ship", slow(10))
+        .route("/tok/api/sessions/{id}/ci/run", slow(90))
+        .route(
+            "/tok/api/sessions",
+            get(|| async {
+                tokio::time::sleep(std::time::Duration::from_secs(61)).await;
+                Json(serde_json::json!({ "sessions": [] }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    format!("http://127.0.0.1:{port}/tok")
+}
+
+#[tokio::test(start_paused = true)]
+async fn ship_and_ci_run_outlast_a_ci_plan_while_other_routes_keep_the_minute_cap() {
+    let base = slow_daemon().await;
+    for route in [RouteId::SessionShip, RouteId::SessionCiRun] {
+        let request = bridged(route, "POST", &["session_1"], b"{}");
+        let response = dispatch_http_with_policy(&base, &request, true)
+            .await
+            .unwrap_or_else(|error| panic!("{route:?} was cut off: {error:#}"));
+        assert_eq!(response.status, 200, "{route:?}");
+    }
+    let list = bridged(RouteId::ListSessions, "GET", &[], b"");
+    assert!(
+        dispatch_http_with_policy(&base, &list, true).await.is_err(),
+        "a hung ordinary route still times out"
+    );
+}

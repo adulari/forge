@@ -1564,7 +1564,7 @@ async fn dispatch_http_with_policy(
     url.set_query(target.query.as_deref());
 
     let client = Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(local_call_timeout(request.route))
         .build()
         .context("build local bridge client")?;
     let mut outgoing = client

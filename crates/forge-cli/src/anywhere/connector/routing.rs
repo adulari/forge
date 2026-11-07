@@ -200,6 +200,19 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
     }
 }
 
+/// How long the host waits on the local daemon for one bridged call. Ship and local CI run answer
+/// only once the repo's CI plan has finished (ship gates its push on it), so a minute would cut
+/// them off mid-plan, after ship has already committed. They get the plan's default budget plus
+/// room for the commit message, push and PR.
+pub(super) fn local_call_timeout(route: RouteId) -> Duration {
+    match route {
+        RouteId::SessionShip | RouteId::SessionCiRun => Duration::from_secs(
+            forge_config::ci_parity::settings::DEFAULT_TOTAL_BUDGET_SECS + 10 * 60,
+        ),
+        _ => Duration::from_secs(60),
+    }
+}
+
 /// The two routes that commit, push or hand a PR to the merge queue from away from the machine.
 /// The host refuses them unless `[anywhere] allow_ship_over_relay` is on.
 pub(super) fn needs_ship_opt_in(route: RouteId) -> bool {
