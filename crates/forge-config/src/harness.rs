@@ -110,6 +110,10 @@ pub struct HarnessConfig {
     /// Second-model review at DONE (docs/features/advisor.md).
     #[serde(default)]
     pub advisor: crate::advisor::AdvisorConfig,
+    /// A stronger model on call for stalls, DONE and the model's own questions
+    /// (docs/features/advisor.md).
+    #[serde(default)]
+    pub expert: crate::expert::ExpertConfig,
     /// Whether the model gets the `update_tasks` task-list tool. `false` is the no-task-list arm
     /// of the task-list A/B: the tool is not advertised (nor in the `run_code` catalog), a call is
     /// refused, and the system prompt stops mentioning it. Default `true` until the A/B decides.
@@ -152,6 +156,7 @@ impl Default for HarnessConfig {
             lsp_nav: false,
             subagent_output_schema: false,
             advisor: crate::advisor::AdvisorConfig::default(),
+            expert: crate::expert::ExpertConfig::default(),
             task_tool: true,
             task_nudges: None,
         }
