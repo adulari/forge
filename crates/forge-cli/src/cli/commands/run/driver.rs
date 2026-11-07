@@ -213,11 +213,15 @@ impl Drop for SessionDriverHandle {
 /// the driver keeps running until [`SessionDriverHandle::shutdown`].
 pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriverHandle> {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiMsg>();
+    // Shared with the WS route (one guard per connection) and the push debounce. The session's
+    // presenter reads it too: with no client attached nobody can answer a prompt or read a
+    // warning, and the turn must not stop on the assumption that someone will type `continue`.
+    let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mcp_off = super::session_mcp_off::inherited(spec.resume.as_deref());
     let session = super::session_mcp_off::scoped(
         mcp_off.clone(),
         build_session_with_self_mcp(
-            Box::new(ChannelPresenter::new(ui_tx)),
+            Box::new(ChannelPresenter::with_attached(ui_tx, ws_clients.clone())),
             spec.mock,
             None,
             spec.resume.clone(),
@@ -312,7 +316,6 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     let draining = std::sync::Arc::new(AtomicBool::new(false));
     let daemon_shutdown = std::sync::Arc::new(AtomicBool::new(false));
     let last_activity = std::sync::Arc::new(AtomicI64::new(last_active_at));
-    let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let title = std::sync::Arc::new(std::sync::RwLock::new(spec.title));
     let worktree_setup = crate::serve_worktree_start::SetupCell::default();
 

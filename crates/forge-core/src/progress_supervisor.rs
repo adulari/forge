@@ -162,7 +162,7 @@ impl Session {
             };
         }
         let work = self.preserve_uncommitted_work();
-        let text = format!("ERROR: {headline}\n{work}\nResume: forge run --continue");
+        let text = format!("ERROR: {headline}\n{work}\nResume: forge run --continue (or send `continue` to this session)");
         self.presenter
             .emit(forge_types::PresenterEvent::Error(text.clone()));
         self.turn_hard_guard_abort = true;

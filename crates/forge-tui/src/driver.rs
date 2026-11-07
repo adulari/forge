@@ -115,6 +115,9 @@ pub enum UiMsg {
 pub struct ChannelPresenter {
     tx: Sender<UiMsg>,
     suggestion: Option<crate::RuleSuggestion>,
+    /// How many clients are attached to the session this presenter serves, when that is tracked
+    /// (the daemon). `None` means a person is always there (the terminal UI owns this presenter).
+    attached: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl ChannelPresenter {
@@ -122,6 +125,20 @@ impl ChannelPresenter {
         Self {
             tx,
             suggestion: None,
+            attached: None,
+        }
+    }
+
+    /// A presenter that is attended only while `attached` is above zero. The daemon passes the
+    /// session's connected-client count, so a turn running with every phone and browser closed is
+    /// unattended: stops and prompts that assume a person is there take the headless path.
+    pub fn with_attached(
+        tx: Sender<UiMsg>,
+        attached: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            attached: Some(attached),
+            ..Self::new(tx)
         }
     }
 }
@@ -147,7 +164,17 @@ impl Presenter for ChannelPresenter {
     fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
         // The sender is clonable and forwards to the render loop, so a detached recap task can emit
         // through it after the turn task has ended.
-        Some(Box::new(ChannelPresenter::new(self.tx.clone())))
+        Some(Box::new(Self {
+            tx: self.tx.clone(),
+            suggestion: None,
+            attached: self.attached.clone(),
+        }))
+    }
+
+    fn is_attended(&self) -> bool {
+        self.attached
+            .as_ref()
+            .is_none_or(|n| n.load(std::sync::atomic::Ordering::Relaxed) > 0)
     }
 
     fn confirm(&mut self, tool: &str, side_effect: SideEffect) -> crate::ConfirmOutcome {
@@ -638,6 +665,30 @@ impl Drop for Tui {
 mod tests {
     use super::*;
     use crate::QChoice;
+
+    #[test]
+    fn a_daemon_presenter_is_attended_only_while_a_client_is_connected() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p = ChannelPresenter::with_attached(tx.clone(), clients.clone());
+        assert!(
+            !p.is_attended(),
+            "nobody connected: nobody can read or answer"
+        );
+        let sink = p.recap_sink().expect("a detached sink");
+        clients.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(p.is_attended(), "a client connected mid-turn");
+        assert!(
+            sink.is_attended(),
+            "the detached sink follows the same count"
+        );
+        clients.store(0, std::sync::atomic::Ordering::Relaxed);
+        assert!(!p.is_attended());
+        assert!(
+            ChannelPresenter::new(tx).is_attended(),
+            "the terminal UI owns its presenter: a person is always there"
+        );
+    }
 
     /// Regression: `ask`/`confirm` block on a sync channel from inside the async turn task. On a
     /// single-worker multi-thread runtime a bare `recv()` parks the only worker → the answering
