@@ -92,25 +92,26 @@ pub(crate) fn render(counts: &[(String, i64)], unfinished: &[TurnRow], since: &s
     }
     let mut out = format!("Turn endings, last {since} ({total} turns)\n");
     for (reason, n) in counts {
-        out.push_str(&format!("  {reason:<28} {n:>6}\n"));
+        out.push_str(&format!("  {:<34} {n:>6}\n", forge_core::end_label(reason)));
     }
     if !unfinished.is_empty() {
         out.push_str(&format!(
-            "\nLast {} turns that did not finish\n  {:<7} {:<12} {:<26} {:<24} {}\n",
+            "\nLast {} turns that did not finish\n  {:<7} {:<12} {:<34} {:<26} {}\n",
             unfinished.len(),
             "id",
             "time",
-            "reason",
-            "shape",
+            "what happened",
+            "tail",
             "session"
         ));
         for t in unfinished {
+            let view = forge_core::TurnEndView::from_row(t);
             out.push_str(&format!(
-                "  {:<7} {:<12} {:<26} {:<24} {}\n",
+                "  {:<7} {:<12} {:<34} {:<26} {}\n",
                 t.id,
                 when(t.started_at),
-                t.end_reason.as_deref().unwrap_or("running"),
-                t.last_role_shape.as_deref().unwrap_or("-"),
+                view.label,
+                view.shape_label.as_deref().unwrap_or("-"),
                 &t.session_id[..t.session_id.len().min(8)]
             ));
         }
@@ -130,7 +131,7 @@ fn render_backfill(turns: &[TurnRow]) -> String {
         turns.len()
     );
     for (reason, n) in by_reason {
-        out.push_str(&format!("  {reason:<28} {n:>6}\n"));
+        out.push_str(&format!("  {:<34} {n:>6}\n", forge_core::end_label(reason)));
     }
     out
 }
@@ -167,8 +168,12 @@ mod tests {
             "7d",
         );
         assert!(text.contains("(6 turns)"), "{text}");
-        assert!(text.contains("final_answer"));
-        assert!(text.contains("unanswered_tool_results"));
+        assert!(text.contains("finished"), "{text}");
+        assert!(text.contains("no progress"), "{text}");
+        assert!(text.contains("tool results never read"), "{text}");
+        assert!(!text.contains("final_answer"), "{text}");
+        assert!(!text.contains("unanswered_tool_results"), "{text}");
+        assert!(!text.contains("stalled"), "{text}");
         assert!(text.contains("abcdef12"));
         assert_eq!(
             render(&[], &[], "7d"),
