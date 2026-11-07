@@ -231,6 +231,7 @@ impl Session {
             tasks,
             pending_plan: None,
             pending_contract_goal: None,
+            pending_mission: false,
             contract_outcome: None,
             task_scope: None,
             mcp: None,

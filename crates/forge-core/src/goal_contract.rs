@@ -19,7 +19,7 @@ use forge_types::SideEffect;
 pub(crate) const GOAL_CONTRACT_PURPOSE: &str = "goal-contract";
 const USAGE_PURPOSE: &str = "goal/contract";
 const DRAFT_MAX_SECS: u64 = 120;
-const MAX_REVISIONS: usize = 3;
+pub(crate) const MAX_REVISIONS: usize = 3;
 const LISTING_ENTRIES: usize = 60;
 
 /// The first words of the drafter's system prompt. The offline mock provider keys on it.
@@ -49,7 +49,7 @@ pub enum ContractOutcome {
     Failed(String),
 }
 
-fn listing(root: &std::path::Path) -> String {
+pub(crate) fn listing(root: &std::path::Path) -> String {
     let Ok(entries) = std::fs::read_dir(root) else {
         return "(unreadable)".to_string();
     };
@@ -70,7 +70,12 @@ fn listing(root: &std::path::Path) -> String {
     names.join("\n")
 }
 
-fn draft_input(goal: &str, listing: &str, feedback: &[String], rejected: &[String]) -> String {
+pub(crate) fn draft_input(
+    goal: &str,
+    listing: &str,
+    feedback: &[String],
+    rejected: &[String],
+) -> String {
     let mut out = format!(
         "GOAL:\n{}\n\nWorkspace top level:\n{listing}\n",
         goal.trim()
@@ -115,6 +120,9 @@ impl Session {
     /// Run the pending request: draft, show the card, ask. Revisions loop until the person
     /// approves or cancels. Leaves the result in [`Session::take_goal_contract_outcome`].
     pub(crate) async fn resolve_goal_contract(&mut self) {
+        if std::mem::take(&mut self.pending_mission) {
+            return self.resolve_goal_mission().await;
+        }
         let Some(goal) = self.pending_contract_goal.take() else {
             return;
         };
@@ -187,7 +195,7 @@ impl Session {
         self.contract_outcome = Some(outcome);
     }
 
-    fn ask_contract_approval(&mut self, contract: &GoalContract) -> ContractAnswer {
+    pub(crate) fn ask_contract_approval(&mut self, contract: &GoalContract) -> ContractAnswer {
         let n = contract.assertions.len();
         let question = format!(
             "Approve this goal contract? — {n} assertion{}; the goal is done only when every \
@@ -205,19 +213,7 @@ impl Session {
                 description: "Do not start the goal".into(),
             },
         ];
-        let answer = self.presenter.ask(&question, &options, true);
-        let a = answer.trim();
-        if a.eq_ignore_ascii_case("approve") || a.eq_ignore_ascii_case("yes") {
-            ContractAnswer::Approve
-        } else if a.is_empty()
-            || a == forge_types::NO_ANSWER
-            || a.eq_ignore_ascii_case("cancel")
-            || a.eq_ignore_ascii_case("no")
-        {
-            ContractAnswer::Cancel
-        } else {
-            ContractAnswer::Revise(a.to_string())
-        }
+        parse_answer(&self.presenter.ask(&question, &options, true))
     }
 
     /// One drafting round with a retry when the reply holds fewer than three read-only checks.
@@ -250,6 +246,15 @@ impl Session {
     }
 
     async fn contract_side_call(&mut self, input: &str) -> Result<String, String> {
+        self.drafter_side_call(GOAL_CONTRACT_SYSTEM, input).await
+    }
+
+    /// One trivial-tier completion with `system` and `input`: the contract and mission drafters.
+    pub(crate) async fn drafter_side_call(
+        &mut self,
+        system: &str,
+        input: &str,
+    ) -> Result<String, String> {
         let budget = self.budget_snapshot();
         if budget.status() == BudgetStatus::Exhausted {
             return Err("budget exhausted".to_string());
@@ -271,10 +276,7 @@ impl Session {
         let Some(model) = self.goal_evaluator_model(&decision) else {
             return Err("no side-call model available".to_string());
         };
-        let messages = [
-            Message::system(GOAL_CONTRACT_SYSTEM),
-            Message::user(input.to_string()),
-        ];
+        let messages = [Message::system(system), Message::user(input.to_string())];
         self.presenter.emit(PresenterEvent::AuxiliaryRequest {
             model: model.clone(),
             purpose: "drafting goal contract".to_string(),
@@ -406,10 +408,26 @@ impl Session {
     }
 }
 
-enum ContractAnswer {
+pub(crate) enum ContractAnswer {
     Approve,
     Cancel,
     Revise(String),
+}
+
+/// What the person's reply to an approval card means: Approve, Cancel, or the text of a revision.
+pub(crate) fn parse_answer(answer: &str) -> ContractAnswer {
+    let a = answer.trim();
+    if a.eq_ignore_ascii_case("approve") || a.eq_ignore_ascii_case("yes") {
+        ContractAnswer::Approve
+    } else if a.is_empty()
+        || a == forge_types::NO_ANSWER
+        || a.eq_ignore_ascii_case("cancel")
+        || a.eq_ignore_ascii_case("no")
+    {
+        ContractAnswer::Cancel
+    } else {
+        ContractAnswer::Revise(a.to_string())
+    }
 }
 
 fn renumber(mut assertions: Vec<Assertion>) -> Vec<Assertion> {

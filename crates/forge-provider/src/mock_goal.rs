@@ -21,6 +21,31 @@ pub(crate) fn is_contract_draft(messages: &[Message]) -> bool {
         .any(|m| m.role == Role::System && m.content.starts_with(CONTRACT_MARKER))
 }
 
+/// Must match `forge_core::goal_mission::GOAL_MISSION_MARKER`.
+const MISSION_MARKER: &str = "You are the goal mission planner";
+
+pub(crate) fn is_mission_draft(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .any(|m| m.role == Role::System && m.content.starts_with(MISSION_MARKER))
+}
+
+/// A two-milestone mission every workspace satisfies, so an offline `--mission` goal can be
+/// approved and run.
+pub(crate) fn mission() -> String {
+    serde_json::json!({"milestones": [
+        {"title": "the workspace is in place", "assertions": [
+            {"assertion": "the workspace directory exists", "check": "test -d .", "expect": "exit 0"},
+            {"assertion": "the workspace can be listed", "check": "ls", "expect": "exit 0"},
+        ]},
+        {"title": "the workspace is usable", "assertions": [
+            {"assertion": "the working directory resolves", "check": "pwd", "expect": "prints a path"},
+            {"assertion": "the workspace is readable", "check": "test -r .", "expect": "exit 0"},
+        ]},
+    ]})
+    .to_string()
+}
+
 /// A contract every workspace satisfies, so an offline `--contract` goal can be approved and run.
 pub(crate) fn contract() -> String {
     serde_json::json!({"assertions": [

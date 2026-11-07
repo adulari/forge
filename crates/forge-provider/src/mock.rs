@@ -84,6 +84,9 @@ impl Provider for MockProvider {
         if mock_advisor::is_advisor_review(messages) {
             return Ok(resp(&mock_advisor::reply(messages), vec![], 120, 40));
         }
+        if mock_goal::is_mission_draft(messages) {
+            return Ok(resp(&mock_goal::mission(), vec![], 120, 60));
+        }
         if mock_goal::is_contract_draft(messages) {
             return Ok(resp(&mock_goal::contract(), vec![], 120, 60));
         }

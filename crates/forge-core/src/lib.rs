@@ -66,6 +66,7 @@ mod expert;
 pub mod goal_contract;
 pub mod goal_evaluator;
 mod goal_evidence;
+pub mod goal_mission;
 pub mod goal_relay;
 mod shell_batch;
 mod silence_guard;
@@ -1637,6 +1638,8 @@ pub struct Session {
     pending_plan: Option<forge_types::PlanProposal>,
     /// A `/goal --contract` waiting for its first turn to draft and get the contract approved.
     pending_contract_goal: Option<String>,
+    /// The pending contract is a mission (`/goal --mission`): milestones, not one flat list.
+    pending_mission: bool,
     /// What the contract flow decided, until the goal loop takes it.
     contract_outcome: Option<crate::goal_contract::ContractOutcome>,
     /// Immutable authority for the active turn. Observational scopes cannot mutate state or spawn.

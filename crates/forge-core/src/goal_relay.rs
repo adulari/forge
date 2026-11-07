@@ -22,6 +22,9 @@ pub enum RelayReason {
     Stalled,
     /// The session was compacted `[goal] relay_after_compactions` times.
     Worn,
+    /// A mission milestone passed: the next one starts in a fresh worker. Not a failure, so it
+    /// does not count against `max_relays`.
+    Milestone,
 }
 
 impl RelayReason {
@@ -30,6 +33,7 @@ impl RelayReason {
             Self::Wedged => "wedged",
             Self::Stalled => "stalled",
             Self::Worn => "worn",
+            Self::Milestone => "milestone",
         }
     }
 
@@ -38,6 +42,7 @@ impl RelayReason {
             "wedged" => Self::Wedged,
             "stalled" => Self::Stalled,
             "worn" => Self::Worn,
+            "milestone" => Self::Milestone,
             _ => return None,
         })
     }
@@ -135,15 +140,20 @@ pub fn render_brief(f: &BriefFacts) -> String {
     let short = &f.predecessor_id[..f.predecessor_id.len().min(8)];
     let mut out = format!(
         "Goal: {}\n\nYou are a fresh worker taking over this goal from session {short} \
-         (hand-off {} of {}). It was handed on because it {}{}. The work it did is already in \
+         (hand-off {}{}). It was handed on because it {}{}. The work it did is already in \
          this workspace: read it, do not redo it.\n",
         f.goal,
         f.relay_no,
-        f.max_relays,
+        if f.reason == "milestone" {
+            String::new()
+        } else {
+            format!(" of {}", f.max_relays)
+        },
         match f.reason.as_str() {
             "wedged" => "stopped making progress",
             "stalled" => "stalled without task progress",
             "worn" => "was worn out by repeated compaction",
+            "milestone" => "finished its milestone",
             other => other,
         },
         if f.detail.trim().is_empty() {
@@ -165,7 +175,10 @@ pub fn render_brief(f: &BriefFacts) -> String {
     ));
     if let Some(contract) = &f.contract {
         out.push_str(&format!("\nGoal contract: {}\n", contract.headline()));
-        for a in &contract.assertions {
+        if let Some(mission) = forge_types::goal_contract::mission::brief_lines(contract) {
+            out.push_str(&mission);
+        }
+        for a in contract.active_assertions() {
             match contract.result(a.id) {
                 Some(r) if r.passed => {
                     out.push_str(&format!("PASS {}. {}\n", a.id, a.text));
@@ -270,11 +283,20 @@ impl Session {
         self.store.compaction_count(&self.id).unwrap_or(0)
     }
 
-    /// Hand-offs that led to this session.
+    /// Failure hand-offs that led to this session; a mission's milestone hand-offs do not count.
     pub fn relay_depth(&self) -> u32 {
         self.store
             .relay_predecessors(&self.id)
-            .map_or(0, |p| p.len() as u32)
+            .unwrap_or_default()
+            .iter()
+            .filter(|p| {
+                self.store
+                    .relay_successor(p)
+                    .ok()
+                    .flatten()
+                    .is_none_or(|link| link.reason != RelayReason::Milestone.as_str())
+            })
+            .count() as u32
     }
 
     /// The relay settings and where this session stands against them.

@@ -22,10 +22,11 @@ impl Provider for DrafterProvider {
         _tools: &[ToolSpec],
         _on_event: &mut forge_provider::EventSink<'_>,
     ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
-        let content = if messages
-            .first()
-            .is_some_and(|m| m.content.starts_with(GOAL_CONTRACT_MARKER))
-        {
+        let content = if messages.first().is_some_and(|m| {
+            m.content.starts_with(GOAL_CONTRACT_MARKER)
+                || m.content
+                    .starts_with(crate::goal_mission::GOAL_MISSION_MARKER)
+        }) {
             self.drafts.lock().unwrap().push(
                 messages
                     .last()
@@ -303,4 +304,155 @@ async fn an_unattended_session_accepts_the_contract_it_cannot_ask_about() {
         h.session.take_goal_contract_outcome(),
         Some(ContractOutcome::Approved(_))
     ));
+}
+
+const MISSION: &str = r#"{"milestones":[
+  {"title":"write the notes","assertions":[
+    {"assertion":"notes.txt exists","check":"test -f notes.txt","expect":"exit 0"},
+    {"assertion":"notes.txt says ready","check":"cat notes.txt","contains":"ready"}]},
+  {"title":"clean them up","assertions":[
+    {"assertion":"no TODO left","check":"! grep -q TODO notes.txt"},
+    {"assertion":"a changelog exists","check":"test -f CHANGELOG.md"}]}]}"#;
+
+async fn approved_mission(h: &mut Harness) -> GoalContract {
+    h.session.request_goal_mission("write the notes");
+    h.session.resolve_goal_contract().await;
+    let Some(ContractOutcome::Approved(contract)) = h.session.take_goal_contract_outcome() else {
+        panic!("expected an approved mission");
+    };
+    contract
+}
+
+#[tokio::test]
+async fn an_approved_mission_is_one_contract_with_milestones_and_one_card() {
+    let mut h = harness(&[MISSION], "Approve", Config::default());
+    let contract = approved_mission(&mut h).await;
+    assert!(contract.approved);
+    assert_eq!(contract.assertions.len(), 4);
+    let mission = contract.mission_ref().expect("the contract is a mission");
+    assert_eq!((mission.current, mission.total()), (1, 2));
+    assert_eq!(mission.milestones[1].assertion_ids, vec![3, 4]);
+    let events = h.events.lock().unwrap();
+    let cards: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            PresenterEvent::PlanProposed(p) => Some(p.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(cards.len(), 1, "one approval card for the whole mission");
+    assert!(
+        cards[0].title.contains("2 milestones"),
+        "{}",
+        cards[0].title
+    );
+    assert_eq!(cards[0].steps.len(), 2);
+    assert!(cards[0].steps[0]
+        .title
+        .starts_with("Milestone 1: write the notes"));
+    assert!(cards[0].steps[1].detail.contains("test -f CHANGELOG.md"));
+    drop(events);
+    assert!(h
+        .session
+        .transcript
+        .iter()
+        .any(|m| m.content.contains("milestone 1/2: write the notes")));
+    assert_eq!(*h.other_calls.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn cancelling_a_mission_declines_it_and_typed_changes_redraft() {
+    let mut h = harness(&[MISSION], "Cancel", Config::default());
+    h.session.request_goal_mission("g");
+    h.session.resolve_goal_contract().await;
+    assert_eq!(
+        h.session.take_goal_contract_outcome(),
+        Some(ContractOutcome::Declined)
+    );
+    let mut h = harness(&[MISSION], "add a docs milestone", Config::default());
+    h.session.request_goal_mission("g");
+    h.session.resolve_goal_contract().await;
+    assert!(matches!(
+        h.session.take_goal_contract_outcome(),
+        Some(ContractOutcome::Failed(_))
+    ));
+    let drafts = h.drafts.lock().unwrap();
+    assert!(drafts.len() >= 2 && drafts[1].contains("add a docs milestone"));
+}
+
+#[tokio::test]
+async fn an_unattended_session_accepts_the_mission_it_cannot_ask_about() {
+    let mut h = harness_with(&[MISSION], "Cancel", Config::default(), false);
+    let contract = approved_mission(&mut h).await;
+    assert!(contract.mission_ref().is_some());
+}
+
+#[tokio::test]
+async fn the_milestone_cap_comes_from_config_and_cuts_a_longer_draft() {
+    let five = r#"{"milestones":[
+      {"title":"a","assertions":[{"assertion":"1","check":"true"},{"assertion":"2","check":"true"}]},
+      {"title":"b","assertions":[{"assertion":"1","check":"true"},{"assertion":"2","check":"true"}]},
+      {"title":"c","assertions":[{"assertion":"1","check":"true"},{"assertion":"2","check":"true"}]},
+      {"title":"d","assertions":[{"assertion":"1","check":"true"},{"assertion":"2","check":"true"}]}]}"#;
+    let mut config = Config::default();
+    config.goal.mission_max_milestones = 3;
+    let mut h = harness(&[five], "Approve", config);
+    let contract = approved_mission(&mut h).await;
+    assert_eq!(contract.mission_ref().unwrap().total(), 3);
+    assert!(h.drafts.lock().unwrap()[0].contains("write the notes"));
+    let mut default = harness(&[five], "Approve", Config::default());
+    assert_eq!(
+        approved_mission(&mut default)
+            .await
+            .mission_ref()
+            .unwrap()
+            .total(),
+        4
+    );
+}
+
+#[tokio::test]
+async fn write_checks_are_dropped_and_a_milestone_left_thin_goes_with_them() {
+    let bad = r#"{"milestones":[
+      {"title":"a","assertions":[{"assertion":"1","check":"true"},{"assertion":"2","check":"true"}]},
+      {"title":"b","assertions":[{"assertion":"1","check":"true"},{"assertion":"2","check":"rm -rf build"}]},
+      {"title":"c","assertions":[{"assertion":"1","check":"true"},{"assertion":"2","check":"ls"}]}]}"#;
+    let mut h = harness(&[bad], "Approve", Config::default());
+    let contract = approved_mission(&mut h).await;
+    let titles: Vec<&str> = contract
+        .mission_ref()
+        .unwrap()
+        .milestones
+        .iter()
+        .map(|m| m.title.as_str())
+        .collect();
+    assert_eq!(titles, ["a", "c"]);
+    assert!(contract
+        .assertions
+        .iter()
+        .all(|a| !a.command.contains("rm")));
+}
+
+#[tokio::test]
+async fn a_reply_without_milestones_fails_the_start() {
+    let mut h = harness(&[GOOD], "Approve", Config::default());
+    h.session.request_goal_mission("g");
+    h.session.resolve_goal_contract().await;
+    assert!(matches!(
+        h.session.take_goal_contract_outcome(),
+        Some(ContractOutcome::Failed(_))
+    ));
+}
+
+#[tokio::test]
+async fn the_validator_runs_only_the_scope_it_is_given() {
+    let mut h = harness(&[MISSION], "Approve", Config::default());
+    std::fs::write(h.dir.path().join("notes.txt"), "ready\n").unwrap();
+    let contract = approved_mission(&mut h).await;
+    let results = h
+        .session
+        .validate_goal_contract(&contract.validation_scope())
+        .await;
+    assert_eq!(results.iter().map(|r| r.id).collect::<Vec<_>>(), vec![1, 2]);
+    assert!(results.iter().all(|r| r.passed), "{results:?}");
 }
