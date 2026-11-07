@@ -762,8 +762,8 @@ impl Session {
     }
 }
 
-/// UI-only note stored after a prompt that joined a running turn.
-pub(crate) const STEER_NOTE: &str =
-    "(sent while the turn was running: it joined this turn, it did not start a new one)";
+/// UI-only note stored after a prompt that joined a running turn. Owned by the store, whose tail
+/// classifier must read it as mid-turn.
+pub(crate) const STEER_NOTE: &str = forge_store::STEER_NOTE;
 /// The same for a finished background job's wake message.
-pub(crate) const JOB_WAKE_NOTE: &str = "(a background job finished: its message joined this turn)";
+pub(crate) const JOB_WAKE_NOTE: &str = forge_store::JOB_WAKE_NOTE;

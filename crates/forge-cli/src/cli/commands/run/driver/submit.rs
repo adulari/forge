@@ -404,7 +404,7 @@ impl DriverState {
                 return;
             }
         }
-        self.record_unrun("⏳ queued: runs after the restart.", false);
+        self.record_unrun(forge_store::QUEUED_FOR_RESTART_NOTE, false);
     }
 
     /// Run what the queue holds, in typed order, until a turn is running or the queue is empty.

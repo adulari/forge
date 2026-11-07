@@ -22,6 +22,24 @@ pub(crate) fn is_outage_note(content: &str) -> bool {
         || (content.starts_with(OUTAGE_BACK_MARK) && content.contains(" back after "))
 }
 
+/// UI-only note stored after a prompt that joined a running turn.
+pub const STEER_NOTE: &str =
+    "(sent while the turn was running: it joined this turn, it did not start a new one)";
+/// The same for a finished background job's wake message.
+pub const JOB_WAKE_NOTE: &str = "(a background job finished: its message joined this turn)";
+/// UI-only note for a prompt sent while the daemon drains; it can land while a turn still runs.
+pub const QUEUED_FOR_RESTART_NOTE: &str = "⏳ queued: runs after the restart.";
+
+/// Whether a UI-only system note is written in the MIDDLE of a turn (an outage wait, a steer or
+/// job wake that joined it, a prompt queued during the drain), so it must not read as the turn's
+/// end: the reply it precedes is stored only when the next request finishes.
+pub(crate) fn is_mid_turn_note(content: &str) -> bool {
+    is_outage_note(content)
+        || content == STEER_NOTE
+        || content == JOB_WAKE_NOTE
+        || content == QUEUED_FOR_RESTART_NOTE
+}
+
 /// How far back the transcript tail is read; one assistant tool-call batch plus its results is
 /// far shorter than this.
 const TAIL_ROWS: i64 = 256;
@@ -68,20 +86,21 @@ pub fn classify_tail(newest_first: &[TailRow]) -> TailState {
             return TailState::UserInterrupted;
         }
         if !(last.role == "system"
-            && (last.content.starts_with(RESTART_INTERRUPT_NOTE) || is_outage_note(&last.content)))
+            && (last.content.starts_with(RESTART_INTERRUPT_NOTE)
+                || is_mid_turn_note(&last.content)))
         {
             // A published answer, a budget note, a command echo: the turn ended on it.
             return TailState::Finished;
         }
     }
-    // Restart notes are transparent: a restart that failed to bring the session back must not
-    // hide the cut-off turn from the next one. So are model-facing system rows (context a resume
+    // Restart and mid-turn notes are transparent: a restart that failed to bring the session back
+    // must not hide the cut-off turn from the next one. So are model-facing system rows (context a resume
     // injects, summaries): they are never the end of a turn.
     let mut rows = newest_first.iter().filter(|r| {
         !(r.role == "system"
             && (r.visibility != "ui"
                 || r.content.starts_with(RESTART_INTERRUPT_NOTE)
-                || is_outage_note(&r.content)))
+                || is_mid_turn_note(&r.content)))
     });
     let Some(tail) = rows.next() else {
         return TailState::Finished;
@@ -262,6 +281,58 @@ mod tests {
         );
         store.note_turn_failure(&sid, "gave up").unwrap();
         assert_eq!(store.session_tail_state(&sid).unwrap(), TailState::Finished);
+    }
+
+    #[test]
+    fn a_steer_or_job_wake_note_in_the_middle_of_a_turn_does_not_end_it() {
+        for note in [STEER_NOTE, JOB_WAKE_NOTE] {
+            let (store, sid) = store_with_session();
+            store
+                .add_ui_note(&sid, 1, Role::Assistant, "first reply")
+                .unwrap();
+            store
+                .add_message(&sid, 2, Role::User, "also do this", None)
+                .unwrap();
+            store.add_ui_note(&sid, 3, Role::System, note).unwrap();
+            assert_eq!(
+                store.session_tail_state(&sid).unwrap(),
+                TailState::Interrupted(InterruptedTail::UnansweredPrompt),
+                "a restart before the reply to {note:?} must re-drive the turn"
+            );
+            let enter = format!(
+                "{OUTAGE_ENTER_MARK}drill::flash: provider down since 10:18 (503), retrying"
+            );
+            store.add_ui_note(&sid, 4, Role::System, &enter).unwrap();
+            assert_eq!(
+                store.session_tail_state(&sid).unwrap(),
+                TailState::Interrupted(InterruptedTail::UnansweredPrompt),
+                "an outage wait on top of {note:?} is still mid-turn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prompt_queued_during_the_drain_does_not_end_the_running_turn() {
+        let (store, sid) = store_with_session();
+        store
+            .add_ui_note(&sid, 1, Role::System, QUEUED_FOR_RESTART_NOTE)
+            .unwrap();
+        assert_eq!(
+            store.session_tail_state(&sid).unwrap(),
+            TailState::Interrupted(InterruptedTail::UnansweredPrompt)
+        );
+        let (store, sid) = store_with_session();
+        store
+            .add_message(&sid, 1, Role::Assistant, "done", None)
+            .unwrap();
+        store
+            .add_ui_note(&sid, 2, Role::System, QUEUED_FOR_RESTART_NOTE)
+            .unwrap();
+        assert_eq!(
+            store.session_tail_state(&sid).unwrap(),
+            TailState::Finished,
+            "queued while idle: nothing to re-drive"
+        );
     }
 
     #[test]

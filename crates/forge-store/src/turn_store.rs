@@ -6,7 +6,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
 use crate::interrupted_turn_store::{
-    classify_tail, is_outage_note, InterruptedTail, TailRow, TailState,
+    classify_tail, is_mid_turn_note, InterruptedTail, TailRow, TailState,
 };
 use crate::{Result, Store};
 
@@ -399,9 +399,9 @@ impl Store {
             .optional()?
         };
         if let Some((role, visibility, content)) = newest {
-            // An outage note is written in the middle of the turn: it says the wait began, never
-            // how the turn ended.
-            if role == "system" && visibility == "ui" && !is_outage_note(&content) {
+            // An outage, steer or job-wake note is written in the middle of the turn: it never
+            // says how the turn ended.
+            if role == "system" && visibility == "ui" && !is_mid_turn_note(&content) {
                 return Ok(false);
             }
         }
@@ -611,6 +611,21 @@ mod tests {
         assert!(store
             .note_turn_stopped(&sid, "⚠ Turn failed: provider still down")
             .unwrap());
+    }
+
+    #[test]
+    fn a_stop_after_a_steer_is_still_noted() {
+        let (store, sid) = store_with_prompt();
+        store
+            .add_message(&sid, 1, Role::User, "also do this", None)
+            .unwrap();
+        store
+            .add_ui_note(&sid, 2, Role::System, crate::STEER_NOTE)
+            .unwrap();
+        assert!(store
+            .note_turn_stopped(&sid, "⚠ Turn stopped (stalled): send continue")
+            .unwrap());
+        assert_eq!(store.session_tail_state(&sid).unwrap(), TailState::Finished);
     }
 
     #[test]

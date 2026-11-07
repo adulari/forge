@@ -195,6 +195,35 @@ mod tests {
     }
 
     #[test]
+    fn mark_interrupted_re_drives_a_turn_cut_off_after_a_steer() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        store.add_message(&sid, 0, Role::User, "go", None).unwrap();
+        store
+            .add_ui_note(&sid, 1, Role::Assistant, "first reply")
+            .unwrap();
+        store
+            .add_message(&sid, 2, Role::User, "also do this", None)
+            .unwrap();
+        store
+            .add_ui_note(&sid, 3, Role::System, forge_store::STEER_NOTE)
+            .unwrap();
+        store
+            .add_ui_note(
+                &sid,
+                4,
+                Role::System,
+                "⏸ drill::flash: provider down since 10:18 (503), retrying every <=5 min",
+            )
+            .unwrap();
+        assert!(mark_interrupted(
+            &store,
+            &mut RedriveLedger::default(),
+            &sid
+        ));
+    }
+
+    #[test]
     fn mark_interrupted_skips_finished_and_user_stopped_sessions() {
         let store = Store::open_in_memory().unwrap();
         let mut ledger = RedriveLedger::default();
