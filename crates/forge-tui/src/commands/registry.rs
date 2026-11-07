@@ -51,6 +51,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/jobs",
     },
     Command {
+        name: "turns",
+        desc: "why turns stopped short, and what to do about it",
+        usage: "/turns",
+    },
+    Command {
         name: "sessions",
         desc: "browse & resume past sessions",
         usage: "/sessions",

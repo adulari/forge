@@ -231,6 +231,40 @@ impl Store {
         Ok(rows)
     }
 
+    /// [`Store::turn_end_counts`] for every session working in `cwd` (a project root).
+    pub fn project_turn_end_counts(&self, since: i64, cwd: &str) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT COALESCE(end_reason, 'running'), COUNT(*) AS n FROM turn \
+             WHERE started_at >= ?1 AND session_id IN (SELECT id FROM session WHERE cwd = ?2) \
+             GROUP BY 1 ORDER BY n DESC, 1",
+        )?;
+        let rows = stmt
+            .query_map(params![since, cwd], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// [`Store::recent_unfinished_turns`] for every session working in `cwd`.
+    pub fn project_unfinished_turns(
+        &self,
+        since: i64,
+        cwd: &str,
+        limit: usize,
+    ) -> Result<Vec<TurnRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {COLS} FROM turn WHERE started_at >= ?1 \
+             AND session_id IN (SELECT id FROM session WHERE cwd = ?2) \
+             AND ended_at IS NOT NULL AND end_reason NOT IN ('final_answer', 'plan_presented') \
+             ORDER BY started_at DESC, id DESC LIMIT ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![since, cwd, limit as i64], row_of)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// Reconstruct turns from the transcript of sessions that have no `turn` row for a prompt
     /// yet: shape only, reason `unknown_<shape>`. A prompt is a user row that is not a harness
     /// nudge; steers cannot be told apart from prompts in old data, so they count as turns.
@@ -514,6 +548,30 @@ mod tests {
         assert_eq!(store.write_backfilled_turns(&turns).unwrap(), 2);
         assert!(store.backfill_turns(None, 0).unwrap().is_empty());
         assert_eq!(store.write_backfilled_turns(&turns).unwrap(), 0);
+    }
+
+    #[test]
+    fn project_scope_follows_the_session_cwd() {
+        let store = Store::open_in_memory().unwrap();
+        let mine = store.create_session("/work/a", "default").unwrap();
+        let other = store.create_session("/work/b", "default").unwrap();
+        for (sid, reason) in [
+            (&mine, "stalled"),
+            (&mine, "final_answer"),
+            (&other, "stalled"),
+        ] {
+            let id = store.open_turn(sid, 1).unwrap();
+            store.close_turn(id, reason, None).unwrap();
+        }
+        let counts = store.project_turn_end_counts(0, "/work/a").unwrap();
+        assert_eq!(counts.iter().map(|(_, n)| n).sum::<i64>(), 2);
+        let unfinished = store.project_unfinished_turns(0, "/work/a", 10).unwrap();
+        assert_eq!(unfinished.len(), 1);
+        assert_eq!(unfinished[0].session_id, mine);
+        assert!(store
+            .project_unfinished_turns(0, "/work/none", 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

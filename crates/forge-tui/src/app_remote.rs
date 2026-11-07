@@ -199,6 +199,7 @@ pub fn picker_kind_wire(kind: crate::commands::PickerKind) -> &'static str {
         P::RewindAction => "picker:rewind_action",
         P::ErrorReport => "picker:error_report",
         P::ControlTools => "picker:control_tools",
+        P::Turns => "picker:turns",
     }
 }
 

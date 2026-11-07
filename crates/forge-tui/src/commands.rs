@@ -178,6 +178,8 @@ pub enum CommandAction {
     Ship,
     /// Open the control-tools menu: which tools agents may use to drive the app, and what they did.
     Control,
+    /// Open the turn endings overlay (`/turns`).
+    Turns,
     /// Open the agent CLI install/update menu (`/clis`).
     AgentClis,
     /// Show or hide the session strip (`/strip [on|off]`).
@@ -566,6 +568,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "strip" => CommandAction::Strip(arg),
         "sidebar" => CommandAction::Sidebar(arg),
         "jobs" | "shells" => CommandAction::Jobs,
+        "turns" => CommandAction::Turns,
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),
