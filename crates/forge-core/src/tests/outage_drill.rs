@@ -154,6 +154,16 @@ fn pinned(model: &str) -> Arc<dyn Router> {
 const ALLOWANCE: u64 = 8 * 60 * 60;
 
 impl Drill {
+    fn prompts(&self) -> Vec<String> {
+        self.store
+            .load_messages(&self.session.id)
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.role == Role::User)
+            .map(|m| m.content)
+            .collect()
+    }
+
     fn notes(&self) -> Vec<String> {
         self.store
             .load_messages(&self.session.id)
@@ -537,6 +547,38 @@ async fn t7_a_transient_bench_at_turn_start_is_waited_out_not_refused() {
         "{notes:?}"
     );
     assert!(notes.iter().any(|n| n.starts_with('▶')), "{notes:?}");
+    assert_eq!(d.prompts(), vec!["continue".to_string()]);
+}
+
+/// A daemon restart or Esc drops the turn task in the middle of the turn-start wait. The prompt
+/// must already be in the transcript then, or it is lost and the tail reads as finished, so the
+/// restart re-drive skips the session.
+#[tokio::test]
+async fn t7d_a_prompt_waiting_out_a_bench_survives_the_turn_being_dropped() {
+    let provider = Arc::new(OutageProvider::new(0, Duration::ZERO, Fault::Refused));
+    let mut d = drill(
+        provider,
+        Arc::new(BenchAwareRouter("drill::flash")),
+        ALLOWANCE,
+    );
+    d.store
+        .bench_for(
+            "drill::flash",
+            Duration::from_secs(3600),
+            "provider overloaded",
+        )
+        .unwrap();
+    let cut = tokio::time::timeout(
+        Duration::from_millis(500),
+        d.session.run_turn("ship the fix"),
+    )
+    .await;
+    assert!(cut.is_err(), "the turn should still be waiting");
+    assert_eq!(d.prompts(), vec!["ship the fix".to_string()]);
+    assert_eq!(
+        d.store.session_tail_state(&d.session.id).unwrap(),
+        forge_store::TailState::Interrupted(forge_store::InterruptedTail::UnansweredPrompt)
+    );
 }
 
 #[tokio::test]
@@ -577,6 +619,7 @@ async fn t7c_the_horizon_bounds_the_turn_start_wait() {
         started.elapsed()
     );
     assert!(d.outage_events() >= 1);
+    assert_eq!(d.prompts(), vec!["continue".to_string()]);
 }
 
 #[tokio::test(start_paused = true)]

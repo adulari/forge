@@ -2944,6 +2944,7 @@ impl Session {
         // Routed again after a wait when the only reason nothing is routable is that every
         // candidate was benched moments ago by an outage (`wait_out_benches`).
         self.outage = None;
+        let mut waiting_prompt_seq: Option<i64> = None;
         let (decision, routing_context) = loop {
             let readiness = self.provider_readiness();
             let health = readiness.health;
@@ -3077,7 +3078,15 @@ impl Session {
             // provider either.
             forge_mesh::privacy::enforce_on_decision(&self.config, &mut decision);
             let decision = decision;
-            if decision.unroutable && self.wait_out_benches(&decision.model).await {
+            if decision.unroutable
+                && self
+                    .wait_out_benches(
+                        &decision.model,
+                        (!resume_absorbed).then_some(prompt),
+                        &mut waiting_prompt_seq,
+                    )
+                    .await
+            {
                 continue;
             }
             break (decision, routing_context);
@@ -3090,11 +3099,13 @@ impl Session {
                 || forge_provider::CliKind::all().iter().any(|k| k.available());
             let msg = unroutable_message(&decision.rationale, has_credentials);
             self.presenter.emit(PresenterEvent::Error(msg.clone()));
-            let seq = self.next_seq();
-            self.store
-                .add_message(&self.id, seq, Role::User, prompt, None)?;
+            if waiting_prompt_seq.is_none() {
+                let seq = self.next_seq();
+                self.store
+                    .add_message(&self.id, seq, Role::User, prompt, None)?;
+                self.open_turn_row(seq);
+            }
             self.transcript.push(Message::user(prompt));
-            self.open_turn_row(seq);
             let seq = self.next_seq();
             self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
             self.transcript.push(Message::system(&msg).ui_only());
@@ -3324,8 +3335,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 }
             }
         }
-        let mut seq = self.next_seq();
-        if !resume_absorbed {
+        // A prompt that waited out benches at turn start was saved, with its turn row, before the
+        // wait (`wait_out_benches`).
+        let mut seq = match waiting_prompt_seq {
+            Some(saved) => saved,
+            None => self.next_seq(),
+        };
+        if !resume_absorbed && waiting_prompt_seq.is_none() {
             // The row can land past `seq` (a side-call usage anchor took it, or another writer
             // raced us). Rewind checkpoints and snapshot dirs are keyed by the row's REAL seq.
             let (_, landed) =
@@ -3337,7 +3353,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             seq = landed;
         }
         self.current_turn_seq = seq;
-        self.open_turn_row(seq);
+        if waiting_prompt_seq.is_none() {
+            self.open_turn_row(seq);
+        }
         let turn_start_head = git_head(Some(self.workspace.root()));
         self.turn_start_baseline = if self.config.mesh.verify_completeness
             && forge_provider::is_cli_bridge(&routed_model)

@@ -190,7 +190,17 @@ impl Session {
     /// routes again; false when waiting does not apply (disabled, the candidate is not benched, or
     /// the benches are permanent exclusions or belong to providers without a key) or the horizon
     /// has passed.
-    pub(crate) async fn wait_out_benches(&mut self, candidate: &str) -> bool {
+    ///
+    /// The wait can last hours and ends when the task is dropped (Esc, a daemon restart), so
+    /// before the first sleep `unsaved_prompt` is persisted and its turn row opened, and its seq
+    /// goes into `saved_seq`. Otherwise the prompt would exist only in memory, and the restart
+    /// re-drive would read the tail as finished.
+    pub(crate) async fn wait_out_benches(
+        &mut self,
+        candidate: &str,
+        unsaved_prompt: Option<&str>,
+        saved_seq: &mut Option<i64>,
+    ) -> bool {
         let allowance = Duration::from_secs(self.config.mesh.outage_wait_secs);
         if allowance.is_zero() {
             return false;
@@ -219,6 +229,11 @@ impl Session {
             reason.chars().take(50).collect::<String>().trim()
         );
         let now = Instant::now();
+        if saved_seq.is_none() {
+            if let Some(prompt) = unsaved_prompt {
+                *saved_seq = self.save_waiting_prompt(prompt);
+            }
+        }
         if self.outage.is_none() {
             self.open_episode(candidate, reason, Duration::ZERO, allowance);
         }
@@ -237,6 +252,21 @@ impl Session {
         tracing::warn!(%candidate, wait_secs = wait.as_secs(), "every candidate is benched: waiting for the soonest bench to end");
         self.sleep_probe(candidate, wait).await;
         true
+    }
+
+    /// Store-only: the in-memory transcript gets the prompt where the turn normally pushes it, so
+    /// routing after the wait still reads only the prior turns.
+    fn save_waiting_prompt(&mut self, prompt: &str) -> Option<i64> {
+        let seq = self.next_seq();
+        let (_, landed) = self
+            .store
+            .add_message_returning_seq(&self.id, seq, Role::User, prompt, None)
+            .ok()?;
+        if landed >= self.seq {
+            self.seq = landed + 1;
+        }
+        self.open_turn_row(landed);
+        Some(landed)
     }
 
     fn open_episode(
