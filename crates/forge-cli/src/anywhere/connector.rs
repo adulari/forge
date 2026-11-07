@@ -156,6 +156,8 @@ struct DurableCommandClient<'a> {
     access_token: &'a str,
     host_id: &'a str,
     worker_id: &'a str,
+    /// A test pins `[anywhere] allow_ship_over_relay`; production reads the config per command.
+    allow_ship_override: Option<bool>,
 }
 
 struct VerifiedBlob {
@@ -367,6 +369,7 @@ async fn poll_durable_commands(local_base_url: &str, worker_id: &str) -> Result<
         access_token: &access_token,
         host_id: &host_id,
         worker_id,
+        allow_ship_override: None,
     }
     .poll()
     .await
@@ -676,7 +679,14 @@ impl DurableCommandClient<'_> {
 
         let result = match decode_command_request(&verified.plaintext) {
             Ok(request) => match validate_command_request(&request) {
-                Ok(()) => match dispatch_http_inner(self.local_base_url, &request).await {
+                Ok(()) => match dispatch_http_with_policy(
+                    self.local_base_url,
+                    &request,
+                    self.allow_ship_override
+                        .unwrap_or_else(|| ship_over_relay_enabled(request.route)),
+                )
+                .await
+                {
                     Ok(response) => command_result_for_status(response.status),
                     Err(_) => CommandResult::Error {
                         code: CommandErrorCode::HostUnavailable,
@@ -1506,11 +1516,21 @@ async fn dispatch_http_inner(
     local_base_url: &str,
     request: &BridgeRequest,
 ) -> Result<BridgeResponse> {
-    let allow_ship = needs_ship_opt_in(request.route)
+    dispatch_http_with_policy(
+        local_base_url,
+        request,
+        ship_over_relay_enabled(request.route),
+    )
+    .await
+}
+
+/// `[anywhere] allow_ship_over_relay`, read per request so flipping it takes effect without a
+/// restart. Only consulted for the routes that need it.
+fn ship_over_relay_enabled(route: RouteId) -> bool {
+    needs_ship_opt_in(route)
         && forge_config::load()
             .map(|config| config.anywhere.allow_ship_over_relay)
-            .unwrap_or(false);
-    dispatch_http_with_policy(local_base_url, request, allow_ship).await
+            .unwrap_or(false)
 }
 
 /// `allow_ship` is the host's `[anywhere] allow_ship_over_relay`, passed in so a test can run
@@ -1598,6 +1618,9 @@ struct RouteTarget {
 
 mod routing;
 use routing::*;
+
+#[cfg(test)]
+mod ship_relay_tests;
 
 fn bridge_error(request_id: [u8; 16], status: u16, message: &str) -> BridgeResponse {
     BridgeResponse {

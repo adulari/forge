@@ -28,6 +28,7 @@ pub(crate) fn group_and_label(path: &str) -> Option<(&'static str, &'static str)
         "harness.expert.triggers.tool" => Some(("Behaviour", "Expert on request")),
         "tui.session_strip" => Some(("Interface", "Session strip")),
         "tui.sidebar" => Some(("Interface", "Sidebar")),
+        "anywhere.allow_ship_over_relay" => Some(("Anywhere", "Ship over Anywhere")),
         _ => None,
     }
 }
@@ -62,6 +63,7 @@ pub(crate) fn help(path: &str) -> Option<&'static str> {
         "harness.expert.triggers.done" => "Send the DONE review to the expert instead of the advisor model.",
         "harness.expert.triggers.tool" => "Let the model call consult_expert with a question of its own.",
         "harness.advisor.timeout_secs" => "Seconds before an advisor call is abandoned and the turn finishes as it would have (default 120).",
+        "anywhere.allow_ship_over_relay" => "Let your paired phone ship while you are away: commit a session's files, push the branch (never forced), open or reuse the PR and queue it for merge, through the Anywhere relay. Off by default because it commits and pushes in your repositories without you at this machine. Switch it on from this machine only; the relay cannot change it.",
         _ => return None,
     })
 }
@@ -80,5 +82,19 @@ mod tests {
             assert!(budget.contains(spelling), "{budget}");
         }
         assert!(budget.contains("API model"), "{budget}");
+    }
+
+    #[test]
+    fn ship_over_relay_is_an_off_by_default_setting_in_the_config_editor() {
+        let descriptor = crate::config_descriptors()
+            .into_iter()
+            .find(|d| d.path == "anywhere.allow_ship_over_relay")
+            .expect("descriptor");
+        assert_eq!(descriptor.group, "Anywhere");
+        assert_eq!(descriptor.label, "Ship over Anywhere");
+        assert_eq!(descriptor.default.display(), "false");
+        assert!(help("anywhere.allow_ship_over_relay")
+            .unwrap()
+            .contains("never forced"));
     }
 }

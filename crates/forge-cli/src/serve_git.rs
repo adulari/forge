@@ -86,7 +86,7 @@ mod diff;
 pub(crate) mod hunk;
 mod message;
 mod risk;
-mod ship;
+pub(crate) mod ship;
 mod status;
 mod sync;
 #[cfg(test)]

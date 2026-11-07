@@ -1198,10 +1198,12 @@ struct HostIdentity {
     /// Disk and memory pressure on this host; absent before the first sample or when sampling is off.
     #[serde(skip_serializing_if = "Option::is_none")]
     pressure: Option<crate::host_pressure::Pressure>,
+    ship: crate::serve_ship_caps::ShipCapability,
 }
 
 async fn identity() -> axum::Json<HostIdentity> {
     axum::Json(HostIdentity {
+        ship: crate::serve_ship_caps::ShipCapability::current(),
         hostname: crate::anywhere::default_host_name(),
         version: env!("CARGO_PKG_VERSION"),
         protocol: crate::remote::PROTOCOL_VERSION,
@@ -3674,6 +3676,8 @@ pub(crate) mod tests {
         assert_eq!(body["hostname"], crate::anywhere::default_host_name());
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["protocol"], crate::remote::PROTOCOL_VERSION);
+        assert_eq!(body["ship"]["pr"], true);
+        assert!(body["ship"]["over_relay"].is_boolean());
 
         let unauthorized = router
             .clone()

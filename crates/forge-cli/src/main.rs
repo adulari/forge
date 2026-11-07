@@ -162,6 +162,7 @@ mod serve_relay;
 mod serve_restart_redrive;
 mod serve_revoke;
 mod serve_schedules;
+mod serve_ship_caps;
 mod serve_skills;
 mod serve_skills_confine;
 mod serve_spend;
