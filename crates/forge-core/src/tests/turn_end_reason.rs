@@ -138,6 +138,37 @@ async fn an_answer_that_announces_unfinished_work_is_flagged() {
 }
 
 #[tokio::test]
+async fn an_answer_that_left_a_step_undone_leaves_one_stop_note_and_line() {
+    let (mut session, store) = fixture(
+        vec![Step::Reply("Let me check the config now.", vec![])],
+        None,
+    );
+    let capture = CapturePresenter {
+        attended: true,
+        ..Default::default()
+    };
+    let events = capture.events.clone();
+    session.presenter = Box::new(capture);
+    session.run_turn("do it").await.unwrap();
+    assert_eq!(
+        turns(&store, &session)[0].end_reason.as_deref(),
+        Some("final_answer_mid_intent")
+    );
+    let note = newest_ui_note(&store, &session).unwrap_or_default();
+    assert!(
+        note.starts_with("⚠ Turn stopped (answer left a step undone)"),
+        "{note}"
+    );
+    let lines = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| matches!(e, PresenterEvent::TurnStopped { .. }))
+        .count();
+    assert_eq!(lines, 1);
+}
+
+#[tokio::test]
 async fn the_surface_hears_the_stored_end_reason_before_done() {
     let (mut session, store) = fixture(
         vec![Step::Reply("Let me check the config now.", vec![])],

@@ -318,7 +318,6 @@ impl Session {
                 let text: String = error.to_string().chars().take(500).collect();
                 format!("⚠ Turn failed: {text}")
             }
-            Ok(_) if reason.starts_with("final_answer") => return,
             // A hard guard or forced stop already published its reason as the turn's last
             // message (model_loop.rs); a second note would repeat it.
             Ok(outcome)
