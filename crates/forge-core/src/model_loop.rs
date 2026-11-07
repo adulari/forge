@@ -820,32 +820,15 @@ impl Session {
         // any single loop's count.
         self.mutations_this_turn += mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
 
-        if let (true, true, Some(limit)) = (hit_step_cap, unattended, step_limit) {
-            final_text = self.abort_for_step_ceiling(limit);
-            halted_by_loop_guard = true;
-            hard_guard_abort = true;
-        }
-
-        // A hard stop's reason (spend or token cap, run budget, headless stall, unfinished-task
-        // abort) used to travel only in the turn's result and a live event, so a session read
-        // later ended on a tool call or a tool result with no word of why. Keep it in the history.
-        if hard_guard_abort && !final_text.trim().is_empty() {
-            self.publish_terminal_answer(&final_text.clone())?;
-        }
-
-        // A loop guard (or an unrecoverable empty reply) can end a turn that did real work with
-        // nothing to say; never hand that back as the result.
-        if final_text.trim().is_empty()
-            && !hard_guard_abort
-            && !hit_step_cap
-            && !self.past_turn_deadline()
-            && tools_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
-        {
-            final_text = self
-                .answer_for_halted_turn(&active_model, halted_by_loop_guard)
-                .await;
-            self.publish_terminal_answer(&final_text.clone())?;
-        }
+        let (final_text, halted_by_loop_guard, hard_guard_abort) = self
+            .close_out_turn_text(
+                final_text,
+                &active_model,
+                (hit_step_cap, unattended, step_limit),
+                (halted_by_loop_guard, hard_guard_abort),
+                tools_ran.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .await?;
 
         Ok(ModelLoopOutcome {
             final_text,
