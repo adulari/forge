@@ -78,6 +78,7 @@ pub mod codemode;
 mod commit_policy;
 mod compaction_budget;
 mod compaction_chain;
+mod compaction_episodes;
 mod compaction_headroom;
 mod compaction_input;
 mod compaction_policy;
@@ -165,6 +166,7 @@ pub mod project_context;
 pub mod push_notify;
 mod quality_gates;
 pub mod readiness;
+pub mod recall;
 mod recent_files;
 pub mod redact;
 mod refinement;
@@ -236,6 +238,7 @@ pub mod zero_retention;
 
 pub use llm_router::LlmRouter;
 pub use pinned_context::render_task_list;
+pub use recall::{recall_spec, RECALL_TOOL};
 use replay::messages_to_replay_items;
 pub use replay::stored_replay_items;
 pub use session_usage_detail::{row_notional_cost, SessionUsageDetail};
@@ -2506,6 +2509,15 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(REMEMBER_TOOL))
         {
             specs.push(remember_spec());
+        }
+        // The folded-history reader: only once a compaction has folded something away.
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(RECALL_TOOL))
+            && self.recall_on()
+        {
+            specs.push(recall_spec());
         }
         // Agent-created recurring re-entry prompts — distinct from the user's own `/heartbeat`.
         if self
@@ -5115,6 +5127,9 @@ mod tests {
 
     #[path = "compaction_summary.rs"]
     mod compaction_summary_tests;
+
+    #[path = "recall.rs"]
+    mod recall_tests;
 
     #[path = "transcript_mark.rs"]
     mod transcript_mark_tests;

@@ -317,6 +317,9 @@ impl Session {
         }
         // On-demand memory write — model calls this to persist a durable fact immediately,
         // without waiting for end-of-turn auto-capture.
+        if call.name == RECALL_TOOL {
+            return self.recall(msg_id, call);
+        }
         if call.name == REMEMBER_TOOL {
             return self.remember(msg_id, call).await;
         }

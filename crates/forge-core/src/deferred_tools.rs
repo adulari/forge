@@ -29,6 +29,7 @@ pub const CORE_TOOLS: &[&str] = &[
     "update_tasks",
     "present_plan",
     "use_skill",
+    crate::recall::RECALL_TOOL,
     "dispatch_sessions",
     crate::worktree_ops::WORKTREE_TOOL,
     TOOL_SEARCH,

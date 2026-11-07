@@ -197,7 +197,13 @@ impl Session {
         // The stored rows hold each tool result as the model first saw it; the in-memory copy has
         // had its older results cut to a head by the prune pass.
         let source = self.store.compaction_source(&self.id).unwrap_or_default();
-        let folded = fold_inputs(&self.transcript[..split], &source.tool_results);
+        let mut folded = fold_inputs(&self.transcript[..split], &source.tool_results);
+        // The store folds exactly the rows before the kept tail, so its view of that range is what
+        // recall can read afterwards.
+        let kept_tail = self.transcript.len() - split;
+        if let Ok(rows) = self.store.fold_preview(&self.id, kept_tail) {
+            folded.new_episodes = crate::compaction_episodes::episodes_from_fold(&rows);
+        }
         let (model, summary) = match self.fold_summary(&folded, directive, &budget).await {
             Ok(written) => written,
             Err(error) => {
@@ -209,7 +215,6 @@ impl Session {
         let mut compacted = Vec::with_capacity(COMPACT_KEEP_RECENT + 1);
         compacted.push(Message::system(format!("{SUMMARY_PREFIX}\n{summary}")));
         // The store must keep exactly these rows: the round-aligned tail, not a fixed count.
-        let kept_tail = self.transcript.len() - split;
         compacted.extend(self.transcript.split_off(split));
         self.transcript = compacted;
         self.note_transcript_folded(split);
@@ -290,11 +295,17 @@ impl Session {
             budget.verbatim_tokens,
             budget.verbatim_older_chars(),
         );
-        let summary = if block.is_empty() {
-            body.trim().to_string()
-        } else {
-            format!("{}\n\n{block}", body.trim())
-        };
+        let episodes = crate::compaction_episodes::render_episodes(
+            &folded.previous_episodes,
+            &folded.new_episodes,
+        );
+        let mut summary = body.trim().to_string();
+        for section in [episodes, block] {
+            if !section.is_empty() {
+                summary.push_str("\n\n");
+                summary.push_str(&section);
+            }
+        }
         Ok((model, summary))
     }
 

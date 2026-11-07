@@ -170,8 +170,11 @@ impl Verdict {
         if self.compacted {
             out.push_str(
                 "\n\nThe conversation was compacted while they were open, so the detail behind \
-                 them is no longer in your context. If you cannot reconstruct what one meant, ask \
-                 the user or drop it — do not guess at it.",
+                 them is no longer in your context, but it is still stored. Before anything else \
+                 call `recall` (action search with the task's own words, then action read on the \
+                 seq range it finds, or one from the summary's episode list) to reconstruct what \
+                 each one meant; that is the one reading step this note allows. Only if recall \
+                 turns up nothing, ask the user or drop it — do not guess at it.",
             );
         }
         out
@@ -487,7 +490,10 @@ mod tests {
         assert!(t.turn(&tasks).is_none());
         let v = t.turn(&tasks).unwrap();
         assert!(v.compacted);
-        assert!(v.render().contains("no longer in your context"));
+        let text = v.render();
+        assert!(text.contains("no longer in your context"));
+        assert!(text.contains("call `recall`"));
+        assert!(text.contains("Only if recall turns up nothing, ask the user or drop it"));
     }
 
     #[test]

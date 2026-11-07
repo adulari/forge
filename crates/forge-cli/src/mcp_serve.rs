@@ -325,6 +325,12 @@ impl ForgeMcp {
             });
         }
 
+        // Folded-history recall — read-only, scoped to the parent session (id from ENV_SESSION).
+        if name == forge_core::RECALL_TOOL {
+            let session_id = std::env::var(forge_core::snapshot::ENV_SESSION).ok();
+            return Ok(self.handle_recall(session_id.as_deref(), &args));
+        }
+
         // On-demand memory write — bridge model can persist a durable fact mid-turn (parity with
         // the direct path). No embedding here (bridge-side is sync); keyword recall still works.
         if name == forge_core::REMEMBER_TOOL {
@@ -717,8 +723,32 @@ impl ForgeMcp {
         core
     }
 
+    /// Whether the parent session has folded history to recall.
+    fn recall_available(&self, session_id: Option<&str>) -> bool {
+        session_id.is_some_and(|id| self.tasks_store.has_folded_history(id).unwrap_or(false))
+    }
+
+    fn handle_recall(&self, session_id: Option<&str>, args: &Value) -> CallToolResult {
+        let Some(session_id) = session_id else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "error: recall has no session to read",
+            )]);
+        };
+        let (text, ok) = forge_core::recall::run(&self.tasks_store, session_id, args);
+        if ok {
+            CallToolResult::success(vec![ContentBlock::text(text)])
+        } else {
+            CallToolResult::error(vec![ContentBlock::text(text)])
+        }
+    }
+
     /// Every tool this server can run, before the lean surface defers any of them.
     fn all_tools(&self) -> Vec<Tool> {
+        let session = std::env::var(forge_core::snapshot::ENV_SESSION).ok();
+        self.all_tools_for(session.as_deref())
+    }
+
+    fn all_tools_for(&self, session_id: Option<&str>) -> Vec<Tool> {
         let mut tools: Vec<Tool> = self
             .registry
             .names()
@@ -778,6 +808,13 @@ impl ForgeMcp {
         let rs = forge_core::remember_spec();
         let rs_schema: JsonObject = rs.schema.as_object().cloned().unwrap_or_default();
         tools.push(Tool::new(rs.name, rs.description, Arc::new(rs_schema)));
+        // The folded-history reader, once the parent session has a compaction (the bridge process
+        // is respawned after one, so the list it serves is current).
+        if self.recall_available(session_id) {
+            let spec = forge_core::recall_spec();
+            let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
+            tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
+        }
         // Fleet agent-to-agent messaging — always advertised (unlike subagents, it needs no local
         // setup: a call simply fails with a clear error if no `forge serve` daemon is reachable).
         tools.push(self.message_session_tool());
@@ -1540,6 +1577,61 @@ mod tests {
         assert!(
             text.contains("echo: alive"),
             "call did not continue after timeout: {text}"
+        );
+    }
+
+    #[test]
+    fn recall_is_advertised_and_served_only_for_a_session_with_folded_history() {
+        let server = test_server(false);
+        let sid = server.tasks_store.create_session("/x", "default").unwrap();
+        for (seq, text) in [
+            "decide the upload retry policy",
+            "settled on exponential backoff",
+            "b",
+            "c",
+            "d",
+            "e",
+        ]
+        .iter()
+        .enumerate()
+        {
+            server
+                .tasks_store
+                .add_message(&sid, seq as i64, forge_types::Role::User, text, None)
+                .unwrap();
+        }
+        let names = |s: Option<&str>| -> Vec<String> {
+            server
+                .all_tools_for(s)
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        assert!(!names(Some(&sid)).contains(&"recall".to_string()));
+        assert!(!names(None).contains(&"recall".to_string()));
+
+        server
+            .tasks_store
+            .compact_session_store(&sid, "S", 2)
+            .unwrap();
+        assert!(names(Some(&sid)).contains(&"recall".to_string()));
+        assert!(!names(None).contains(&"recall".to_string()));
+
+        let found = server.handle_recall(
+            Some(&sid),
+            &serde_json::json!({"action": "search", "query": "exponential backoff"}),
+        );
+        assert_ne!(found.is_error, Some(true));
+        assert!(format!("{found:?}").contains("seq 1 [user]"), "{found:?}");
+        let other = server.tasks_store.create_session("/y", "default").unwrap();
+        let isolated = server.handle_recall(
+            Some(&other),
+            &serde_json::json!({"action": "search", "query": "exponential backoff"}),
+        );
+        assert_eq!(
+            isolated.is_error,
+            Some(true),
+            "another session folded nothing"
         );
     }
 
