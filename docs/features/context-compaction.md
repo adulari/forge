@@ -176,6 +176,48 @@ of summarizing again, and one notice says so (`compaction_budget.rs`, `compactio
 `RUST_LOG=forge_agent_core=info` logs the summarizer chain and why a candidate was skipped or
 failed.
 
+### Checkpoint at a landed slice
+
+A long session pays for the whole transcript of the slice it just finished (exploration, superseded
+file contents, old tool output) on every later step, until the size trigger finally compacts.
+Measured on the owner's store (Sep 1 - Oct 30): 204 commit segments, the 19 over 300 steps used 57%
+of all input tokens; 91% of input is cached prompt re-send, the step prompt grows ~1.45k tokens per
+step, and 70% of `read_file` calls re-read a path already read. The checkpoint folds a finished
+slice at the boundary instead of waiting.
+
+- **When.** A slice has landed when the agent ran `git commit` in this session (exit 0, not
+  `--dry-run`) and a check (test, lint, typecheck or build; the same classification as the
+  completion gate) passed after the last file edit and before the commit, with no failing check
+  outstanding. A later edit un-lands it. The commit is the agent's own: a commit the user made in a
+  shell does not count. The decision runs at the next step boundary (`prepare_step_context`), which
+  is also the first step of the next turn when the commit was the last thing a turn did.
+- **Threshold.** The live transcript must be above `[compact] checkpoint_min_tokens` (default
+  60,000); below it the landed slice is dropped without a fold. `[compact] checkpoint = false`
+  turns the whole thing off. Both are settable per project (`compact` is in the trusted-safe key
+  list).
+- **Superseded reads first.** Every `read_file` result of a path that a later call in the slice
+  edited is replaced by `[superseded: <path> was read here and changed later in this slice; ...]`
+  (results under 400 chars are left). If that alone brings the context under the threshold, nothing
+  else folds and the scrollback says `checkpoint: folded the superseded reads behind <sha> (a -> b)`.
+- **The fold.** Everything before the assistant message that issued the commit is replaced by one
+  summary; the commit round itself stays whole. No model call: the summary is written from facts
+  the harness holds. It holds the commit sha, subject and body, the diffstat of `git show --stat`,
+  the files the slice edited with a one-line purpose when the file states one (a `//!` line, a
+  markdown title or a docstring), the open tasks, the check commands that passed, the shortened
+  list of earlier checkpoint slices, a model-written summary from an earlier ordinary compaction
+  carried forward unchanged, then the same episode index and verbatim user messages as any
+  summary. Recently used files are not restored (the next slice rarely needs them; they are in the
+  summary and in `recall`). It installs through the same path as `/compact`, so the store rows are
+  soft-deleted (`recall` and `/uncompact` reach them), the persisted view is the compacted one and
+  the lifecycle hooks fire with `trigger: "auto"`.
+- **Scrollback.** One line on every surface: `checkpoint: folded the slice behind <sha> (192k -> 41k)`
+  (token estimates of the transcript before and after).
+- **CLI bridge.** Not applicable: a bridged claude/codex keeps its tool rounds in its own process,
+  not in the session transcript, so there is nothing for the fold to drop and the tracker (fed by
+  direct-path tool outcomes) never sees a commit. Bridge compaction is unchanged.
+- Code: `compaction_checkpoint.rs` (tracker, superseded-read fold, summary), `install_fold` in
+  `compaction_run.rs` (shared with the model-written compaction), hook in `context_floor.rs`.
+
 ### Recall: reaching what a compaction folded away
 
 A compaction used to be a one-way door for the model. The folded rows stay in the store
