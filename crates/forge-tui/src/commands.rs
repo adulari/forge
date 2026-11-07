@@ -177,6 +177,8 @@ pub enum CommandAction {
     /// Pick Claude Code and Codex conversations from this computer and import them (`/import`).
     Import,
     Issues,
+    /// Open the `/queue` overlay: the merge queue, with hold, release, front and retry.
+    Queue,
     /// Open the `/ship` card: commit, push, open the PR and watch it to merge.
     Ship,
     /// Open the control-tools menu: which tools agents may use to drive the app, and what they did.
@@ -566,6 +568,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "run" | "actions" | "ports" => CommandAction::Run,
         "import" => CommandAction::Import,
         "issues" => CommandAction::Issues,
+        "queue" | "merge-queue" => CommandAction::Queue,
         "ship" => CommandAction::Ship,
         "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
         "control" => CommandAction::Control,

@@ -433,6 +433,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/issues",
     },
     Command {
+        name: "queue",
+        desc: "the merge queue: which PR lands next; hold, release, move to front, retry",
+        usage: "/queue",
+    },
+    Command {
         name: "clis",
         desc: "install and update the Claude Code, Codex and Antigravity CLIs",
         usage: "/clis",

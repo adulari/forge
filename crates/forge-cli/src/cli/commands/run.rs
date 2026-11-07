@@ -106,6 +106,7 @@ mod mesh_overlay;
 mod model_switch;
 mod notes_menu;
 mod panes;
+mod queue_menu;
 mod refine_cmd;
 mod run_menu;
 mod ship_menu;
@@ -862,6 +863,7 @@ pub(crate) async fn run_chat_tui(
     let mut run_menu_driver = run_menu::RunMenuDriver::new();
     let mut import_driver = import_menu::ImportMenuDriver::new();
     let mut issues_driver = issues_menu::IssuesMenuDriver::new();
+    let mut queue_driver = queue_menu::QueueMenuDriver::new();
     let mut ship_driver = ship_menu::ShipMenuDriver::new();
     let mut agents_driver = agents_menu::AgentsMenuDriver::new(mock);
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
@@ -1795,6 +1797,11 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
                 continue;
             }
+            if app.queue_menu.open {
+                queue_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
             if app.ship_menu.open {
                 ship_driver.key(&mut app, key);
                 dirty = true;
@@ -2010,6 +2017,7 @@ pub(crate) async fn run_chat_tui(
                 || app.run_menu.open
                 || app.import_menu.open
                 || app.issues_menu.open
+                || app.queue_menu.open
                 || app.ship_menu.open
                 || app.workspace_menu.open
                 || app.agents_menu.open
@@ -5305,6 +5313,9 @@ pub(crate) async fn run_chat_tui(
             dirty = true;
         }
         if issues_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if queue_driver.tick(&mut app) {
             dirty = true;
         }
         if ship_driver.tick(&mut app) {

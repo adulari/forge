@@ -32,6 +32,7 @@ pub mod agents_menu;
 pub mod anywhere_menu;
 pub mod import_menu;
 pub mod issues_menu;
+pub mod queue_menu;
 mod session_delete;
 pub mod ship_menu;
 pub mod workspace_menu;
