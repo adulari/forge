@@ -88,7 +88,16 @@ export type BridgeRoute =
   | "cancel_issue_drain"
   // Merge queue standing across repos, and the owner's hold / release / front / retry.
   | "pr_queue"
-  | "pr_queue_action";
+  | "pr_queue_action"
+  | "pr_status"
+  | "pr_list"
+  | "pr_detail"
+  | "pr_diff"
+  | "pr_watch_get"
+  | "pr_watches"
+  | "pr_watch_set"
+  | "session_ship"
+  | "session_done";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -335,11 +344,19 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/issues/drain/cancel": { POST: "cancel_issue_drain" },
     "/api/pr/queue": { GET: "pr_queue" },
     "/api/pr/queue/action": { POST: "pr_queue_action" },
+    "/api/pr/status": { GET: "pr_status" },
+    "/api/pr/list": { GET: "pr_list" },
+    "/api/pr/detail": { GET: "pr_detail" },
+    "/api/pr/diff": { GET: "pr_diff" },
+    "/api/pr/watches": { GET: "pr_watches" },
+    // Ship and the PR Watch write are bridged but the host refuses them unless its owner set
+    // `[anywhere] allow_ship_over_relay` (RouteId::SessionShip / PrWatchSet in the protocol crate).
+    "/api/pr/watch": { GET: "pr_watch_get", POST: "pr_watch_set" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };
 
-  const session = path.match(/^\/api\/sessions\/([^/]+)\/(archive|fork|merge|discard|mode)$/);
+  const session = path.match(/^\/api\/sessions\/([^/]+)\/(archive|fork|merge|discard|mode|ship|done)$/);
   if (session) {
     const operation: Record<string, BridgeRoute> = {
       archive: "archive_session",
@@ -347,6 +364,8 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
       merge: "merge_session",
       discard: "discard_session",
       mode: "set_session_mode",
+      ship: "session_ship",
+      done: "session_done",
     };
     const expectedMethod = "POST";
     if (method === expectedMethod) {

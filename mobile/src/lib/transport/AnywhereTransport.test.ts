@@ -280,6 +280,15 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/issues/drain/cancel", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/pr/queue");
     await transport.fetch("fany://host-1/api/pr/queue/action", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/pr/status?session=s1");
+    await transport.fetch("fany://host-1/api/pr/list?session=s1&state=open");
+    await transport.fetch("fany://host-1/api/pr/detail?session=s1&number=4");
+    await transport.fetch("fany://host-1/api/pr/diff?session=s1&number=4");
+    await transport.fetch("fany://host-1/api/pr/watch?session=s1");
+    await transport.fetch("fany://host-1/api/pr/watches");
+    await transport.fetch("fany://host-1/api/pr/watch", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/ship", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/done", { method: "POST", body: "{}" });
 
     expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
       ["workspace_entries", "?session=s1&path=src"],
@@ -308,7 +317,31 @@ describe("AnywhereTransport", () => {
       ["cancel_issue_drain", ""],
       ["pr_queue", ""],
       ["pr_queue_action", ""],
+      ["pr_status", "?session=s1"],
+      ["pr_list", "?session=s1&state=open"],
+      ["pr_detail", "?session=s1&number=4"],
+      ["pr_diff", "?session=s1&number=4"],
+      ["pr_watch_get", "?session=s1"],
+      ["pr_watches", ""],
+      ["pr_watch_set", ""],
+      ["session_ship", "s1"],
+      ["session_done", "s1"],
     ]);
+    // Only the methods the host serves: a GET on ship, a PUT on the watch and the create/merge/
+    // comment writes stay unreachable over the relay.
+    for (const [path, method] of [
+      ["/api/sessions/s1/ship", "GET"],
+      ["/api/sessions/s1/ship", "PUT"],
+      ["/api/pr/watch", "DELETE"],
+      ["/api/pr/status", "POST"],
+      ["/api/pr/create", "POST"],
+      ["/api/pr/merge", "POST"],
+      ["/api/pr/comment", "POST"],
+      ["/api/sessions/..%2Fx/ship", "POST"],
+      ["/api/sessions/a%2Fb/ship", "POST"],
+    ] as const) {
+      await expect(transport.fetch(`fany://host-1${path}`, { method })).rejects.toThrow();
+    }
     await expect(
       transport.fetch("fany://host-1/api/schedules", { method: "POST", body: "{}" }),
     ).rejects.toThrow("not allowlisted");

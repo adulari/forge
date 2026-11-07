@@ -15,7 +15,7 @@ import { Button } from "../ds/Button";
 import { EmptyState } from "../ds/EmptyState";
 import { Sheet } from "../ds/Sheet";
 import { PrDetailView } from "./PrDetailView";
-import { ACTION_LABELS, availableActions, pushesLabel, repoName, rowStatus } from "./mergeQueueModel";
+import { ACTION_LABELS, availableActions, pushesLabel, repoName, rowOpenTarget, rowStatus } from "./mergeQueueModel";
 
 interface Pending {
   session: string;
@@ -44,8 +44,9 @@ export function MergeQueueView() {
   };
 
   const openPr = (row: PrQueueRow) => {
-    if (direct && row.pr_number != null) setOpened(row);
-    else if (row.pr_url) void Linking.openURL(row.pr_url).catch(() => undefined);
+    const target = rowOpenTarget(row, direct);
+    if (target === "detail") setOpened(row);
+    else if (target === "external" && row.pr_url) void Linking.openURL(row.pr_url).catch(() => undefined);
   };
 
   const queues = (query.data ?? []).filter((queue) => queue.rows.length > 0);

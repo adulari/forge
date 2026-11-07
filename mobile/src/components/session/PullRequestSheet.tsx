@@ -2,7 +2,8 @@ import React, { useState } from "react";
 import { ActivityIndicator, Linking, Text, View } from "react-native";
 
 import type { RemoteInput } from "../../lib/ws";
-import { usePrAvailable, useCreatePr, usePrStatus } from "../../lib/queriesPr";
+import { UPDATE_HOST_MESSAGE, prReadable, useDirectOnly, usePrAccess } from "../../lib/prAccess";
+import { useCreatePr, usePrStatus } from "../../lib/queriesPr";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
@@ -62,7 +63,9 @@ function CreateForm({ sessionId, onAgent }: { sessionId: string; onAgent: ((titl
 
 export function PullRequestSheet({ visible, onClose, sessionId, send }: Props) {
   const tokens = useTokens();
-  const direct = usePrAvailable();
+  const access = usePrAccess();
+  const direct = prReadable(access);
+  const canCreate = useDirectOnly();
   const status = usePrStatus(visible && direct ? sessionId : null);
   const agent = send
     ? (title: string) => {
@@ -76,7 +79,11 @@ export function PullRequestSheet({ visible, onClose, sessionId, send }: Props) {
       <View style={{ paddingHorizontal: space.space16, gap: space.space12 }}>
         <Text style={[type.heading, { color: tokens.ink }]}>Create pull request</Text>
         <Text style={[type.sub, { color: tokens.ink3 }]}>
-          Pull requests need a direct connection to the host. Ask the agent to prepare one instead.
+          {access.kind === "relay" && access.state === "update-host"
+            ? UPDATE_HOST_MESSAGE
+            : access.kind === "relay"
+              ? "Checking what this host supports over Anywhere…"
+              : "Pull requests need a direct connection to the host. Ask the agent to prepare one instead."}
         </Text>
         {agent ? <Button label="Prepare pull request" onPress={() => agent("")} fullWidth /> : null}
       </View>
@@ -93,6 +100,16 @@ export function PullRequestSheet({ visible, onClose, sessionId, send }: Props) {
     );
   } else if (status.data?.pr) {
     content = <PrDetailView sessionId={sessionId} number={status.data.pr.number} />;
+  } else if (!canCreate) {
+    content = (
+      <View style={{ paddingHorizontal: space.space16, gap: space.space12 }}>
+        <Text style={[type.heading, { color: tokens.ink }]}>No pull request yet</Text>
+        <Text style={[type.sub, { color: tokens.ink3 }]}>
+          Opening one needs a direct connection. Use Ship to commit, push and open it from here.
+        </Text>
+        {agent ? <Button label="Let the agent prepare it" variant="secondary" onPress={() => agent("")} fullWidth /> : null}
+      </View>
+    );
   } else {
     content = <CreateForm sessionId={sessionId} onAgent={agent} />;
   }

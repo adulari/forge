@@ -2,6 +2,7 @@ import React from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import type { PrWatchMethod, PrWatchMode } from "../../lib/apiPr";
+import { useShipGate } from "../../lib/prAccess";
 import { usePrWatch, useSetPrWatch } from "../../lib/queriesPr";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
@@ -16,16 +17,19 @@ export function PrWatchPanel({ sessionId }: { sessionId: string }) {
   const toast = useToast();
   const query = usePrWatch(sessionId);
   const set = useSetPrWatch();
+  const gate = useShipGate();
   const watch = query.data?.watch ?? null;
   const mode: PrWatchMode = watch?.mode ?? "off";
   const method: PrWatchMethod = watch?.method ?? "squash";
   const status = watchStatus(watch);
 
-  const apply = (next: PrWatchMode, nextMethod: PrWatchMethod) =>
+  const apply = (next: PrWatchMode, nextMethod: PrWatchMethod) => {
+    if (!gate.allowed) return;
     set.mutate(
       { session: sessionId, mode: next, method: nextMethod },
       { onError: (e) => toast.show(e.message, { tone: "danger" }) },
     );
+  };
 
   return (
     <View style={[styles.panel, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
@@ -42,6 +46,7 @@ export function PrWatchPanel({ sessionId }: { sessionId: string }) {
           ? "Forge fixes failing checks and new review comments, and can merge when green. Pushes are never forced."
           : "Runs in the Auto profile: normal pushes are pre-approved, force pushes are refused."}
       </Text>
+      {gate.message ? <Text style={[typeScale.monoMeta, { color: tokens.warn }]}>{gate.message}</Text> : null}
       {status.detail ? (
         <Text style={[typeScale.monoMeta, { color: status.tone === "danger" ? tokens.danger : tokens.ink3 }]}>{status.detail}</Text>
       ) : null}

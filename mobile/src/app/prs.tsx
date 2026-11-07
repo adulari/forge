@@ -21,7 +21,8 @@ import { Sheet } from "../components/ds/Sheet";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import type { PrListRow, PrState } from "../lib/apiPr";
 import { useSessions } from "../lib/queries";
-import { useAllPrs, usePrAvailable, usePrQueue } from "../lib/queriesPr";
+import { UPDATE_HOST_MESSAGE, prReadable, usePrAccess } from "../lib/prAccess";
+import { useAllPrs, usePrQueue } from "../lib/queriesPr";
 import { queueSummary, summaryLabel } from "../components/pr/mergeQueueModel";
 import { router } from "expo-router";
 import { usePullRefresh } from "../lib/usePullRefresh";
@@ -52,7 +53,8 @@ interface Row extends PrListRow {
 
 function PrsBody() {
   const tokens = useTokens();
-  const direct = usePrAvailable();
+  const access = usePrAccess();
+  const direct = prReadable(access);
   const sessions = useSessions();
   const [view, setView] = useState<PrsView>("prs");
   const [state, setState] = useState<PrState>("open");
@@ -120,7 +122,14 @@ function PrsBody() {
           ))}
         </View>
         {!direct ? (
-          <EmptyState icon={GitPullRequest} message="Pull requests need a direct connection to the host." />
+          <EmptyState icon={GitPullRequest} message={
+              access.kind === "relay"
+                ? access.state === "update-host"
+                  ? UPDATE_HOST_MESSAGE
+                  : "Checking what this host supports over Anywhere…"
+                : "Pull requests need a connection to the host."
+            }
+          />
         ) : unavailable && rows.length === 0 ? (
           <EmptyState icon={GitPullRequest} message={unavailable} />
         ) : loading && rows.length === 0 ? (

@@ -54,6 +54,8 @@ export interface HostIdentity {
   update_available?: string | null;
   /** Disk and memory pressure on the host; absent from daemons that predate the sampler. */
   pressure?: HostPressure | null;
+  /** What the host does for PRs and Ship over Anywhere; absent from a host that predates them. */
+  ship?: { pr: boolean; over_relay: boolean };
 }
 
 export interface DiagnosticsResponse {

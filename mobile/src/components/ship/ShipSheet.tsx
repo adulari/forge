@@ -2,7 +2,8 @@ import React, { useEffect, useState } from "react";
 import { Linking, StyleSheet, Text, View } from "react-native";
 
 import type { ShipResponse } from "../../lib/apiShip";
-import { usePrAvailable, useShipSession } from "../../lib/queriesPr";
+import { useShipGate } from "../../lib/prAccess";
+import { useShipSession } from "../../lib/queriesPr";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
@@ -38,7 +39,8 @@ interface Props {
  * in merge mode, stopping at the first refusal with its reason. */
 export function ShipSheet({ visible, onClose, sessionId }: Props) {
   const tokens = useTokens();
-  const direct = usePrAvailable();
+  const gate = useShipGate();
+  const direct = gate.allowed;
   const ship = useShipSession();
   const preview = useShipSession();
   const [plan, setPlan] = useState<ShipResponse | null>(null);
@@ -102,7 +104,7 @@ export function ShipSheet({ visible, onClose, sessionId }: Props) {
         <Text style={[typeScale.heading, { color: tokens.ink }]}>Ship to a merged PR</Text>
         {!direct ? (
           <Text style={[typeScale.sub, { color: tokens.ink3 }]}>
-            Shipping needs a direct connection to the host: it runs git and the GitHub CLI there.
+            {gate.message ?? "Checking what this host allows over Anywhere…"}
           </Text>
         ) : (
           <>

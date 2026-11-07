@@ -102,3 +102,12 @@ export function pushesLabel(row: PrQueueRow): string | null {
   if (row.last_update && effectiveState(row) !== "checks") parts.push(row.last_update);
   return parts.length > 0 ? parts.join(" - ") : null;
 }
+
+/**
+ * What tapping a queue row's PR does: the in-app detail whenever this connection can read pull
+ * requests (a direct connection, or an Anywhere host that bridges them), else the PR on GitHub.
+ */
+export function rowOpenTarget(row: PrQueueRow, readable: boolean): "detail" | "external" | null {
+  if (readable && row.pr_number != null) return "detail";
+  return row.pr_url ? "external" : null;
+}

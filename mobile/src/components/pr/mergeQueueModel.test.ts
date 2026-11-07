@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PrQueueRow } from "../../lib/apiPr";
-import { availableActions, pushesLabel, queueSummary, repoName, rowStatus, summaryLabel } from "./mergeQueueModel";
+import { availableActions, pushesLabel, queueSummary, repoName, rowOpenTarget, rowStatus, summaryLabel } from "./mergeQueueModel";
 
 const row = (over: Partial<PrQueueRow> = {}): PrQueueRow => ({
   session_id: "s1",
@@ -83,5 +83,17 @@ describe("labels", () => {
     expect(pushesLabel(row({ pushes: 1, last_update: "rebased" }))).toBe("1 push by the queue - rebased");
     expect(pushesLabel(row({ pushes: 2 }))).toBe("2 pushes by the queue");
     expect(pushesLabel(row())).toBeNull();
+  });
+});
+
+describe("rowOpenTarget", () => {
+  it("opens the in-app PR over a relay when the host bridges pull requests", () => {
+    expect(rowOpenTarget(row(), true)).toBe("detail");
+  });
+
+  it("falls back to GitHub when pull requests cannot be read, or the PR has no number yet", () => {
+    expect(rowOpenTarget(row(), false)).toBe("external");
+    expect(rowOpenTarget(row({ pr_number: null }), true)).toBe("external");
+    expect(rowOpenTarget(row({ pr_number: null, pr_url: null }), true)).toBeNull();
   });
 });
