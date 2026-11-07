@@ -760,6 +760,12 @@ impl Session {
     }
 }
 
+/// UI-only note stored after a prompt that joined a running turn.
+pub(crate) const STEER_NOTE: &str =
+    "(sent while the turn was running: it joined this turn, it did not start a new one)";
+/// The same for a finished background job's wake message.
+pub(crate) const JOB_WAKE_NOTE: &str = "(a background job finished: its message joined this turn)";
+
 impl Session {
     /// A handle a surface keeps to queue prompts INTO a running turn (docs/features/queue-autopilot.md).
     pub fn steer_handle(&self) -> crate::steer::SteerInbox {
@@ -776,9 +782,9 @@ impl Session {
     /// phone show the steer straight after the user's prompt with the reply the user watched
     /// stream missing, and the steer's own answer reading as the reply to the wrong message.
     pub(crate) fn inject_steers(&mut self, answered: &str) -> bool {
-        let mut texts = self.steer.drain();
-        texts.extend(self.job_wake.drain());
-        if texts.is_empty() {
+        let steers = self.steer.drain();
+        let wakes = self.job_wake.drain();
+        if steers.is_empty() && wakes.is_empty() {
             return false;
         }
         self.ledger.note_steer();
@@ -786,12 +792,20 @@ impl Session {
             tracing::warn!(%error, "could not publish the reply a steer interrupted");
         }
         self.adaptive_effort.restore();
-        for text in texts {
+        for (text, note) in steers
+            .into_iter()
+            .map(|t| (t, STEER_NOTE))
+            .chain(wakes.into_iter().map(|t| (t, JOB_WAKE_NOTE)))
+        {
             let seq = self.next_seq();
             let _ = self
                 .store
                 .add_message(&self.id, seq, Role::User, &text, None);
             self.transcript.push(Message::user(&text));
+            // A steer is stored exactly like a typed prompt, so on its own it reads as a new turn
+            // in the store. The UI-only note right after it says it is not one.
+            let seq = self.next_seq();
+            let _ = self.store.add_ui_note(&self.id, seq, Role::System, note);
             self.presenter.emit(PresenterEvent::Steered(text));
         }
         true

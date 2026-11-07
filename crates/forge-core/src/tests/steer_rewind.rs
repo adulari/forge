@@ -142,6 +142,20 @@ async fn a_prompt_queued_during_a_tool_step_joins_the_turn_after_that_step() {
 }
 
 #[tokio::test]
+async fn a_steer_is_marked_in_the_store_so_it_is_not_read_as_a_new_turn() {
+    let (mut session, _events, store, _calls) = steer_session(true, 0);
+    session.run_turn("tidy the module").await.unwrap();
+    let rows = store.load_all_messages(&session.id).unwrap();
+    let at = rows
+        .iter()
+        .position(|m| m.role == Role::User && m.content == "also rename the helper")
+        .expect("the steer is stored");
+    assert_eq!(rows[at + 1].role, Role::System);
+    assert_eq!(rows[at + 1].content, crate::session_controls::STEER_NOTE);
+    assert_eq!(rows[at + 1].visibility, forge_types::Visibility::UiOnly);
+}
+
+#[tokio::test]
 async fn a_prompt_queued_during_the_final_answer_continues_the_same_turn() {
     // No tool call at all: the only boundary is where the turn would have ended.
     let (mut session, events, store, calls) = steer_session(false, 0);
@@ -159,6 +173,10 @@ async fn a_prompt_queued_during_the_final_answer_continues_the_same_turn() {
             ("user".to_string(), "summarize".to_string()),
             ("assistant".to_string(), "answer after call 0".to_string()),
             ("user".to_string(), "also rename the helper".to_string()),
+            (
+                "system".to_string(),
+                crate::session_controls::STEER_NOTE.to_string()
+            ),
             ("assistant".to_string(), "answer after call 1".to_string()),
         ],
         "the reply the steer interrupted stays in the history, before the steer"
@@ -347,8 +365,15 @@ fn inject_steers_persists_and_echoes_each_prompt() {
     assert!(session.inject_steers(""));
     assert_eq!(steered(&events), vec!["one".to_string(), "two".to_string()]);
     let persisted = store.load_messages(&session.id).unwrap();
-    assert_eq!(persisted.len(), 2);
-    assert!(persisted.iter().all(|m| m.role == Role::User));
+    assert_eq!(persisted.iter().filter(|m| m.role == Role::User).count(), 2);
+    assert_eq!(
+        persisted
+            .iter()
+            .filter(|m| m.role == Role::System && m.visibility == forge_types::Visibility::UiOnly)
+            .count(),
+        2,
+        "one UI-only marker note per steer"
+    );
     assert!(session.steer.is_empty());
 }
 
