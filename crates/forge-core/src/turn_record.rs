@@ -309,6 +309,7 @@ impl Session {
         let _ = self
             .store
             .close_turn(id, &reason, Some(&detail.to_string()));
+        self.presenter.turn_end_reason(&reason);
         if reason == "final_answer" || is_self_explained(&reason) {
             return;
         }

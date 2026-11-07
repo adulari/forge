@@ -6144,10 +6144,15 @@ mod tests {
         attended: bool,
         /// What `ask` returns; empty falls back to the first option (the old deterministic default).
         ask_answer: String,
+        /// Every stored end reason the session handed to the surface.
+        end_reasons: Arc<Mutex<Vec<String>>>,
     }
     impl Presenter for CapturePresenter {
         fn emit(&mut self, event: PresenterEvent) {
             self.events.lock().unwrap().push(event);
+        }
+        fn turn_end_reason(&mut self, reason: &str) {
+            self.end_reasons.lock().unwrap().push(reason.to_string());
         }
         fn confirm(
             &mut self,

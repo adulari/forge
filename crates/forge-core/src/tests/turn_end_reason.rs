@@ -138,6 +138,23 @@ async fn an_answer_that_announces_unfinished_work_is_flagged() {
 }
 
 #[tokio::test]
+async fn the_surface_hears_the_stored_end_reason_before_done() {
+    let (mut session, store) = fixture(
+        vec![Step::Reply("Let me check the config now.", vec![])],
+        None,
+    );
+    let capture = CapturePresenter {
+        attended: true,
+        ..Default::default()
+    };
+    let heard = capture.end_reasons.clone();
+    session.presenter = Box::new(capture);
+    session.run_turn("do it").await.unwrap();
+    let stored = turns(&store, &session)[0].end_reason.clone().unwrap();
+    assert_eq!(heard.lock().unwrap().last(), Some(&stored));
+}
+
+#[tokio::test]
 async fn a_provider_error_after_a_tool_step_closes_the_row_and_leaves_a_note() {
     let (mut session, store) = fixture(
         vec![
