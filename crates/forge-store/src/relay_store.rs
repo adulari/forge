@@ -84,9 +84,62 @@ impl Store {
             let n = self.relay_predecessors(predecessor)?.len() + 2;
             self.set_session_title(&successor, &format!("{title} (worker {n})"))?;
         }
-        self.record_relay(predecessor, &successor, reason, detail, brief)?;
+        self.hand_over_custody(predecessor, &successor, reason, detail, brief)?;
         self.mark_last_turn_handed_off(predecessor)?;
         Ok(successor)
+    }
+
+    /// The hand-off row and everything the predecessor owned move in one transaction: the
+    /// successor holds the worktree and the fleet slot, the predecessor lets go of both and is
+    /// done. Like a Move, the predecessor keeps no worktree record, so nothing it does later
+    /// (a resume, a ship, a discard) can reach the directory the successor now works in, and a
+    /// daemon that dies at any point restarts with exactly one live holder of the goal.
+    fn hand_over_custody(
+        &self,
+        predecessor: &str,
+        successor: &str,
+        reason: &str,
+        detail: &str,
+        brief: &str,
+    ) -> Result<()> {
+        let now = chrono::Utc::now().timestamp();
+        let conn = self.lock()?;
+        let tx = conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO session_relay \
+             (successor_id, predecessor_id, reason, detail, brief, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![successor, predecessor, reason, detail, brief, now],
+        )?;
+        tx.execute(
+            "UPDATE session SET worktree_path = NULL, daemon_live = 0, \
+             done_at = COALESCE(done_at, ?2) WHERE id = ?1",
+            rusqlite::params![predecessor, now],
+        )?;
+        tx.execute(
+            "UPDATE session SET daemon_live = 1 WHERE id = ?1",
+            [successor],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The session that holds `session_id`'s goal now: the end of its hand-off chain, or the
+    /// session itself when it never handed the goal on.
+    pub fn relay_tail(&self, session_id: &str) -> Result<String> {
+        let mut seen: Vec<String> = Vec::new();
+        let mut at = session_id.to_string();
+        while seen.len() < MAX_CHAIN {
+            let Some(link) = self.relay_successor(&at)? else {
+                break;
+            };
+            if link.successor_id == session_id || seen.contains(&link.successor_id) {
+                break;
+            }
+            seen.push(link.successor_id.clone());
+            at = link.successor_id;
+        }
+        Ok(at)
     }
 
     /// The hand-off that created `session_id`, if it is a successor.
@@ -326,6 +379,33 @@ mod tests {
             Some("handed_off")
         );
         assert!(store.load_messages(&b).unwrap().is_empty());
+    }
+
+    #[test]
+    fn custody_moves_with_the_goal_in_one_step() {
+        let store = Store::open_in_memory().unwrap();
+        let a = store.create_session("/repo/wt", "bypass").unwrap();
+        store.set_session_worktree(&a, "/repo/wt").unwrap();
+        store.set_session_daemon_live(&a, true).unwrap();
+        let b = store
+            .create_relay_successor(&a, "wedged", "same set", "BRIEF")
+            .unwrap();
+        let c = store
+            .create_relay_successor(&b, "worn", "", "BRIEF 2")
+            .unwrap();
+        assert_eq!(store.session_worktree(&a).unwrap(), None);
+        assert_eq!(store.session_worktree(&b).unwrap(), None);
+        assert_eq!(
+            store.session_worktree(&c).unwrap().as_deref(),
+            Some("/repo/wt")
+        );
+        assert!(!store.session_daemon_live(&a).unwrap());
+        assert!(!store.session_daemon_live(&b).unwrap());
+        assert!(store.session_daemon_live(&c).unwrap());
+        assert_eq!(store.relay_tail(&a).unwrap(), c);
+        assert_eq!(store.relay_tail(&c).unwrap(), c);
+        let done = store.session_lifecycle(&[a.clone()]).unwrap();
+        assert!(done[&a].1.is_some(), "the predecessor is done");
     }
 
     #[test]
