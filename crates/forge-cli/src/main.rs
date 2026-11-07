@@ -71,6 +71,7 @@ mod bridge_stats;
 mod brief_client;
 #[path = "cli/browser_args.rs"]
 mod browser_args;
+mod ci_run;
 mod cli;
 mod clipboard_image;
 mod context_windows;

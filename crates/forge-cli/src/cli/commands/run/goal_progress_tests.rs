@@ -374,3 +374,73 @@ fn every_other_stop_reason_leaves_the_goal_running() {
         assert!(!pause_if_provider_down(&mut app), "{reason:?}");
     }
 }
+
+fn scratch_repo_with_ci() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let wf = dir.path().join(".github/workflows");
+    std::fs::create_dir_all(&wf).unwrap();
+    std::fs::write(
+        wf.join("ci.yml"),
+        "on: pull_request\nenv:\n  STRICT: \"1\"\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Strict check\n        run: test \"$STRICT\" = 1 && sh ./check.sh\n      - name: Needs a secret\n        env:\n          T: ${{ secrets.T }}\n        run: echo $T\n  win:\n    runs-on: windows-latest\n    steps:\n      - run: echo hi\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("check.sh"),
+        "echo lint-failed >&2\nexit 1\n",
+    )
+    .unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn a_goal_is_not_done_until_the_repos_ci_plan_passes() {
+    let repo = scratch_repo_with_ci();
+    let mut gs = state(&[]);
+    let done = verdict(true, &[], "");
+    let first =
+        next_goal_decision(&mut gs, false, 1, 1, 100, Some(done.clone()), repo.path()).await;
+    let GoalDecision::GateFailed { prompt } = first else {
+        panic!("a failing CI plan must not let the goal finish");
+    };
+    assert!(prompt.contains("forge ci run"), "{prompt}");
+    assert!(
+        prompt.contains("Local CI step failed: Strict check"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("STRICT=1") && prompt.contains("lint-failed"),
+        "{prompt}"
+    );
+
+    std::fs::write(repo.path().join("check.sh"), "exit 0\n").unwrap();
+    let second = next_goal_decision(&mut gs, false, 1, 1, 100, Some(done), repo.path()).await;
+    assert!(matches!(second, GoalDecision::Stop(ref r) if is_goal_complete_reason(r)));
+}
+
+#[tokio::test]
+async fn gate_off_in_ci_toml_lets_the_goal_finish_without_running_the_plan() {
+    let repo = scratch_repo_with_ci();
+    std::fs::create_dir_all(repo.path().join(".forge")).unwrap();
+    std::fs::write(repo.path().join(".forge/ci.toml"), "[ci]\ngate = \"off\"\n").unwrap();
+    let mut gs = state(&[]);
+    let d = next_goal_decision(
+        &mut gs,
+        false,
+        1,
+        1,
+        100,
+        Some(verdict(true, &[], "")),
+        repo.path(),
+    )
+    .await;
+    assert!(matches!(d, GoalDecision::Stop(ref r) if is_goal_complete_reason(r)));
+    assert!(gs.gates.is_empty());
+}
+
+#[tokio::test]
+async fn a_contract_goal_also_waits_for_the_ci_plan() {
+    let repo = scratch_repo_with_ci();
+    let mut gs = state(&[]);
+    let d = finish_with_gates(&mut gs, GOAL_COMPLETE_REASON, repo.path()).await;
+    assert!(matches!(d, GoalDecision::GateFailed { .. }));
+}

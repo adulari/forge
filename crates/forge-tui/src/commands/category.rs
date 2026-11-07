@@ -12,7 +12,7 @@ pub fn command_category(name: &str) -> &'static str {
         }
         "model" | "models" | "mode" | "effort" | "subagents" | "delegation" | "crew" | "agents"
         | "thinking" | "mesh" | "usage" => "Model & usage",
-        "assay" | "lattice" | "pr" | "ship" | "queue" | "commit" | "diff" => "Review & ship",
+        "assay" | "lattice" | "pr" | "ci" | "ship" | "queue" | "commit" | "diff" => "Review & ship",
         "mcp" | "remote" | "anywhere" | "import" | "issues" | "clis" | "host" | "self-mcp"
         | "voice" | "image" | "claude" => "Integrations",
         "config" | "theme" | "statusline" | "keys" | "help" | "init" | "remember" | "memories"

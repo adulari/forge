@@ -671,6 +671,16 @@ pub(crate) async fn ship_session(
         }
     }
 
+    let ci_root = root.clone();
+    if let Ok(Some(failure)) =
+        tokio::task::spawn_blocking(move || crate::ci_run::push_blocker(&ci_root)).await
+    {
+        return Ok(out.refuse(
+            "push",
+            format!("not pushed: the repository's CI fails locally.\n{failure}"),
+        ));
+    }
+
     let (generated_title, generated_body) = pr_text(state, session, &root, base.as_deref()).await;
     let title = request
         .title

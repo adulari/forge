@@ -501,6 +501,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Plugin { cmd } => plugin_cmd(cmd).await,
         Command::SelfMcp { action } => self_mcp_cmd(action),
         Command::Schedule { cmd } => schedule_cmd(cmd),
+        Command::Ci(a) => crate::cli::commands::ci::ci_cmd(a.cmd),
         Command::Notes { cmd } => crate::cli::commands::notes::notes_cmd(cmd),
         Command::Service { cmd } => service_cmd(cmd),
         Command::Queue { cmd } => queue_cmd(cmd),

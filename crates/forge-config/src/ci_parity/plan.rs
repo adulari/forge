@@ -186,7 +186,10 @@ fn strings(y: Option<&Yaml>) -> Vec<String> {
 }
 
 /// The events a workflow fires on, and the `paths` filters of push / pull_request.
-fn triggers(on: Option<&Yaml>) -> (Vec<String>, Vec<(Vec<String>, Vec<String>)>) {
+/// `(paths, paths-ignore)` of one event.
+type PathFilter = (Vec<String>, Vec<String>);
+
+fn triggers(on: Option<&Yaml>) -> (Vec<String>, Vec<PathFilter>) {
     match on {
         Some(Yaml::Map(entries)) => {
             let events = entries.iter().map(|(k, _)| k.clone()).collect();
@@ -520,7 +523,7 @@ fn plan_steps(
         if let Some(uses) = step.get("uses").and_then(Yaml::as_str) {
             let lower = uses.to_ascii_lowercase();
             let action = lower.split('@').next().unwrap_or("");
-            if NOOP_ACTIONS.iter().any(|n| *n == action) {
+            if NOOP_ACTIONS.contains(&action) {
                 plan.noops += 1;
             } else {
                 plan.skips.push(CiSkip {

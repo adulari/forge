@@ -187,6 +187,7 @@ fn goal_budget_check(state: &GoalState) -> Option<GoalDecision> {
 
 /// A completion (claimed or judged): the quality gates decide whether the run really ends.
 async fn finish_with_gates(state: &mut GoalState, reason: &str, cwd: &Path) -> GoalDecision {
+    ensure_ci_gate(&mut state.gates, cwd);
     let fingerprint = workspace_fingerprint(cwd).await;
     match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint, cwd).await {
         GateOutcome::AllPassed => {

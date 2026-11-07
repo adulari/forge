@@ -964,3 +964,57 @@ async fn the_queue_routes_list_and_act_with_the_right_statuses() {
     assert_eq!(status, StatusCode::OK, "{body}");
     disarm(&ids.map(String::from));
 }
+
+#[tokio::test]
+async fn a_failing_local_ci_plan_keeps_the_push_back_and_names_the_step() {
+    let w = World::new(&[("1", ""), ("2", "")]);
+    let wt = &w.clones[1];
+    let wf = wt.join(".github/workflows");
+    std::fs::create_dir_all(&wf).unwrap();
+    std::fs::write(
+        wf.join("ci.yml"),
+        "on: pull_request\nenv:\n  STRICT: \"1\"\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Strict lint\n        run: echo lint-broke-in-merged-result >&2; test \"$STRICT\" = 0\n",
+    )
+    .unwrap();
+    git(wt, &["add", "."]);
+    git(wt, &["commit", "-qm", "add ci"]);
+    git(wt, &["push", "-q", "origin", "feat-2"]);
+    let mut ws = watches(2);
+    let gh = w.gh();
+    let mut prompt = None;
+    for round in 0..14 {
+        let now = 100 + round * 60;
+        for i in 0..2 {
+            if !ws[i].active() {
+                continue;
+            }
+            let mut next = ws[i].clone();
+            let all = ws.to_vec();
+            let out = advance(
+                &gh,
+                &w.clones[i],
+                &mut next,
+                all,
+                true,
+                now,
+                Some(w.verify()),
+            )
+            .await;
+            ws[i] = next;
+            if i == 1 && out.prompt.is_some() {
+                prompt = out.prompt;
+            }
+        }
+    }
+    let prompt = prompt.expect("PR2 is told the CI plan fails");
+    assert!(
+        prompt.contains("Local CI step failed: Strict lint"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("STRICT=1") && prompt.contains("lint-broke-in-merged-result"),
+        "{prompt}"
+    );
+    assert_eq!(ws[1].queue.as_ref().unwrap().state, QueueState::Skipped);
+    assert!(!w.gh_log().contains("pr merge 2 "), "{}", w.gh_log());
+}

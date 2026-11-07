@@ -583,3 +583,32 @@ async fn a_refused_commit_hook_leaves_the_index_as_it_was() {
         "README.md"
     );
 }
+
+#[tokio::test]
+async fn a_failing_local_ci_plan_refuses_the_push_and_names_the_step() {
+    let fx = fixture("worktree", "WRITE", NO_PRS);
+    let wf = fx.work.join(".github/workflows");
+    std::fs::create_dir_all(&wf).unwrap();
+    std::fs::write(
+        wf.join("ci.yml"),
+        "on: pull_request\nenv:\n  STRICT: \"1\"\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Strict lint\n        run: echo lint-broke >&2; test \"$STRICT\" = 0\n",
+    )
+    .unwrap();
+    let response = ship(&fx, ShipRequest::default()).await;
+
+    assert!(!response.ok);
+    let refused = response.refused.unwrap();
+    assert_eq!(refused.step, "push");
+    assert!(
+        refused.reason.contains("Local CI step failed: Strict lint"),
+        "{}",
+        refused.reason
+    );
+    assert!(
+        refused.reason.contains("STRICT=1") && refused.reason.contains("lint-broke"),
+        "{}",
+        refused.reason
+    );
+    assert!(sh(&fx.remote, &["branch", "--list", "feat/cart"]).is_empty());
+    assert!(gh_calls(&fx).is_empty());
+}

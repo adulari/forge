@@ -98,6 +98,7 @@ mod rewind_menu;
 pub(crate) use rewind_menu::*;
 mod agents_menu;
 mod anywhere_menu;
+mod ci_menu;
 mod dispatch;
 mod fork_cmd;
 mod heartbeat_cmd;
@@ -867,6 +868,7 @@ pub(crate) async fn run_chat_tui(
     let mut issues_driver = issues_menu::IssuesMenuDriver::new();
     let mut queue_driver = queue_menu::QueueMenuDriver::new();
     let mut ship_driver = ship_menu::ShipMenuDriver::new();
+    let mut ci_driver = ci_menu::CiMenuDriver::new();
     let mut agents_driver = agents_menu::AgentsMenuDriver::new(mock);
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
     // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
@@ -1804,6 +1806,11 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
                 continue;
             }
+            if app.ci_menu.open {
+                ci_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
             if app.ship_menu.open {
                 ship_driver.key(&mut app, key);
                 dirty = true;
@@ -2021,6 +2028,7 @@ pub(crate) async fn run_chat_tui(
                 || app.issues_menu.open
                 || app.queue_menu.open
                 || app.ship_menu.open
+                || app.ci_menu.open
                 || app.workspace_menu.open
                 || app.agents_menu.open
                 || app.status_open
@@ -5358,6 +5366,9 @@ pub(crate) async fn run_chat_tui(
             dirty = true;
         }
         if queue_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if ci_driver.tick(&mut app) {
             dirty = true;
         }
         if ship_driver.tick(&mut app) {

@@ -40,6 +40,7 @@ use crate::serve::{
 pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
     Router::new()
         .route(&format!("{base}/api/git/status"), get(status::git_status))
+        .merge(ci::routes(base))
         .route(
             &format!("{base}/api/git/branches"),
             get(git_branches).post(git_create_branch),
@@ -82,6 +83,7 @@ pub(crate) fn parse_patch(raw: &str, drop_unchanged: bool) -> Vec<GitDiffFile> {
 
 mod branches;
 pub(crate) mod changes;
+mod ci;
 mod diff;
 pub(crate) mod hunk;
 mod message;

@@ -179,6 +179,8 @@ pub enum CommandAction {
     Issues,
     /// Open the `/queue` overlay: the merge queue, with hold, release, front and retry.
     Queue,
+    /// Open the `/ci` overlay: the repository's workflows as a local plan, with a one-key run.
+    Ci,
     /// Open the `/ship` card: commit, push, open the PR and watch it to merge.
     Ship,
     /// Open the control-tools menu: which tools agents may use to drive the app, and what they did.
@@ -571,6 +573,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "import" => CommandAction::Import,
         "issues" => CommandAction::Issues,
         "queue" | "merge-queue" => CommandAction::Queue,
+        "ci" => CommandAction::Ci,
         "ship" => CommandAction::Ship,
         "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
         "control" => CommandAction::Control,

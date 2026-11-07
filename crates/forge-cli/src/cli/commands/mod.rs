@@ -4,6 +4,7 @@ pub(crate) mod blame;
 pub(crate) mod brief;
 pub(crate) mod browser;
 pub(crate) mod cc_transcript;
+pub(crate) mod ci;
 pub(crate) mod codex_rollout;
 pub(crate) mod continue_claude;
 pub(crate) mod dispatch;

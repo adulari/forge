@@ -431,6 +431,8 @@ pub struct App {
     pub issues_menu: crate::issues_menu::IssuesMenu,
     /// The `/queue` merge queue (hold, release, front, retry), while open.
     pub queue_menu: crate::queue_menu::QueueMenu,
+    /// The `/ci` overlay (the repository's workflows as a local plan), while open.
+    pub ci_menu: crate::ci_menu::CiMenu,
     /// The `/ship` card (commit, push, PR, watch in one action), while open.
     pub ship_menu: crate::ship_menu::ShipMenu,
     /// The `/worktree` and `/project` overlay, while open.

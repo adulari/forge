@@ -323,6 +323,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/pr [title]",
     },
     Command {
+        name: "ci",
+        desc: "run the repository's own CI (from .github/workflows) locally, with its environment",
+        usage: "/ci",
+    },
+    Command {
         name: "ship",
         desc: "commit, push, open the pull request and let PR Watch merge it when checks pass",
         usage: "/ship",

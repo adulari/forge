@@ -618,8 +618,9 @@ fn fix_prompt(pr: &PrSummary, failing: &[String], changes: bool, new_comments: u
         ));
     }
     text.push_str(
-        "\nFix the cause in this worktree, run the relevant checks locally, commit, and push \
-         with a normal `git push`. Never force-push, never rewrite history, never delete the \
+        "\nFix the cause in this worktree, run the relevant checks locally (when the repository has \
+         workflows, `forge ci run` runs the same steps CI does, with CI's environment), commit, \
+         and push with a normal `git push`. Never force-push, never rewrite history, never delete the \
          branch. If you cannot fix it, say why and stop.",
     );
     text

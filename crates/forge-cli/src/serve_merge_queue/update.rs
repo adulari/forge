@@ -142,6 +142,16 @@ fn verify_prompt(name: &str, output: &str) -> String {
     )
 }
 
+fn ci_prompt(failure: &str) -> String {
+    format!(
+        "Merge queue: this branch now contains the latest base, but the repository's own CI plan \
+         fails locally on the merged result (the merge commit is local and not pushed):\n\n{failure}\n\n\
+         Fix it in this worktree, commit, and push with a normal `git push`. Never force-push. The \
+         queue carries on with the other pull requests meanwhile and takes this one back once you \
+         push."
+    )
+}
+
 /// Resolve the unmerged paths of an in-progress merge, or say which ones cannot be resolved.
 fn resolve_changelogs(root: &Path, paths: &[String]) -> Result<(), Vec<String>> {
     let mut unresolved = Vec::new();
@@ -313,6 +323,14 @@ pub(crate) fn run_step(root: &Path, base: &str, verify: &[Verify]) -> Step {
             };
         }
         verified.push(v.name.clone());
+    }
+
+    if let Some(failure) = crate::ci_run::push_blocker(root) {
+        return Step::Handoff {
+            reason: "the repository's CI fails locally on the merged result".into(),
+            paths: Vec::new(),
+            prompt: ci_prompt(&failure),
+        };
     }
 
     let refspec = format!("HEAD:refs/heads/{branch}");

@@ -234,6 +234,8 @@ pub(crate) use session_flags::SessionFlags;
 #[path = "args/schedule.rs"]
 pub(crate) mod schedule;
 pub(crate) use schedule::ScheduleCmd;
+#[path = "args/ci.rs"]
+pub(crate) mod ci;
 #[path = "args/notes.rs"]
 pub(crate) mod notes;
 pub(crate) use notes::NotesCmd;
@@ -976,6 +978,9 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: SelfMcpAction,
     },
+    /// The repository's own CI, run locally: `forge ci plan` lists what would run (and what is
+    /// skipped, with the reason), `forge ci run` runs it. Overrides live in `.forge/ci.toml`.
+    Ci(ci::CiArgs),
     /// The project's scratchpad and to-do list: `forge notes`, `add`, `done`, `rm`, `pad`. The
     /// same notes the desktop, web and mobile Notes surface and the TUI `/notes` overlay edit.
     Notes {

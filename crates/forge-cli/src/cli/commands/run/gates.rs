@@ -25,6 +25,36 @@ const BOUNDED_OUTPUT_CHARS: usize = 4000;
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
+/// The built-in gate that runs the repository's own CI plan (docs/features/ci-parity.md). It is a
+/// name, not a shell command: [`run_gate_command`] runs the plan in-process, and the plan's own
+/// per-step and total timeouts replace the 300 s gate timeout.
+pub(crate) const CI_GATE_CMD: &str = "forge ci run";
+
+/// Add the CI-parity gate to `gates` when the repo has runnable workflow steps and `[ci] gate`
+/// is not `off`. Idempotent; called when a goal reaches completion.
+pub(crate) fn ensure_ci_gate(gates: &mut Vec<GateState>, cwd: &std::path::Path) {
+    if gates.iter().any(|g| g.spec.cmd == CI_GATE_CMD) {
+        return;
+    }
+    let (plan, settings) = crate::ci_run::make_plan(cwd);
+    if settings.gate == forge_config::ci_parity::settings::GateMode::Auto && !plan.steps.is_empty()
+    {
+        gates.push(GateState::new(GateSpec {
+            cmd: CI_GATE_CMD.to_string(),
+        }));
+    }
+}
+
+async fn run_ci_gate(cwd: &std::path::Path) -> (bool, String) {
+    let root = cwd.to_path_buf();
+    match tokio::task::spawn_blocking(move || crate::ci_run::automatic_check(&root)).await {
+        Ok(crate::ci_run::Check::Passed(summary)) => (true, summary),
+        Ok(crate::ci_run::Check::Skipped(why)) => (true, format!("skipped: {why}")),
+        Ok(crate::ci_run::Check::Failed(text)) => (false, text),
+        Err(e) => (false, format!("the CI plan run crashed: {e}")),
+    }
+}
+
 /// A single user-defined quality gate: a shell command that must exit 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GateSpec {
@@ -137,6 +167,9 @@ fn bound_output(s: &str, max_chars: usize) -> String {
 /// tree if it outruns `timeout`. gates.rs can't reuse forge-tools' shell runtime directly (it's a
 /// private tool-execution path in a different crate) so this mirrors its process-group kill idiom.
 async fn run_gate_command(cmd: &str, timeout: Duration, cwd: &std::path::Path) -> (bool, String) {
+    if cmd == CI_GATE_CMD {
+        return run_ci_gate(cwd).await;
+    }
     let (shell, flag) = shell_invocation();
     let mut command = Command::new(shell);
     command

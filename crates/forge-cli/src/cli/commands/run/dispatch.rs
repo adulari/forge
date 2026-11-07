@@ -1009,6 +1009,7 @@ and keep going."
         CommandAction::Issues => app.note("/issues opens in a terminal chat; run `forge issues` instead"),
         CommandAction::Queue if tui.is_some() => app.queue_menu.open(),
         CommandAction::Queue => app.note("/queue opens in a terminal chat; run `forge prs queue` instead"),
+        CommandAction::Ci => app.ci_menu.open(),
         CommandAction::Ship if tui.is_some() => app.ship_menu.open(),
         CommandAction::Ship => app.note("/ship opens in a terminal chat; run `forge ship <session>` instead"),
         CommandAction::ContinueClaude(q) if tui.is_some() => super::import_menu::cont_claude(app, q),
