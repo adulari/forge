@@ -207,7 +207,7 @@ export function goalMeta(goal: GoalView, nowMs: number): string {
 export interface ContractRow {
   id: number;
   text: string;
-  state: "pass" | "fail" | "pending";
+  state: "pass" | "fail" | "pending" | "unverified";
   /** Symbol shown beside the row; the colour is never the only signal. */
   mark: string;
   command: string;
@@ -229,12 +229,13 @@ export function contractRows(goal: GoalView): ContractRow[] | null {
       .map((line) => line.trim())
       .filter(Boolean)
       .pop();
-    const detail = a.state === "fail" ? [a.reason, lastProof].filter(Boolean).join(" · ") : (lastProof ?? "");
+    const detail =
+      a.state === "fail" || a.state === "unverified" ? [a.reason, lastProof].filter(Boolean).join(" · ") : (lastProof ?? "");
     return {
       id: a.id,
       text: a.text,
       state: a.state,
-      mark: a.state === "pass" ? "✓" : a.state === "fail" ? "✗" : "·",
+      mark: a.state === "pass" ? "✓" : a.state === "fail" ? "✗" : a.state === "unverified" ? "?" : "·",
       command: a.command,
       detail,
       artifact: a.artifact ?? null,

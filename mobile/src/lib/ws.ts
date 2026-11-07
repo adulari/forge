@@ -215,7 +215,7 @@ export interface SnapshotAssertion {
   text: string;
   command: string;
   expect: string;
-  state: "pass" | "fail" | "pending";
+  state: "pass" | "fail" | "pending" | "unverified";
   reason: string;
   proof: string;
   /** Path of a screenshot a behaviour (QA) probe took; served by the evidence image route. */

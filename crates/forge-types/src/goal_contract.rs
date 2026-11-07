@@ -52,6 +52,16 @@ pub struct AssertionResult {
     pub artifact: Option<String>,
 }
 
+impl AssertionResult {
+    /// A behaviour probe that could not run (no browser tool, say). It counts as passed so a
+    /// missing tool cannot wedge the goal, but every surface lists it apart from a real pass.
+    pub fn unverified(&self) -> bool {
+        self.passed && self.reason.starts_with(UNVERIFIED)
+    }
+}
+
+pub const UNVERIFIED: &str = "unverified:";
+
 /// A contract and what the validator has found so far. `approved` is false only while the card
 /// waits for the person.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -113,6 +123,15 @@ impl GoalContract {
             .collect()
     }
 
+    /// Ids of passed assertions that were not actually verified.
+    pub fn unverified_ids(&self) -> Vec<u32> {
+        self.results
+            .iter()
+            .filter(|r| r.unverified())
+            .map(|r| r.id)
+            .collect()
+    }
+
     /// `3/6 pass`, or `6 assertions` before the validator has run.
     pub fn headline(&self) -> String {
         if let Some(line) = self.mission_headline() {
@@ -121,7 +140,17 @@ impl GoalContract {
         if self.results.is_empty() {
             format!("{} assertions", self.assertions.len())
         } else {
-            format!("{}/{} pass", self.passed_count(), self.assertions.len())
+            let unverified = self.unverified_ids().len();
+            let tail = if unverified > 0 {
+                format!(" ({unverified} unverified)")
+            } else {
+                String::new()
+            };
+            format!(
+                "{}/{} pass{tail}",
+                self.passed_count(),
+                self.assertions.len()
+            )
         }
     }
 
@@ -154,6 +183,7 @@ impl GoalContract {
 
     fn assertion_lines(&self, a: &Assertion, out: &mut Vec<String>) {
         let (mark, state) = match self.result(a.id) {
+            Some(r) if r.unverified() => ("?", "UNVERIFIED"),
             Some(r) if r.passed => ("✓", "pass"),
             Some(_) => ("✗", "FAIL"),
             None => ("·", "not run"),
@@ -164,7 +194,7 @@ impl GoalContract {
             out.push(format!("     expect: {}", a.expect));
         }
         if let Some(r) = self.result(a.id) {
-            if !r.passed && !r.reason.is_empty() {
+            if (!r.passed || r.unverified()) && !r.reason.is_empty() {
                 out.push(format!("     why: {}", r.reason));
             }
             if let Some(last) = r.proof.lines().rev().find(|l| !l.trim().is_empty()) {

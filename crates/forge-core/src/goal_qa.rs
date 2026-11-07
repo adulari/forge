@@ -296,7 +296,12 @@ impl Session {
         let (verdict, output, shot) = match outcome {
             Ok(v) => v,
             Err(skip) => {
-                return result(true, String::new(), format!("skipped: {skip}"), None);
+                return result(
+                    true,
+                    format!("{} {skip}", forge_types::goal_contract::UNVERIFIED),
+                    format!("skipped: {skip}"),
+                    None,
+                );
             }
         };
         let proof = tail(

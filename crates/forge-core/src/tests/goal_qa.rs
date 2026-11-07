@@ -142,6 +142,17 @@ async fn a_screenshot_probe_without_a_browser_is_skipped_with_the_reason() {
         "",
     )]);
     let r = h.session.validate_goal_contract(&c).await;
-    assert!(r[0].passed);
+    assert!(r[0].passed, "an unrunnable probe must not block the goal");
+    assert!(r[0].unverified(), "{:?}", r[0]);
+    assert!(r[0].reason.starts_with("unverified:"), "{}", r[0].reason);
     assert!(r[0].proof.starts_with("skipped:"), "{}", r[0].proof);
+    let mut c = c;
+    c.record(r, 1);
+    assert_eq!(c.unverified_ids(), vec![1]);
+    assert!(c.headline().contains("1 unverified"), "{}", c.headline());
+    assert!(c.table_lines()[0].contains("UNVERIFIED"));
+    let events = h.events.lock().unwrap();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, PresenterEvent::Progress(p) if p.contains("unverified"))));
 }

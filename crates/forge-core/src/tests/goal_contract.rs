@@ -60,7 +60,7 @@ impl Provider for DrafterProvider {
 
 pub(super) struct Harness {
     pub(super) session: Session,
-    events: Arc<Mutex<Vec<PresenterEvent>>>,
+    pub(super) events: Arc<Mutex<Vec<PresenterEvent>>>,
     drafts: Arc<Mutex<Vec<String>>>,
     other_calls: Arc<Mutex<usize>>,
     pub(super) dir: tempfile::TempDir,

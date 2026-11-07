@@ -9,6 +9,7 @@ const PROOF_PREVIEW: usize = 90;
 
 fn mark(contract: &GoalContract, id: u32) -> &'static str {
     match contract.result(id) {
+        Some(r) if r.unverified() => "UNVERIFIED",
         Some(r) if r.passed => "pass",
         Some(_) => "FAIL",
         None => "not run",
@@ -29,7 +30,9 @@ pub(crate) fn rows(contract: &GoalContract) -> Vec<PickerRow> {
         .map(|a| {
             let state = mark(contract, a.id);
             let detail = match contract.result(a.id) {
-                Some(r) if !r.passed && !r.reason.is_empty() => r.reason.clone(),
+                Some(r) if (!r.passed || r.unverified()) && !r.reason.is_empty() => {
+                    r.reason.clone()
+                }
                 Some(r) => last_line(&r.proof).to_string(),
                 None => a.command.clone(),
             };

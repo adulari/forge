@@ -261,8 +261,12 @@ so a QA runner does it.
   is a setup step.
 - **Proof.** The probe output tail (and screenshot path) is stored in the result and fed back as
   the failure prompt. Cleanup always runs, then the whole process group is killed.
-- **Skipped.** A `screenshot` probe with no browser tool counts as passed with proof
-  `skipped: <reason>`; the reason is visible everywhere.
+- **Unverified.** A probe that cannot run (a `screenshot` probe with no browser tool) is not a
+  pass. The result carries reason `unverified: <reason>` and proof `skipped: <reason>`; it does not
+  block the goal (a missing tool cannot wedge it) but is listed apart everywhere: mark `?` and
+  `UNVERIFIED` in the table, `/contract` and `forge goal show`, `unverified` as the snapshot state,
+  `(N unverified)` in the headline, and `· unverified (probe could not run): N` on the validator's
+  progress line.
 - **Shows.** `/contract` (full proof, `screenshot:` path), `/goal status`, `forge goal show`,
   `Snapshot.goal.contract.assertions[].artifact|behaviour`, and the phone/desktop goal panel (proof
   line plus the screenshot through the evidence image route).

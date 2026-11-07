@@ -142,6 +142,33 @@ describe("GoalBanner", () => {
     expect(html).toContain("/ev/qa-1.png");
   });
 
+  it("marks an assertion whose probe could not run as unverified, not passed", () => {
+    const contract = {
+      headline: "1/1 pass (1 unverified)",
+      approved: true,
+      rounds: 1,
+      passed: 1,
+      total: 1,
+      checked_at: 1_700_000_000,
+      assertions: [
+        {
+          id: 1,
+          text: "page shows the button",
+          command: "behaviour: run `x`, probe `screenshot u`",
+          expect: "",
+          state: "unverified" as const,
+          reason: "unverified: the browser tool is not available",
+          proof: "skipped: the browser tool is not available",
+          behaviour: true,
+        },
+      ],
+    };
+    const { html } = render(snapshot({ goal: goal({ contract }) }));
+    expect(html).toContain("unverified: the browser tool is not available");
+    expect(html).toContain("?");
+    expect(html).not.toContain("✓");
+  });
+
   it("draws the contract table with a mark, the check and the proof per assertion", () => {
     const contract = {
       headline: "1/2 pass",

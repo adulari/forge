@@ -348,12 +348,25 @@ impl Session {
             .map(|r| r.id.to_string())
             .collect();
         let passed = results.len() - failing.len();
+        let unverified: Vec<String> = results
+            .iter()
+            .filter(|r| r.unverified())
+            .map(|r| r.id.to_string())
+            .collect();
+        let note = if unverified.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " · unverified (probe could not run): {}",
+                unverified.join(", ")
+            )
+        };
         self.presenter
             .emit(PresenterEvent::Progress(if failing.is_empty() {
-                format!("📜 contract {passed}/{passed} pass")
+                format!("📜 contract {passed}/{passed} pass{note}")
             } else {
                 format!(
-                    "📜 contract {passed}/{} pass · failing: {}",
+                    "📜 contract {passed}/{} pass · failing: {}{note}",
                     results.len(),
                     failing.join(", ")
                 )

@@ -136,7 +136,7 @@ pub struct SnapAssertion {
     pub text: String,
     pub command: String,
     pub expect: String,
-    /// `pass`, `fail`, or `pending` before the validator has run.
+    /// `pass`, `fail`, `unverified` (passed, but the probe could not run), or `pending` before the validator has run.
     pub state: &'static str,
     pub reason: String,
     /// The tail of the check's output.
@@ -169,6 +169,7 @@ impl From<&forge_types::goal_contract::GoalContract> for SnapContract {
                         command: a.command.clone(),
                         expect: a.expect.clone(),
                         state: match result {
+                            Some(r) if r.unverified() => "unverified",
                             Some(r) if r.passed => "pass",
                             Some(_) => "fail",
                             None => "pending",
