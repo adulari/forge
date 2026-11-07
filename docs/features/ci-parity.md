@@ -30,7 +30,9 @@ Forge derives a **CI plan** from `.github/workflows/*.y{,a}ml`:
 
 Every skip is listed with its reason, never dropped: needs a secret / repository variable / GitHub
 context (`${{ secrets.X }}`, `${{ github.event_name }}`, `${{ steps.x.outputs.y }}`), a network or
-deploy command (`npm publish`, `gh release`, `git push`, ...), runner housekeeping (a script that
+deploy command (`npm publish`, `gh release`, `git push`, ...), a `git fetch`/`git pull` that
+changes the clone's history depth (`--depth`, `--shallow-since`, `--unshallow`, ...; the step would
+run in your own clone and make it shallow), runner housekeeping (a script that
 writes `$GITHUB_ENV` / `$GITHUB_OUTPUT`), a cleanup step (`if: always()`), another `if:` condition,
 a non-bash shell. `${{ runner.temp }}`, `${{ runner.os }}`, `${{ github.workspace }}`,
 `${{ matrix.* }}` and `${{ env.* }}` are resolved.

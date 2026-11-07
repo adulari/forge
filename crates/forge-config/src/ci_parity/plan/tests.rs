@@ -249,6 +249,10 @@ fn this_repos_plan_skips_runner_housekeeping_and_release_builds() {
         .skips
         .iter()
         .any(|s| s.job.as_deref() == Some("release-build")));
+    assert!(
+        !p.steps.iter().any(|s| shallow_git(&s.run).is_some()),
+        "a step would make the owner's clone shallow"
+    );
 }
 
 #[test]
@@ -271,4 +275,39 @@ fn scripts_that_write_runner_state_are_skipped_but_their_tests_are_not() {
     assert_eq!(p.steps.len(), 1);
     assert_eq!(p.steps[0].run, "bash test-setup.sh");
     assert!(p.skips[0].reason.contains("runner state"));
+}
+
+#[test]
+fn a_fetch_that_makes_the_clone_shallow_is_skipped_and_a_plain_fetch_is_not() {
+    let wf = r#"
+on: push
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Guard
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          ./scripts/guard.sh
+      - name: Tag
+        run: git fetch --depth 1 origin "refs/tags/v1:refs/tags/v1"
+      - name: Since
+        run: git -C . pull --shallow-since=2024-01-01
+      - name: Plain fetch
+        run: git fetch --no-tags origin main
+      - name: Tree
+        run: cargo tree --depth 1
+"#;
+    let p = plan(&[("ci.yml", wf)]);
+    let runnable: Vec<&str> = p.steps.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(runnable, ["Plain fetch", "Tree"], "{:#?}", p.skips);
+    for name in ["Guard", "Tag", "Since"] {
+        assert!(
+            p.skips
+                .iter()
+                .any(|k| k.step.as_deref() == Some(name) && k.reason.contains("shallow")),
+            "{name}: {:#?}",
+            p.skips
+        );
+    }
 }

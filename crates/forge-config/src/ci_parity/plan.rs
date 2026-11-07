@@ -97,6 +97,36 @@ const DEPLOY_MARKERS: &[&str] = &[
     "aws s3",
 ];
 
+/// `git fetch`/`git pull` options that change how much history the clone holds. A step runs in
+/// the owner's own clone, whose object store every worktree shares, so `--depth=1` there would
+/// make the whole repository shallow.
+const SHALLOW_FLAGS: &[&str] = &[
+    "--depth",
+    "--deepen",
+    "--shallow-since",
+    "--shallow-exclude",
+    "--unshallow",
+    "--update-shallow",
+];
+
+/// The first `git fetch`/`git pull` in `run` that changes the clone's history depth, as
+/// `git fetch --depth`.
+fn shallow_git(run: &str) -> Option<String> {
+    run.split(['\n', ';', '&', '|']).find_map(|cmd| {
+        let words: Vec<&str> = cmd.split_whitespace().collect();
+        let git = words.iter().position(|w| *w == "git")?;
+        let sub = words[git + 1..]
+            .iter()
+            .find(|w| matches!(**w, "fetch" | "pull"))?;
+        let flag = words[git + 1..].iter().find_map(|w| {
+            SHALLOW_FLAGS
+                .iter()
+                .find(|f| w.split('=').next() == Some(**f))
+        })?;
+        Some(format!("git {sub} {flag}"))
+    })
+}
+
 const RUNNER_STATE: &[&str] = &[
     "GITHUB_ENV",
     "GITHUB_PATH",
@@ -648,6 +678,11 @@ fn skip_reason(
     }
     if let Some(m) = DEPLOY_MARKERS.iter().find(|m| cand.run.contains(**m)) {
         reason = reason.or(Some(format!("network/deploy command (`{}`)", m.trim())));
+    }
+    if let Some(cmd) = shallow_git(&cand.run) {
+        reason = reason.or(Some(format!(
+            "would make the shared clone shallow (`{cmd}`)"
+        )));
     }
     if names_runner_state(&cand.run) || root.is_some_and(|r| script_touches_runner(r, cand)) {
         reason = reason.or(Some(
