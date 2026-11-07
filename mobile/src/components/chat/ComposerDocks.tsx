@@ -25,6 +25,7 @@ import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 import type { MenuEntry } from "../shell/PopoverMenu";
+import { ExpertLine } from "./ExpertLine";
 import { MiniPressable } from "./MiniPressable";
 import { SpendDock } from "./SpendDock";
 import { TaskDock } from "./TaskDock";
@@ -80,9 +81,11 @@ export function ComposerDocks({ sessionId, snapshot }: ComposerDocksProps) {
 
   const toggle = (id: DockId) => () => void setDockCollapsed(sessionId, id, !session.collapsed.includes(id));
 
-  if (shown.length === 0 && hidden.length === 0) return null;
+  const expert = snapshot?.expert;
+  if (shown.length === 0 && hidden.length === 0 && !expert) return null;
   return (
     <View testID="composer-docks">
+      {expert ? <ExpertLine text={expert} /> : null}
       {shown.map((id) =>
         id === "tasks" ? (
           <TaskDock

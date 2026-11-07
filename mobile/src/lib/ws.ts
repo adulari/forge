@@ -259,6 +259,9 @@ export interface Snapshot {
   activity?: string;
   /** Additive: when the running turn started, Unix ms; 0/absent when idle or unknown. */
   turn_started_at?: number;
+  /** Additive: the expert-on-call line ("expert: <model> · 1 consult · 2.1% of weekly window"),
+   * absent until the session has consulted its expert. */
+  expert?: string;
   transcript: string[];
   /** v9 additive: `transcript` with per-line provenance. Absent/empty from a pre-v9 host —
    * fall back to `transcript` rather than rendering nothing. */
