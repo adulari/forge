@@ -15,6 +15,7 @@ fn row(n: u64, state: &str, position: Option<usize>) -> QueueRow {
             _ => String::new(),
         },
         pushes: 0,
+        review: String::new(),
     }
 }
 
@@ -164,4 +165,19 @@ fn an_empty_queue_says_how_to_fill_it() {
     menu.open();
     menu.apply_list(Ok(vec![]));
     assert!(drawn(menu, 100, 12).contains("No PRs are queued"));
+}
+
+#[test]
+fn a_rows_review_verdict_shows_beside_its_reason() {
+    let mut menu = QueueMenu::default();
+    menu.open();
+    assert!(menu.take_refresh());
+    let mut head = row(7, "head", Some(1));
+    head.review = "review: 2 confirmed, fixing".into();
+    let mut clean = row(8, "queued", Some(2));
+    clean.review = "review clean".into();
+    menu.apply_list(Ok(vec![head, clean]));
+    let text = drawn(menu, 120, 14);
+    assert!(text.contains("[review: 2 confirmed, fixing]"), "{text}");
+    assert!(text.contains("[review clean]"), "{text}");
 }

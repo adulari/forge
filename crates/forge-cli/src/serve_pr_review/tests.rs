@@ -317,3 +317,20 @@ fn the_row_text_names_the_state() {
     state.fix_sent = true;
     assert_eq!(state.summary(), "review: 2 confirmed, fixing");
 }
+
+#[tokio::test]
+async fn the_queue_row_and_the_review_route_carry_the_verdict() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    install_hook(vec![Ok(vec![finding("high", 12)])], |_| {});
+    let mut watch = Watch::new("s1", Mode::Merge, "squash", 0);
+    watch.queue = Some(crate::serve_merge_queue::QueueInfo::for_test("r @ main"));
+    view(dir.path(), "aaaa1111");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    let queues = crate::serve_merge_queue::snapshot(&[watch.clone()]);
+    let json = serde_json::to_value(&queues).unwrap();
+    assert_eq!(json[0]["rows"][0]["review"], "review: 1 confirmed, fixing");
+    let stored = serde_json::to_value(&watch).unwrap();
+    assert_eq!(stored["review"]["findings"][0]["line"], 12);
+    assert_eq!(stored["review"]["findings"][0]["blocking"], true);
+}

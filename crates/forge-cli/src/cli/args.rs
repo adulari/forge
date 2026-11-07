@@ -1379,6 +1379,9 @@ pub(crate) enum PrsOp {
         #[command(subcommand)]
         action: Option<QueueAction>,
     },
+    /// The independent review of a watched PR: verdict, model and every finding with file:line.
+    /// Needs the daemon (docs/features/pr-review-gate.md).
+    Review(QueueTarget),
 }
 
 #[derive(Subcommand)]

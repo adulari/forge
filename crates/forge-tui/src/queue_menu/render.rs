@@ -70,6 +70,9 @@ fn row_line(r: &QueueRow, focused: bool, w: usize) -> Line<'static> {
     let state = pad(r.state_label(), 14);
     let reason_w = w.saturating_sub(2 + 4 + 9 + 15).max(8);
     let mut reason = r.reason.clone();
+    if !r.review.is_empty() {
+        reason = format!("[{}] {reason}", r.review);
+    }
     if r.pushes > 0 {
         reason.push_str(&format!(
             " ({} push{})",

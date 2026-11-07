@@ -12,6 +12,17 @@ pub(crate) async fn prs_cmd(op: PrsOp) -> Result<()> {
             action: Some(action),
             ..
         } => queue_action_cmd(action).await,
+        PrsOp::Review(QueueTarget { pr, url, token }) => {
+            let query = match pr.trim_start_matches('#').parse::<u64>() {
+                Ok(n) => format!("pr={n}"),
+                Err(_) => format!("session={pr}"),
+            };
+            let answer = Daemon::resolve(url, token)?.pr_review(&query).await?;
+            for line in review_lines(&answer) {
+                println!("{line}");
+            }
+            Ok(())
+        }
         PrsOp::Queue {
             json, url, token, ..
         } => {
@@ -73,6 +84,7 @@ pub(crate) fn queue_rows(answer: &Value) -> Vec<forge_tui::queue_menu::QueueRow>
                     .and_then(|p| usize::try_from(p).ok()),
                 state: text(row, "state"),
                 reason: text(row, "reason"),
+                review: text(row, "review"),
                 pushes: row["pushes"]
                     .as_u64()
                     .and_then(|p| u32::try_from(p).ok())
@@ -81,6 +93,43 @@ pub(crate) fn queue_rows(answer: &Value) -> Vec<forge_tui::queue_menu::QueueRow>
         }
     }
     out
+}
+
+/// `forge prs review <pr>`: the verdict, then each finding as `severity file:line title`.
+pub(crate) fn review_lines(answer: &Value) -> Vec<String> {
+    let pr = answer["pr_number"]
+        .as_u64()
+        .map_or_else(|| "PR ?".to_string(), |n| format!("PR #{n}"));
+    let Some(review) = answer.get("review").filter(|r| !r.is_null()) else {
+        return vec![format!("{pr}: not reviewed yet")];
+    };
+    let mut lines = vec![format!(
+        "{pr}: {} (head {}, model {})",
+        text(answer, "summary"),
+        text(review, "head_sha").chars().take(7).collect::<String>(),
+        review["model"].as_str().unwrap_or("-")
+    )];
+    if let Some(error) = review["error"].as_str() {
+        lines.push(format!("  error: {error}"));
+    }
+    for f in review["findings"].as_array().into_iter().flatten() {
+        let place = f["line"].as_u64().map_or_else(
+            || text(f, "file").to_string(),
+            |l| format!("{}:{l}", text(f, "file")),
+        );
+        let held = if f["blocking"].as_bool().unwrap_or(false) {
+            "blocks"
+        } else {
+            "advisory"
+        };
+        lines.push(format!(
+            "  [{}] {place} {} ({held})",
+            text(f, "severity"),
+            text(f, "title")
+        ));
+        lines.push(format!("      why: {}", text(f, "why")));
+    }
+    lines
 }
 
 fn text<'a>(row: &'a Value, key: &str) -> &'a str {
@@ -111,6 +160,9 @@ pub(crate) fn queue_lines(answer: &Value) -> Vec<String> {
             let reason = text(row, "reason");
             if !reason.is_empty() {
                 line.push_str(&format!(" {reason}"));
+            }
+            if let Some(review) = row["review"].as_str() {
+                line.push_str(&format!(" [{review}]"));
             }
             let pushes = row["pushes"].as_u64().unwrap_or(0);
             if pushes > 0 {
@@ -165,6 +217,26 @@ mod tests {
         assert_eq!((rows[1].pr, rows[1].position), (None, None));
         assert_eq!(rows[2].repo, "r2 @ main");
         assert!(queue_rows(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn the_review_shows_in_the_queue_table_and_in_its_own_report() {
+        let answer = json!({"queues": [{"repo": "r", "rows": [
+            {"position": 1, "pr_number": 7, "state": "head", "reason": "", "pushes": 0, "review": "review: 2 confirmed, fixing"}]}]});
+        assert!(queue_lines(&answer)[1].contains("[review: 2 confirmed, fixing]"));
+        assert_eq!(queue_rows(&answer)[0].review, "review: 2 confirmed, fixing");
+        let lines = review_lines(
+            &json!({"pr_number": 7, "summary": "review: 1 confirmed, fixing",
+            "review": {"head_sha": "abcdef123", "model": "m", "error": null, "findings": [
+                {"severity": "high", "file": "src/a.rs", "line": 12, "title": "unwrap", "why": "panics", "blocking": true}]}}),
+        );
+        assert!(lines[0].starts_with("PR #7: review: 1 confirmed, fixing (head abcdef1, model m)"));
+        assert_eq!(lines[1], "  [high] src/a.rs:12 unwrap (blocks)");
+        assert_eq!(lines[2], "      why: panics");
+        assert_eq!(
+            review_lines(&json!({"pr_number": 7, "review": null})),
+            ["PR #7: not reviewed yet"]
+        );
     }
 
     #[test]

@@ -22,6 +22,8 @@ pub struct QueueRow {
     pub state: String,
     pub reason: String,
     pub pushes: u32,
+    /// The independent review's verdict (`review clean`, `review: 2 confirmed, fixing`), or empty.
+    pub review: String,
 }
 
 impl QueueRow {

@@ -69,6 +69,11 @@ pub(crate) struct QueueInfo {
 }
 
 impl QueueInfo {
+    #[cfg(test)]
+    pub(crate) fn for_test(repo: &str) -> Self {
+        Self::new(repo.to_string())
+    }
+
     fn new(repo: String) -> Self {
         Self {
             repo,

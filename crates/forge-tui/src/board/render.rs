@@ -400,7 +400,12 @@ fn draw_queue_section(app: &BoardApp, frame: &mut Frame, area: Rect) {
         line.add(format!("{:<9}", r.label()), styles::fg());
         line.add(format!("{:<13}", r.state_label()), tone);
         let room = width.saturating_sub(2 + 3 + 9 + 13 + 1);
-        line.add(w::clip_cells(&r.reason, room), styles::faint());
+        let text = if r.review.is_empty() {
+            r.reason.clone()
+        } else {
+            format!("[{}] {}", r.review, r.reason)
+        };
+        line.add(w::clip_cells(&text, room), styles::faint());
         line.render(
             frame,
             Rect {
@@ -956,6 +961,7 @@ mod tests {
             state: state.into(),
             reason: reason.into(),
             pushes: 0,
+            review: String::new(),
         }
     }
 

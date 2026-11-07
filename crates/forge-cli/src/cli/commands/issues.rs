@@ -219,6 +219,13 @@ impl Daemon {
         self.call(http.get(url)).await
     }
 
+    /// `GET /api/pr/review`: the stored review of one watched PR (`query` is `pr=7` or `session=id`).
+    pub(crate) async fn pr_review(&self, query: &str) -> Result<Value> {
+        let http = local_http_client(&self.base);
+        let url = format!("{}/{}/api/pr/review?{query}", self.base, self.token);
+        self.call(http.get(url)).await
+    }
+
     /// `POST /api/pr/queue/action`: hold, release, front or retry one queued PR.
     pub(crate) async fn queue_action(&self, body: &Value) -> Result<Value> {
         let http = local_http_client(&self.base);
