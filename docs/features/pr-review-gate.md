@@ -12,7 +12,10 @@ the review runs again on the head the session pushes; a clean review lets the me
    for every method, so GitHub auto-merge (`method = auto`) is gated too: `gh pr merge --auto`
    is not called until the head is clean.
 2. The reviewer gets `gh pr diff` for the PR (capped at 150 KB), once per head SHA. A review
-   that already exists for the current head is reused, never repeated.
+   that already exists for the current head is reused, never repeated. The review runs as a
+   background job (at most two at a time); the watch shows `review running` and every other
+   watch keeps polling. When the job finishes the watch is polled again at once and the merge
+   decision is made with the result.
 3. Findings are capped (`review_max_findings`, worst first). Those at or above `review_severity`
    are *blocking*; the rest are kept as advisory and shown, not sent.
 4. Blocking findings produce one fix turn listing each as `[severity] file:line: title`, why it
@@ -49,9 +52,35 @@ review_max_rounds = 3
 ```
 
 A subscription reviewer (`claude-cli::`, `codex-cli::`, `codex-oauth::`) is refused without a
-budget. Only the dollar form (`$2`) is enforced per review today (against Assay's pre-run cost
-estimate); a window slice (`codex:5%w`) is accepted as the required opt-in but is not metered
-yet, unlike the expert's envelope.
+budget, and the budget must be a slice of that reviewer's own window (`codex:5%w` for a codex
+model); a malformed or mismatched budget is rejected with the reason. A dollar budget (`$2`)
+caps one review against Assay's pre-run cost estimate. A window slice is metered the way the
+expert's is: reviews share one envelope that counts how far the subscription window has risen
+since the first review in it (the reviews record the provider's usage readings), it is checked
+before each review, and once the slice is used the review fails with `the review budget (5% of
+the codex weekly window) is spent` (so `review_on_error` decides whether the PR waits or merges)
+until the window resets. A single review that is already running is not interrupted, so the
+last one may overshoot the slice.
+
+## Owner override
+
+The owner has the last word on a held merge, for the head under review only:
+
+- **Merge anyway**: lets the current head merge without waiting for the review (running, failed
+  or with findings). Checks, conflicts and the merge queue still apply. It does not carry to the
+  next head, which is reviewed from scratch.
+- **Dismiss finding n**: the finding stops blocking and stays listed as dismissed. When none
+  blocks any more the merge proceeds. A new head is reviewed again and ignores nothing.
+
+Both are recorded on the review with who and when (`merge_anyway`, `findings[].dismissed`, shown
+by `forge prs review` and in the summary: `review overridden by tui`, `review clean (1
+dismissed)`). Where to do it:
+
+- `forge prs review <pr> --merge-anyway` or `--dismiss <n>` (numbers as in the listing).
+- TUI `/queue`: `m` (press twice to confirm) merge anyway, `d` dismiss the first blocking finding.
+- Phone and desktop PR Watch panel: a Dismiss button per blocking finding and Merge anyway
+  (asks to confirm). Bridged over Anywhere as `pr_review_action`.
+- `POST /api/pr/review/action` `{session | pr, action: "merge_anyway" | "dismiss", finding?, by?}`.
 
 ## Where it shows
 
@@ -67,5 +96,5 @@ yet, unlike the expert's envelope.
 ## Where it lives
 
 The verdict is stored on the watch record in `pr-watch.json` (`review`), not in the database: no
-migration. Re-arming a watch clears it. The review runs inline in the daemon's PR Watch tick, so
-a slow reviewer delays other watches' polls by up to `review_timeout_secs`.
+migration. Re-arming a watch clears it. A `running` review lives in the daemon's memory only; after
+a restart the stored `running` state has no job behind it and the next tick starts it again.

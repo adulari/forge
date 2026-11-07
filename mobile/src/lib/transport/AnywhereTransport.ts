@@ -89,6 +89,7 @@ export type BridgeRoute =
   // Merge queue standing across repos, and the owner's hold / release / front / retry.
   | "pr_queue"
   | "pr_queue_action"
+  | "pr_review_action"
   | "pr_status"
   | "pr_list"
   | "pr_detail"
@@ -347,6 +348,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/issues/drain/cancel": { POST: "cancel_issue_drain" },
     "/api/pr/queue": { GET: "pr_queue" },
     "/api/pr/queue/action": { POST: "pr_queue_action" },
+    "/api/pr/review/action": { POST: "pr_review_action" },
     "/api/pr/status": { GET: "pr_status" },
     "/api/pr/list": { GET: "pr_list" },
     "/api/pr/detail": { GET: "pr_detail" },

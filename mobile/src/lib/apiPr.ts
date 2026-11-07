@@ -256,16 +256,26 @@ export interface PrReviewFinding {
   fix?: string;
   /** At or above the configured severity: this one holds the merge. */
   blocking: boolean;
+  /** The owner dismissed it; it no longer blocks. */
+  dismissed?: PrReviewOwner | null;
+}
+
+/** Who did an owner override on a review, and when (epoch seconds). */
+export interface PrReviewOwner {
+  by: string;
+  at: number;
 }
 
 export interface PrReview {
   head_sha: string;
-  verdict: "clean" | "findings" | "error";
+  verdict: "running" | "clean" | "findings" | "error";
   findings: PrReviewFinding[];
   model: string | null;
   error: string | null;
   fix_sent: boolean;
   rounds: number;
+  /** The owner let this head merge without waiting for the review. */
+  merge_anyway?: PrReviewOwner | null;
 }
 
 export type PrQueueState = "queued" | "head" | "checks" | "held" | "skipped";
@@ -313,6 +323,11 @@ export interface PrQueueActionResponse extends PrQueueResponse {
 
 export const postPrQueueAction = (baseUrl: string, body: { session: string; action: PrQueueAction }) =>
   post<PrQueueActionResponse>(baseUrl, "/api/pr/queue/action", body);
+
+export type PrReviewAction = { action: "merge_anyway" } | { action: "dismiss"; finding: number };
+
+export const postPrReviewAction = (baseUrl: string, body: { session: string; by?: string } & PrReviewAction) =>
+  post<PrQueueActionResponse>(baseUrl, "/api/pr/review/action", body);
 
 export const getPrWatch = (baseUrl: string, session: string) =>
   request<{ watch: PrWatch | null }>(baseUrl, `/api/pr/watch${query({ session })}`);

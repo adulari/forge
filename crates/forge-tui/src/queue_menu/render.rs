@@ -106,7 +106,7 @@ fn footer(m: &QueueMenu) -> String {
     }
     let sep = g().sep;
     format!(
-        " {} move {sep} h hold {sep} r release {sep} f front {sep} t retry {sep} Enter fit {sep} R refresh {sep} Esc close ",
+        " {} move {sep} h hold {sep} r release {sep} f front {sep} t retry {sep} m merge anyway {sep} d dismiss {sep} Enter fit {sep} R refresh {sep} Esc close ",
         g().up_down
     )
 }

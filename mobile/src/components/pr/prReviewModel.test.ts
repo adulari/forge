@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { PrQueueRow, PrReview, PrWatch } from "../../lib/apiPr";
 import { rowStatus } from "./mergeQueueModel";
-import { blockingFindings, findingPlace, reviewLabel } from "./prReviewModel";
+import { blockingFindings, canMergeAnyway, findingPlace, numberedBlocking, reviewLabel } from "./prReviewModel";
 import { watchStatus } from "./prWatchModel";
 
 const finding = (over = {}) => ({
@@ -80,5 +80,25 @@ describe("the review on the watch and queue rows", () => {
     expect(status.detail).toBe("review: 2 confirmed, fixing - waiting for the session to push");
     expect(status.tone).toBe("warn");
     expect(rowStatus({ ...row, review: undefined }).detail).toBe("waiting for the session to push");
+  });
+});
+
+describe("owner overrides", () => {
+  it("numbers blocking findings by their place in the whole list", () => {
+    const r = review({ findings: [finding({ blocking: false }), finding({ title: "second" })] });
+    expect(numberedBlocking(r).map((x) => x.n)).toEqual([2]);
+  });
+  it("offers merge anyway only while a review holds the merge, and not twice", () => {
+    expect(canMergeAnyway(review())).toBe(true);
+    expect(canMergeAnyway(review({ verdict: "running", findings: [] }))).toBe(true);
+    expect(canMergeAnyway(review({ verdict: "clean", findings: [] }))).toBe(false);
+    expect(canMergeAnyway(review({ merge_anyway: { by: "app", at: 1 } }))).toBe(false);
+    expect(canMergeAnyway(null)).toBe(false);
+  });
+  it("spells running, dismissed and overridden", () => {
+    expect(reviewLabel(review({ verdict: "running", findings: [] }))).toBe("review running");
+    const r = review({ verdict: "clean", findings: [finding({ blocking: false, dismissed: { by: "tui", at: 1 } })] });
+    expect(reviewLabel(r)).toBe("review clean (1 dismissed)");
+    expect(reviewLabel(review({ merge_anyway: { by: "floris", at: 1 } }))).toBe("review overridden by floris");
   });
 });

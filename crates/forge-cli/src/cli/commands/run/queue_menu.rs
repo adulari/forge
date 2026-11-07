@@ -53,10 +53,14 @@ impl QueueMenuDriver {
         tokio::spawn(async move {
             let result = async {
                 let daemon = Daemon::resolve(None, None).map_err(|e| format!("{e:#}"))?;
-                let answer = daemon
-                    .queue_action(&serde_json::json!({"session": session_id, "action": op.wire()}))
-                    .await
-                    .map_err(|e| format!("{e:#}"))?;
+                let body =
+                    serde_json::json!({"session": session_id, "action": op.wire(), "by": "tui"});
+                let answer = if op.is_review() {
+                    daemon.review_action(&body).await
+                } else {
+                    daemon.queue_action(&body).await
+                }
+                .map_err(|e| format!("{e:#}"))?;
                 let message = answer["message"].as_str().unwrap_or("done").to_string();
                 Ok((message, crate::cli::commands::prs::queue_rows(&answer)))
             }

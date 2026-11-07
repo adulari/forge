@@ -3,7 +3,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::cli::args::{PrsOp, QueueAction, QueueTarget};
+use crate::cli::args::{PrsOp, QueueAction, QueueTarget, ReviewArgs};
 use crate::cli::commands::issues::Daemon;
 
 pub(crate) async fn prs_cmd(op: PrsOp) -> Result<()> {
@@ -12,7 +12,20 @@ pub(crate) async fn prs_cmd(op: PrsOp) -> Result<()> {
             action: Some(action),
             ..
         } => queue_action_cmd(action).await,
-        PrsOp::Review(QueueTarget { pr, url, token }) => {
+        PrsOp::Review(ReviewArgs {
+            target: QueueTarget { pr, url, token },
+            merge_anyway: true,
+            ..
+        }) => review_action_cmd(&pr, url, token, "merge_anyway", None).await,
+        PrsOp::Review(ReviewArgs {
+            target: QueueTarget { pr, url, token },
+            dismiss: Some(n),
+            ..
+        }) => review_action_cmd(&pr, url, token, "dismiss", Some(n)).await,
+        PrsOp::Review(ReviewArgs {
+            target: QueueTarget { pr, url, token },
+            ..
+        }) => {
             let query = match pr.trim_start_matches('#').parse::<u64>() {
                 Ok(n) => format!("pr={n}"),
                 Err(_) => format!("session={pr}"),
@@ -37,6 +50,31 @@ pub(crate) async fn prs_cmd(op: PrsOp) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// The body `POST /api/pr/review/action` takes: who acted is the local user.
+pub(crate) fn review_action_body(target: &str, action: &str, finding: Option<usize>) -> Value {
+    let who = std::env::var("USER").unwrap_or_else(|_| "owner".into());
+    let mut body = action_body(target, action);
+    body["by"] = Value::from(format!("{who} (cli)"));
+    if let Some(n) = finding {
+        body["finding"] = Value::from(n);
+    }
+    body
+}
+
+async fn review_action_cmd(
+    pr: &str,
+    url: Option<String>,
+    token: Option<String>,
+    action: &str,
+    finding: Option<usize>,
+) -> Result<()> {
+    let answer = Daemon::resolve(url, token)?
+        .review_action(&review_action_body(pr, action, finding))
+        .await?;
+    println!("{}", answer["message"].as_str().unwrap_or("done"));
+    Ok(())
 }
 
 /// The body `POST /api/pr/queue/action` takes: a PR number, or a session id when it is not one.
@@ -112,24 +150,44 @@ pub(crate) fn review_lines(answer: &Value) -> Vec<String> {
     if let Some(error) = review["error"].as_str() {
         lines.push(format!("  error: {error}"));
     }
-    for f in review["findings"].as_array().into_iter().flatten() {
+    if let Some(owner) = review.get("merge_anyway").filter(|o| !o.is_null()) {
+        lines.push(format!("  merge anyway: {}", who_when(owner)));
+    }
+    for (i, f) in review["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
         let place = f["line"].as_u64().map_or_else(
             || text(f, "file").to_string(),
             |l| format!("{}:{l}", text(f, "file")),
         );
-        let held = if f["blocking"].as_bool().unwrap_or(false) {
-            "blocks"
-        } else {
-            "advisory"
+        let held = match f.get("dismissed").filter(|d| !d.is_null()) {
+            Some(owner) => format!("dismissed {}", who_when(owner)),
+            None if f["blocking"].as_bool().unwrap_or(false) => "blocks".to_string(),
+            None => "advisory".to_string(),
         };
         lines.push(format!(
-            "  [{}] {place} {} ({held})",
+            "  {}. [{}] {place} {} ({held})",
+            i + 1,
             text(f, "severity"),
             text(f, "title")
         ));
         lines.push(format!("      why: {}", text(f, "why")));
     }
     lines
+}
+
+/// `by floris (cli) at 2026-11-07 05:00 UTC`
+fn who_when(owner: &Value) -> String {
+    let at = owner["at"]
+        .as_i64()
+        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
+        .map_or_else(String::new, |d| {
+            format!(" at {}", d.format("%Y-%m-%d %H:%M UTC"))
+        });
+    format!("by {}{at}", text(owner, "by"))
 }
 
 fn text<'a>(row: &'a Value, key: &str) -> &'a str {
@@ -231,12 +289,53 @@ mod tests {
                 {"severity": "high", "file": "src/a.rs", "line": 12, "title": "unwrap", "why": "panics", "blocking": true}]}}),
         );
         assert!(lines[0].starts_with("PR #7: review: 1 confirmed, fixing (head abcdef1, model m)"));
-        assert_eq!(lines[1], "  [high] src/a.rs:12 unwrap (blocks)");
+        assert_eq!(lines[1], "  1. [high] src/a.rs:12 unwrap (blocks)");
         assert_eq!(lines[2], "      why: panics");
         assert_eq!(
             review_lines(&json!({"pr_number": 7, "review": null})),
             ["PR #7: not reviewed yet"]
         );
+    }
+
+    #[test]
+    fn the_listing_numbers_findings_and_records_overrides() {
+        let lines = review_lines(
+            &json!({"pr_number": 7, "summary": "review overridden by tui",
+            "review": {"head_sha": "abcdef123", "model": "m", "error": null,
+            "merge_anyway": {"by": "tui", "at": 1_783_400_000},
+            "findings": [
+                {"severity": "high", "file": "a.rs", "line": 1, "title": "t1", "why": "w", "blocking": false,
+                 "dismissed": {"by": "floris (cli)", "at": 1_783_400_000}},
+                {"severity": "high", "file": "b.rs", "line": null, "title": "t2", "why": "w", "blocking": true}]}}),
+        );
+        assert!(
+            lines[1].starts_with("  merge anyway: by tui at 20"),
+            "{}",
+            lines[1]
+        );
+        assert!(
+            lines[2].starts_with("  1. [high] a.rs:1 t1 (dismissed by floris (cli) at"),
+            "{}",
+            lines[2]
+        );
+        assert_eq!(lines[4], "  2. [high] b.rs t2 (blocks)");
+    }
+
+    #[test]
+    fn review_actions_carry_the_target_the_verb_the_finding_and_who() {
+        let body = review_action_body("#7", "dismiss", Some(2));
+        assert_eq!(
+            (
+                body["pr"].clone(),
+                body["action"].clone(),
+                body["finding"].clone()
+            ),
+            (json!(7), json!("dismiss"), json!(2))
+        );
+        assert!(body["by"].as_str().unwrap().ends_with("(cli)"));
+        let body = review_action_body("s_ab", "merge_anyway", None);
+        assert_eq!(body["session"], "s_ab");
+        assert!(body.get("finding").is_none());
     }
 
     #[test]

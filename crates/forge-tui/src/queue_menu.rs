@@ -45,6 +45,14 @@ impl QueueRow {
         }
     }
 
+    /// A review that is running, failed or has confirmed findings: something to override.
+    fn review_holds(&self) -> bool {
+        !self.review.is_empty()
+            && self.review != "review clean"
+            && !self.review.starts_with("review overridden")
+            && !self.review.starts_with("review clean")
+    }
+
     fn finished(&self) -> bool {
         matches!(self.state.as_str(), "merged" | "blocked")
     }
@@ -56,6 +64,10 @@ pub enum QueueOp {
     Release,
     Front,
     Retry,
+    /// Let the PR merge once without waiting for a clean review.
+    MergeAnyway,
+    /// Dismiss the first finding that still blocks the merge.
+    Dismiss,
 }
 
 impl QueueOp {
@@ -66,7 +78,14 @@ impl QueueOp {
             Self::Release => "release",
             Self::Front => "front",
             Self::Retry => "retry",
+            Self::MergeAnyway => "merge_anyway",
+            Self::Dismiss => "dismiss",
         }
+    }
+
+    /// Review overrides go to the review endpoint, not the queue's.
+    pub fn is_review(self) -> bool {
+        matches!(self, Self::MergeAnyway | Self::Dismiss)
     }
 
     /// Whether `row` can take this action, or the reason it cannot.
@@ -82,6 +101,12 @@ impl QueueOp {
                 Err(format!("{label} was not handed back; nothing to retry"))
             }
             Self::Front if row.position == Some(1) => Err(format!("{label} is already next")),
+            Self::MergeAnyway if !row.review_holds() => {
+                Err(format!("no review is holding {label}; nothing to override"))
+            }
+            Self::Dismiss if !row.review.contains("confirmed") => {
+                Err(format!("{label} has no confirmed finding to dismiss"))
+            }
             _ => Ok(()),
         }
     }
@@ -123,6 +148,8 @@ pub struct QueueMenu {
     /// An action is on its way to the daemon.
     pub busy: bool,
     refresh: bool,
+    /// Merge anyway was asked once; the same key again confirms it.
+    confirm_merge: Option<String>,
 }
 
 impl Default for QueueMenu {
@@ -136,6 +163,7 @@ impl Default for QueueMenu {
             tick: 0,
             busy: false,
             refresh: false,
+            confirm_merge: None,
         }
     }
 }
@@ -202,6 +230,16 @@ impl QueueMenu {
             self.notify(Tone::Warn, why);
             return QueueAction::None;
         }
+        if op == QueueOp::MergeAnyway && self.confirm_merge.as_ref() != Some(&row.session_id) {
+            let text = format!(
+                "Press m again to merge {} without a clean review (any other key cancels)",
+                row.label()
+            );
+            self.confirm_merge = Some(row.session_id.clone());
+            self.notify(Tone::Warn, text);
+            return QueueAction::None;
+        }
+        self.confirm_merge = None;
         self.busy = true;
         QueueAction::Act {
             session_id: row.session_id.clone(),
@@ -215,6 +253,9 @@ impl QueueMenu {
             return QueueAction::None;
         }
         self.notice = None;
+        if key != KeyKind::Char('m') {
+            self.confirm_merge = None;
+        }
         let last = self.rows.len().saturating_sub(1);
         match key {
             KeyKind::Esc | KeyKind::Interrupt => {
@@ -231,6 +272,8 @@ impl QueueMenu {
             KeyKind::Char('r') => return self.act(QueueOp::Release),
             KeyKind::Char('f') => return self.act(QueueOp::Front),
             KeyKind::Char('t') => return self.act(QueueOp::Retry),
+            KeyKind::Char('m') => return self.act(QueueOp::MergeAnyway),
+            KeyKind::Char('d') => return self.act(QueueOp::Dismiss),
             KeyKind::Char('R') => {
                 self.load = Load::Loading;
                 self.refresh = true;

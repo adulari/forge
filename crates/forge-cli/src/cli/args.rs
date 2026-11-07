@@ -1315,7 +1315,7 @@ pub(crate) use skill::{ExportScope, SkillCmd};
 #[path = "args/vcs.rs"]
 pub(crate) mod vcs;
 #[allow(unused_imports)] // used by the binary, not the completions facade
-pub(crate) use vcs::{GitCmd, PrsOp, QueueAction, QueueTarget, WorktreeOp};
+pub(crate) use vcs::{GitCmd, PrsOp, QueueAction, QueueTarget, ReviewArgs, WorktreeOp};
 
 #[path = "args/lattice.rs"]
 pub(crate) mod lattice;

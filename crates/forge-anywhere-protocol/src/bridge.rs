@@ -154,6 +154,10 @@ pub enum RouteId {
     /// body names a session (or PR number) and one of four verbs; it carries no text the agent
     /// would act on, and the daemon scopes it like every other `/api/pr/` write.
     PrQueueAction,
+    /// `POST /api/pr/review/action`: let one PR merge without waiting for its review, or dismiss
+    /// one review finding. The body names a session (or PR number), one of two verbs and a
+    /// finding number; it carries no text the agent would act on.
+    PrReviewAction,
     // Ship from the phone. The PR reads (`status`, `list`, `detail`, `diff`, `watch`, `watches`)
     // are always bridged: they only show what `gh` already says about the host's repository.
     // The two writes that follow commit and push the host's repository, which is what the git

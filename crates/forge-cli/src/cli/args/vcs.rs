@@ -35,7 +35,8 @@ pub(crate) enum PrsOp {
     },
     /// The independent review of a watched PR: verdict, model and every finding with file:line.
     /// Needs the daemon (docs/features/pr-review-gate.md).
-    Review(QueueTarget),
+    /// `--dismiss <n>` drops one finding; `--merge-anyway` lets the current head merge unreviewed.
+    Review(ReviewArgs),
 }
 
 #[derive(Subcommand)]
@@ -60,6 +61,18 @@ pub(crate) struct QueueTarget {
     /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
     #[arg(long)]
     pub(crate) token: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct ReviewArgs {
+    #[command(flatten)]
+    pub(crate) target: QueueTarget,
+    /// Let this PR's current head merge once without waiting for a clean review.
+    #[arg(long, conflicts_with = "dismiss")]
+    pub(crate) merge_anyway: bool,
+    /// Dismiss finding N (as numbered in the listing) so it no longer blocks the merge.
+    #[arg(long, value_name = "N")]
+    pub(crate) dismiss: Option<usize>,
 }
 
 #[derive(Subcommand)]

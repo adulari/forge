@@ -20,6 +20,7 @@ import {
   getWorkflows,
   mergePr,
   postPrQueueAction,
+  postPrReviewAction,
   runAction,
   setPrWatch,
   type PrState,
@@ -272,6 +273,20 @@ export function useQueueAction() {
     onSuccess: (result) => {
       // The reply already carries the fresh queues; show them before the refetch lands.
       queryClient.setQueryData(["pr", "queue", baseUrl], result.queues);
+      void queryClient.invalidateQueries({ queryKey: ["pr", "queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watch"] });
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });
+    },
+  });
+}
+
+/** The owner's say over a held merge: dismiss a finding or merge anyway. Refetches the watch. */
+export function useReviewAction() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof postPrReviewAction>[1]) => postPrReviewAction(baseUrl as string, body),
+    onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["pr", "queue"] });
       void queryClient.invalidateQueries({ queryKey: ["pr", "watch"] });
       void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });

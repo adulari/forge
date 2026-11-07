@@ -226,6 +226,13 @@ impl Daemon {
         self.call(http.get(url)).await
     }
 
+    /// `POST /api/pr/review/action`: merge anyway, or dismiss one finding.
+    pub(crate) async fn review_action(&self, body: &Value) -> Result<Value> {
+        let http = local_http_client(&self.base);
+        let url = format!("{}/{}/api/pr/review/action", self.base, self.token);
+        self.call(http.post(url).json(body)).await
+    }
+
     /// `POST /api/pr/queue/action`: hold, release, front or retry one queued PR.
     pub(crate) async fn queue_action(&self, body: &Value) -> Result<Value> {
         let http = local_http_client(&self.base);

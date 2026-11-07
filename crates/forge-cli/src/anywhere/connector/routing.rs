@@ -75,6 +75,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::CancelIssueDrain => exact(Method::POST, "/api/issues/drain/cancel"),
         RouteId::PrQueue => exact(Method::GET, "/api/pr/queue"),
         RouteId::PrQueueAction => exact(Method::POST, "/api/pr/queue/action"),
+        RouteId::PrReviewAction => exact(Method::POST, "/api/pr/review/action"),
         RouteId::PrStatus => exact(Method::GET, "/api/pr/status"),
         RouteId::PrList => exact(Method::GET, "/api/pr/list"),
         RouteId::PrDetail => exact(Method::GET, "/api/pr/detail"),
@@ -389,6 +390,7 @@ mod tests {
             ),
             (RouteId::PrQueue, "GET", "/api/pr/queue"),
             (RouteId::PrQueueAction, "POST", "/api/pr/queue/action"),
+            (RouteId::PrReviewAction, "POST", "/api/pr/review/action"),
         ] {
             let target = route_target(&request(route, method, &[])).unwrap();
             assert_eq!(target.path, path);
@@ -794,6 +796,7 @@ mod tests {
             RouteId::SessionDone,
             RouteId::PrQueue,
             RouteId::PrQueueAction,
+            RouteId::PrReviewAction,
             RouteId::GitHunk,
         ] {
             assert!(!needs_ship_opt_in(route), "{route:?}");

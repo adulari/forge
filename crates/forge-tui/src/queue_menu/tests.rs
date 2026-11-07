@@ -181,3 +181,79 @@ fn a_rows_review_verdict_shows_beside_its_reason() {
     assert!(text.contains("[review: 2 confirmed, fixing]"), "{text}");
     assert!(text.contains("[review clean]"), "{text}");
 }
+
+fn reviewed(text: &str) -> QueueMenu {
+    let mut menu = ready();
+    menu.rows[0].review = text.into();
+    menu
+}
+
+#[test]
+fn merge_anyway_asks_twice_before_it_acts() {
+    let mut menu = reviewed("review: 2 confirmed, fixing");
+    assert_eq!(menu.key(KeyKind::Char('m')), QueueAction::None);
+    assert!(menu.notice.as_ref().unwrap().text.contains("Press m again"));
+    assert_eq!(
+        menu.key(KeyKind::Char('m')),
+        QueueAction::Act {
+            session_id: "s7".into(),
+            op: QueueOp::MergeAnyway
+        }
+    );
+    assert_eq!(QueueOp::MergeAnyway.wire(), "merge_anyway");
+    assert!(QueueOp::MergeAnyway.is_review() && !QueueOp::Hold.is_review());
+}
+
+#[test]
+fn another_key_cancels_the_merge_anyway_confirmation() {
+    let mut menu = reviewed("review running");
+    menu.key(KeyKind::Char('m'));
+    menu.key(KeyKind::Down);
+    menu.key(KeyKind::Up);
+    assert_eq!(
+        menu.key(KeyKind::Char('m')),
+        QueueAction::None,
+        "asks again"
+    );
+}
+
+#[test]
+fn overrides_are_explained_when_nothing_holds_the_pr() {
+    for review in [
+        "",
+        "review clean",
+        "review clean (1 dismissed)",
+        "review overridden by tui",
+    ] {
+        let mut menu = reviewed(review);
+        assert_eq!(menu.key(KeyKind::Char('m')), QueueAction::None);
+        assert!(
+            menu.notice
+                .as_ref()
+                .unwrap()
+                .text
+                .contains("nothing to override"),
+            "{review}"
+        );
+    }
+    let mut menu = reviewed("review running");
+    assert_eq!(menu.key(KeyKind::Char('d')), QueueAction::None);
+    assert!(menu
+        .notice
+        .as_ref()
+        .unwrap()
+        .text
+        .contains("no confirmed finding"));
+}
+
+#[test]
+fn d_dismisses_a_confirmed_finding_in_one_press() {
+    let mut menu = reviewed("review: 1 confirmed");
+    assert_eq!(
+        menu.key(KeyKind::Char('d')),
+        QueueAction::Act {
+            session_id: "s7".into(),
+            op: QueueOp::Dismiss
+        }
+    );
+}

@@ -280,6 +280,7 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/issues/drain/cancel", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/pr/queue");
     await transport.fetch("fany://host-1/api/pr/queue/action", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/pr/review/action", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/pr/status?session=s1");
     await transport.fetch("fany://host-1/api/pr/list?session=s1&state=open");
     await transport.fetch("fany://host-1/api/pr/detail?session=s1&number=4");
@@ -319,6 +320,7 @@ describe("AnywhereTransport", () => {
       ["cancel_issue_drain", ""],
       ["pr_queue", ""],
       ["pr_queue_action", ""],
+      ["pr_review_action", ""],
       ["pr_status", "?session=s1"],
       ["pr_list", "?session=s1&state=open"],
       ["pr_detail", "?session=s1&number=4"],

@@ -118,6 +118,10 @@ fn classification_maps_routes_to_scopes() {
         "workspace-write"
     );
     assert_eq!(
+        scope(Method::POST, "/api/pr/review/action"),
+        "workspace-write"
+    );
+    assert_eq!(
         scope(Method::POST, "/api/sessions/s1/ship"),
         "workspace-write"
     );
