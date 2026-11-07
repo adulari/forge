@@ -371,7 +371,10 @@ impl GoalRecord {
             tokens_used: goal.tokens_used,
             elapsed_secs: goal.elapsed_secs,
             reason: Some(why.to_string()),
-            envelope: goal.envelope.clone(),
+            envelope: goal.envelope.clone().map(|mut envelope| {
+                envelope.carry_to_new_session();
+                envelope
+            }),
             contract: goal.contract.clone(),
             phase: Some(forge_tui::goal_status::GoalPhase::Paused.wire().to_string()),
         };

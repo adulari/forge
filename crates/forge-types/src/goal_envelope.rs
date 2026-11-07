@@ -209,6 +209,16 @@ impl EnvelopeState {
         self.settle()
     }
 
+    /// The envelope a fresh-worker successor counts on. A `$` envelope reads its own session's
+    /// cost, which starts at zero, so what the predecessor spent moves into `carried`; a window
+    /// envelope reads the same account-wide window and carries over unchanged.
+    pub fn carry_to_new_session(&mut self) {
+        if self.is_usd() {
+            self.carried = self.used;
+            self.start = Some(0.0);
+        }
+    }
+
     /// Set a new envelope on the same goal. The same kind keeps its baseline and only moves the
     /// slice; a different kind starts over from the next reading.
     pub fn retarget(&mut self, spec: EnvelopeSpec) {
@@ -436,6 +446,21 @@ mod tests {
         assert_eq!(env.observe_usd(15.0), EnvelopeCheck::Within);
         assert_eq!(env.meter(), "envelope $3.00/$5.00");
         assert_eq!(env.observe_usd(17.0), EnvelopeCheck::Spent);
+    }
+
+    #[test]
+    fn a_usd_envelope_carries_its_spend_into_a_new_session_and_a_window_one_is_unchanged() {
+        let mut usd = EnvelopeState::new(EnvelopeSpec::parse("$10", None).unwrap(), 2.0, None);
+        usd.observe_usd(9.0);
+        usd.carry_to_new_session();
+        assert_eq!(usd.observe_usd(1.0), EnvelopeCheck::Within);
+        assert_eq!(usd.used, 8.0);
+        assert_eq!(usd.observe_usd(3.5), EnvelopeCheck::Spent);
+        let mut window = EnvelopeState::new(weekly(20.0), 40.0, None);
+        window.observe_quota(reading(50.0, 10), 10);
+        let before = window.clone();
+        window.carry_to_new_session();
+        assert_eq!(window, before);
     }
 
     #[test]

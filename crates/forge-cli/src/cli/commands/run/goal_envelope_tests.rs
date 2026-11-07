@@ -119,6 +119,25 @@ fn the_goal_record_round_trips_through_json() {
 }
 
 #[test]
+fn a_successor_keeps_counting_the_dollars_its_predecessor_spent() {
+    let mut app = forge_tui::App::default();
+    let mut envelope = EnvelopeState::new(EnvelopeSpec::parse("$10", None).unwrap(), 2.0, None);
+    assert_eq!(envelope.observe_usd(9.0), EnvelopeCheck::Within);
+    app.pending_envelope = Some(envelope);
+    app.goal_begin("harden the importer", &[], None, None);
+    let json = GoalRecord::for_successor(app.goal.as_ref().unwrap(), "wedged");
+    let record: GoalRecord = serde_json::from_str(&json).unwrap();
+    let mut successor = record
+        .envelope
+        .expect("the envelope moves to the successor");
+    assert_eq!(
+        successor.observe_usd(3.5),
+        EnvelopeCheck::Spent,
+        "$7 spent by the predecessor plus $3.50 by the successor is past the $10 cap"
+    );
+}
+
+#[test]
 fn a_restart_restores_the_goal_paused_with_its_envelope_and_counters() {
     let store = forge_store::Store::open_in_memory().unwrap();
     let id = store.create_session("/tmp", "Default").unwrap();
