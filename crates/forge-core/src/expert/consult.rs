@@ -123,21 +123,19 @@ impl Session {
             return Some("the turn is past its deadline".to_string());
         }
         let spec = r.spec.as_ref()?;
-        let windows = self.store.subscription_windows().unwrap_or_default();
+        // Metered in the store like the bridged path, so a resumed or restarted session keeps
+        // its baseline, spend and unverified allowance instead of starting a new slice.
         let now = chrono::Utc::now().timestamp();
-        let check = meter(
-            &mut self.expert.envelope,
+        let refusal = bridge_budget_refusal(
+            &self.store,
+            &self.id,
+            &r.model,
             spec,
-            &windows,
-            self.expert.usd_spent,
+            &self.config.harness.expert.budget,
             now,
         );
-        envelope_refusal(
-            check,
-            self.expert.envelope.as_ref(),
-            &mut self.expert.unverified_consults,
-            &self.config.harness.expert.budget,
-        )
+        self.expert.envelope = stored_envelope(&self.store, &self.id);
+        refusal
     }
 
     /// Make one consult call. `Err` is a refusal in a sentence (cap, budget, spend, deadline);
@@ -175,7 +173,6 @@ impl Session {
         )
         .await;
         persist_quota_hints(&self.store, &r.model, &hints);
-        self.expert.usd_spent += call.usage.cost_usd;
         tracing::info!(
             model = r.model,
             trigger = trigger.as_str(),
@@ -209,7 +206,9 @@ impl Session {
                 &mut self.expert.envelope,
                 spec,
                 &windows,
-                self.expert.usd_spent,
+                self.store
+                    .side_call_cost(&self.id, "expert/")
+                    .unwrap_or(0.0),
                 now,
             );
         }
@@ -377,7 +376,9 @@ impl Session {
                 &mut self.expert.envelope,
                 spec,
                 &windows,
-                self.expert.usd_spent,
+                self.store
+                    .side_call_cost(&self.id, "expert/")
+                    .unwrap_or(0.0),
                 now,
             );
         }

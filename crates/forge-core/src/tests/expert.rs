@@ -959,3 +959,37 @@ async fn the_per_turn_cap_holds_when_the_bridge_process_is_respawned_mid_turn() 
     );
     assert_eq!(calls.lock().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn a_rebuilt_direct_session_keeps_its_expert_meter() {
+    let plan: Plan = Box::new(|n| {
+        (n < 3 || (4..7).contains(&n)).then(|| {
+            (
+                "Asking again.".into(),
+                vec![call(
+                    CONSULT_EXPERT_TOOL,
+                    serde_json::json!({"question": format!("attempt {n}")}),
+                )],
+            )
+        })
+    });
+    let mut r = run(plan, vec![ADVICE], None, |c| {
+        c.harness.expert.model = CODEX_EXPERT.into();
+        c.harness.expert.budget = "codex:5%w".into();
+        c.harness.expert.max_consults_per_turn = 10;
+    });
+    r.session.run_turn("find the parser").await.unwrap();
+    assert_eq!(
+        r.expert_models().len(),
+        3,
+        "the session's unverified allowance"
+    );
+    // A resume, daemon restart or relay rebuilds the session with fresh in-memory state.
+    r.session.expert = Default::default();
+    r.session.run_turn("keep looking").await.unwrap();
+    assert_eq!(
+        r.expert_models().len(),
+        3,
+        "a rebuilt session must not get a new allowance"
+    );
+}

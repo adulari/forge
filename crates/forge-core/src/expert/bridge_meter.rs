@@ -1,4 +1,4 @@
-//! The bridged expert's budget meter, kept per session in the store. `forge mcp-serve` is a
+//! The expert's budget meter, kept per session in the store for the direct and bridged path. `forge mcp-serve` is a
 //! fresh process for every `codex exec` and again whenever the claude process is respawned, so
 //! a meter held in the process took a new baseline (and a new unverified allowance) each time
 //! and let every turn spend its own slice. The state lives in the newest `expert/meter:` row of
@@ -27,6 +27,23 @@ impl BridgeMeter {
     }
 }
 
+fn stored_meter(store: &forge_store::Store, session_id: &str) -> BridgeMeter {
+    store
+        .latest_side_call_label(session_id, METER_LABEL)
+        .ok()
+        .flatten()
+        .and_then(|label| serde_json::from_str(label.strip_prefix(METER_LABEL)?).ok())
+        .unwrap_or_default()
+}
+
+/// The session's stored expert envelope, shared by the direct and the bridged path.
+pub(crate) fn stored_envelope(
+    store: &forge_store::Store,
+    session_id: &str,
+) -> Option<EnvelopeState> {
+    stored_meter(store, session_id).envelope
+}
+
 /// Why the session's expert budget allows no further bridged consult, or `None` to go ahead.
 /// An allowed consult made without a fresh reading counts against the session's allowance.
 pub(crate) fn bridge_budget_refusal(
@@ -37,12 +54,7 @@ pub(crate) fn bridge_budget_refusal(
     budget: &str,
     now: i64,
 ) -> Option<String> {
-    let mut state: BridgeMeter = store
-        .latest_side_call_label(session_id, METER_LABEL)
-        .ok()
-        .flatten()
-        .and_then(|label| serde_json::from_str(label.strip_prefix(METER_LABEL)?).ok())
-        .unwrap_or_default();
+    let mut state = stored_meter(store, session_id);
     let before = state.baseline();
     let windows = store.subscription_windows().unwrap_or_default();
     let spent_usd = store.side_call_cost(session_id, "expert/").unwrap_or(0.0);

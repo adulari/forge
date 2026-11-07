@@ -17,7 +17,7 @@ use forge_types::goal_envelope::{
 mod bridge_meter;
 mod consult;
 
-use bridge_meter::{bridge_budget_refusal, envelope_refusal};
+use bridge_meter::{bridge_budget_refusal, stored_envelope};
 
 /// The virtual tool the model calls to ask the expert.
 pub const CONSULT_EXPERT_TOOL: &str = "consult_expert";
@@ -561,9 +561,7 @@ pub(crate) struct ExpertState {
     pub turn_diagnosis: Option<String>,
     pub stop_deferred: bool,
     pub session_consults: u32,
-    /// Consults made while the subscription window had no fresh reading.
-    pub unverified_consults: u32,
-    pub usd_spent: f64,
+    /// The stored meter's envelope, refreshed at each check; it drives the status line.
     pub envelope: Option<EnvelopeState>,
     pub status: Option<String>,
     /// A configuration problem already told to the owner this session.
