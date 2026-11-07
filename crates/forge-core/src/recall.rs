@@ -3,7 +3,8 @@
 //!
 //! The folded rows stay in the store, but until now nothing the model could call reached them, so
 //! a stalled task whose detail had been summarized away could only be asked about or dropped.
-//! `recall` is read-only, answers from this session's rows alone, and caps what it returns. It is
+//! `recall` is read-only, answers from this session's rows and the sessions that handed it their
+//! goal (a fresh-worker relay, docs/features/goal-contract.md), and caps what it returns. It is
 //! advertised once the session has at least one compaction, on the direct path and, through
 //! `forge mcp-serve`, on the CLI bridge. Both paths call [`run`].
 
@@ -41,8 +42,9 @@ pub fn recall_spec() -> ToolSpec {
             replaced with a summary. They are exact and complete in the store. Use `search` with \
             a few distinctive words (a file name, an error, a decision) to find where something \
             was discussed, then `read` the seq range around a hit. Use it whenever the summary lacks the \
-            exact text, value or reason you need; do not guess it. Read-only; it never reaches \
-            other sessions. The summary's \"Earlier episodes\" list says which seq ranges exist. \
+            exact text, value or reason you need; do not guess it. Read-only; it reaches only this \
+            session and the earlier sessions that handed their goal to it. The summary's \"Earlier \
+            episodes\" list says which seq ranges exist. \
             Output is capped at 8,000 characters; tool results are clipped, so re-run the \
             command or read the file if you need the full output."
             .to_string(),
@@ -65,6 +67,10 @@ pub fn recall_spec() -> ToolSpec {
                 "to_seq": {
                     "type": "integer",
                     "description": "for read: last message seq (default: from_seq + 40)"
+                },
+                "session": {
+                    "type": "string",
+                    "description": "for read: the predecessor session id (or its first 8 characters) a search hit named; omit for this session"
                 }
             },
             "required": ["action"]
@@ -106,9 +112,14 @@ pub fn run(store: &Store, session_id: &str, args: &Value) -> (String, bool) {
     }
 }
 
+fn predecessors(store: &Store, session_id: &str) -> Vec<String> {
+    store.relay_predecessors(session_id).unwrap_or_default()
+}
+
 fn nothing_folded(store: &Store, session_id: &str) -> Result<(), String> {
     match store.has_folded_history(session_id) {
         Ok(true) => Ok(()),
+        Ok(false) if !predecessors(store, session_id).is_empty() => Ok(()),
         Ok(false) => Err(
             "nothing in this session has been folded by a compaction yet; the \
             whole conversation is already in your context"
@@ -128,18 +139,26 @@ fn search(store: &Store, session_id: &str, args: &Value) -> Result<String, Strin
         return Err("recall search needs a `query`".to_string());
     }
     nothing_folded(store, session_id)?;
-    let hits = store
-        .search_folded(session_id, query, SEARCH_LIMIT)
+    let hits = if store.has_folded_history(session_id).unwrap_or(false) {
+        store
+            .search_folded(session_id, query, SEARCH_LIMIT)
+            .map_err(|error| format!("search failed: {error}"))?
+    } else {
+        Vec::new()
+    };
+    let earlier = store
+        .search_predecessors(session_id, query, SEARCH_LIMIT)
         .map_err(|error| format!("search failed: {error}"))?;
-    if hits.is_empty() {
+    if hits.is_empty() && earlier.is_empty() {
         return Ok(format!(
             "no folded message matches {query:?}. Try fewer or different words (a file name, a \
              function, an error text), or read a seq range from the summary's episode list."
         ));
     }
     let mut out = format!(
-        "{} folded message(s) match {query:?}, best first:\n",
-        hits.len()
+        "{} {}message(s) match {query:?}, best first:\n",
+        hits.len() + earlier.len(),
+        if earlier.is_empty() { "folded " } else { "" }
     );
     for hit in &hits {
         out.push_str(&format!(
@@ -149,7 +168,21 @@ fn search(store: &Store, session_id: &str, args: &Value) -> Result<String, Strin
             hit.snippet.trim()
         ));
     }
-    out.push_str("\nUse recall read {from_seq, to_seq} to read the messages around a hit.");
+    for (session, hit) in &earlier {
+        out.push_str(&format!(
+            "earlier session {} seq {} [{}]: {}\n",
+            &session[..session.len().min(8)],
+            hit.seq,
+            hit.role,
+            hit.snippet.trim()
+        ));
+    }
+    out.push_str("\nUse recall read {from_seq, to_seq} to read the messages around a hit");
+    out.push_str(if earlier.is_empty() {
+        "."
+    } else {
+        " (add `session` with the earlier session's id for a hit from one)."
+    });
     Ok(out)
 }
 
@@ -163,9 +196,27 @@ fn read(store: &Store, session_id: &str, args: &Value) -> Result<String, String>
         return Err("`to_seq` is before `from_seq`".to_string());
     }
     nothing_folded(store, session_id)?;
-    let read = store
-        .read_folded(session_id, from, to, READ_BUDGET_CHARS)
-        .map_err(|error| format!("read failed: {error}"))?;
+    let asked = args
+        .get("session")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let read = match asked {
+        None => store.read_folded(session_id, from, to, READ_BUDGET_CHARS),
+        Some(prefix) => {
+            let Some(earlier) = predecessors(store, session_id)
+                .into_iter()
+                .find(|id| id.starts_with(prefix))
+            else {
+                return Err(format!(
+                    "{prefix:?} is not an earlier session of this goal; recall only reaches the \
+                     sessions that handed their goal to this one"
+                ));
+            };
+            store.read_history(&earlier, from, to, READ_BUDGET_CHARS)
+        }
+    }
+    .map_err(|error| format!("read failed: {error}"))?;
     if read.rows.is_empty() {
         return Ok(format!(
             "no folded message has a seq in {from}-{to}. Messages after the last compaction are \
@@ -195,6 +246,7 @@ impl Session {
     /// Whether `recall` is advertised now: the session has folded history.
     pub(crate) fn recall_on(&self) -> bool {
         self.store.has_folded_history(&self.id).unwrap_or(false)
+            || !predecessors(&self.store, &self.id).is_empty()
     }
 
     pub(crate) fn recall(
@@ -318,5 +370,69 @@ mod tests {
         ] {
             assert!(!run(&store, &sid, &args).1, "{args}");
         }
+    }
+
+    #[test]
+    fn a_successor_recalls_its_predecessors_and_no_other_session() {
+        let store = Store::open_in_memory().unwrap();
+        let first = store.create_session("/x", "default").unwrap();
+        let second = store.create_session("/x", "default").unwrap();
+        let stranger = store.create_session("/x", "default").unwrap();
+        store
+            .add_message(
+                &first,
+                4,
+                Role::Assistant,
+                "decision: ship the zebra parser",
+                None,
+            )
+            .unwrap();
+        store
+            .add_message(
+                &stranger,
+                0,
+                Role::Assistant,
+                "zebra parser in another project",
+                None,
+            )
+            .unwrap();
+        store
+            .record_relay(&first, &second, "wedged", "", "")
+            .unwrap();
+
+        let (found, ok) = run(
+            &store,
+            &second,
+            &serde_json::json!({"action": "search", "query": "zebra parser"}),
+        );
+        assert!(ok, "{found}");
+        assert!(
+            found.contains(&format!("earlier session {} seq 4", &first[..8])),
+            "{found}"
+        );
+        assert!(!found.contains("another project"), "{found}");
+
+        let (read, ok) = run(
+            &store,
+            &second,
+            &serde_json::json!({"action": "read", "from_seq": 4, "to_seq": 4, "session": &first[..8]}),
+        );
+        assert!(ok, "{read}");
+        assert!(read.contains("ship the zebra parser"));
+        let (refused, ok) = run(
+            &store,
+            &second,
+            &serde_json::json!({"action": "read", "from_seq": 0, "to_seq": 0, "session": &stranger[..8]}),
+        );
+        assert!(!ok, "{refused}");
+        let (_, ok) = run(
+            &store,
+            &stranger,
+            &serde_json::json!({"action": "search", "query": "zebra"}),
+        );
+        assert!(
+            !ok,
+            "a session with no ancestors and no fold still has nothing to recall"
+        );
     }
 }
