@@ -126,6 +126,12 @@ impl Presenter for PrintPresenter {
                 "    full output: {} ({} lines)",
                 output.path, output.lines
             )),
+            PresenterEvent::ExpertConsult {
+                trigger,
+                summary,
+                status,
+                ..
+            } => self.trace(&format!("  ◇ {status} ({trigger}): {summary}")),
             PresenterEvent::Warning(msg) => self.trace(&format!("  ⚠ {msg}")),
             PresenterEvent::Error(msg) => self.error(&msg),
             PresenterEvent::ProviderOutage {
@@ -335,6 +341,28 @@ mod tests {
         assert!(
             !trace.contains("All good."),
             "the answer is not repeated: {trace}"
+        );
+    }
+
+    #[test]
+    fn an_expert_consult_reaches_the_trace_and_never_stdout() {
+        let (out, trace) = (Buf::default(), Buf::default());
+        let mut p = PrintPresenter::with_writers(
+            Box::new(out.clone()),
+            Some(Box::new(trace.clone())),
+            false,
+        );
+        p.emit(PresenterEvent::ExpertConsult {
+            trigger: "stall".into(),
+            model: "codex-oauth::gpt-5.6-sol".into(),
+            summary: "reads the same file. Next: write notes.txt".into(),
+            status: "expert: codex-oauth::gpt-5.6-sol · 1 consult".into(),
+        });
+        assert_eq!(out.text(), "");
+        let trace = trace.text();
+        assert!(
+            trace.contains("expert: codex-oauth::gpt-5.6-sol · 1 consult (stall): reads the same file. Next: write notes.txt"),
+            "{trace}"
         );
     }
 
