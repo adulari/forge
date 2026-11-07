@@ -41,6 +41,7 @@ impl Session {
         }
         forge_reporting::event("turn_start", None);
         let started = std::time::Instant::now();
+        let _turn_guard = self.turn_end_guard();
         let result = IN_TURN
             .scope(
                 (),
@@ -56,6 +57,7 @@ impl Session {
             Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         );
         self.close_shell_diagnoses();
+        self.finish_turn_row(&result);
         if let Err(error) = &result {
             crate::error_report::report_turn_error(error);
             self.fire_stop_failure(error).await;

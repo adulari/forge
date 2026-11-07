@@ -121,6 +121,8 @@ mod hooks_model;
 pub mod hooks_session;
 mod hooks_subagent;
 mod hooks_turn;
+mod turn_record;
+pub use turn_record::{describe_end, stop_note};
 mod hooks_worktree;
 pub mod host_move;
 mod stop_guards;
@@ -1601,6 +1603,8 @@ pub struct Session {
     checkpoint_root_custom: bool,
     /// The seq that began the current turn (its user message), keying this turn's snapshot dir.
     current_turn_seq: i64,
+    /// Id of the open `turn` row (0 = none); shared with the cancellation guard (turn_record.rs).
+    turn_row: Arc<std::sync::atomic::AtomicI64>,
     /// The discovered model catalog (auto-discovery mesh), kept so the TUI `/models` browser can
     /// classify + group what's available without re-running discovery. `None` for mock/offline.
     catalog: Option<ModelCatalog>,
@@ -2848,6 +2852,7 @@ impl Session {
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            self.open_turn_row(seq);
             // UI-only: the note ends the turn for the USER; a model resuming this session gains
             // nothing from stale budget chrome in its prompt.
             let seq = self.next_seq();
@@ -2867,6 +2872,7 @@ impl Session {
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            self.open_turn_row(seq);
             let seq = self.next_seq();
             self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
             self.transcript.push(Message::system(&msg).ui_only());
@@ -3034,6 +3040,7 @@ impl Session {
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            self.open_turn_row(seq);
             let seq = self.next_seq();
             self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
             self.transcript.push(Message::system(&msg).ui_only());
@@ -3067,6 +3074,7 @@ impl Session {
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            self.open_turn_row(seq);
             // UI-only, same reasoning as the budget-stop note above.
             let seq = self.next_seq();
             self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
@@ -3274,6 +3282,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             seq = landed;
         }
         self.current_turn_seq = seq;
+        self.open_turn_row(seq);
         let turn_start_head = git_head(Some(self.workspace.root()));
         self.turn_start_baseline = if self.config.mesh.verify_completeness
             && forge_provider::is_cli_bridge(&routed_model)
@@ -5147,6 +5156,8 @@ mod tests {
 
     #[path = "outage_drill.rs"]
     mod outage_drill_tests;
+    #[path = "turn_end_reason.rs"]
+    mod turn_end_reason_tests;
 
     #[path = "bridge_stall.rs"]
     mod bridge_stall_tests;

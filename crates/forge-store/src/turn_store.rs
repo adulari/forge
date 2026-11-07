@@ -131,12 +131,24 @@ impl Store {
 
     /// Crash/restart sweep: close every turn still open as `reason`. Returns how many.
     pub fn close_open_turns_as(&self, reason: &str) -> Result<usize> {
+        self.close_open_turns(None, reason)
+    }
+
+    /// The same sweep for one session: its open turns cannot still be running once the process
+    /// that ran them is gone, or once a new prompt is about to start.
+    pub fn close_open_session_turns_as(&self, session_id: &str, reason: &str) -> Result<usize> {
+        self.close_open_turns(Some(session_id), reason)
+    }
+
+    fn close_open_turns(&self, session_id: Option<&str>, reason: &str) -> Result<usize> {
         let conn = self.lock()?;
         let open: Vec<(i64, String)> = {
-            let mut stmt =
-                conn.prepare("SELECT id, session_id FROM turn WHERE ended_at IS NULL")?;
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id FROM turn WHERE ended_at IS NULL \
+                 AND (?1 IS NULL OR session_id = ?1)",
+            )?;
             let rows = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
@@ -317,7 +329,8 @@ impl Store {
     }
 
     /// Append the UI note for a turn that stopped without a normal answer, unless the newest
-    /// visible row already explains the stop (a budget refusal, an earlier failure note).
+    /// visible row is already a UI system note (a budget refusal, a loop-guard halt): callers run
+    /// this for a turn whose prompt is persisted, so that row belongs to this turn.
     /// Returns whether a note was written.
     pub fn note_turn_stopped(&self, session_id: &str, text: &str) -> Result<bool> {
         let newest: Option<(String, String, String)> = {
@@ -331,7 +344,8 @@ impl Store {
             .optional()?
         };
         if let Some((role, visibility, content)) = newest {
-            if role == "system" && visibility == "ui" && content.starts_with('⚠') {
+            let _ = content;
+            if role == "system" && visibility == "ui" {
                 return Ok(false);
             }
         }
@@ -441,6 +455,24 @@ mod tests {
         let counts = store.turn_end_counts(0, Some(&sid)).unwrap();
         assert!(counts.contains(&("daemon_restart_or_crash".to_string(), 1)));
         assert!(counts.contains(&("final_answer".to_string(), 1)));
+    }
+
+    #[test]
+    fn a_session_sweep_leaves_other_sessions_alone() {
+        let (store, a) = store_with_prompt();
+        let b = store.create_session("/repo", "default").unwrap();
+        store.open_turn(&a, 0).unwrap();
+        store.open_turn(&b, 0).unwrap();
+        assert_eq!(
+            store
+                .close_open_session_turns_as(&a, "daemon_restart_or_crash")
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            store.turn_end_counts(0, Some(&b)).unwrap(),
+            [("running".into(), 1)]
+        );
     }
 
     #[test]

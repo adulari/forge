@@ -222,6 +222,7 @@ impl Session {
             checkpoint_root,
             checkpoint_root_custom: false,
             current_turn_seq: -1,
+            turn_row: Default::default(),
             catalog: None,
             catalog_feed: None,
             catalog_feed_seen: None,
