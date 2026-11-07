@@ -973,7 +973,11 @@ impl Session {
         self.presenter.emit(PresenterEvent::ExpertConsult {
             trigger: "tool".to_string(),
             model,
-            summary: format!("{bridged} asked through the bridge"),
+            summary: format!(
+                "the bridged model asked the expert {bridged} time{}; its answers are in that \
+                 model's tool results",
+                if bridged == 1 { "" } else { "s" }
+            ),
             status,
         });
     }

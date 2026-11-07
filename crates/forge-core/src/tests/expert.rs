@@ -797,3 +797,28 @@ async fn an_unreadable_window_allows_only_a_few_consults_per_session() {
             .contains("the expert budget (codex:5%w) cannot be checked")
         && m.content.contains("forge doctor")));
 }
+
+#[tokio::test]
+async fn consults_a_bridged_model_made_are_folded_in_with_a_line_that_says_what_they_were() {
+    let mut r = run(Box::new(|_| None), vec![], None, with_expert);
+    r.session.expert.prompt_seq = 0;
+    for _ in 0..2 {
+        r.store
+            .record_side_call_usage_for(
+                r.session.session_id(),
+                "expert/tool:advice",
+                Some(EXPERT),
+                &forge_types::Usage::default(),
+            )
+            .unwrap();
+    }
+    r.session.fold_bridge_consults();
+    let consults = r.consult_events();
+    assert_eq!(consults.len(), 1);
+    assert_eq!(consults[0].0, "tool");
+    assert_eq!(
+        consults[0].1,
+        "the bridged model asked the expert 2 times; its answers are in that model's tool results"
+    );
+    assert_eq!(r.session.expert.turn_consults, 2);
+}
