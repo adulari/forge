@@ -32,6 +32,7 @@ pub const CORE_TOOLS: &[&str] = &[
     crate::recall::RECALL_TOOL,
     "dispatch_sessions",
     crate::worktree_ops::WORKTREE_TOOL,
+    crate::CONSULT_EXPERT_TOOL,
     TOOL_SEARCH,
     TOOL_CALL,
 ];

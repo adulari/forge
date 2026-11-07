@@ -44,6 +44,7 @@ impl App {
             } else {
                 0
             },
+            expert: self.expert_status.clone(),
             transcript: self
                 .recent_transcript
                 .iter()
@@ -743,6 +744,9 @@ pub struct RemoteSnapshot {
     pub streaming_offset: u64,
     pub activity: String,
     pub turn_started_at: u64,
+    /// The expert-on-call line (`expert: <model> · 1 consult · 2.1% of weekly window`), if the
+    /// session has consulted one.
+    pub expert: Option<String>,
     pub transcript: Vec<String>,
     /// The same lines as `transcript`, each carrying the provenance its emitter recorded (v9) —
     /// see [`TranscriptRow`]. Same length and order.

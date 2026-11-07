@@ -312,6 +312,7 @@ impl Session {
             spend: Default::default(),
             turn_unfinished_tasks: Vec::new(),
             advisor_reviewed: false,
+            expert: Default::default(),
             turn_budget_refused: false,
             expect_code_change: false,
             cli_bridge_notice_shown: false,

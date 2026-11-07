@@ -791,12 +791,16 @@ impl Session {
                 break;
             }
             let unresolved = verification_ledger.lock().unwrap().unresolved_summary();
-            if let Some(stop) = self.supervise_step(
-                &resp.content,
-                &step_observations,
-                self.done_task_count() > done_before,
-                unresolved.as_deref(),
-            ) {
+            if let Some(stop) = self
+                .supervise_step(
+                    &resp.content,
+                    &step_observations,
+                    self.done_task_count() > done_before,
+                    unresolved.as_deref(),
+                    &active_model,
+                )
+                .await
+            {
                 final_text = stop.final_text;
                 hard_guard_abort = stop.hard;
                 halted_by_loop_guard = true;

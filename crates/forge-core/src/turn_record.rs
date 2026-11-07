@@ -250,6 +250,11 @@ impl Session {
             "open_tasks": open_tasks,
             "mutations": self.mutations_this_turn,
         });
+        if let Some(expert) = self.expert_turn_detail() {
+            if let (Some(map), Some(extra)) = (detail.as_object_mut(), expert.as_object()) {
+                map.extend(extra.clone());
+            }
+        }
         let reason: String = match result {
             Ok(outcome) => match outcome.stop_reason {
                 StopReason::FinalAnswer if open_tasks > 0 => "final_answer_open_tasks".into(),

@@ -185,6 +185,14 @@ pub enum PresenterEvent {
         model: String,
         purpose: String,
     },
+    /// A stronger expert model was consulted (`[harness.expert]`). `status` is the ready-to-show
+    /// line (`expert: <model> · 1 consult · 2.1% of weekly window`); `summary` is the diagnosis.
+    ExpertConsult {
+        trigger: String,
+        model: String,
+        summary: String,
+        status: String,
+    },
     /// Characters streamed by the active auxiliary call. Kept separate from assistant reasoning
     /// so internal diagnostics never leak into or pollute the conversation transcript.
     AuxiliaryProgress {

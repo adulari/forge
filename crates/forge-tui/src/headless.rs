@@ -348,6 +348,14 @@ impl Presenter for HeadlessPresenter {
             PresenterEvent::AuxiliaryRequest { model, purpose } => {
                 out!("  ◇ {purpose} via {model}…");
             }
+            PresenterEvent::ExpertConsult {
+                trigger,
+                summary,
+                status,
+                ..
+            } => {
+                out!("  ◇ {status} ({trigger}): {summary}");
+            }
             PresenterEvent::AuxiliaryProgress { .. } => {}
             PresenterEvent::ShellDiagnosis {
                 command,

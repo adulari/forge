@@ -114,6 +114,24 @@ impl StallReport {
             .map(|(step, what)| format!("Last real progress: step {step} ({what})."))
     }
 
+    /// What the expert is told tripped the supervisor: the lane, its length and the observations.
+    pub(crate) fn describe(&self, unresolved_checks: Option<&str>, open_tasks: usize) -> String {
+        let mut text = format!(
+            "The progress supervisor flagged this turn: {} for {} {}.",
+            self.lane.reason(),
+            self.steps,
+            self.lane.unit()
+        );
+        if let Some(observed) = self.observed(unresolved_checks, open_tasks) {
+            text.push_str(&format!(" Observed: {observed}."));
+        }
+        if let Some(line) = self.last_progress_line() {
+            text.push(' ');
+            text.push_str(&line);
+        }
+        text
+    }
+
     /// The model-facing nudge, delivered once per episode as a `LoopGuard` note.
     pub(crate) fn nudge_text(&self, unresolved_checks: Option<&str>, open_tasks: usize) -> String {
         let observed = self.observed(unresolved_checks, open_tasks);

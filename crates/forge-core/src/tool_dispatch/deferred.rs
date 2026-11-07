@@ -221,6 +221,7 @@ impl Session {
             || name == PRESENT_PLAN_TOOL
             || name == USE_SKILL_TOOL
             || name == REMEMBER_TOOL
+            || name == CONSULT_EXPERT_TOOL
             || name == fleet::MESSAGE_SESSION_TOOL
             || name == fleet::LIST_SESSIONS_TOOL
             || name == crate::dispatch::DISPATCH_SESSIONS_TOOL

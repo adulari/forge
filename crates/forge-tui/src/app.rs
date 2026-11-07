@@ -236,6 +236,9 @@ pub struct App {
     /// bar's "down since / next try / until" line. Cleared on recovery and the moment real output
     /// arrives, like `model_search`.
     pub provider_outage: Option<ProviderOutageView>,
+    /// `expert: <model> · 2 consults · 2.1% of weekly window`, from the latest expert consult of
+    /// the session (`[harness.expert]`); shown in `/status` and on the remote snapshot.
+    pub expert_status: Option<String>,
     pub cost_usd: f64,
     /// Live token counter (tui-token-counter.md): session totals + current context fill.
     pub session_in: u64,
@@ -1408,6 +1411,18 @@ impl App {
                 self.turn_activity.model = Some(model);
                 self.turn_activity.auxiliary_chars = 0;
                 self.set_turn_activity(TurnPhase::Auxiliary, purpose);
+            }
+            PresenterEvent::ExpertConsult {
+                trigger,
+                summary,
+                status,
+                ..
+            } => {
+                self.push_notice(
+                    NoticeKind::Info,
+                    &format!("{status} ({trigger}): {summary}"),
+                );
+                self.expert_status = Some(status);
             }
             PresenterEvent::AuxiliaryProgress { chars } => {
                 self.turn_activity.auxiliary_chars =

@@ -45,12 +45,13 @@ impl Session {
 
     /// Judge the step that just finished. A nudge is delivered into the transcript after the
     /// step's tool results, so message ordering stays valid; `Some` means the turn must end now.
-    pub(crate) fn supervise_step(
+    pub(crate) async fn supervise_step(
         &mut self,
         narration: &str,
         observations: &[CallObservation],
         task_closed: bool,
         unresolved_checks: Option<&str>,
+        active: &str,
     ) -> Option<StallStop> {
         let headless = self.turn_is_headless();
         let mesh = &self.config.mesh;
@@ -74,14 +75,47 @@ impl Session {
         match verdict {
             Verdict::Fine => None,
             Verdict::Nudge(report) => {
-                self.deliver_stall_nudge(&report, unresolved_checks);
+                // A `minimal` profile sends no nudge, so there is nothing for the expert to
+                // sharpen; it is still asked before the stop.
+                let advice = if self.advisory_nudges_on() {
+                    self.expert_on_stall(&report, unresolved_checks, false, active)
+                        .await
+                } else {
+                    None
+                };
+                self.deliver_stall_nudge(&report, unresolved_checks, advice);
                 None
             }
-            Verdict::Stop(report) => self.settle_stop(&report, mode, headless),
+            Verdict::Stop(report) => {
+                if mode == ProgressGuardMode::Enforce && !self.expert.stop_deferred {
+                    if let Some((resolved, reply)) = self
+                        .expert_on_stall(&report, unresolved_checks, true, active)
+                        .await
+                    {
+                        if !reply.next_step.is_empty() {
+                            self.expert.stop_deferred = true;
+                            self.ledger.defer_stop();
+                            self.presenter.emit(forge_types::PresenterEvent::Warning(
+                                "stall: the expert gave a next step; the stop is deferred once"
+                                    .to_string(),
+                            ));
+                            let text = crate::expert::stall_advice_text(&resolved.model, &reply);
+                            let _ = self.push_nudge(text);
+                            return None;
+                        }
+                    }
+                }
+                self.settle_stop(&report, mode, headless)
+            }
         }
     }
 
-    fn deliver_stall_nudge(&mut self, report: &StallReport, unresolved_checks: Option<&str>) {
+    fn deliver_stall_nudge(
+        &mut self,
+        report: &StallReport,
+        unresolved_checks: Option<&str>,
+        advice: Option<(crate::expert::Resolved, crate::expert::ExpertReply)>,
+    ) {
         // A `minimal` profile sends no nudge, but the ledger still counts, so a model that keeps
         // finding nothing new is stopped on the same schedule.
         if !self.advisory_nudges_on() {
@@ -90,7 +124,11 @@ impl Session {
         self.presenter
             .emit(forge_types::PresenterEvent::Warning(report.nudge_notice()));
         let open_tasks = crate::nudge_policy::open_titles(&self.tasks).len();
-        let text = report.nudge_text(unresolved_checks, open_tasks);
+        let mut text = report.nudge_text(unresolved_checks, open_tasks);
+        if let Some((resolved, reply)) = advice {
+            text.push_str("\n\n");
+            text.push_str(&crate::expert::stall_advice_text(&resolved.model, &reply));
+        }
         let _ = self.push_note(forge_types::MessageKind::LoopGuard, text);
     }
 

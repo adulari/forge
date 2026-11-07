@@ -62,6 +62,7 @@ mod auxiliary_candidates;
 mod auxiliary_policy;
 mod bridge_trace;
 mod btw_policy;
+mod expert;
 pub mod goal_evaluator;
 mod goal_evidence;
 mod shell_batch;
@@ -236,6 +237,7 @@ pub mod worktree_reclaim;
 pub mod worktree_setup;
 pub mod zero_retention;
 
+pub use expert::{consult_expert_spec, CONSULT_EXPERT_TOOL};
 pub use llm_router::LlmRouter;
 pub use pinned_context::render_task_list;
 pub use recall::{recall_spec, RECALL_TOOL};
@@ -1867,6 +1869,8 @@ pub struct Session {
     turn_unfinished_tasks: Vec<String>,
     /// The advisor has reviewed this turn (one shot, spent even by an error; advisor.rs).
     advisor_reviewed: bool,
+    /// Expert-on-call consults, per turn and per session (expert.rs).
+    expert: expert::ExpertState,
     /// The latest turn was refused by a spend cap before any model call; a `/goal` driver reads
     /// it to stop instead of re-driving refused turns.
     turn_budget_refused: bool,
@@ -2500,6 +2504,14 @@ impl Session {
                 .is_none_or(|scope| scope.permits_tool(UPDATE_TASKS_TOOL))
         {
             specs.push(update_tasks_spec());
+        }
+        if self.expert_tool_on()
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(CONSULT_EXPERT_TOOL))
+        {
+            specs.push(consult_expert_spec());
         }
         // The on-demand memory tool — model calls this to persist a durable fact at any
         // point during a turn, not just via end-of-turn auto-capture.
@@ -3227,6 +3239,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
         self.advisor_reviewed = false;
+        self.expert.begin_turn();
         self.env_fight = EnvFightTracker::default();
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
@@ -5320,6 +5333,9 @@ mod tests {
 
     #[path = "advisor.rs"]
     mod advisor_tests;
+
+    #[path = "expert.rs"]
+    mod expert_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {

@@ -86,6 +86,7 @@ pub(crate) fn build_snapshot_frame(
         streaming_offset: view.streaming_offset,
         activity: view.activity,
         turn_started_at: view.turn_started_at,
+        expert: view.expert,
         transcript: view.transcript,
         transcript_rows: view
             .transcript_rows

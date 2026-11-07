@@ -315,6 +315,9 @@ impl Session {
         if call.name == USE_SKILL_TOOL {
             return self.use_skill(msg_id, call);
         }
+        if call.name == CONSULT_EXPERT_TOOL {
+            return self.consult_expert_tool(call).await;
+        }
         // On-demand memory write — model calls this to persist a durable fact immediately,
         // without waiting for end-of-turn auto-capture.
         if call.name == RECALL_TOOL {

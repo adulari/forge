@@ -624,6 +624,10 @@ pub struct Snapshot {
     /// When the running turn started, Unix milliseconds; 0 when idle (additive).
     #[serde(default)]
     pub turn_started_at: u64,
+    /// The expert-on-call line, `expert: <model> · 1 consult · 2.1% of weekly window` (additive).
+    /// Absent until the session has consulted its expert (`[harness.expert]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expert: Option<String>,
     /// Recent finalized scrollback lines (plain text, newest last; bounded).
     pub transcript: Vec<String>,
     /// The same lines, each tagged with its provenance (v9) — see [`SnapTranscriptRow`]. Rides
@@ -845,6 +849,7 @@ impl Default for Snapshot {
             streaming_offset: 0,
             activity: String::new(),
             turn_started_at: 0,
+            expert: None,
             transcript: Vec::new(),
             transcript_rows: Vec::new(),
             transcript_total: 0,
