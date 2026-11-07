@@ -32,6 +32,19 @@ impl GoalPhase {
         }
     }
 
+    /// The inverse of [`GoalPhase::wire`].
+    pub fn from_wire(tag: &str) -> Option<Self> {
+        Some(match tag {
+            "active" => Self::Active,
+            "paused" => Self::Paused,
+            "budget_limit" => Self::BudgetLimit,
+            "complete" => Self::Complete,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => return None,
+        })
+    }
+
     /// The wire tag remote clients switch on.
     pub fn wire(self) -> &'static str {
         match self {
