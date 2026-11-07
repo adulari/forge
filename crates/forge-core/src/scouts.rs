@@ -101,7 +101,133 @@ impl Tally {
     }
 }
 
+/// Words that make a first prompt a coding request worth orienting for.
+const CODING_WORDS: &[&str] = &[
+    "fix",
+    "implement",
+    "add ",
+    "change",
+    "refactor",
+    "rename",
+    "port ",
+    "migrate",
+    "bug",
+    "failing",
+    "broken",
+    "investigate",
+    "why does",
+    "where is",
+    "how does",
+    "support",
+    "remove",
+    "update",
+    "make ",
+    "build",
+    "write ",
+    "split",
+    "parse",
+    "red ",
+];
+/// A repository smaller than this is read faster than briefed.
+const MIN_FILES: usize = 25;
+/// The prompt text a scout gets, in characters.
+const MAX_TASK_CHARS: usize = 3000;
+
+/// Whether the opening prompt of a session reads like a coding task. The repository size, the
+/// mode and whether it is the first turn are checked by the caller.
+pub(crate) fn wants_orientation(prompt: &str) -> bool {
+    let p = prompt.trim().to_lowercase();
+    p.chars().count() >= 60 && !p.starts_with('/') && CODING_WORDS.iter().any(|w| p.contains(w))
+}
+
+/// At least `MIN_FILES` files within three directory levels, hidden and build directories aside.
+fn repo_is_big_enough(root: &std::path::Path) -> bool {
+    fn walk(dir: &std::path::Path, depth: u8, seen: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || matches!(name.as_str(), "target" | "node_modules") {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(t) if t.is_dir() && depth < 3 => walk(&entry.path(), depth + 1, seen),
+                Ok(t) if t.is_file() => *seen += 1,
+                _ => {}
+            }
+            if *seen >= MIN_FILES {
+                return;
+            }
+        }
+    }
+    let mut seen = 0;
+    walk(root, 0, &mut seen);
+    seen >= MIN_FILES
+}
+
+fn orientation_question(prompt: &str) -> String {
+    let task: String = prompt.trim().chars().take(MAX_TASK_CHARS).collect();
+    format!(
+        "Orient another agent that is about to do this task; do not do the task yourself. Report \
+         where in the repository the work belongs: the files and line ranges that matter, how \
+         they connect, existing conventions and tests to follow, and how to verify the result.\n\n\
+         The task:\n{task}"
+    )
+}
+
 impl crate::Session {
+    /// `[harness] scouts = "auto"`: on the opening coding prompt of a session in a repository
+    /// big enough to need it, run a scout before the model's first step and hand the model its
+    /// brief as context, so the orientation never enters the working transcript.
+    pub(crate) async fn pre_scout(
+        &mut self,
+        pack: &mut crate::context_pack::ContextPack,
+        prompt: &str,
+        seq: i64,
+        routed_model: &str,
+    ) -> Result<(), crate::CoreError> {
+        let first_turn = self.transcript.iter().all(|m| {
+            !matches!(
+                m.role,
+                forge_types::Role::Assistant | forge_types::Role::Tool
+            )
+        });
+        if self.config.harness.scouts != ScoutsMode::Auto
+            || !first_turn
+            || !self.config.mesh.subagents.enabled
+            || self.delegation_off
+            || forge_provider::is_cli_bridge(routed_model)
+            || !wants_orientation(prompt)
+            || !repo_is_big_enough(self.workspace.root())
+        {
+            return Ok(());
+        }
+        let Some(msg_id) = self.store.message_id_at(&self.id, seq)? else {
+            return Ok(());
+        };
+        let call = ToolCall {
+            id: "pre-scout".into(),
+            name: SPAWN_AGENTS_TOOL.into(),
+            args: json!({ "agents": [{ "agent": SCOUT_AGENT, "task": orientation_question(prompt) }] }),
+        };
+        let brief = self.spawn_agents(&msg_id, &call).await?;
+        if brief.trim().len() < 40 || brief.starts_with("error") {
+            return Ok(());
+        }
+        let note = format!(
+            "A read-only scout already explored this repository for the task and reports below. \
+             It changed nothing. Start from its citations and read the cited ranges before you \
+             edit them; search again only for what it did not cover.\n\n{brief}"
+        );
+        self.inject_context(
+            pack,
+            crate::context_pack::ContextSource::Orchestration,
+            "scout brief",
+            &note,
+        )
+    }
+
     /// The scout runs the open turn has made, for its stored detail.
     pub(crate) fn scouts_this_turn(&self) -> Option<u32> {
         self.store
@@ -221,6 +347,20 @@ mod tests {
         let tool = &specs(&harness(ScoutsMode::Tool))[0].description;
         assert!(auto.contains("FIRST"));
         assert!(!tool.contains("FIRST"));
+    }
+
+    #[test]
+    fn only_long_coding_openers_want_orientation() {
+        assert!(wants_orientation(
+            "The ledgerkit test suite went red after a bad merge. Fix the library code in ledgerkit/."
+        ));
+        assert!(!wants_orientation("fix it"));
+        assert!(!wants_orientation(
+            "/compact please make this conversation a lot shorter than it is now"
+        ));
+        assert!(!wants_orientation(
+            "Tell me a story about a lighthouse keeper and the sea, a long one, please."
+        ));
     }
 
     #[test]

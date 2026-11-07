@@ -42,7 +42,7 @@ impl forge_provider::Provider for ScoutProvider {
     }
 }
 
-fn session(
+fn scout_session(
     dir: &std::path::Path,
     mode: forge_config::ScoutsMode,
 ) -> (Session, Arc<Mutex<Vec<PresenterEvent>>>) {
@@ -77,7 +77,7 @@ fn scout(question: &str) -> forge_types::ToolCall {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scout_returns_its_brief_and_keeps_the_reading_in_the_child() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut session, events) = session(dir.path(), forge_config::ScoutsMode::Tool);
+    let (mut session, events) = scout_session(dir.path(), forge_config::ScoutsMode::Tool);
     assert!(session.tool_specs().iter().any(|s| s.name == "scout"));
     let msg_id = session
         .store
@@ -114,6 +114,87 @@ async fn a_scout_returns_its_brief_and_keeps_the_reading_in_the_child() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn off_does_not_advertise_scout() {
     let dir = tempfile::tempdir().unwrap();
-    let (session, _events) = session(dir.path(), forge_config::ScoutsMode::Off);
+    let (session, _events) = scout_session(dir.path(), forge_config::ScoutsMode::Off);
     assert!(!session.tool_specs().iter().any(|s| s.name == "scout"));
+}
+
+fn seeded_repo(dir: &std::path::Path) {
+    for i in 0..30 {
+        std::fs::write(dir.join(format!("m{i}.py")), "x = 1\n").unwrap();
+    }
+}
+
+const PROMPT: &str = "Fix the retry backoff for failed uploads so it stops hammering the server after three attempts.";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn auto_scouts_the_opening_coding_prompt_and_injects_only_the_brief() {
+    let dir = tempfile::tempdir().unwrap();
+    seeded_repo(dir.path());
+    let (mut session, events) = scout_session(dir.path(), forge_config::ScoutsMode::Auto);
+    let (_, seq) = session
+        .store
+        .add_message_returning_seq(session.id(), 0, Role::User, PROMPT, None)
+        .unwrap();
+    let mut pack = crate::context_pack::ContextPack::default();
+    session
+        .pre_scout(&mut pack, PROMPT, seq, "inferhub::cb/deepseek-v4.1-flash")
+        .await
+        .unwrap();
+    let note = session
+        .transcript
+        .iter()
+        .find(|m| m.role == Role::System && m.content.contains("net.rs:10-20"))
+        .expect("the brief is in the transcript");
+    assert!(note.content.contains("scout already explored"));
+    assert!(!session
+        .transcript
+        .iter()
+        .any(|m| m.content.contains("list_dir")));
+    assert_eq!(session.scouts_this_turn(), Some(1));
+    assert!(events.lock().unwrap().iter().any(|e| matches!(
+        e,
+        PresenterEvent::ToolResult { name, .. } if name == "scout"
+    )));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_mode_small_repos_and_later_turns_do_not_pre_scout() {
+    let dir = tempfile::tempdir().unwrap();
+    seeded_repo(dir.path());
+    let (mut session, _) = scout_session(dir.path(), forge_config::ScoutsMode::Tool);
+    let mut pack = crate::context_pack::ContextPack::default();
+    session
+        .pre_scout(&mut pack, PROMPT, 0, "m::x")
+        .await
+        .unwrap();
+    assert!(session
+        .store
+        .child_sessions(session.id())
+        .unwrap()
+        .is_empty());
+
+    let small = tempfile::tempdir().unwrap();
+    std::fs::write(small.path().join("a.py"), "x = 1\n").unwrap();
+    let (mut session, _) = scout_session(small.path(), forge_config::ScoutsMode::Auto);
+    session
+        .pre_scout(&mut pack, PROMPT, 0, "m::x")
+        .await
+        .unwrap();
+    assert!(session
+        .store
+        .child_sessions(session.id())
+        .unwrap()
+        .is_empty());
+
+    let (mut session, _) = scout_session(dir.path(), forge_config::ScoutsMode::Auto);
+    session.transcript.push(Message::assistant("done earlier"));
+    session
+        .pre_scout(&mut pack, PROMPT, 0, "m::x")
+        .await
+        .unwrap();
+    assert!(session
+        .store
+        .child_sessions(session.id())
+        .unwrap()
+        .is_empty());
 }

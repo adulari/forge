@@ -3431,6 +3431,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // prefix on every request (clock.rs explains the trade-off).
         self.inject_turn_clock(&mut context_pack)?;
         self.inject_git_branch_if_changed(&mut context_pack)?;
+        self.pre_scout(&mut context_pack, prompt, seq, &routed_model)
+            .await?;
 
         // Commit discipline (git_hygiene.rs): while files this session edited are still
         // uncommitted, say so once per turn; when the branch is well ahead of its upstream, ask

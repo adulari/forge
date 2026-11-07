@@ -137,6 +137,19 @@ impl Store {
         Ok(())
     }
 
+    /// The id of the session's message at `seq`, when there is one.
+    pub fn message_id_at(&self, session_id: &str, seq: i64) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT id FROM message WHERE session_id = ?1 AND seq = ?2",
+                (session_id, seq),
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
     /// How many scout runs (`spawn_agents` of the built-in `scout` agent) the session made at or
     /// after message `from_seq`.
     pub fn count_scout_calls_since(&self, session_id: &str, from_seq: i64) -> Result<u32> {
