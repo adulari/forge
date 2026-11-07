@@ -104,6 +104,8 @@ mod mentions;
 mod model_report;
 mod onboarding;
 mod open_pr_hooks;
+#[cfg(test)]
+mod outage_e2e;
 mod ports;
 mod power;
 mod preview;
