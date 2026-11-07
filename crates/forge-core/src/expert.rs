@@ -538,6 +538,8 @@ pub(crate) struct ExpertState {
     pub turn_consults: u32,
     pub turn_triggers: Vec<&'static str>,
     pub turn_model: Option<String>,
+    /// The diagnosis of the turn's last usable consult, kept so a fresh-worker relay can hand it on.
+    pub turn_diagnosis: Option<String>,
     pub stop_deferred: bool,
     pub session_consults: u32,
     /// Consults made while the subscription window had no fresh reading.
@@ -556,6 +558,7 @@ impl ExpertState {
         self.turn_consults = 0;
         self.turn_triggers.clear();
         self.turn_model = None;
+        self.turn_diagnosis = None;
         self.stop_deferred = false;
     }
 }
@@ -797,6 +800,9 @@ impl Session {
                 now,
             );
         }
+        if !summary.is_empty() && !summary.starts_with("no usable reply") {
+            self.expert.turn_diagnosis = Some(clip_chars(summary, 400));
+        }
         let status = status_line(
             &r.model,
             self.expert.session_consults,
@@ -988,6 +994,7 @@ impl Session {
                 "expert_model": self.expert.turn_model,
                 "expert_triggers": self.expert.turn_triggers,
                 "expert_status": self.expert.status,
+                "expert_diagnosis": self.expert.turn_diagnosis,
             })
         })
     }

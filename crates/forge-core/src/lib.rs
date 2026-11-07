@@ -66,6 +66,7 @@ mod expert;
 pub mod goal_contract;
 pub mod goal_evaluator;
 mod goal_evidence;
+pub mod goal_relay;
 mod shell_batch;
 mod silence_guard;
 mod workspace_policy;
@@ -5343,6 +5344,9 @@ mod tests {
 
     #[path = "goal_contract.rs"]
     mod goal_contract_tests;
+
+    #[path = "goal_relay.rs"]
+    mod goal_relay_session_tests;
 
     #[path = "advisor.rs"]
     mod advisor_tests;

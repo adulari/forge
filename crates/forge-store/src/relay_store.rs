@@ -58,6 +58,37 @@ impl Store {
         Ok(())
     }
 
+    /// Create the fresh session a goal moves to: same workspace, worktree, permission mode and
+    /// model/effort pin as `predecessor`, no messages, linked to it with the brief. The
+    /// predecessor's newest turn is marked `handed_off`. Returns the successor's id.
+    pub fn create_relay_successor(
+        &self,
+        predecessor: &str,
+        reason: &str,
+        detail: &str,
+        brief: &str,
+    ) -> Result<String> {
+        let cwd = self.session_cwd(predecessor)?.unwrap_or_default();
+        let mode = self.session_mode(predecessor)?;
+        let successor = self.create_session(&cwd, &mode)?;
+        if let Some(worktree) = self.session_worktree(predecessor)? {
+            self.set_session_worktree(&successor, &worktree)?;
+        }
+        if let Some(pin) = self.session_pinned_model(predecessor)? {
+            self.set_session_pinned_model(&successor, Some(&pin))?;
+        }
+        if let Some(effort) = self.session_pinned_effort(predecessor)? {
+            self.set_session_pinned_effort(&successor, Some(&effort))?;
+        }
+        if let Some(title) = self.session_title(predecessor)?.filter(|t| !t.is_empty()) {
+            let n = self.relay_predecessors(predecessor)?.len() + 2;
+            self.set_session_title(&successor, &format!("{title} (worker {n})"))?;
+        }
+        self.record_relay(predecessor, &successor, reason, detail, brief)?;
+        self.mark_last_turn_handed_off(predecessor)?;
+        Ok(successor)
+    }
+
     /// The hand-off that created `session_id`, if it is a successor.
     pub fn relay_predecessor(&self, session_id: &str) -> Result<Option<RelayLink>> {
         Ok(self
@@ -243,6 +274,48 @@ mod tests {
             );
         }
         assert_eq!(store.relay_brief(&c).unwrap().as_deref(), Some("brief c"));
+    }
+
+    #[test]
+    fn a_successor_inherits_the_workspace_pin_and_closes_the_predecessor_turn() {
+        let store = Store::open_in_memory().unwrap();
+        let a = store.create_session("/repo/wt", "bypass").unwrap();
+        store.set_session_worktree(&a, "/repo/wt").unwrap();
+        store
+            .set_session_pinned_model(&a, Some("opencode::muse"))
+            .unwrap();
+        store.set_session_title(&a, "ship parser").unwrap();
+        let turn = store.open_turn(&a, 0).unwrap();
+        store.close_turn(turn, "final_answer", None).unwrap();
+        let b = store
+            .create_relay_successor(&a, "wedged", "same set", "BRIEF")
+            .unwrap();
+        assert_ne!(a, b);
+        assert_eq!(store.session_cwd(&b).unwrap().as_deref(), Some("/repo/wt"));
+        assert_eq!(store.session_mode(&b).unwrap(), "bypass");
+        assert_eq!(
+            store.session_worktree(&b).unwrap().as_deref(),
+            Some("/repo/wt")
+        );
+        assert_eq!(
+            store.session_pinned_model(&b).unwrap().as_deref(),
+            Some("opencode::muse")
+        );
+        assert_eq!(
+            store.session_title(&b).unwrap().as_deref(),
+            Some("ship parser (worker 2)")
+        );
+        assert_eq!(store.relay_brief(&b).unwrap().as_deref(), Some("BRIEF"));
+        assert_eq!(
+            store
+                .last_closed_turn(&a)
+                .unwrap()
+                .unwrap()
+                .end_reason
+                .as_deref(),
+            Some("handed_off")
+        );
+        assert!(store.load_messages(&b).unwrap().is_empty());
     }
 
     #[test]

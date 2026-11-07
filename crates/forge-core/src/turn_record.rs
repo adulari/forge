@@ -38,7 +38,10 @@ impl Drop for TurnEndGuard {
 
 /// Reason strings that need no note: the person (or the restart machinery) already got one.
 fn is_self_explained(reason: &str) -> bool {
-    matches!(reason, "interrupted" | "daemon_shutdown" | "plan_presented")
+    matches!(
+        reason,
+        "interrupted" | "daemon_shutdown" | "plan_presented" | "handed_off"
+    )
 }
 
 /// `(plain reason, what to do)` for a non-success end. Unknown reasons fall back to the raw
@@ -91,6 +94,10 @@ pub fn describe_end(reason: &str) -> (String, String) {
         "daemon_shutdown" => ("daemon shut down", "send continue once it is back"),
         "interrupted" => ("stopped by you", "send continue to resume"),
         "plan_presented" => ("plan awaiting approval", "approve or revise the plan"),
+        "handed_off" => (
+            "goal handed to a fresh worker",
+            "the goal continues in the successor session",
+        ),
         "abandoned" => ("never closed", "send continue to retry"),
         other if other.starts_with("unknown_") => {
             return (
@@ -129,8 +136,10 @@ pub fn is_resumable(reason: &str) -> bool {
 
 /// Whether an unattended run (`forge run`) must report this end as a failed run.
 pub fn end_fails_run(reason: &str) -> bool {
-    !matches!(reason, "final_answer" | "plan_presented" | "interrupted")
-        && !reason.starts_with("unknown_")
+    !matches!(
+        reason,
+        "final_answer" | "plan_presented" | "interrupted" | "handed_off"
+    ) && !reason.starts_with("unknown_")
 }
 
 /// One turn as the apps and `forge turns` show it: the stored facts plus the plain label and the
