@@ -188,6 +188,8 @@ pub enum CommandAction {
     Sidebar(String),
     /// List this workspace's background shells (`/jobs`).
     Jobs,
+    /// Search this session's whole history, folded messages included (`/history <words>`).
+    History(String),
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Open the latest tool call's complete output in the full-output viewer (`/output`).
@@ -569,6 +571,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "sidebar" => CommandAction::Sidebar(arg),
         "jobs" | "shells" => CommandAction::Jobs,
         "turns" => CommandAction::Turns,
+        "history" => CommandAction::History(arg.trim().to_string()),
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),
@@ -603,6 +606,21 @@ pub fn parse_command(line: &str) -> CommandAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_takes_its_search_words_and_is_in_the_palette() {
+        assert_eq!(
+            parse_command("/history retry  policy "),
+            CommandAction::History("retry  policy".into())
+        );
+        assert_eq!(
+            parse_command("/history"),
+            CommandAction::History(String::new())
+        );
+        let mut p = Palette::default();
+        p.open_with("history");
+        assert!(p.matches().iter().any(|e| e.name == "history"));
+    }
 
     #[test]
     fn palette_carries_usage_and_exposes_selected_hint() {

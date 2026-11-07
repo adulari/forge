@@ -78,6 +78,7 @@ pub(crate) fn other_modal_open(app: &App) -> bool {
         || app.agents_menu.open
         || app.diff_overlay.open
         || app.jobs_overlay.open
+        || app.history_overlay.open
         || app.status_open
         || app.mesh_overlay.open
         || app.at_picker.open

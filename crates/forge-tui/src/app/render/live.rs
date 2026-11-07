@@ -16,6 +16,10 @@ fn render_live_inner(frame: &mut Frame, app: &App) {
         crate::jobs_overlay::render_jobs_overlay(frame, &app.jobs_overlay, app.tick);
         return;
     }
+    if app.history_overlay.open {
+        crate::history_overlay::render_history_overlay(frame, &app.history_overlay);
+        return;
+    }
     // The full-output viewer is opened on request, so it sits above every other takeover.
     if let Some(view) = &app.output_view {
         crate::app::output_view::render_output_view(frame, view);

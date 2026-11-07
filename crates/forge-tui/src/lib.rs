@@ -80,6 +80,7 @@ pub use shell_mode::bang_command;
 pub use stream_json::{StreamInit, StreamInitSlot, StreamJsonPresenter};
 pub use usage_source::{ModelUsage, UsageSlot, UsageSource};
 pub mod diff_overlay;
+pub mod history_overlay;
 pub mod jobs_overlay;
 pub mod project_offer;
 mod qr_overlay;

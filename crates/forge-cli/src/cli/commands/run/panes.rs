@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use forge_tui::board::FleetRow;
 use forge_tui::diff_overlay::{parse_unified, untracked_file, DiffAction, OverlayFile};
+use forge_tui::history_overlay::{HistoryAction, HistoryHit};
 use forge_tui::jobs_overlay::{JobRow, JobsAction, TAIL_LINES};
 use forge_tui::{App, KeyKind, Tui};
 use futures::StreamExt;
@@ -22,6 +23,11 @@ const FLEET_REFRESH: Duration = Duration::from_secs(15);
 const FLEET_BACKOFF: [u64; 4] = [1, 2, 5, 10];
 const ATTACH_HEARTBEAT: Duration = Duration::from_secs(15);
 const JOBS_EVERY: Duration = Duration::from_secs(2);
+/// Hits `/history` lists, and the window it reads around the one you open.
+const HISTORY_HITS: usize = 40;
+const HISTORY_CONTEXT_BEFORE: i64 = 4;
+const HISTORY_CONTEXT_AFTER: i64 = 8;
+const HISTORY_VIEW_CHARS: usize = 14_000;
 const MCP_EVERY: Duration = Duration::from_secs(5);
 /// Untracked files larger than this, or past this many, are listed without their content.
 const UNTRACKED_MAX_BYTES: u64 = 200 * 1024;
@@ -33,6 +39,8 @@ enum Msg {
     Jobs(Vec<JobRow>),
     Tail(u32, String),
     JobNote(String),
+    History(Result<Vec<HistoryHit>, String>),
+    HistoryView(i64, String),
     Reverted(Result<String, String>),
 }
 
@@ -159,6 +167,14 @@ impl PaneHost {
             }
             return Ok(true);
         }
+        if app.history_overlay.open {
+            match app.history_overlay.key(key) {
+                HistoryAction::None => {}
+                HistoryAction::Search(query) => self.spawn_history(app, query),
+                HistoryAction::View(seq) => self.spawn_history_view(app, seq),
+            }
+            return Ok(true);
+        }
         if app.jobs_overlay.open {
             match app.jobs_overlay.key(key) {
                 JobsAction::None => {}
@@ -226,6 +242,65 @@ impl PaneHost {
         self.jobs_at = None;
     }
 
+    /// Ranked word search over the session's whole history, off the render loop. The store is the
+    /// same file the session writes, opened on its own handle.
+    fn spawn_history(&mut self, app: &App, query: String) {
+        let session_id = app.session_id.clone();
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let found = crate::cli::commands::replay::open_store()
+                .map_err(|e| e.to_string())
+                .and_then(|store| {
+                    store
+                        .search_session_history(&session_id, &query, HISTORY_HITS)
+                        .map_err(|e| e.to_string())
+                })
+                .map(|hits| {
+                    hits.into_iter()
+                        .map(|hit| HistoryHit {
+                            seq: hit.seq,
+                            role: hit.role,
+                            snippet: hit.snippet,
+                            folded: hit.folded,
+                        })
+                        .collect()
+                });
+            let _ = tx.send(Msg::History(found));
+        });
+    }
+
+    /// The messages around one hit, as the text the overlay scrolls through.
+    fn spawn_history_view(&mut self, app: &App, seq: i64) {
+        let session_id = app.session_id.clone();
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || {
+            let text = crate::cli::commands::replay::open_store()
+                .map_err(|e| e.to_string())
+                .and_then(|store| {
+                    store
+                        .read_history(
+                            &session_id,
+                            seq - HISTORY_CONTEXT_BEFORE,
+                            seq + HISTORY_CONTEXT_AFTER,
+                            HISTORY_VIEW_CHARS,
+                        )
+                        .map_err(|e| e.to_string())
+                })
+                .map(|read| {
+                    let mut text = String::new();
+                    for row in read.rows {
+                        let mark = if row.seq == seq { ">" } else { "-" };
+                        text.push_str(&format!("{mark}{mark} #{} {}\n", row.seq, row.role));
+                        text.push_str(&row.content);
+                        text.push_str("\n\n");
+                    }
+                    text
+                })
+                .unwrap_or_else(|e| format!("could not read the history: {e}"));
+            let _ = tx.send(Msg::HistoryView(seq, text));
+        });
+    }
+
     fn spawn_jobs(&mut self, app: &App) {
         self.jobs_inflight = true;
         self.jobs_at = Some(Instant::now());
@@ -282,6 +357,11 @@ impl PaneHost {
         if app.diff_overlay.open && app.diff_overlay.loading && !self.tree_inflight {
             self.spawn_tree(app);
         }
+        if app.history_overlay.open {
+            if let Some(query) = app.history_overlay.take_start() {
+                self.spawn_history(app, query);
+            }
+        }
         if app.jobs_overlay.open
             && !self.jobs_inflight
             && self.jobs_at.is_none_or(|at| at.elapsed() >= JOBS_EVERY)
@@ -321,6 +401,12 @@ impl PaneHost {
                 }
                 Msg::Tail(id, text) => app.jobs_overlay.set_tail(id, &text),
                 Msg::JobNote(note) => app.jobs_overlay.notice = Some(note),
+                Msg::History(Ok(hits)) => app.history_overlay.set_hits(hits),
+                Msg::History(Err(error)) => {
+                    app.history_overlay.set_hits(Vec::new());
+                    app.history_overlay.notice = Some(error);
+                }
+                Msg::HistoryView(seq, text) => app.history_overlay.set_view(seq, &text),
                 Msg::Reverted(result) => {
                     app.diff_overlay.notice = Some(match result {
                         Ok(note) | Err(note) => note,

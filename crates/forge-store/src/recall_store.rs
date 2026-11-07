@@ -233,12 +233,41 @@ impl Store {
         seq_to: i64,
         max_chars: usize,
     ) -> Result<FoldedRead> {
+        self.read_rows(session_id, seq_from, seq_to, max_chars, "compacted = 1")
+    }
+
+    /// [`read_folded`](Self::read_folded) over everything that still counts as the conversation,
+    /// live rows and folded ones alike: what the owner's history search reads around a hit.
+    pub fn read_history(
+        &self,
+        session_id: &str,
+        seq_from: i64,
+        seq_to: i64,
+        max_chars: usize,
+    ) -> Result<FoldedRead> {
+        self.read_rows(
+            session_id,
+            seq_from,
+            seq_to,
+            max_chars,
+            "(active = 1 OR compacted = 1)",
+        )
+    }
+
+    fn read_rows(
+        &self,
+        session_id: &str,
+        seq_from: i64,
+        seq_to: i64,
+        max_chars: usize,
+        state: &str,
+    ) -> Result<FoldedRead> {
         let conn = self.lock()?;
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "SELECT seq, role, content, tool_calls_json FROM message
-             WHERE session_id = ?1 AND compacted = 1 AND seq >= ?2 AND seq <= ?3
-             ORDER BY seq",
-        )?;
+             WHERE session_id = ?1 AND {state} AND seq >= ?2 AND seq <= ?3
+             ORDER BY seq"
+        ))?;
         let mut rows = stmt.query(rusqlite::params![session_id, seq_from, seq_to])?;
         let mut out = FoldedRead::default();
         let mut used = 0usize;
@@ -488,6 +517,21 @@ mod tests {
         assert_eq!(rest.rows.first().unwrap().seq, resume);
         // The live tail (seq 9) is not folded history.
         assert_eq!(rest.rows.last().unwrap().seq, 8);
+    }
+
+    #[test]
+    fn read_history_covers_live_and_folded_rows() {
+        let (store, sid) = seeded();
+        store.compact_session_store(&sid, "SUMMARY", 2).unwrap();
+        let rows = store.read_history(&sid, 0, 99, 10_000).unwrap().rows;
+        assert_eq!(
+            rows.iter().map(|r| r.seq).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            store.read_folded(&sid, 0, 99, 10_000).unwrap().rows.len(),
+            4
+        );
     }
 
     #[test]

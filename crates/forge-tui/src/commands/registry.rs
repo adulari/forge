@@ -46,6 +46,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/sidebar [on|off]",
     },
     Command {
+        name: "history",
+        desc: "search this session's whole history, including messages folded out of context",
+        usage: "/history <words>",
+    },
+    Command {
         name: "jobs",
         desc: "background shells of this workspace: view their logs, stop them",
         usage: "/jobs",

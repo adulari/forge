@@ -1024,6 +1024,8 @@ and keep going."
         CommandAction::Ide => app.note("/ide needs the interactive chat; run `forge ide`"),
         CommandAction::Jobs if tui.is_some() => app.jobs_overlay.open(),
         CommandAction::Jobs => app.note("/jobs needs the interactive chat"),
+        CommandAction::History(query) if tui.is_some() => app.history_overlay.open(&query),
+        CommandAction::History(_) => app.note("/history needs the interactive chat"),
         CommandAction::Diff(path) if tui.is_some() && app.fullscreen && path.trim().is_empty() => {
             app.open_diff_overlay()
         }

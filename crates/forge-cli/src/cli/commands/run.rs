@@ -1986,6 +1986,7 @@ pub(crate) async fn run_chat_tui(
                 || app.notes_overlay.open
                 || app.diff_overlay.open
                 || app.jobs_overlay.open
+                || app.history_overlay.open
                 || app.polish.qr.is_some()
                 || app.run_menu.open
                 || app.import_menu.open

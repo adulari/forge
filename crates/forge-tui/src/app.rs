@@ -440,6 +440,7 @@ pub struct App {
     pub diff_overlay: crate::diff_overlay::DiffOverlay,
     /// The background-shells list (`/jobs`), while open.
     pub jobs_overlay: crate::jobs_overlay::JobsOverlay,
+    pub history_overlay: crate::history_overlay::HistoryOverlay,
     /// `/ide` or its key asked for IDE mode; the host opens it on its next loop turn.
     pub ide_requested: bool,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
