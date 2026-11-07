@@ -767,6 +767,34 @@ pub(super) async fn request_provider_response(
                     },
                 }
             }
+            // A pass with no failover (a guard or hook re-drive, architect mode's editor pass,
+            // `mesh.failover = false`) used to fail the whole turn on the first transient error,
+            // after the answer had already been given. There is no other model to hop to, so the
+            // same model is retried: 2 retries, 500 ms then 1 s (or the server's own pause).
+            Err(e)
+                if !failover_enabled
+                    && *transient_retries < MAX_TRANSIENT_RETRIES
+                    && matches!(
+                        e,
+                        forge_provider::ProviderError::Unavailable(_)
+                            | forge_provider::ProviderError::Overloaded { .. }
+                    )
+                    && !e.is_context_overflow() =>
+            {
+                *transient_retries += 1;
+                let backoff = e
+                    .retry_after()
+                    .map(|d| d.min(std::time::Duration::from_secs(30)))
+                    .unwrap_or_else(|| {
+                        std::time::Duration::from_millis(500u64 << (*transient_retries - 1))
+                    });
+                session.presenter.emit(PresenterEvent::ModelSearch {
+                    model: active_model.clone(),
+                    retrying: true,
+                });
+                tokio::time::sleep(backoff).await;
+                continue;
+            }
             Err(e) => {
                 // Paths that never enter the failover arm above — `mesh.failover = false`, or a
                 // re-run with no routing decision — still have to leave a health trace for a

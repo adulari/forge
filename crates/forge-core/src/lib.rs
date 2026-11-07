@@ -5235,6 +5235,9 @@ mod tests {
     #[path = "harness_profile.rs"]
     mod harness_profile_tests;
 
+    #[path = "stop_integrity.rs"]
+    mod stop_integrity_tests;
+
     #[path = "droid_loop.rs"]
     mod droid_loop_tests;
     #[path = "hashline_edit.rs"]

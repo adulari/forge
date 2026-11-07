@@ -274,6 +274,9 @@ impl Session {
                 step,
             )
             .await?;
+            // The retry allowance is per request: a long pass that rode out two blips early must
+            // still get its retries when a third one lands hundreds of steps later.
+            transient_retries = 0;
             // A bridge's `worktree` call moved the session inside `mcp-serve`; a direct one moved
             // it in-process. Either way the next request (and bridge spawn) runs at the new root.
             if let Some(before) = bridge_cwd {
