@@ -157,6 +157,10 @@ pub fn ladder(provider: &str, model: &str) -> &'static [EffortLevel] {
         // a nonsense value produced byte-identical output lengths (22,517 tokens each, measured
         // 2026-09-23). Offering a rung there would be a control that does nothing.
         "bedrock" if model.to_lowercase().contains("moonshot") => &[],
+        // DeepSeek V4 and Kimi define low/high/max; routes that publish no ladder answer `xhigh`
+        // and `medium` with "reasoning_effort must be one of off (or none), low, high, or max",
+        // so the generic ladder clamped a max pin to a rejected `xhigh`.
+        _ if uses_low_high_max(provider, model) => KIMI_LADDER,
         // Everything else goes over the generic (genai/OpenAI-compatible) path, where an effort
         // field is only meaningful for a reasoning model.
         _ => {
@@ -167,6 +171,11 @@ pub fn ladder(provider: &str, model: &str) -> &'static [EffortLevel] {
             }
         }
     }
+}
+
+fn uses_low_high_max(provider: &str, model: &str) -> bool {
+    let m = model.to_lowercase();
+    provider == "deepseek" || m.contains("deepseek-v4") || m.contains("kimi")
 }
 
 /// Resolve a pin against what a provider surface can actually be asked for.
@@ -394,6 +403,24 @@ mod tests {
         register_discovered_ladders([(other.to_string(), Vec::new())]);
         let (p, m) = split_id(other);
         assert_eq!(ladder(p, m), &FULL_LADDER[..4]);
+    }
+
+    #[test]
+    fn a_max_pin_reaches_deepseek_and_kimi_as_max_without_a_published_ladder() {
+        for id in [
+            "inferhub-test2::alicn/deepseek-v4.1-flash",
+            "deepseek::deepseek-v4-pro",
+            "inferhub-test2::ali/kimi-k3",
+        ] {
+            let d = resolve_id(id, Some(EffortLevel::WhiteHot));
+            assert_eq!(d.sent, Some(EffortLevel::WhiteHot), "{id}");
+            assert_eq!(wire_name(d.sent.unwrap()), "max");
+            assert_eq!(
+                resolve_id(id, Some(EffortLevel::XHigh)).sent,
+                Some(EffortLevel::High),
+                "{id}: xhigh is not a rung there"
+            );
+        }
     }
 
     #[test]
