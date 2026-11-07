@@ -148,6 +148,12 @@ pub enum RouteId {
     ListIssueDrains,
     /// `POST /api/issues/drain/cancel`: stop a drain starting more issues.
     CancelIssueDrain,
+    /// `GET /api/pr/queue`: the merge queue of every repository the host watches.
+    PrQueue,
+    /// `POST /api/pr/queue/action`: hold, release, move to the front or retry one queued PR. The
+    /// body names a session (or PR number) and one of four verbs; it carries no text the agent
+    /// would act on, and the daemon scopes it like every other `/api/pr/` write.
+    PrQueueAction,
     WebSocket,
     TerminalWebSocket,
 }
