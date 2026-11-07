@@ -822,3 +822,125 @@ async fn consults_a_bridged_model_made_are_folded_in_with_a_line_that_says_what_
     );
     assert_eq!(r.session.expert.turn_consults, 2);
 }
+
+/// A bridge store with one session and a scripted expert, standing in for the fresh
+/// `forge mcp-serve` process each codex exec (or respawned claude process) starts.
+type ExpertCalls = Arc<Mutex<Vec<(String, String)>>>;
+
+fn bridge_fixture(
+    bump_quota_to: Option<f64>,
+) -> (Arc<Store>, String, Arc<dyn Provider>, ExpertCalls) {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let id = store.create_session(".", "Bypass").unwrap();
+    store
+        .add_message(&id, 0, Role::User, "fix the parser in src/parse.rs", None)
+        .unwrap();
+    let expert_calls: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let provider: Arc<dyn Provider> = Arc::new(Scripted {
+        plan: Box::new(|_| None),
+        expert_replies: vec![ADVICE],
+        main_calls: Arc::default(),
+        expert_calls: expert_calls.clone(),
+        store: store.clone(),
+        bump_quota_to,
+    });
+    (store, id, provider, expert_calls)
+}
+
+fn codex_bridge_config() -> Config {
+    let mut config = Config::default();
+    config.harness.expert.model = CODEX_EXPERT.into();
+    config.harness.expert.budget = "codex:5%w".into();
+    config.harness.expert.max_consults_per_turn = 10;
+    config
+}
+
+#[tokio::test]
+async fn a_fresh_bridge_process_meters_the_window_from_the_sessions_first_check() {
+    // The window reads 10% at the first bridged consult and the call lifts it to 16%. The next
+    // turn's codex exec starts a new mcp-serve; it must not take 16% as a fresh baseline.
+    let (store, id, provider, calls) = bridge_fixture(Some(16.0));
+    let _ = store.record_codex_quota(&forge_types::QuotaHint {
+        provider: "codex-cli".into(),
+        window: "weekly".into(),
+        status: forge_types::QuotaStatus::Ok,
+        resets_at: Some(chrono::Utc::now().timestamp() + 100_000),
+        fraction_used: Some(0.10),
+    });
+    let config = codex_bridge_config();
+    let first = crate::BridgeExpert::default()
+        .consult(
+            &provider,
+            &store,
+            &config,
+            &id,
+            Some(0),
+            "where is the bug?",
+        )
+        .await;
+    assert!(first.contains("answers."), "{first}");
+    let second = crate::BridgeExpert::default()
+        .consult(&provider, &store, &config, &id, Some(5), "and now?")
+        .await;
+    assert!(
+        second.contains("the expert budget (codex:5%w) is spent"),
+        "{second}"
+    );
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        1,
+        "the second process is refused"
+    );
+    assert_eq!(
+        store
+            .count_side_calls_since(&id, "expert/tool:", 0)
+            .unwrap(),
+        1,
+        "the meter's own rows are not counted as consults"
+    );
+}
+
+#[tokio::test]
+async fn bridged_consults_without_a_reading_stop_after_the_session_cap_across_processes() {
+    let (store, id, provider, calls) = bridge_fixture(None);
+    let config = codex_bridge_config();
+    let mut answers = Vec::new();
+    for turn in 0..5 {
+        answers.push(
+            crate::BridgeExpert::default()
+                .consult(&provider, &store, &config, &id, Some(turn * 10), "stuck")
+                .await,
+        );
+    }
+    assert_eq!(
+        calls.lock().unwrap().len(),
+        3,
+        "three unverified consults per session"
+    );
+    assert!(
+        answers[3].contains("the expert budget (codex:5%w) cannot be checked")
+            && answers[3].contains("forge doctor"),
+        "{}",
+        answers[3]
+    );
+}
+
+#[tokio::test]
+async fn the_per_turn_cap_holds_when_the_bridge_process_is_respawned_mid_turn() {
+    let (store, id, provider, calls) = bridge_fixture(None);
+    let mut config = Config::default();
+    config.harness.expert.model = EXPERT.into();
+    config.harness.expert.max_consults_per_turn = 1;
+    let first = crate::BridgeExpert::default()
+        .consult(&provider, &store, &config, &id, Some(0), "q1")
+        .await;
+    assert!(first.contains("answers."), "{first}");
+    let respawned = crate::BridgeExpert::default()
+        .consult(&provider, &store, &config, &id, Some(0), "q2")
+        .await;
+    assert!(
+        respawned.contains("this turn already used its 1 expert consults"),
+        "{respawned}"
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}

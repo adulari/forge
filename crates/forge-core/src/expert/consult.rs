@@ -125,37 +125,19 @@ impl Session {
         let spec = r.spec.as_ref()?;
         let windows = self.store.subscription_windows().unwrap_or_default();
         let now = chrono::Utc::now().timestamp();
-        match meter(
+        let check = meter(
             &mut self.expert.envelope,
             spec,
             &windows,
             self.expert.usd_spent,
             now,
-        ) {
-            EnvelopeCheck::Spent => {
-                let used = self.expert.envelope.as_ref().map_or(0.0, |e| e.used);
-                Some(format!(
-                    "the expert budget ({}) is spent at {used:.1}",
-                    self.config.harness.expert.budget.trim()
-                ))
-            }
-            EnvelopeCheck::Within => None,
-            // Without a fresh reading the slice cannot be verified. A consult usually refreshes
-            // the reading itself, so a few are allowed; a meter that never comes back must not
-            // let an overnight run draw on the plan unchecked.
-            EnvelopeCheck::Unverified
-                if self.expert.unverified_consults < UNVERIFIED_CONSULTS_MAX =>
-            {
-                self.expert.unverified_consults += 1;
-                None
-            }
-            EnvelopeCheck::Unverified => Some(format!(
-                "the expert budget ({}) cannot be checked: no fresh plan-usage reading came back \
-                 after {UNVERIFIED_CONSULTS_MAX} consults. Run `forge doctor` to check the \
-                 login, or clear [harness.expert] model to stop using it",
-                self.config.harness.expert.budget.trim()
-            )),
-        }
+        );
+        envelope_refusal(
+            check,
+            self.expert.envelope.as_ref(),
+            &mut self.expert.unverified_consults,
+            &self.config.harness.expert.budget,
+        )
     }
 
     /// Make one consult call. `Err` is a refusal in a sentence (cap, budget, spend, deadline);

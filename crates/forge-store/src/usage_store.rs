@@ -183,6 +183,37 @@ impl Store {
         Ok(n.max(0) as u32)
     }
 
+    /// The label of the session's newest side-call row whose label starts with `label_prefix`.
+    pub fn latest_side_call_label(
+        &self,
+        session_id: &str,
+        label_prefix: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let like = format!("{}%", label_prefix.replace('%', ""));
+        Ok(conn
+            .query_row(
+                "SELECT content FROM message WHERE session_id = ?1 AND role = 'system' \
+                 AND active = 0 AND content LIKE ?2 ORDER BY seq DESC LIMIT 1",
+                (session_id, like),
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// What the session's side calls whose label starts with `label_prefix` cost in total.
+    pub fn side_call_cost(&self, session_id: &str, label_prefix: &str) -> Result<f64> {
+        let conn = self.lock()?;
+        let like = format!("{}%", label_prefix.replace('%', ""));
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(u.cost_usd), 0.0) FROM usage u JOIN message m \
+             ON m.id = u.message_id WHERE m.session_id = ?1 AND m.role = 'system' \
+             AND m.active = 0 AND m.content LIKE ?2",
+            (session_id, like),
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn record_side_call_usage_for(
         &self,
         session_id: &str,

@@ -14,7 +14,10 @@ use forge_types::goal_envelope::{
     EnvelopeCheck, EnvelopeKind, EnvelopeSpec, EnvelopeState, QuotaReading,
 };
 
+mod bridge_meter;
 mod consult;
+
+use bridge_meter::{bridge_budget_refusal, envelope_refusal};
 
 /// The virtual tool the model calls to ask the expert.
 pub const CONSULT_EXPERT_TOOL: &str = "consult_expert";
@@ -436,13 +439,12 @@ pub fn expert_config_problem(config: &Config) -> Option<String> {
 }
 
 /// The expert state of one `forge mcp-serve` process: the bridged model's consults, capped per
-/// turn and metered like the direct path's.
+/// turn and metered like the direct path's. The budget meter is the session's, in the store
+/// ([`bridge_meter`]), because this process does not outlive a `codex exec`.
 #[derive(Default)]
 pub struct BridgeExpert {
     turn_seq: Option<i64>,
     consults: u32,
-    usd_spent: f64,
-    envelope: Option<EnvelopeState>,
 }
 
 impl BridgeExpert {
@@ -476,22 +478,26 @@ impl BridgeExpert {
         let refuse = |why: String| {
             format!("The expert was not consulted: {why}. Go on with your own judgement.")
         };
-        if self.consults >= cfg.max_consults_per_turn {
+        // A respawned mcp-serve starts at zero; the turn's stored consults are what it used.
+        let stored = turn_seq
+            .and_then(|seq| {
+                store
+                    .count_side_calls_since(session_id, "expert/tool:", seq)
+                    .ok()
+            })
+            .unwrap_or(0);
+        if self.consults.max(stored) >= cfg.max_consults_per_turn {
             return refuse(format!(
                 "this turn already used its {} expert consults",
                 cfg.max_consults_per_turn
             ));
         }
         if let Some(spec) = &spec {
-            let windows = store.subscription_windows().unwrap_or_default();
             let now = chrono::Utc::now().timestamp();
-            if meter(&mut self.envelope, spec, &windows, self.usd_spent, now)
-                == EnvelopeCheck::Spent
+            if let Some(why) =
+                bridge_budget_refusal(store, session_id, &model, spec, &cfg.budget, now)
             {
-                return refuse(format!(
-                    "the expert budget ({}) is spent",
-                    cfg.budget.trim()
-                ));
+                return refuse(why);
             }
         }
         self.consults += 1;
@@ -524,7 +530,6 @@ impl BridgeExpert {
         )
         .await;
         persist_quota_hints(store, &model, &hints);
-        self.usd_spent += call.usage.cost_usd;
         let (label, parsed) = judge(&call, Trigger::Tool);
         if let Err(error) =
             store.record_side_call_usage_for(session_id, &label, Some(&model), &call.usage)
