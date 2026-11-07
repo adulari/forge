@@ -297,6 +297,13 @@ impl Session {
         }
         // Task tracking is core-owned (it mutates session state + persists + emits to the TUI).
         if call.name == UPDATE_TASKS_TOOL {
+            if !self.task_tool_on() {
+                return Ok(
+                    "update_tasks is not available in this session: there is no task list. Keep \
+                     the plan in your own notes and go on with the work."
+                        .to_string(),
+                );
+            }
             return self.update_tasks(msg_id, call);
         }
         // Plan presentation is core-owned (seeds tasks, persists the plan, drives the approval flow).

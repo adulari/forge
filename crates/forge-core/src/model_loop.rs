@@ -623,7 +623,7 @@ impl Session {
                     // (bounded) so the work completes instead of ending the turn mid-task.
                     let open_titles = nudge_policy::open_titles(&self.tasks);
                     let unfinished = open_titles.len();
-                    if unfinished > 0 && self.advisory_nudges_on() {
+                    if unfinished > 0 && self.task_nudges_on() {
                         // Work is still open — any earlier "all done" verification is stale.
                         verify_attempts = 0;
                         let progress_now = (
@@ -653,16 +653,7 @@ impl Session {
                                 ));
                                 let nudge =
                                     nudge_policy::continue_nudge(&open_titles, continue_nudges);
-                                let nseq = self.next_seq();
-                                let _ = self.store.add_message(
-                                    &self.id,
-                                    nseq,
-                                    Role::System,
-                                    &nudge,
-                                    None,
-                                );
-                                self.transcript.push(Message::system(&nudge));
-                                self.ledger.note_gate();
+                                let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
                                 continue;
                             }
                             ContinueNudge::BlockedStop => {
@@ -735,6 +726,12 @@ impl Session {
                             continue;
                         }
                     }
+                }
+                // The answer is being accepted: whatever is still open at this point is what the
+                // turn leaves behind, so it is reported as unfinished under every profile and
+                // whether or not the nudges were on.
+                if !self.tasks.is_empty() {
+                    self.turn_unfinished_tasks = nudge_policy::open_titles(&self.tasks);
                 }
                 let unresolved = verification_ledger.lock().unwrap().unresolved_summary();
                 let pass_mutations = mutations_ran.load(std::sync::atomic::Ordering::Relaxed);

@@ -320,9 +320,15 @@ impl crate::Session {
         &mut self,
         pack: &mut crate::context_pack::ContextPack,
     ) -> Result<(), crate::CoreError> {
-        let mut stale = std::mem::take(&mut self.stale_tasks);
-        let verdict = stale.turn(&self.tasks);
-        self.stale_tasks = stale;
+        let nudges = self.task_nudges_on();
+        let verdict = if nudges {
+            let mut stale = std::mem::take(&mut self.stale_tasks);
+            let verdict = stale.turn(&self.tasks);
+            self.stale_tasks = stale;
+            verdict
+        } else {
+            None
+        };
         if let Some(verdict) = verdict {
             let mut notes = vec![verdict.render()];
             let mut changed = false;
@@ -363,7 +369,7 @@ impl crate::Session {
                 &snapshot,
             );
         }
-        if let Some(note) = carried_list_note(&self.tasks) {
+        if let Some(note) = carried_list_note(&self.tasks).filter(|_| nudges) {
             let note = if self.config.harness.append_only_prefix {
                 note.replace(
                     "as shown in the session context",

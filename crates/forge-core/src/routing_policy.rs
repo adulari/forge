@@ -260,6 +260,9 @@ impl Session {
         let env = format!("<env>\nworking_directory: {cwd}\nplatform: {os}\n</env>");
         let base = crate::commit_policy::apply(FORGE_SYSTEM, self.commit_policy());
         let mut base = base.into_owned();
+        if !self.task_tool_on() {
+            base = crate::strip_task_bullet(&base);
+        }
         if self.harness_flags.completion_contract {
             base.push_str(crate::stop_guards::COMPLETION_CONTRACT);
         }

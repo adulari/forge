@@ -45,6 +45,11 @@ pub(crate) const SEARCH_CALL: &str = "$search";
 /// Log lines a script may keep; later lines are counted, not stored.
 const MAX_LOG_LINES: usize = 200;
 
+/// The sentence of the `run_code` description that advertises `update_tasks`; dropped when
+/// `[harness] task_tool` is off.
+pub(crate) const TASKS_IN_SCRIPT_SENTENCE: &str = " update_tasks works here, so a step can \
+            tick a task off and run its next calls together.";
+
 /// The spec advertised to direct-path models. Static text, so the sorted catalog stays
 /// byte-stable for prompt caching: no per-session tool list goes in here.
 pub fn run_code_spec() -> ToolSpec {

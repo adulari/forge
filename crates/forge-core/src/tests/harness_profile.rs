@@ -306,11 +306,14 @@ async fn mid_intent(profile: HarnessProfile) -> (usize, String) {
 }
 
 #[tokio::test]
-async fn minimal_accepts_a_mid_intent_ending_without_a_nudge() {
+async fn minimal_redrives_a_mid_intent_ending_like_guarded_then_accepts() {
     assert_eq!(mid_intent(HarnessProfile::Guarded).await.0, 2);
     let (nudges, text) = mid_intent(HarnessProfile::Minimal).await;
-    assert_eq!(nudges, 0);
-    assert_eq!(text, "Now let me look at the workspace layout:");
+    assert_eq!(nudges, 2, "a stop-integrity gate, not an advisory nudge");
+    assert_eq!(
+        text, "Now let me look at the workspace layout:",
+        "bounded: the third identical ending is accepted"
+    );
 }
 
 fn open_task(title: &str) -> forge_types::TodoItem {
@@ -321,25 +324,165 @@ fn open_task(title: &str) -> forge_types::TodoItem {
     }
 }
 
-async fn continue_nudges(profile: HarnessProfile) -> (usize, String) {
+async fn continue_nudges_with(cfg: Config) -> (usize, forge_types::LoopOutcome) {
     let mut run = Run::new(
         Arc::new(Script::new(vec![say(
             "That covers the first part of the plan.",
         )])),
-        config(profile),
+        cfg,
         test_workspace(),
     );
     run.session.tasks = vec![open_task("write the parser"), open_task("wire it in")];
     let outcome = run.session.run_turn("work through the plan").await.unwrap();
-    (run.warnings("continuing it (nudge"), outcome.text)
+    (run.warnings("continuing it (nudge"), outcome)
 }
 
 #[tokio::test]
-async fn minimal_sends_no_continue_nudge_for_open_tasks() {
-    assert!(continue_nudges(HarnessProfile::Guarded).await.0 > 0);
-    let (nudges, text) = continue_nudges(HarnessProfile::Minimal).await;
-    assert_eq!(nudges, 0);
-    assert_eq!(text, "That covers the first part of the plan.");
+async fn minimal_drives_open_tasks_onward_and_reports_them_unfinished() {
+    for profile in [HarnessProfile::Guarded, HarnessProfile::Minimal] {
+        let (nudges, outcome) = continue_nudges_with(config(profile)).await;
+        assert_eq!(
+            nudges, 3,
+            "{profile:?}: three idle answers is the blocked limit"
+        );
+        assert_eq!(outcome.text, "That covers the first part of the plan.");
+        assert_eq!(outcome.stop_reason, StopReason::TasksUnfinished);
+    }
+}
+
+#[tokio::test]
+async fn task_nudges_off_sends_none_but_still_reports_the_open_tasks() {
+    for profile in [HarnessProfile::Guarded, HarnessProfile::Minimal] {
+        let mut cfg = config(profile);
+        cfg.harness.task_nudges = Some(false);
+        let (nudges, outcome) = continue_nudges_with(cfg).await;
+        assert_eq!(nudges, 0, "{profile:?}");
+        assert_eq!(
+            outcome.stop_reason,
+            StopReason::TasksUnfinished,
+            "{profile:?}: open tasks are reported in every arm, not as a success"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_task_gate_owns_a_mid_intent_stop_only_while_task_nudges_are_on() {
+    let run_with = |nudges: Option<bool>| async move {
+        let mut cfg = config(HarnessProfile::Minimal);
+        cfg.harness.task_nudges = nudges;
+        let mut run = Run::new(
+            Arc::new(Script::new(vec![say(
+                "Now let me look at the workspace layout:",
+            )])),
+            cfg,
+            test_workspace(),
+        );
+        run.session.tasks = vec![open_task("map the layout")];
+        run.session.run_turn("look around").await.unwrap();
+        (
+            run.warnings("announced another action"),
+            run.warnings("continuing it (nudge"),
+        )
+    };
+    let (intent, tasks) = run_with(None).await;
+    assert_eq!(
+        (intent, tasks > 0),
+        (0, true),
+        "the task gate takes the stop"
+    );
+    let (intent, tasks) = run_with(Some(false)).await;
+    assert_eq!(
+        (intent, tasks),
+        (2, 0),
+        "with the task gate off the mid-intent nudge must not stand aside"
+    );
+}
+
+#[tokio::test]
+async fn continue_nudges_are_stored_countable_by_kind() {
+    let mut run = Run::new(
+        Arc::new(Script::new(vec![say("Part one is done.")])),
+        config(HarnessProfile::Minimal),
+        test_workspace(),
+    );
+    run.session.tasks = vec![open_task("write the parser")];
+    run.session.run_turn("work through the plan").await.unwrap();
+    let kinds = run
+        .session
+        .transcript
+        .iter()
+        .filter(|m| m.kind == forge_types::MessageKind::Continue)
+        .count();
+    assert_eq!(kinds, 3);
+}
+
+#[tokio::test]
+async fn task_tool_off_hides_refuses_and_stops_mentioning_update_tasks() {
+    let mut cfg = config(HarnessProfile::Minimal);
+    cfg.harness.task_tool = false;
+    let mut run = Run::new(
+        Arc::new(Script::new(vec![
+            (
+                String::new(),
+                vec![call(
+                    "update_tasks",
+                    serde_json::json!({"tasks": [{"title": "x", "status": "pending"}]}),
+                )],
+            ),
+            say("Done."),
+        ])),
+        cfg,
+        test_workspace(),
+    );
+    assert!(
+        !run.session
+            .full_tool_specs()
+            .iter()
+            .any(|s| s.name == "update_tasks"),
+        "not advertised"
+    );
+    let run_code = run
+        .session
+        .full_tool_specs()
+        .into_iter()
+        .find(|s| s.name == crate::codemode::RUN_CODE_TOOL);
+    if let Some(spec) = run_code {
+        assert!(
+            !spec.description.contains("update_tasks"),
+            "codemode catalog"
+        );
+    }
+    let prompt = run.session.system_preamble();
+    assert!(
+        !prompt.iter().any(|m| m.content.contains("update_tasks")),
+        "system prompt"
+    );
+    run.session.run_turn("plan it").await.unwrap();
+    assert!(run.session.tasks.is_empty(), "the call changed nothing");
+    assert!(run
+        .session
+        .transcript
+        .iter()
+        .any(|m| m.role == Role::Tool && m.content.contains("update_tasks is not available")));
+}
+
+#[tokio::test]
+async fn task_tool_on_by_default_keeps_the_tool_and_the_prompt_bullet() {
+    let run = Run::new(
+        Arc::new(Script::new(vec![])),
+        config(HarnessProfile::Minimal),
+        test_workspace(),
+    );
+    assert!(run
+        .session
+        .full_tool_specs()
+        .iter()
+        .any(|s| s.name == "update_tasks"));
+    assert!(run
+        .session
+        .system_preamble()
+        .iter()
+        .any(|m| m.content.contains("update_tasks")));
 }
 
 #[tokio::test]
@@ -385,7 +528,9 @@ async fn minimal_still_runs_the_phantom_edit_gate_even_with_open_tasks() {
         "I've created the file and updated the workflow.",
     )]));
     let calls = Arc::clone(&provider.calls);
-    let mut run = Run::new(provider, config(HarnessProfile::Minimal), test_workspace());
+    let mut cfg = config(HarnessProfile::Minimal);
+    cfg.harness.task_nudges = Some(false);
+    let mut run = Run::new(provider, cfg, test_workspace());
     run.session.tasks = vec![open_task("update CI")];
     run.session
         .run_turn("create a file and update CI")
@@ -505,10 +650,14 @@ async fn the_profile_is_resolved_again_after_a_failover() {
     );
     let outcome = run.session.run_turn("look around").await.unwrap();
     assert_eq!(outcome.text, "Now let me look at the workspace layout:");
+    assert!(
+        !run.session.advisory_nudges_on(),
+        "the fallback model is minimal"
+    );
     assert_eq!(
         run.warnings("announced another action"),
-        0,
-        "the fallback model is minimal, so its mid-intent ending stands"
+        2,
+        "its mid-intent ending is still re-driven: stop integrity is not advisory"
     );
     assert_eq!(run.warnings("model returned an empty response"), 1);
 }
@@ -624,7 +773,7 @@ async fn stop_retries_off_keeps_the_old_caps() {
     let (nudges, calls, _) = announced_run(config(HarnessProfile::Guarded)).await;
     assert_eq!((nudges, calls), (2, 3));
     let (nudges, calls, _) = announced_run(config(HarnessProfile::Minimal)).await;
-    assert_eq!((nudges, calls), (0, 1));
+    assert_eq!((nudges, calls), (2, 3), "stop integrity is not advisory");
 }
 
 async fn empty_calls(stop_retries: bool) -> usize {

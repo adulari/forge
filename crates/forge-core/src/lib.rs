@@ -2446,13 +2446,20 @@ impl Session {
                 .as_ref()
                 .is_none_or(|scope| scope.permits_tool(codemode::RUN_CODE_TOOL))
         {
-            specs.push(codemode::run_code_spec());
+            let mut spec = codemode::run_code_spec();
+            if !self.task_tool_on() {
+                spec.description = spec
+                    .description
+                    .replace(codemode::TASKS_IN_SCRIPT_SENTENCE, "");
+            }
+            specs.push(spec);
         }
         // The task-tracking tool — always advertised so the model can keep a live todo list.
-        if self
-            .task_scope
-            .as_ref()
-            .is_none_or(|scope| scope.permits_tool(UPDATE_TASKS_TOOL))
+        if self.task_tool_on()
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(UPDATE_TASKS_TOOL))
         {
             specs.push(update_tasks_spec());
         }
@@ -4486,6 +4493,18 @@ pub fn use_skill_spec(catalog: &forge_skills::Catalog, allow_project: bool) -> T
 
 /// The task-tracking virtual tool name.
 pub const UPDATE_TASKS_TOOL: &str = "update_tasks";
+
+/// `FORGE_SYSTEM` without its task-list bullet, for `[harness] task_tool = false`.
+pub(crate) fn strip_task_bullet(system: &str) -> String {
+    const START: &str = "- For any non-trivial task, make a short plan";
+    const NEXT: &str = "\n- Make the smallest change";
+    match (system.find(START), system.find(NEXT)) {
+        (Some(start), Some(next)) if start < next => {
+            format!("{}{}", &system[..start], &system[next + 1..])
+        }
+        _ => system.to_string(),
+    }
+}
 
 /// Parse the `update_tasks` arguments into a task list (tolerant of missing/loose fields).
 /// Shared by the in-process intercept and the CLI-bridge `mcp-serve` handler.
