@@ -37,6 +37,12 @@ impl World {
     }
 
     fn new(prs: &[(&str, &str)]) -> Self {
+        Self::build(prs, false)
+    }
+
+    /// With `actions`, the seed commit carries a `.forge/config.toml` whose `Verify` action is
+    /// `verify.sh`: it logs the tree it ran against and fails on any `broken-*.txt`.
+    fn build(prs: &[(&str, &str)], actions: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         git(root, &["init", "-q", "--bare", "-b", "main", "remote.git"]);
@@ -49,6 +55,22 @@ impl World {
         std::fs::create_dir_all(seed.join("pkg")).unwrap();
         std::fs::write(seed.join("pkg/CHANGELOG.md"), CHANGELOG).unwrap();
         std::fs::write(seed.join("shared.txt"), "shared line\n").unwrap();
+        if actions {
+            std::fs::create_dir_all(seed.join(".forge")).unwrap();
+            std::fs::write(
+                seed.join(".forge/config.toml"),
+                format!(
+                    "[[actions]]\nname = \"Verify\"\ncommand = \"sh verify.sh {}\"\n",
+                    root.join("verify.log").display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                seed.join("verify.sh"),
+                "#!/bin/sh\nif ls broken-*.txt >/dev/null 2>&1; then\n  echo 'compiling crate...'\n  echo \"error[E0308]: mismatched types in $(ls broken-*.txt)\" >&2\n  echo 'test result: FAILED. 1 failed' >&2\n  exit 1\nfi\necho \"$(git rev-parse --abbrev-ref HEAD): $(ls code-*.txt | tr '\\n' ' ')\" >> \"$1\"\n",
+            )
+            .unwrap();
+        }
         git(&seed, &["add", "."]);
         git(&seed, &["commit", "-q", "-m", "seed"]);
         git(&seed, &["push", "-q", "origin", "main"]);
@@ -203,6 +225,38 @@ fn main_file(w: &World, path: &str) -> String {
     git(&w.bare(), &["show", &format!("main:{path}")])
 }
 
+/// PR4's session resolves its conflict by hand and pushes: the PR re-enters and lands last.
+fn resolve_four_by_hand(w: &World) {
+    let wt = &w.clones[1];
+    let merge = Command::new("git")
+        .arg("-C")
+        .arg(wt)
+        .args(["merge", "origin/main"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "the hand-off was a real conflict");
+    // (the queue aborted its own attempt; this is the session's attempt)
+    git(wt, &["fetch", "-q", "origin"]);
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(wt)
+        .args(["merge", "--abort"])
+        .output();
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(wt)
+        .args(["merge", "origin/main"])
+        .output();
+    std::fs::write(wt.join("shared.txt"), "from one and four\n").unwrap();
+    for path in ["CHANGELOG.md", "pkg/CHANGELOG.md"] {
+        let text = main_file(w, path).replace("- pr 1 entry\n", "- pr 1 entry\n- pr 4 entry\n");
+        std::fs::write(wt.join(path), text).unwrap();
+    }
+    git(wt, &["add", "."]);
+    git(wt, &["commit", "-q", "--no-edit"]);
+    git(wt, &["push", "-q", "origin", "feat-4"]);
+}
+
 #[tokio::test]
 async fn the_nights_prs_land_one_at_a_time_and_a_real_conflict_does_not_block_the_queue() {
     // Queue order: PR1, PR4 (will conflict with PR1 in shared.txt), PR2, PR3.
@@ -320,35 +374,7 @@ async fn the_nights_prs_land_one_at_a_time_and_a_real_conflict_does_not_block_th
         "Merge queue: 0 waiting, 1 handed back"
     );
 
-    // The session resolves its conflict by hand and pushes: the PR re-enters and lands last.
-    let wt = &w.clones[1];
-    let merge = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["merge", "origin/main"])
-        .output()
-        .unwrap();
-    assert!(!merge.status.success(), "the hand-off was a real conflict");
-    // (the queue aborted its own attempt; this is the session's attempt)
-    git(wt, &["fetch", "-q", "origin"]);
-    let _ = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["merge", "--abort"])
-        .output();
-    let _ = Command::new("git")
-        .arg("-C")
-        .arg(wt)
-        .args(["merge", "origin/main"])
-        .output();
-    std::fs::write(wt.join("shared.txt"), "from one and four\n").unwrap();
-    for path in ["CHANGELOG.md", "pkg/CHANGELOG.md"] {
-        let text = main_file(&w, path).replace("- pr 1 entry\n", "- pr 1 entry\n- pr 4 entry\n");
-        std::fs::write(wt.join(path), text).unwrap();
-    }
-    git(wt, &["add", "."]);
-    git(wt, &["commit", "-q", "--no-edit"]);
-    git(wt, &["push", "-q", "origin", "feat-4"]);
+    resolve_four_by_hand(&w);
     w.run(&mut ws, 6, 5000).await;
     assert_eq!(ws[1].state, Phase::Merged, "{:?}", ws[1].queue);
     assert_eq!(main_file(&w, "shared.txt"), "from one and four");
@@ -461,4 +487,480 @@ fn verify_comes_from_the_projects_verify_and_check_actions() {
     let found = verify_for(dir.path());
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].command, "make test");
+}
+
+fn act(ws: &mut [Watch], session: &str, action: Action) -> Result<String, ActionError> {
+    let mut map: std::collections::HashMap<String, Watch> = ws
+        .iter()
+        .map(|w| (w.session_id.clone(), w.clone()))
+        .collect();
+    let result = apply(&mut map, session, action);
+    for w in ws.iter_mut() {
+        *w = map[&w.session_id].clone();
+    }
+    result
+}
+
+fn merged_order(w: &World) -> Vec<String> {
+    w.gh_log()
+        .lines()
+        .filter(|l| l.starts_with("pr merge"))
+        .map(|l| l.split_whitespace().nth(2).unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_held_pr_neither_lands_nor_blocks_the_queue_and_release_puts_it_back() {
+    let w = World::new(&[("1", ""), ("2", "")]);
+    // PR1 is the head but cannot move yet (uncommitted work), so the hold lands on a live queue.
+    std::fs::write(w.clones[0].join("code-1.txt"), "edited, uncommitted\n").unwrap();
+    let mut ws = watches(2);
+    w.run(&mut ws, 2, 100).await;
+    assert_eq!(ws[0].queue.as_ref().unwrap().state, QueueState::Head);
+
+    assert!(
+        act(&mut ws, "s0", Action::Release).is_err(),
+        "nothing to release yet"
+    );
+    act(&mut ws, "s0", Action::Hold).unwrap();
+    assert!(matches!(
+        act(&mut ws, "s0", Action::Hold),
+        Err(ActionError::Conflict(_))
+    ));
+    w.run(&mut ws, 6, 1000).await;
+    assert_eq!(
+        ws[1].state,
+        Phase::Merged,
+        "PR2 is not stuck behind a held PR"
+    );
+    assert_eq!(ws[0].state, Phase::Watching);
+    assert_eq!(ws[0].queue.as_ref().unwrap().state, QueueState::Held);
+    assert_eq!(merged_order(&w), vec!["2"]);
+    let snap = snapshot(&ws);
+    assert_eq!(snap[0].rows[0].state, "held");
+    assert!(snap[0].rows[0].held && snap[0].rows[0].position.is_none());
+    assert_eq!(
+        brief_line(&ws).unwrap().line,
+        "Merge queue: 0 waiting, 1 held"
+    );
+
+    std::fs::write(w.clones[0].join("code-1.txt"), "code 1\n").unwrap();
+    act(&mut ws, "s0", Action::Release).unwrap();
+    w.run(&mut ws, 8, 5000).await;
+    assert_eq!(ws[0].state, Phase::Merged);
+    assert_eq!(merged_order(&w), vec!["2", "1"]);
+}
+
+#[tokio::test]
+async fn front_makes_a_later_pr_the_next_to_land() {
+    let w = World::new(&[("1", ""), ("2", ""), ("3", "")]);
+    std::fs::write(w.clones[0].join("code-1.txt"), "edited, uncommitted\n").unwrap();
+    let mut ws = watches(3);
+    w.run(&mut ws, 2, 100).await;
+    let place = |ws: &[Watch], pr: &str| {
+        snapshot(ws)[0]
+            .rows
+            .iter()
+            .find(|r| r.session_id == pr)
+            .and_then(|r| r.position)
+    };
+    assert_eq!((place(&ws, "s0"), place(&ws, "s2")), (Some(1), Some(3)));
+    assert!(act(&mut ws, "s0", Action::Front)
+        .unwrap()
+        .contains("already at the front"));
+
+    act(&mut ws, "s2", Action::Front).unwrap();
+    assert_eq!((place(&ws, "s2"), place(&ws, "s0")), (Some(1), Some(2)));
+    w.run(&mut ws, 4, 1000).await;
+    assert_eq!(
+        merged_order(&w),
+        vec!["3"],
+        "PR3 jumped the line; PR1 still blocks PR2"
+    );
+
+    std::fs::write(w.clones[0].join("code-1.txt"), "code 1\n").unwrap();
+    w.run(&mut ws, 6, 5000).await;
+    assert_eq!(merged_order(&w), vec!["3", "1", "2"]);
+}
+
+#[tokio::test]
+async fn retry_re_enters_a_handed_back_pr_without_a_new_push() {
+    let w = World::new(&[("1", "from one"), ("4", "from four")]);
+    let mut ws = watches(2);
+    let prompts = w.run(&mut ws, 6, 100).await;
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(ws[1].queue.as_ref().unwrap().state, QueueState::Skipped);
+    assert!(
+        act(&mut ws, "s0", Action::Retry).is_err(),
+        "a merged PR has no queue to re-enter"
+    );
+
+    act(&mut ws, "s1", Action::Retry).unwrap();
+    assert_eq!(ws[1].queue.as_ref().unwrap().state, QueueState::Queued);
+    let again = w.run(&mut ws, 4, 1000).await;
+    assert_eq!(
+        again.len(),
+        1,
+        "the retry ran the update step again: {again:?}"
+    );
+    assert_eq!(ws[1].queue.as_ref().unwrap().state, QueueState::Skipped);
+    assert!(matches!(
+        act(&mut ws, "s1", Action::Hold).map(|_| ()),
+        Ok(())
+    ));
+    assert!(matches!(
+        act(&mut ws, "s1", Action::Retry),
+        Err(ActionError::Conflict(_))
+    ));
+}
+
+#[test]
+fn actions_find_a_pr_by_number_and_refuse_an_ambiguous_one() {
+    let mut a = watches(2);
+    for (i, w) in a.iter_mut().enumerate() {
+        w.pr_number = Some(7);
+        let mut info = QueueInfo::new(format!("repo-{i} @ main"));
+        info.state = QueueState::Queued;
+        w.queue = Some(info);
+    }
+    let map: std::collections::HashMap<String, Watch> = a
+        .iter()
+        .map(|w| (w.session_id.clone(), w.clone()))
+        .collect();
+    assert!(matches!(
+        resolve(&map, None, Some(7)),
+        Err(ActionError::Conflict(m)) if m.contains("s0, s1")
+    ));
+    assert!(matches!(
+        resolve(&map, None, Some(8)),
+        Err(ActionError::NotFound(_))
+    ));
+    assert_eq!(resolve(&map, Some("s1"), None).unwrap(), "s1");
+    assert!(matches!(
+        resolve(&map, Some("nope"), Some(7)),
+        Err(ActionError::NotFound(_))
+    ));
+    let mut one = map.clone();
+    one.remove("s1");
+    assert_eq!(resolve(&one, None, Some(7)).unwrap(), "s0");
+}
+
+#[test]
+fn what_the_owner_chose_while_a_poll_ran_survives_storing_its_result() {
+    let mut live = watches(1).remove(0);
+    let mut info = QueueInfo::new("r @ main".into());
+    info.held = true;
+    info.rank = Some(-3);
+    info.retry_seq = 2;
+    live.queue = Some(info);
+    let mut stale = live.clone();
+    let q = stale.queue.as_mut().unwrap();
+    q.held = false;
+    q.rank = None;
+    q.retry_seq = 0;
+    q.pushes = 5;
+    carry_owner_edits(&live, &mut stale);
+    let q = stale.queue.unwrap();
+    assert!(q.held && q.rank == Some(-3) && q.retry_seq == 2);
+    assert_eq!(q.pushes, 5, "the poll's own work is kept");
+}
+
+// ---- the daemon's sweep, end to end
+
+use crate::serve::tests::FORGE_DB_LOCK;
+use crate::serve::{start_session, CreateSessionReq, DaemonState, SessionRegistry};
+use crate::serve_pr_watch::{registry, sweep};
+
+fn mock_state(dir: &Path) -> std::sync::Arc<DaemonState> {
+    std::sync::Arc::new(DaemonState {
+        registry: std::sync::Arc::new(SessionRegistry::new()),
+        terminals: std::sync::Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+        store: std::sync::Arc::new(crate::open_store().unwrap()),
+        base: "/tok".into(),
+        mock: true,
+        default_cwd: dir.display().to_string(),
+        project_roots: Vec::new(),
+        push: None,
+        apns: None,
+        voice: crate::voice::VoiceState::new(),
+        anywhere_enable: tokio::sync::watch::channel(false).0,
+    })
+}
+
+/// One daemon session per clone, each with a merge-mode watch armed in clone order.
+async fn arm_sessions(state: &DaemonState, w: &World) -> Vec<String> {
+    let mut ids = Vec::new();
+    for (i, clone) in w.clones.iter().enumerate() {
+        let handle = start_session(
+            state,
+            CreateSessionReq {
+                cwd: Some(clone.display().to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .ok()
+        .unwrap();
+        registry().arm(&handle.session_id, Mode::Merge, "squash", 100 + i as i64);
+        ids.push(handle.session_id.clone());
+    }
+    ids
+}
+
+fn watch_of(id: &str) -> Watch {
+    registry().get(id).expect("armed")
+}
+
+async fn sweeps(state: &std::sync::Arc<DaemonState>, w: &World, rounds: i64, start: i64) {
+    let gh = w.gh();
+    for round in 0..rounds {
+        sweep(state, &gh, start + round * 60).await;
+    }
+}
+
+fn disarm(ids: &[String]) {
+    for id in ids {
+        registry().arm(id, Mode::Off, "squash", 0);
+    }
+    std::env::remove_var("FORGE_DB");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_daemon_sweep_lands_the_nights_prs_verifying_through_the_projects_actions() {
+    let _env = FORGE_DB_LOCK.lock().await;
+    let w = World::build(
+        &[("1", "from one"), ("4", "from four"), ("2", ""), ("3", "")],
+        true,
+    );
+    std::env::set_var("FORGE_DB", w.dir.path().join("forge.db"));
+    std::env::set_var("FORGE_TRUST_PROJECT", "1");
+    let state = mock_state(w.dir.path());
+    let ids = arm_sessions(&state, &w).await;
+
+    sweeps(&state, &w, 14, 1000).await;
+
+    for i in [0, 2, 3] {
+        assert_eq!(
+            watch_of(&ids[i]).state,
+            Phase::Merged,
+            "{:?}",
+            watch_of(&ids[i]).queue
+        );
+    }
+    assert_eq!(merged_order(&w), vec!["1", "2", "3"]);
+    let four = watch_of(&ids[1]);
+    let q = four.queue.as_ref().unwrap();
+    assert_eq!(q.state, QueueState::Skipped);
+    assert!(q.reason.as_deref().unwrap().contains("shared.txt"));
+    assert!(four
+        .last_action
+        .as_deref()
+        .unwrap()
+        .starts_with("handed to its session"));
+
+    // The project's own `Verify` action ran on the merged result of PR2 and PR3, not PR1.
+    let log = std::fs::read_to_string(w.verify_log()).unwrap();
+    let log: Vec<&str> = log.lines().collect();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(log[0].starts_with("feat-2:") && log[0].contains("code-1.txt"));
+    assert!(log[1].starts_with("feat-3:") && log[1].contains("code-2.txt"));
+    assert!(watch_of(&ids[2])
+        .queue
+        .unwrap()
+        .last_update
+        .unwrap()
+        .contains("verified: Verify"));
+
+    // The session resolves PR4 by hand; the sweep takes it back and lands it last.
+    resolve_four_by_hand(&w);
+    sweeps(&state, &w, 6, 5000).await;
+    assert_eq!(watch_of(&ids[1]).state, Phase::Merged);
+    assert_eq!(merged_order(&w), vec!["1", "2", "3", "4"]);
+    assert_eq!(main_file(&w, "shared.txt"), "from one and four");
+    disarm(&ids);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_verify_action_skips_the_pr_with_the_output_tail_and_retry_runs_it_again() {
+    let _env = FORGE_DB_LOCK.lock().await;
+    let w = World::build(&[("1", ""), ("2", ""), ("3", "")], true);
+    std::env::set_var("FORGE_DB", w.dir.path().join("forge.db"));
+    std::env::set_var("FORGE_TRUST_PROJECT", "1");
+    // PR2's branch breaks the project's verification once the base is merged into it.
+    let wt = &w.clones[1];
+    std::fs::write(wt.join("broken-2.txt"), "x\n").unwrap();
+    git(wt, &["add", "."]);
+    git(wt, &["commit", "-q", "-m", "break"]);
+    git(wt, &["push", "-q", "origin", "feat-2"]);
+    let state = mock_state(w.dir.path());
+    let ids = arm_sessions(&state, &w).await;
+
+    sweeps(&state, &w, 12, 1000).await;
+
+    assert_eq!(watch_of(&ids[0]).state, Phase::Merged);
+    assert_eq!(
+        watch_of(&ids[2]).state,
+        Phase::Merged,
+        "PR3 is not stuck behind the broken PR"
+    );
+    assert_eq!(merged_order(&w), vec!["1", "3"]);
+    let two = watch_of(&ids[1]);
+    assert_eq!(two.state, Phase::Watching);
+    let q = two.queue.as_ref().unwrap();
+    assert_eq!(q.state, QueueState::Skipped);
+    let reason = q.reason.as_deref().unwrap();
+    assert!(
+        reason.starts_with("verification `Verify` failed: "),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("error[E0308]: mismatched types in broken-2.txt"),
+        "{reason}"
+    );
+    assert!(reason.contains("test result: FAILED. 1 failed"), "{reason}");
+    assert_eq!(
+        git(&w.bare(), &["rev-parse", "refs/heads/feat-2"]),
+        git(wt, &["rev-parse", "origin/feat-2"]),
+        "nothing was pushed"
+    );
+    let row = &snapshot(&registry().all())
+        .into_iter()
+        .flat_map(|q| q.rows)
+        .find(|r| r.session_id == ids[1])
+        .unwrap();
+    assert_eq!(row.state, "skipped");
+    assert!(row.reason.as_deref().unwrap().contains("FAILED"));
+
+    // Retry by PR number, without touching the branch: the verification runs again and fails again.
+    registry()
+        .queue_action(None, two.pr_number, Action::Retry)
+        .unwrap();
+    assert_eq!(watch_of(&ids[1]).queue.unwrap().state, QueueState::Queued);
+    sweeps(&state, &w, 3, 5000).await;
+    assert_eq!(watch_of(&ids[1]).queue.unwrap().state, QueueState::Skipped);
+
+    // The session fixes it and pushes: the PR re-enters on its own and lands.
+    git(wt, &["rm", "-q", "broken-2.txt"]);
+    git(wt, &["commit", "-q", "-m", "fix"]);
+    git(wt, &["push", "-q", "origin", "feat-2"]);
+    sweeps(&state, &w, 8, 9000).await;
+    assert_eq!(watch_of(&ids[1]).state, Phase::Merged);
+    assert_eq!(merged_order(&w), vec!["1", "3", "2"]);
+    disarm(&ids);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_queue_routes_list_and_act_with_the_right_statuses() {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    let _env = FORGE_DB_LOCK.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    std::env::set_var("FORGE_DB", dir.path().join("forge.db"));
+    let router = crate::serve::daemon_router(mock_state(dir.path()));
+    let ids = ["route-a", "route-b"];
+    for (i, id) in ids.iter().enumerate() {
+        registry().arm(id, Mode::Merge, "squash", 10 + i as i64);
+        let mut w = watch_of(id);
+        w.pr_number = Some(40 + i as u64);
+        let mut info = QueueInfo::new("origin @ main".into());
+        info.state = if i == 0 {
+            QueueState::Head
+        } else {
+            QueueState::Queued
+        };
+        w.queue = Some(info);
+        registry().store(id, w);
+    }
+    let call = |method: &'static str, path: &'static str, body: serde_json::Value| {
+        let router = router.clone();
+        async move {
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap();
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (
+                status,
+                serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default(),
+            )
+        }
+    };
+
+    let (status, body) = call("GET", "/tok/api/pr/queue", serde_json::json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine: Vec<&serde_json::Value> = body["queues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|q| q["rows"].as_array().unwrap())
+        .filter(|r| ids.contains(&r["session_id"].as_str().unwrap()))
+        .collect();
+    assert_eq!(mine.len(), 2);
+
+    let act = |action: &str, who: serde_json::Value| {
+        let mut body = serde_json::json!({ "action": action });
+        body.as_object_mut()
+            .unwrap()
+            .extend(who.as_object().unwrap().clone());
+        body
+    };
+    let (status, body) = call(
+        "POST",
+        "/tok/api/pr/queue/action",
+        act("hold", serde_json::json!({"session": "route-a"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["ok"], true);
+    assert!(body["message"].as_str().unwrap().contains("PR #40 held"));
+    let held = body["queues"][0]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["session_id"] == "route-a")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        (held["state"].as_str(), held["held"].as_bool()),
+        (Some("held"), Some(true))
+    );
+
+    let (status, body) = call(
+        "POST",
+        "/tok/api/pr/queue/action",
+        act("hold", serde_json::json!({"pr": 40})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("already held"));
+    let (status, _) = call(
+        "POST",
+        "/tok/api/pr/queue/action",
+        act("front", serde_json::json!({"session": "route-nope"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = call(
+        "POST",
+        "/tok/api/pr/queue/action",
+        serde_json::json!({"session": "route-a", "action": "dance"}),
+    )
+    .await;
+    assert!(status.is_client_error());
+    let (status, body) = call(
+        "POST",
+        "/tok/api/pr/queue/action",
+        act("release", serde_json::json!({"pr": 40})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    disarm(&ids.map(String::from));
 }

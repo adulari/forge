@@ -13,6 +13,7 @@
 //! - `GET  /api/pr/watches`          every armed watch (Fleet rows, Schedules list)
 //! - `POST /api/pr/watch`            `{session, mode: off|fix|merge, method?: squash|merge|rebase|auto}`
 //! - `GET  /api/pr/queue`            the merge queue per repository (docs/features/merge-queue.md)
+//! - `POST /api/pr/queue/action`     `{session | pr, action: hold|release|front|retry}`
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +22,7 @@ use std::time::Duration;
 
 use axum::extract::{Json, Query, State};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -184,7 +185,29 @@ impl Registry {
         self.persist(&guard);
     }
 
-    fn arm(&self, session: &str, mode: Mode, method: &str, now: i64) -> Option<Watch> {
+    /// An owner action on the merge queue (hold, release, front, retry); persisted at once.
+    pub(crate) fn queue_action(
+        &self,
+        session: Option<&str>,
+        pr: Option<u64>,
+        action: crate::serve_merge_queue::Action,
+    ) -> Result<String, crate::serve_merge_queue::ActionError> {
+        let mut guard = self.lock();
+        let id = crate::serve_merge_queue::resolve(&guard, session, pr)?;
+        let result = crate::serve_merge_queue::apply(&mut guard, &id, action);
+        self.persist(&guard);
+        result
+    }
+
+    /// Store a poll's result, keeping what the owner did to the queue while it ran.
+    pub(crate) fn store(&self, session: &str, mut next: Watch) {
+        self.update(session, |w| {
+            crate::serve_merge_queue::carry_owner_edits(w, &mut next);
+            *w = next;
+        });
+    }
+
+    pub(crate) fn arm(&self, session: &str, mode: Mode, method: &str, now: i64) -> Option<Watch> {
         let mut guard = self.lock();
         let result = if mode == Mode::Off {
             guard.remove(session);
@@ -247,6 +270,7 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         )
         .route(&format!("{base}/api/pr/watches"), get(watches_list))
         .route(&format!("{base}/api/pr/queue"), get(queue_list))
+        .route(&format!("{base}/api/pr/queue/action"), post(queue_action))
 }
 
 #[derive(Deserialize)]
@@ -270,6 +294,38 @@ async fn queue_list() -> Response {
     json_response(&serde_json::json!({
         "queues": crate::serve_merge_queue::snapshot(&registry().all())
     }))
+}
+
+#[derive(Deserialize)]
+struct QueueActionRequest {
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    pr: Option<u64>,
+    action: crate::serve_merge_queue::Action,
+}
+
+async fn queue_action(
+    State(state): State<Arc<DaemonState>>,
+    Json(request): Json<QueueActionRequest>,
+) -> Response {
+    let result = registry().queue_action(request.session.as_deref(), request.pr, request.action);
+    match result {
+        Ok(message) => {
+            state.registry.notify_fleet();
+            json_response(&serde_json::json!({
+                "ok": true,
+                "message": message,
+                "queues": crate::serve_merge_queue::snapshot(&registry().all()),
+            }))
+        }
+        Err(crate::serve_merge_queue::ActionError::NotFound(message)) => {
+            err_response(axum::http::StatusCode::NOT_FOUND, &message)
+        }
+        Err(crate::serve_merge_queue::ActionError::Conflict(message)) => {
+            err_response(axum::http::StatusCode::CONFLICT, &message)
+        }
+    }
 }
 
 async fn watches_list() -> Response {
@@ -353,7 +409,7 @@ fn is_force_push(prompt: &str) -> bool {
                 .any(|w| w == "-f" || w.starts_with('+')))
 }
 
-async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
+pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
     for watch in registry().all().into_iter().filter(Watch::active) {
         let Some(handle) = state.registry.get(&watch.session_id).await else {
             continue;
@@ -392,7 +448,7 @@ async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
         let all = registry().all();
         let outcome = advance(gh, &root, &mut next, all, free, now, None).await;
         let announcement = settle_push(&mut next, outcome.green);
-        registry().update(&watch.session_id, |w| *w = next.clone());
+        registry().store(&watch.session_id, next.clone());
         announce(state, &watch.session_id, announcement).await;
         if let Some(text) = outcome.prompt {
             let _ = handle

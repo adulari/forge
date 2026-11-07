@@ -95,6 +95,26 @@ fn tail(text: &str) -> String {
     text[start..].to_string()
 }
 
+/// The last lines of a failing command, on one line, for the queue row's reason.
+fn reason_tail(output: &str) -> String {
+    const LINES: usize = 3;
+    const CHARS: usize = 240;
+    let lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let joined = lines[lines.len().saturating_sub(LINES)..].join(" | ");
+    if joined.chars().count() <= CHARS {
+        return joined;
+    }
+    let keep: String = joined
+        .chars()
+        .skip(joined.chars().count() - CHARS)
+        .collect();
+    format!("...{keep}")
+}
+
 fn conflict_prompt(base: &str, paths: &[String]) -> String {
     format!(
         "Merge queue: this pull request is next to land, but `origin/{base}` conflicts with the \
@@ -281,8 +301,13 @@ pub(crate) fn run_step(root: &Path, base: &str, verify: &[Verify]) -> Step {
     let mut verified = Vec::new();
     for v in verify {
         if let Err(output) = run_verify(root, v) {
+            let tail = reason_tail(&output);
             return Step::Handoff {
-                reason: format!("verification `{}` failed", v.name),
+                reason: if tail.is_empty() {
+                    format!("verification `{}` failed", v.name)
+                } else {
+                    format!("verification `{}` failed: {tail}", v.name)
+                },
                 paths: Vec::new(),
                 prompt: verify_prompt(&v.name, &output),
             };
