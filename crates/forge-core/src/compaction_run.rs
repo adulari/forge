@@ -26,6 +26,16 @@ const COMPACT_FRAMING_TOKENS: usize = 600;
 /// What a part's wrapper tags and instructions cost, taken off the part's room.
 const PART_WRAPPER_TOKENS: usize = 100;
 
+/// What [`Session::install_fold`] puts in place of the first `split` messages.
+pub(crate) struct FoldInstall<'a> {
+    pub split: usize,
+    pub summary: &'a str,
+    pub before: usize,
+    pub auto: bool,
+    pub note: Option<&'a str>,
+    pub restore_files: bool,
+}
+
 /// How a summarizer call failed.
 enum SummarizerFailure {
     Provider(forge_provider::ProviderError),
@@ -212,7 +222,40 @@ impl Session {
             }
         };
 
-        let mut compacted = Vec::with_capacity(COMPACT_KEEP_RECENT + 1);
+        let note = format!("compacted {before} messages → {{after}} (summary via {model})");
+        self.install_fold(
+            FoldInstall {
+                split,
+                summary: &summary,
+                before,
+                auto,
+                note: Some(&note),
+                restore_files: true,
+            },
+            &budget,
+        )
+        .await
+    }
+
+    /// Replace the first `split` messages with `summary`, persist the fold and rebuild everything
+    /// a compaction invalidates. Shared by the model-written summary and the checkpoint fold
+    /// (`compaction_checkpoint.rs`). `note` is the scrollback line, `{after}` standing for the message count left (none: the caller says it);
+    /// `restore_files` puts the recently used files back after the fold.
+    pub(crate) async fn install_fold(
+        &mut self,
+        fold: FoldInstall<'_>,
+        budget: &CompactionBudget,
+    ) -> Result<(usize, usize), CoreError> {
+        let FoldInstall {
+            split,
+            summary,
+            before,
+            auto,
+            note,
+            restore_files,
+        } = fold;
+        let kept_tail = self.transcript.len() - split;
+        let mut compacted = Vec::with_capacity(kept_tail + 1);
         compacted.push(Message::system(format!("{SUMMARY_PREFIX}\n{summary}")));
         // The store must keep exactly these rows: the round-aligned tail, not a fixed count.
         compacted.extend(self.transcript.split_off(split));
@@ -225,15 +268,17 @@ impl Session {
         // session rehydrates the compacted view instead of the full uncompacted transcript.
         let _ = self
             .store
-            .compact_session_store(&self.id, &summary, kept_tail);
+            .compact_session_store(&self.id, summary, kept_tail);
         self.ledger.note_compaction();
 
         let after = self.transcript.len();
         self.presenter
             .emit(PresenterEvent::CompactionFinished { before, after });
-        self.presenter.emit(PresenterEvent::Warning(format!(
-            "compacted {before} messages → {after} (summary via {model})"
-        )));
+        if let Some(note) = note {
+            self.presenter.emit(PresenterEvent::Warning(
+                note.replace("{after}", &after.to_string()),
+            ));
+        }
         // PostCompact lifecycle hook: fires after the summary is folded in (Forge extension beyond
         // CC, which only has PreCompact).
         self.fire_lifecycle(
@@ -251,8 +296,8 @@ impl Session {
         // staleness tracker remembers that, so if one of them then stops moving the escalation can
         // say why the model cannot work out what it meant (task_staleness.rs).
         self.stale_tasks.note_compaction();
-        self.rehydrate_after_compaction(&budget).await;
-        self.settle_after_compaction(&budget);
+        self.rehydrate_after_compaction(budget, restore_files).await;
+        self.settle_after_compaction(budget);
         // Claude Code starts the compacted conversation with `SessionStart` (`source: compact`).
         self.fire_session_start(Some(crate::hooks_session::SessionSource::Compact))
             .await;
@@ -314,7 +359,7 @@ impl Session {
     /// The project instructions need nothing: the pinned block never left the request. Directory
     /// and path-scoped instruction files rode on tool results the summary folded away, so the next
     /// read or edit that touches them delivers them again.
-    async fn rehydrate_after_compaction(&mut self, budget: &CompactionBudget) {
+    async fn rehydrate_after_compaction(&mut self, budget: &CompactionBudget, restore_files: bool) {
         self.refresh_pinned_tasks();
         if let Err(error) = self.push_task_snapshot_if_changed() {
             tracing::warn!(%error, "could not record the task list after compaction");
@@ -324,6 +369,9 @@ impl Session {
         self.recall_pinned_memories(&query).await;
         // Before the files go back, so they get what is left rather than what was there.
         self.enforce_post_compact_headroom(budget.trigger);
+        if !restore_files {
+            return;
+        }
         if let Err(error) = self.restore_recent_files(budget) {
             tracing::warn!(%error, "could not record the files restored after compaction");
         }
