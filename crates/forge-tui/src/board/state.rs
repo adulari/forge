@@ -76,6 +76,8 @@ pub struct BoardApp {
     pub(crate) brief_cursor: usize,
     /// The daemon host's disk/memory pressure, shown in the header while it is not fine.
     pub(crate) pressure: Option<super::wire::PressureInfo>,
+    /// The daemon's merge queue, drawn as a section under the columns while it has rows.
+    pub(crate) queue: Vec<crate::queue_menu::QueueRow>,
 }
 
 impl BoardApp {
@@ -123,6 +125,7 @@ impl BoardApp {
             brief: None,
             brief_cursor: 0,
             pressure: None,
+            queue: Vec::new(),
         }
     }
 
@@ -177,6 +180,7 @@ impl BoardApp {
                 self.focus = Focus::Brief;
             }
             BoardEvent::HostPressure(info) => self.pressure = info,
+            BoardEvent::Queue(rows) => self.queue = rows,
             BoardEvent::ReclaimOffer { cwd, message } => {
                 self.confirm = Some(Confirm {
                     kind: ConfirmKind::Reclaim(cwd),

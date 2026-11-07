@@ -68,6 +68,18 @@ pub(crate) async fn fetch_pressure(
         .and_then(|p| serde_json::from_value(p.clone()).ok()))
 }
 
+/// The merge queue (`GET /api/pr/queue`); an older daemon without it answers 404, which the
+/// caller drops so the board simply shows no queue section.
+pub(crate) async fn fetch_queue(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Result<Vec<forge_tui::queue_menu::QueueRow>> {
+    let answer: serde_json::Value =
+        get_json(http, base, &api_url(base, token, "api/pr/queue")).await?;
+    Ok(crate::cli::commands::prs::queue_rows(&answer))
+}
+
 pub(crate) async fn fetch_past(
     http: &reqwest::Client,
     base: &str,
@@ -188,11 +200,12 @@ async fn refresh_once(
     ev: &mpsc::UnboundedSender<Ev>,
     offline: &mut bool,
 ) {
-    let (fleet, past, dispatches, pressure) = tokio::join!(
+    let (fleet, past, dispatches, pressure, queue) = tokio::join!(
         fetch_fleet(http, base, token),
         fetch_past(http, base, token, PAST_LIMIT),
         super::dispatch_client::fetch_dispatches(http, base, token),
-        fetch_pressure(http, base, token)
+        fetch_pressure(http, base, token),
+        fetch_queue(http, base, token)
     );
     match fleet {
         Ok(rows) => {
@@ -221,6 +234,9 @@ async fn refresh_once(
     }
     if let Ok(list) = dispatches {
         let _ = ev.send(Ev::Board(BoardEvent::Dispatches(list)));
+    }
+    if let Ok(rows) = queue {
+        let _ = ev.send(Ev::Board(BoardEvent::Queue(rows)));
     }
     if let Ok(info) = pressure {
         let _ = ev.send(Ev::Board(BoardEvent::HostPressure(info)));

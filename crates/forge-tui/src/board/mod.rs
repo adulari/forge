@@ -92,6 +92,8 @@ pub enum BoardEvent {
     Connection(ConnState),
     /// The "while you were away" digest: opens the overlay over the board.
     Brief(BriefCard),
+    /// A fresh `GET /api/pr/queue` (empty from a daemon that predates the merge queue).
+    Queue(Vec<crate::queue_menu::QueueRow>),
     /// The daemon's host disk/memory pressure (`None` from a daemon that does not report it).
     HostPressure(Option<PressureInfo>),
     /// The daemon refused a new worktree session because the disk is under its hard floor: the
