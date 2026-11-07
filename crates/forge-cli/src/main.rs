@@ -440,6 +440,9 @@ fn error_next_step(e: &anyhow::Error) -> &'static str {
     }) {
         return "the provider is down, not misconfigured: send `continue` in this session once it is back, or raise mesh.outage_wait_secs to wait longer";
     }
+    if e.to_string().starts_with("the run did not finish") {
+        return "the session is kept: send `continue` to pick it up where it stopped";
+    }
     let text = e
         .chain()
         .map(|c| c.to_string().to_lowercase())
