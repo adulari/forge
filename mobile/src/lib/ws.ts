@@ -301,6 +301,9 @@ export interface Snapshot {
   parent?: { id: string; title: string } | null;
   /** Why the last turn failed, from the turn's end until the next turn starts. */
   thread_error?: ThreadError | null;
+  /** How the last turn ended when it did not finish cleanly: the stored reason, a plain label and
+   * when (unix seconds). Absent after a clean answer and from an older host. */
+  last_turn_end?: { reason: string; label: string; at: number } | null;
   /** On the resync frame of a reconnect the host could not replay: how many updates were missed. */
   history_gap?: { count: number; reason: string } | null;
   /** Progress of the worktree's background copy + `setup`; absent when nothing was provisioned. */

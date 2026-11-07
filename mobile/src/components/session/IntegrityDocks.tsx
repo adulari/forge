@@ -10,6 +10,7 @@ import { getHistoryIntegrity } from "../../lib/api";
 import { readGapAck } from "../../lib/serverStorageKeys";
 import { gapAckKey, liveGapNotice, missingRowsNotice, needsAck, type GapNotice } from "../../lib/historyGap";
 import { hasMoreDetail, threadErrorKey, threadErrorTitle } from "../../lib/threadError";
+import { turnEndKey, turnEndTitle } from "../../lib/turnEnd";
 import type { Snapshot } from "../../lib/ws";
 import { NoticeDock } from "./NoticeDock";
 
@@ -67,6 +68,10 @@ export function IntegrityDocks({ baseUrl, sessionId, snapshot }: IntegrityDocksP
     if (errorKey == null) setDismissedError(null);
   }, [errorKey]);
 
+  const turnEnd = snapshot?.last_turn_end ?? null;
+  const [dismissedEnd, setDismissedEnd] = useState<string | null>(null);
+  const endKey = turnEnd ? turnEndKey(turnEnd) : null;
+
   const liveGap = snapshot?.history_gap ?? null;
   const liveRevision = snapshot?.revision ?? 0;
   const [live, setLive] = useState<{ notice: GapNotice; session: string } | null>(null);
@@ -92,6 +97,17 @@ export function IntegrityDocks({ baseUrl, sessionId, snapshot }: IntegrityDocksP
           onDismiss={() => setDismissedError(errorKey)}
           dismissLabel="Dismiss error"
           testID="thread-error-dock"
+        />
+      ) : null}
+      {turnEnd && !threadError && endKey !== dismissedEnd ? (
+        <NoticeDock
+          tone="warn"
+          icon={AlertTriangle}
+          title={turnEndTitle(turnEnd)}
+          summary="The last turn did not finish. Send continue to pick it up."
+          onDismiss={() => setDismissedEnd(endKey)}
+          dismissLabel="Dismiss turn notice"
+          testID="turn-end-dock"
         />
       ) : null}
       {notices.map((notice) => (
