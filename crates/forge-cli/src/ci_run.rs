@@ -82,6 +82,8 @@ pub(crate) fn make_plan(root: &Path) -> (CiPlan, CiSettings) {
         runner_temp: runner_temp(root),
         workspace: root.to_path_buf(),
         changed_files: changed_files(root),
+        branch: git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .map(|b| b.trim().to_string()),
     };
     let mut plan = build_plan(root, &ctx);
     apply_overrides(&mut plan, &settings);

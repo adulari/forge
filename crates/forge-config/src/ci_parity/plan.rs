@@ -52,6 +52,8 @@ pub struct PlanContext {
     pub workspace: PathBuf,
     /// Files changed against the base; `None` disables `paths:` filtering.
     pub changed_files: Option<Vec<String>>,
+    /// The checked-out branch; `None` (detached or unknown) never matches a `branches:` filter.
+    pub branch: Option<String>,
 }
 
 const NOOP_ACTIONS: &[&str] = &[
@@ -94,7 +96,20 @@ const DEPLOY_MARKERS: &[&str] = &[
     "fastlane",
     "altool",
     "wrangler",
-    "aws s3",
+    "aws ",
+    "terraform ",
+    "kubectl ",
+    "helm ",
+    "gcloud ",
+    "az ",
+    "flyctl",
+    "fly deploy",
+    "vercel",
+    "netlify deploy",
+    "firebase deploy",
+    "heroku",
+    "pulumi ",
+    "deploy",
 ];
 
 /// `git fetch`/`git pull` options that change how much history the clone holds. A step runs in
@@ -219,14 +234,16 @@ fn strings(y: Option<&Yaml>) -> Vec<String> {
 /// `(paths, paths-ignore)` of one event.
 type PathFilter = (Vec<String>, Vec<String>);
 
-fn triggers(on: Option<&Yaml>) -> (Vec<String>, Vec<PathFilter>) {
+fn triggers(on: Option<&Yaml>, branch: Option<&str>) -> (Vec<String>, Vec<PathFilter>) {
     match on {
         Some(Yaml::Map(entries)) => {
             let events = entries.iter().map(|(k, _)| k.clone()).collect();
             let filters = entries
                 .iter()
-                .filter(|(k, _)| {
-                    matches!(k.as_str(), "push" | "pull_request" | "pull_request_target")
+                .filter(|(k, v)| match k.as_str() {
+                    "push" => push_fires(v, branch),
+                    "pull_request" | "pull_request_target" => true,
+                    _ => false,
                 })
                 .map(|(_, v)| (strings(v.get("paths")), strings(v.get("paths-ignore"))))
                 .collect();
@@ -236,6 +253,37 @@ fn triggers(on: Option<&Yaml>) -> (Vec<String>, Vec<PathFilter>) {
     }
 }
 
+/// Whether a `push:` trigger fires for a push of `branch`: a tags-only trigger never does, and a
+/// `branches` filter needs the branch to match, as the runner would decide.
+fn push_fires(push: &Yaml, branch: Option<&str>) -> bool {
+    let branches = strings(push.get("branches"));
+    let ignore = strings(push.get("branches-ignore"));
+    let has_tags = push.get("tags").is_some() || push.get("tags-ignore").is_some();
+    if branches.is_empty() && ignore.is_empty() {
+        return !has_tags;
+    }
+    let Some(b) = branch else {
+        return false;
+    };
+    if !ignore.is_empty() {
+        return !ignore.iter().any(|p| glob_match(p, b));
+    }
+    let mut hit = false;
+    for p in &branches {
+        match p.strip_prefix('!') {
+            Some(neg) if glob_match(neg, b) => hit = false,
+            None if glob_match(p, b) => hit = true,
+            _ => {}
+        }
+    }
+    hit
+}
+
+/// A job-level `if:` that depends on the ref or event, which local runs cannot reproduce.
+fn ref_or_event_bound(cond: &str) -> bool {
+    cond.contains("github.ref") || cond.contains("github.event")
+}
+
 fn plan_workflow(
     plan: &mut CiPlan,
     name: &str,
@@ -243,8 +291,12 @@ fn plan_workflow(
     ctx: &PlanContext,
     root: Option<&Path>,
 ) {
-    let (events, filters) = triggers(doc.get("on"));
-    let fires = |e: &str| events.iter().any(|x| x == e);
+    let (events, filters) = triggers(doc.get("on"), ctx.branch.as_deref());
+    let push_ok = doc
+        .get("on")
+        .and_then(|on| on.get("push"))
+        .is_none_or(|v| push_fires(v, ctx.branch.as_deref()));
+    let fires = |e: &str| events.iter().any(|x| x == e) && (e != "push" || push_ok);
     if !(fires("push") || fires("pull_request") || fires("pull_request_target")) {
         plan.workflow_skip(
             name,
@@ -446,6 +498,10 @@ fn plan_job(
                 job_id,
                 format!("condition is false locally (if: {cond})"),
             );
+            return;
+        }
+        if eval_if(cond).is_none() && ref_or_event_bound(cond) {
+            plan.job_skip(wf, job_id, format!("conditional job (if: {cond})"));
             return;
         }
     }

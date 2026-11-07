@@ -5,6 +5,7 @@ fn ctx() -> PlanContext {
         runner_temp: PathBuf::from("/tmp/rt"),
         workspace: PathBuf::from("/work"),
         changed_files: None,
+        branch: Some("feature/x".to_string()),
     }
 }
 
@@ -310,4 +311,43 @@ jobs:
             p.skips
         );
     }
+}
+
+const MAIN_ONLY_DEPLOY: &str = "on:\n  push:\n    branches: [main]\n    tags: ['v*']\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo built\n";
+
+#[test]
+fn push_branch_and_tag_filters_follow_the_current_branch() {
+    let main_only = plan(&[("deploy.yml", MAIN_ONLY_DEPLOY)]);
+    assert!(main_only.steps.is_empty(), "{:?}", main_only.steps);
+    assert!(main_only.skips[0].job.is_none());
+
+    let tags_only = plan(&[(
+        "release.yml",
+        "on:\n  push:\n    tags: ['v*']\njobs:\n  r:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo release\n",
+    )]);
+    assert!(tags_only.steps.is_empty(), "{:?}", tags_only.steps);
+
+    let mut on_main = ctx();
+    on_main.branch = Some("main".to_string());
+    let src = vec![("deploy.yml".to_string(), Ok(MAIN_ONLY_DEPLOY.to_string()))];
+    assert_eq!(plan_from_sources(&src, &on_main, None).steps.len(), 1);
+
+    let wildcard = plan(&[(
+        "ci.yml",
+        "on:\n  push:\n    branches: ['feature/**', '!feature/skip']\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo test\n",
+    )]);
+    assert_eq!(wildcard.steps.len(), 1);
+}
+
+#[test]
+fn job_gated_on_the_ref_is_skipped_and_deploy_tools_are_never_run() {
+    let p = plan(&[(
+        "cd.yml",
+        "on: push\njobs:\n  deploy:\n    if: github.ref == 'refs/heads/main'\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo gated\n  tools:\n    runs-on: ubuntu-latest\n    steps:\n      - run: aws ecs update-service --cluster prod --force-new-deployment\n      - run: terraform -chdir=infra apply -auto-approve\n      - run: kubectl apply -f k8s/\n      - run: ./deploy.sh\n",
+    )]);
+    assert!(p.steps.is_empty(), "{:?}", p.steps);
+    assert!(p
+        .skips
+        .iter()
+        .any(|s| s.reason.starts_with("conditional job")));
 }
