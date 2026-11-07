@@ -311,6 +311,19 @@ export interface Snapshot {
   /** Additive: the rolling output of the foreground tool call in flight (last few lines, ANSI
    * stripped) and how long it has run. Absent from an older host and when nothing is reporting. */
   live_tail?: SnapshotLiveTail | null;
+  /** Additive: set while the turn waits out a provider outage (`mesh.outage_wait_secs`). Times are
+   * unix seconds. Absent from an older host and whenever the provider is answering. */
+  outage?: SnapshotOutage | null;
+}
+
+export interface SnapshotOutage {
+  model: string;
+  provider: string;
+  since_unix: number;
+  next_try_unix: number;
+  until_unix: number;
+  attempts: number;
+  reason: string;
 }
 
 export interface SnapshotLiveTail {

@@ -91,6 +91,7 @@ import { isSegmentPath, type SegmentValue } from "../../../lib/sessionSegments";
 import { useSessionSegment } from "../../../lib/useSessionSegment";
 import { sessionDisplayTitle } from "../../../lib/sessionTitle";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
+import { providerOutageBanner } from "../../../lib/providerOutage";
 import { worktreeBaseBanner, worktreeSetupBanner } from "../../../lib/worktreeCommands";
 import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
@@ -358,6 +359,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const setupBanner = worktreeSetupBanner(snapshot?.worktree_setup);
   const setupState = snapshot?.worktree_setup?.state;
   const baseBanner = worktreeBaseBanner(snapshot?.worktree_base);
+  const outageBanner = providerOutageBanner(snapshot?.outage);
   useEffect(() => {
     setSetupExpanded(false);
   }, [setupState]);
@@ -659,6 +661,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
               onDismiss={() => setBaseDismissed(snapshot?.worktree_base ?? null)}
             />
           ) : null}
+          {outageBanner ? <Banner tone={outageBanner.tone} message={outageBanner.message} /> : null}
           {projectNeedsInitialization ? (
             <Banner
               tone="warn"
