@@ -62,7 +62,7 @@ mod auxiliary_candidates;
 mod auxiliary_policy;
 mod bridge_trace;
 mod btw_policy;
-mod expert;
+pub mod expert;
 pub mod goal_contract;
 pub mod goal_evaluator;
 mod goal_evidence;

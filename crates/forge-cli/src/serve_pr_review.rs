@@ -13,7 +13,8 @@
 //! Routes: `GET /api/pr/review?pr=|session=` the stored review with every finding;
 //! `POST /api/pr/review/action` `{session | pr, action: merge_anyway|dismiss, finding?, by?}`.
 
-mod jobs;
+mod assay_reviewer;
+pub(crate) mod jobs;
 mod owner;
 
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use crate::serve::{err_response, json_response, DaemonState};
 use crate::serve_pr::{Gh, PrSummary};
 use crate::serve_pr_watch::{registry, Announcement, Watch};
+use assay_reviewer::AssayReviewer;
 use jobs::{jobs, Poll};
 pub(crate) use owner::{carry_owner_edits, Owner};
 
@@ -169,6 +171,7 @@ pub(crate) trait Reviewer: Send + Sync {
     async fn review(&self, request: &ReviewRequest<'_>) -> Result<Reviewed, String>;
 }
 
+#[derive(Debug)]
 pub(crate) struct Reviewed {
     pub(crate) findings: Vec<ReviewFinding>,
     pub(crate) model: Option<String>,
@@ -178,9 +181,7 @@ static REVIEWER: OnceLock<Arc<dyn Reviewer>> = OnceLock::new();
 
 /// Called once by the daemon: PR reviews run through Assay with the daemon's store.
 pub(crate) fn install(state: &Arc<DaemonState>) {
-    let _ = REVIEWER.set(Arc::new(AssayReviewer {
-        store: state.store.clone(),
-    }));
+    let _ = REVIEWER.set(Arc::new(AssayReviewer::new(state.store.clone())));
 }
 
 #[cfg(test)]
@@ -451,145 +452,6 @@ pub(crate) fn review_push(watch: &mut Watch) -> Option<Announcement> {
         ),
         true,
     ))
-}
-
-struct AssayReviewer {
-    store: Arc<forge_store::Store>,
-}
-
-fn reviewer_models(config: &forge_config::Config) -> Result<forge_core::assay::TierModels, String> {
-    let c = &config.pr_watch;
-    let pinned = if c.review_model.trim().is_empty() {
-        config.harness.expert.model.trim().to_string()
-    } else {
-        c.review_model.trim().to_string()
-    };
-    if pinned.is_empty() {
-        let tiers = forge_core::assay::TierModels {
-            trivial: config.candidates_for(forge_types::TaskTier::Trivial),
-            complex: config.candidates_for(forge_types::TaskTier::Complex),
-        };
-        if tiers.trivial.is_empty() && tiers.complex.is_empty() {
-            return Err("no reviewer model is configured; set [pr_watch] review_model".into());
-        }
-        return Ok(tiers);
-    }
-    let provider = forge_config::provider_of(&pinned);
-    if !provider.is_empty() && !forge_config::is_known_provider(provider) {
-        return Err(format!(
-            "'{provider}' is not a known provider in reviewer model {pinned}"
-        ));
-    }
-    let subscription =
-        forge_provider::is_cli_bridge(&pinned) || pinned.starts_with("codex-oauth::");
-    let budget = if c.review_budget.trim().is_empty() {
-        config.harness.expert.budget.trim()
-    } else {
-        c.review_budget.trim()
-    };
-    if subscription && budget.is_empty() {
-        return Err(format!(
-            "{pinned} is a subscription model and needs [pr_watch] review_budget"
-        ));
-    }
-    Ok(forge_core::assay::TierModels {
-        trivial: vec![pinned.clone()],
-        complex: vec![pinned],
-    })
-}
-
-/// A dollar cap (`$2`) from a budget string; slices of a subscription window are not metered here.
-fn usd_cap(config: &forge_config::Config) -> Option<f64> {
-    let c = &config.pr_watch;
-    let budget = if c.review_budget.trim().is_empty() {
-        config.harness.expert.budget.trim()
-    } else {
-        c.review_budget.trim()
-    };
-    budget.strip_prefix('$').and_then(|v| v.trim().parse().ok())
-}
-
-#[async_trait::async_trait]
-impl Reviewer for AssayReviewer {
-    async fn review(&self, request: &ReviewRequest<'_>) -> Result<Reviewed, String> {
-        use forge_core::assay;
-        let config = forge_config::load().map_err(|e| e.to_string())?;
-        let models = reviewer_models(&config)?;
-        let model = models.complex.first().or(models.trivial.first()).cloned();
-        let lenses = vec![
-            forge_types::FindingCategory::Correctness,
-            forge_types::FindingCategory::Unsafe,
-        ];
-        let pricing = Arc::new(forge_mesh::pricing::Pricing::from_config(&config));
-        let source = format!(
-            "Pull request #{} at {}\n\n{}",
-            request.pr_number, request.head_sha, request.diff
-        );
-        if let Some(cap) = usd_cap(&config) {
-            let estimate = assay::estimate_assay_cost(&source, &lenses, &models, &pricing);
-            if estimate.est_usd > cap {
-                return Err(format!(
-                    "estimated ${:.3} exceeds the review budget ${cap:.2}",
-                    estimate.est_usd
-                ));
-            }
-        }
-        let harness = config.mesh.bridge_mode == forge_config::BridgeMode::Harness;
-        let provider: Arc<dyn forge_provider::Provider> = forge_core::zero_retention::guard(
-            Arc::new(
-                forge_provider::DispatchProvider::new(harness)
-                    .with_max_output_tokens(config.mesh.effective_max_output_tokens()),
-            ),
-            &config,
-        );
-        let cooldown = std::time::Duration::from_secs(config.mesh.failover_cooldown_secs);
-        let wanted = lenses.len();
-        let mut ignore_progress = |_: assay::AssayProgress| {};
-        let run = assay::run_assay(
-            forge_types::AssayScope::Diff,
-            Arc::from(source.as_str()),
-            lenses,
-            models,
-            provider,
-            pricing,
-            self.store.clone(),
-            cooldown,
-            &mut ignore_progress,
-        );
-        let secs = config.pr_watch.review_timeout_secs.max(30);
-        let report = tokio::time::timeout(std::time::Duration::from_secs(secs), run)
-            .await
-            .map_err(|_| format!("the reviewer did not finish within {secs}s"))?;
-        if report.skipped_lenses.len() >= wanted {
-            let why = report
-                .skipped_lenses
-                .first()
-                .map(|(_, reason)| reason.clone())
-                .unwrap_or_default();
-            return Err(format!("every reviewer lens failed ({why})"));
-        }
-        tracing::info!(
-            session = request.session_id,
-            pr = request.pr_number,
-            "PR review done"
-        );
-        let findings = report
-            .findings
-            .into_iter()
-            .filter(|f| f.verified)
-            .map(|f| ReviewFinding {
-                severity: f.severity.as_str().to_string(),
-                file: f.file,
-                line: f.line,
-                title: f.title,
-                why: f.rationale,
-                fix: f.suggested_fix,
-                blocking: false,
-                dismissed: None,
-            })
-            .collect();
-        Ok(Reviewed { findings, model })
-    }
 }
 
 pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {

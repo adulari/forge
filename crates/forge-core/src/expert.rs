@@ -67,7 +67,7 @@ pub(crate) struct ExpertReply {
 
 /// The subscription family a metered expert belongs to (`codex`, `claude`), or `None` for a
 /// subscription Forge has no usage meter for.
-fn subscription_family(model: &str) -> Option<&'static str> {
+pub fn subscription_family(model: &str) -> Option<&'static str> {
     let m = forge_provider::normalize_model_id(model);
     if m.starts_with("codex-oauth::") || m.starts_with("codex-cli::") {
         Some("codex")
@@ -167,7 +167,7 @@ fn window_reading(
 
 /// Fold the current readings into the session's expert envelope. A dollar budget counts the
 /// expert's own spend; a window budget counts what the window rose by since the first check.
-pub(crate) fn meter(
+pub fn meter(
     envelope: &mut Option<EnvelopeState>,
     spec: &EnvelopeSpec,
     windows: &[forge_store::SubscriptionWindow],
@@ -306,7 +306,11 @@ pub fn consult_expert_spec() -> ToolSpec {
     }
 }
 
-fn persist_quota_hints(store: &forge_store::Store, model: &str, hints: &[forge_types::QuotaHint]) {
+pub(crate) fn persist_quota_hints(
+    store: &forge_store::Store,
+    model: &str,
+    hints: &[forge_types::QuotaHint],
+) {
     let live_plan = model
         .starts_with("codex-oauth::")
         .then(forge_provider::fresh_live_codex_plan)
