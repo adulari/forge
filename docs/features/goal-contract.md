@@ -85,6 +85,8 @@ paused and `/goal resume` continues against the same contract. No new table.
 [goal]
 contract = false                  # true: every /goal drafts a contract (same as --contract)
 contract_check_timeout_secs = 60  # per check, clamped 1..600
+relay_after_compactions = 4       # hand the goal on once the session was compacted this often; 0 = never for wear
+max_relays = 3                    # fresh-worker hand-offs one goal may make; 0 = relay off
 ```
 
 ## 6. Implementation
@@ -97,11 +99,74 @@ contract_check_timeout_secs = 60  # per check, clamped 1..600
 - `crates/forge-cli/src/cli/commands/run/goal_progress.rs` - `GoalNext::Validate`,
   `contract_decision`, the wedge rule; `goal_headless.rs` does the same without an `App`.
 - `crates/forge-cli/src/cli/commands/run/goal_envelope.rs` (`GoalRecord`) and `goal_show.rs`.
+- `crates/forge-store/src/relay_store.rs` and migration 58 - the lineage, the compaction count.
+- `crates/forge-core/src/goal_relay.rs` - the brief and `Session::hand_off_goal`;
+  `recall.rs` reads the lineage. `crates/forge-cli/.../run/goal_relay.rs` - `perform`,
+  `successor_outcome`; `serve_relay.rs` hosts the successor.
 - `crates/forge-cli/src/remote/goal.rs` - `SnapContract`; `mobile/src/lib/goalState.ts` and
   `GoalBanner.tsx` - the table.
 
-## 7. Not in this slice
+## 7. Fresh-worker relay
 
-Fresh worker sessions per milestone and milestone sequencing. A dedicated `/contract` overlay
-(the table is in `/goal status` and the goal panel), and the "contract" toggle in the goal start
-sheet on the phone: the phone starts a contract goal by sending `/goal --contract <objective>`.
+> Slice S2 of Missions. On by default (`max_relays = 3`); `max_relays = 0` turns it off.
+
+A long run used to live and die in one session: a goal that wedged simply stopped, and the owner
+recovered it by hand (a new session on the same worktree, the task re-sent, a note on what the dead
+one had produced). Now Forge does that itself.
+
+**When.** The goal hands itself to a fresh worker session when it
+
+- wedges: the evaluator saw no movement for three verdicts, the agent claimed done against the
+  evaluator's "not achieved" too often, or the contract validator saw the same failing set three
+  times in a row (`wedged`);
+- stalls: six turns without task progress (`stalled`; the expert on call has already had its
+  say by then);
+- or the session is worn out: it was compacted `relay_after_compactions` times (`worn`). The
+  count is stored with the compaction (migration 58), so a daemon restart does not reset it.
+
+A spent envelope, a budget cap, the iteration ceiling, a declined contract and an interrupt still
+stop or pause the goal as before: a new worker would only hit the same wall. After `max_relays`
+hand-offs the goal stops with its original wedge or stall message. The headless local
+`forge run "/goal ..."` has no driver to host a second session and stops as before.
+
+**What happens.**
+
+1. A new session is created on the same cwd and worktree, with the same permission mode and
+   model/effort pin, titled `<title> (worker N)`. It is linked to the old one in `session_relay`.
+2. The old session's last turn ends `handed_off` (`forge turns` shows "goal handed to a fresh
+   worker"; the reason it had before is kept in the turn detail as `was`). Its goal reads
+   `handed off`.
+3. The successor's goal record carries the goal, the contract with its latest results, the spend
+   envelope, and the iteration and token counters, so the budget is one budget across workers.
+4. The successor's first prompt is a deterministic brief, read from git, the contract, the task
+   list, the compaction index and the stored turns (no model call):
+   commits since the goal started and uncommitted files; the contract's passing assertions and the
+   failing ones with the check, the reason and the proof tail; open tasks; the old session's
+   episode index (the seq ranges its compactions folded); how its last turn ended; the expert's
+   diagnosis when one was given; the envelope; and a pointer to `recall`.
+5. The successor's `recall` searches the old session's whole history and reads it with
+   `session=<id prefix>`, and so on up the chain. Nothing else is reachable: an unrelated
+   session is refused.
+
+**Where it shows.**
+
+- TUI: `/goal status` prints `S1 handed off (wedged) -> S2 running`. In a terminal chat the
+  screen switches to the successor and carries on; under `forge serve` the daemon hosts the
+  successor as a new session in the fleet.
+- `forge turns` and `/turns`: the `handed_off` ending. `forge goal show` prints the chain.
+- Snapshot: `Snapshot.goal.relay` (`session_id`, `state`, `reason`) and state `handed_off`.
+- Phone and desktop: the goal panel shows the chain; a handed-off goal has no controls.
+- Push: "goal handed to a fresh worker (wedged)".
+- `/contract` (TUI): the contract as a table (pass or fail per assertion, the last line of
+  proof); Enter prints the check and the full proof.
+
+**Restart.** The successor is flagged as a fleet session when it is created, and it has no
+messages until its first turn. A daemon that dies between the hand-off and that first turn brings
+the successor back, finds its goal record and its stored brief, and starts the goal from it; after
+the first turn it is an ordinary session and comes back paused like any other goal. A predecessor
+whose own record was not yet written is shown as handed off because the relation exists.
+
+## 8. Not in this slice
+
+Milestone sequencing and the contract per milestone. Relaying a goal that has no driver (headless
+`forge run`). The phone's start sheet has a contract switch; the relay settings are config only.
