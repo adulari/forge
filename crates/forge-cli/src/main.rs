@@ -158,6 +158,7 @@ mod serve_project_ops;
 mod serve_push_owners;
 mod serve_push_routes;
 mod serve_recovery;
+mod serve_relay;
 mod serve_restart_redrive;
 mod serve_revoke;
 mod serve_schedules;

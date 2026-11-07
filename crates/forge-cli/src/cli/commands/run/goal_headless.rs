@@ -156,12 +156,13 @@ pub(crate) async fn run_goal_headless(
             };
             *gs.eval.slot.lock().unwrap() = verdict;
         }
-        let facts = GoalTurnFacts::read(session, cwd);
+        let facts = GoalTurnFacts::read(session, cwd).without_relay();
         match settle_goal(&mut gs, facts).await {
             GoalStep::Stop { met: true, .. } => return Ok(GoalRunEnd::Met),
             GoalStep::Stop { reason, .. } | GoalStep::Pause { reason } => {
                 return Ok(GoalRunEnd::NotMet(reason))
             }
+            GoalStep::Relay { detail, .. } => return Ok(GoalRunEnd::NotMet(detail)),
             GoalStep::Turn(next) | GoalStep::Continue(next) => {
                 gs.iter += 1;
                 prompt = next;

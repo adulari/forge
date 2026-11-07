@@ -3,6 +3,30 @@
 use super::*;
 
 impl DriverState {
+    /// A goal was handed to a fresh worker: put the successor in the fleet flag first, so a
+    /// daemon that dies before hosting it brings it back, then ask the daemon to host it now.
+    async fn launch_successor(&mut self, plan: &goal_relay::RelayPlan) {
+        let store = self.session.lock().await.store.clone();
+        if let Err(error) = store.set_session_daemon_live(&plan.successor_id, true) {
+            tracing::warn!(session = %plan.successor_id, %error, "could not flag the fresh worker as live");
+        }
+        tracing::info!(
+            session = %plan.successor_id,
+            reason = plan.reason.as_str(),
+            "goal handed to a fresh worker"
+        );
+        let launched = self
+            .registry
+            .as_ref()
+            .is_some_and(|registry| registry.launch_relay(plan.successor_id.clone()));
+        if !launched {
+            self.app.note(&format!(
+                "the fresh worker {} starts when this session is hosted by forge serve or resumed",
+                &plan.successor_id[..plan.successor_id.len().min(8)]
+            ));
+        }
+    }
+
     /// The headless key router: modal surfaces first (same precedence as the TUI key loop),
     /// then plain input editing. Only surfaces a remote client can actually drive are handled;
     /// host-terminal-only hotkeys have no headless meaning and are ignored.
@@ -549,6 +573,9 @@ impl DriverState {
             if gs.gen == g {
                 let cwd = std::path::Path::new(&self.cwd);
                 let next = advance_goal(&mut gs, &self.session, &mut self.app, cwd).await;
+                if let GoalNext::Relay(plan) = &next {
+                    self.launch_successor(plan).await;
+                }
                 let queue = &mut self.queued_prompts;
                 let steer = |app: &mut forge_tui::App| dequeue_prompt(queue, app);
                 if let Some(step) = launch_goal_step(

@@ -337,7 +337,8 @@ impl GoalRecord {
         let goal = app.goal.as_ref()?;
         let live = matches!(goal.phase, GoalPhase::Active | GoalPhase::Paused);
         let keeps_envelope = live && goal.envelope.is_some();
-        if !keeps_envelope && goal.contract.is_none() {
+        let handed_off = goal.phase == GoalPhase::HandedOff;
+        if !keeps_envelope && goal.contract.is_none() && !handed_off {
             return None;
         }
         let record = Self {
@@ -357,6 +358,27 @@ impl GoalRecord {
     }
 }
 
+impl GoalRecord {
+    /// The record a successor session starts from: the goal as the predecessor leaves it, paused
+    /// until the successor's driver starts it from the brief.
+    pub(crate) fn for_successor(goal: &forge_tui::goal_status::GoalStatus, why: &str) -> String {
+        let record = Self {
+            objective: goal.objective.clone(),
+            gates: goal.gates.clone(),
+            max_tokens: goal.max_tokens,
+            max_minutes: goal.max_minutes,
+            iteration: goal.iteration,
+            tokens_used: goal.tokens_used,
+            elapsed_secs: goal.elapsed_secs,
+            reason: Some(why.to_string()),
+            envelope: goal.envelope.clone(),
+            contract: goal.contract.clone(),
+            phase: Some(forge_tui::goal_status::GoalPhase::Paused.wire().to_string()),
+        };
+        serde_json::to_string(&record).unwrap_or_default()
+    }
+}
+
 /// Bring back the goal a restart interrupted, paused, with its envelope and counters.
 pub(crate) fn restore(app: &mut forge_tui::App, store: &forge_store::Store, session_id: &str) {
     if app.goal.is_some() {
@@ -369,11 +391,17 @@ pub(crate) fn restore(app: &mut forge_tui::App, store: &forge_store::Store, sess
         return;
     };
     use forge_tui::goal_status::GoalPhase;
-    let ended = record
-        .phase
-        .as_deref()
-        .and_then(GoalPhase::from_wire)
-        .filter(|p| !matches!(p, GoalPhase::Active | GoalPhase::Paused));
+    // A hand-off that created the successor but died before this session's own record said so.
+    let handed_off = store.relay_successor(session_id).ok().flatten().is_some();
+    let ended = if handed_off {
+        Some(GoalPhase::HandedOff)
+    } else {
+        record
+            .phase
+            .as_deref()
+            .and_then(GoalPhase::from_wire)
+            .filter(|p| !matches!(p, GoalPhase::Active | GoalPhase::Paused))
+    };
     if let Some(phase) = ended {
         app.goal_restore(
             &record.objective,
@@ -390,6 +418,7 @@ pub(crate) fn restore(app: &mut forge_tui::App, store: &forge_store::Store, sess
             record.contract,
             phase,
         );
+        app.goal_set_relay(super::goal_relay::relay_links(store, session_id));
         return;
     }
     let reason = record
@@ -410,6 +439,12 @@ pub(crate) fn restore(app: &mut forge_tui::App, store: &forge_store::Store, sess
         record.contract,
         GoalPhase::Paused,
     );
+    app.goal_set_relay(super::goal_relay::relay_links(store, session_id));
+    let starting_successor = store.relay_predecessor(session_id).ok().flatten().is_some()
+        && store.next_message_seq(session_id).is_ok_and(|n| n == 0);
+    if starting_successor {
+        return;
+    }
     let waiting = app
         .goal
         .as_ref()

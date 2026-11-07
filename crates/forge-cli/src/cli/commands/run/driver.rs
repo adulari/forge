@@ -338,6 +338,7 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         spec.apns,
         ws_clients.clone(),
         worktree_setup.clone(),
+        spec.registry.clone(),
     ));
 
     Ok(SessionDriverHandle {
@@ -378,6 +379,8 @@ fn now_secs() -> i64 {
 /// 2000-line loop body.
 struct DriverState {
     session: std::sync::Arc<tokio::sync::Mutex<Session>>,
+    /// The daemon's fleet, where a goal relay asks for its successor session to be hosted.
+    registry: Option<std::sync::Arc<crate::serve::SessionRegistry>>,
     app: App,
     catalog: std::sync::Arc<forge_skills::Catalog>,
     armed_project: std::collections::HashSet<String>,
@@ -513,6 +516,7 @@ async fn drive_session(
     apns: Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
     ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     worktree_setup: crate::serve_worktree_start::SetupCell,
+    registry: Option<std::sync::Arc<crate::serve::SessionRegistry>>,
 ) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
     let worktree_base = worktree
@@ -587,6 +591,7 @@ async fn drive_session(
     let interrupt_store = session.lock().await.store.clone();
     let mut st = DriverState {
         session,
+        registry,
         steer,
         app,
         catalog,
@@ -682,6 +687,11 @@ async fn drive_session(
     }
 
     goal_envelope::restore(&mut st.app, &queue_store, &session_id);
+    // A fresh worker a goal relay created starts the goal from its brief; a restart between the
+    // hand-off and this point finds it here again, because it has not run a turn yet.
+    if let Some(outcome) = goal_relay::successor_outcome(&st.session, &mut st.app).await {
+        st.handle_outcome(outcome);
+    }
     let mut persisted_goal: Option<String> = GoalRecord::of(&st.app);
 
     if auto_setup {
@@ -1533,6 +1543,7 @@ pub(super) mod tests {
         let steer = session.steer_handle();
         DriverState {
             steer,
+            registry: None,
             session: std::sync::Arc::new(tokio::sync::Mutex::new(session)),
             app: App::default(),
             catalog,
@@ -2787,5 +2798,236 @@ pub(super) mod tests {
         })
         .await;
         state.turn_handle.take().unwrap().abort();
+    }
+
+    /// Step a goal run the way the driver loop does until it ends or hands its goal on.
+    async fn run_goal_out(state: &mut DriverState) {
+        for _ in 0..12 {
+            let Some(gen) = state.goal_state.as_ref().map(|g| g.gen) else {
+                return;
+            };
+            state.busy = true;
+            state.on_turn_done(gen).await;
+            if let Some(handle) = state.turn_handle.take() {
+                handle.await.unwrap();
+            }
+        }
+        panic!("the goal neither ended nor was handed on");
+    }
+
+    async fn start_wedging_goal(
+        state: &mut DriverState,
+    ) -> (String, std::sync::Arc<forge_store::Store>) {
+        state.goal_state = Some(GoalState::begin(
+            &mut state.app,
+            10,
+            "finish the goal".into(),
+            Vec::new(),
+            None,
+            None,
+        ));
+        let session = state.session.lock().await;
+        (session.id().to_string(), session.store.clone())
+    }
+
+    #[tokio::test]
+    async fn a_wedged_goal_is_handed_to_a_fresh_worker_with_a_brief_it_can_search_back_from() {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        let (pred, store) = start_wedging_goal(&mut state).await;
+        for seq in 0..8 {
+            store
+                .add_message(
+                    &pred,
+                    seq,
+                    forge_types::Role::User,
+                    &format!("zebra decision {seq}"),
+                    None,
+                )
+                .unwrap();
+        }
+        store
+            .compact_session_store(
+                &pred,
+                "summary\n\n## Earlier episodes (message seq ranges)\nintro\n- seq 0-3: the zebra parser",
+                2,
+            )
+            .unwrap();
+        let expert = store.open_turn(&pred, 0).unwrap();
+        store
+            .close_turn(
+                expert,
+                "final_answer",
+                Some(r#"{"expert_consults":1,"expert_model":"codex::sol","expert_diagnosis":"the lexer loops on EOF"}"#),
+            )
+            .unwrap();
+
+        run_goal_out(&mut state).await;
+
+        let link = store
+            .relay_successor(&pred)
+            .unwrap()
+            .expect("a successor was created");
+        assert_eq!(link.reason, "wedged");
+        assert_eq!(
+            store.session_cwd(&link.successor_id).unwrap(),
+            store.session_cwd(&pred).unwrap()
+        );
+        assert_eq!(
+            store
+                .last_closed_turn(&pred)
+                .unwrap()
+                .unwrap()
+                .end_reason
+                .as_deref(),
+            Some("handed_off"),
+            "the predecessor's last turn ends handed_off"
+        );
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::HandedOff);
+        assert!(goal
+            .relay_line()
+            .unwrap()
+            .starts_with("S1 handed off (wedged) -> S2"));
+        let brief = store.relay_brief(&link.successor_id).unwrap().unwrap();
+        for needle in [
+            "Goal: finish the goal",
+            "Commits since the goal started",
+            "Open tasks",
+            "- seq 0-3: the zebra parser",
+            "The expert on call said: (codex::sol) the lexer loops on EOF",
+        ] {
+            assert!(brief.contains(needle), "{needle}\n{brief}");
+        }
+        assert!(
+            store
+                .session_goal_state(&link.successor_id)
+                .unwrap()
+                .is_some_and(|j| j.contains("finish the goal")),
+            "the successor holds the goal record"
+        );
+
+        let (found, ok) = forge_core::recall::run(
+            &store,
+            &link.successor_id,
+            &serde_json::json!({"action": "search", "query": "zebra decision"}),
+        );
+        assert!(
+            ok && found.contains("earlier session"),
+            "the successor recalls its predecessor: {found}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_relay_cap_stops_the_chain() {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        let (pred, store) = start_wedging_goal(&mut state).await;
+        let mut parent = pred.clone();
+        let mut ancestors = Vec::new();
+        for _ in 0..3 {
+            let older = store.create_session("/x", "default").unwrap();
+            ancestors.push((older.clone(), parent.clone()));
+            parent = older;
+        }
+        for (older, child) in &ancestors {
+            store.record_relay(older, child, "wedged", "", "").unwrap();
+        }
+
+        run_goal_out(&mut state).await;
+
+        assert!(
+            store.relay_successor(&pred).unwrap().is_none(),
+            "three relays already made"
+        );
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::Failed);
+        assert!(goal.reason.as_deref().unwrap_or("").contains("wedged"));
+    }
+
+    #[tokio::test]
+    async fn a_session_compacted_often_enough_hands_its_goal_on_without_wedging() {
+        let mut state = test_driver_state().await;
+        let (pred, store) = start_wedging_goal(&mut state).await;
+        for round in 0..4 {
+            for i in 0..4 {
+                let seq = store.next_message_seq(&pred).unwrap();
+                store
+                    .add_message(
+                        &pred,
+                        seq,
+                        forge_types::Role::User,
+                        &format!("r{round} m{i}"),
+                        None,
+                    )
+                    .unwrap();
+            }
+            store
+                .compact_session_store(&pred, &format!("summary {round}"), 1)
+                .unwrap();
+        }
+        assert_eq!(store.compaction_count(&pred).unwrap(), 4);
+
+        run_goal_out(&mut state).await;
+
+        let link = store
+            .relay_successor(&pred)
+            .unwrap()
+            .expect("worn out, so handed on");
+        assert_eq!(link.reason, "worn");
+        assert!(link.detail.contains("4"), "{}", link.detail);
+    }
+
+    #[tokio::test]
+    async fn a_restart_between_the_hand_off_and_the_first_turn_starts_the_goal_from_the_brief() {
+        let mut state = test_driver_state().await;
+        let (pred, store) = start_wedging_goal(&mut state).await;
+        run_goal_out(&mut state).await;
+        let link = store.relay_successor(&pred).unwrap().unwrap();
+        let brief = store.relay_brief(&link.successor_id).unwrap().unwrap();
+
+        // The next daemon generation hosts the successor: a fresh session on its id, a fresh app.
+        state
+            .session
+            .lock()
+            .await
+            .reset_resumed(&link.successor_id)
+            .unwrap();
+        let mut app = App::default();
+        goal_envelope::restore(&mut app, &store, &link.successor_id);
+        let outcome = goal_relay::successor_outcome(&state.session, &mut app).await;
+        let Some(DispatchOutcome::StartGoal { prompt, goal, .. }) = outcome else {
+            panic!("the successor starts its goal");
+        };
+        assert_eq!(prompt, brief);
+        assert_eq!(goal, "finish the goal");
+        assert!(app
+            .goal
+            .as_ref()
+            .unwrap()
+            .relay_line()
+            .unwrap()
+            .starts_with("S1 handed off (wedged)"));
+
+        // Once it has run a turn it is an ordinary session again: a restart must not replay it.
+        store
+            .add_message(&link.successor_id, 0, forge_types::Role::User, &brief, None)
+            .unwrap();
+        let mut again = App::default();
+        goal_envelope::restore(&mut again, &store, &link.successor_id);
+        assert!(goal_relay::successor_outcome(&state.session, &mut again)
+            .await
+            .is_none());
+
+        // And the predecessor, restored, still says it handed the goal on (the driver loop
+        // persists its goal record; a record that predates the hand-off says the same).
+        let record = GoalRecord::of(&state.app).expect("a handed-off goal keeps its record");
+        store.set_session_goal_state(&pred, Some(&record)).unwrap();
+        let mut old = App::default();
+        goal_envelope::restore(&mut old, &store, &pred);
+        assert_eq!(
+            old.goal.as_ref().unwrap().phase,
+            forge_tui::goal_status::GoalPhase::HandedOff
+        );
     }
 }

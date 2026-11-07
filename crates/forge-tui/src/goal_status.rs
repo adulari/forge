@@ -18,6 +18,27 @@ pub enum GoalPhase {
     Complete,
     Failed,
     Cancelled,
+    /// The goal moved to a fresh worker session; this session no longer runs it.
+    HandedOff,
+}
+
+/// One session of a goal's relay chain (docs/features/goal-contract.md, "Fresh-worker relay").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GoalRelayLink {
+    pub session_id: String,
+    /// Why this session handed the goal on (`wedged`, `stalled`, `worn`); `None` for the session
+    /// that holds the goal now.
+    pub handed_off: Option<String>,
+}
+
+impl GoalRelayLink {
+    /// `S1 handed off (wedged)` / `S2 running`.
+    pub fn line(&self, number: usize, tip_state: &str) -> String {
+        match &self.handed_off {
+            Some(reason) => format!("S{number} handed off ({reason})"),
+            None => format!("S{number} {tip_state}"),
+        }
+    }
 }
 
 impl GoalPhase {
@@ -29,6 +50,7 @@ impl GoalPhase {
             Self::Complete => "complete",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::HandedOff => "handed off",
         }
     }
 
@@ -41,6 +63,7 @@ impl GoalPhase {
             "complete" => Self::Complete,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
+            "handed_off" => Self::HandedOff,
             _ => return None,
         })
     }
@@ -54,6 +77,7 @@ impl GoalPhase {
             Self::Complete => "complete",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::HandedOff => "handed_off",
         }
     }
 }
@@ -96,6 +120,9 @@ pub struct GoalStatus {
     /// The approved validation contract and the validator's latest results
     /// (docs/features/goal-contract.md); `None` for a goal without one.
     pub contract: Option<GoalContract>,
+    /// The sessions the goal has run in, oldest first, the one holding it last; empty until the
+    /// goal has been handed to a fresh worker.
+    pub relay: Vec<GoalRelayLink>,
     /// Wall clock of the last sync, Unix ms, so a client can keep the elapsed time ticking.
     pub synced_at_ms: u64,
     carry: bool,
@@ -162,6 +189,27 @@ impl GoalStatus {
         }
     }
 
+    /// `S1 handed off (wedged) -> S2 running`; `None` for a goal that never changed worker.
+    pub fn relay_line(&self) -> Option<String> {
+        if self.relay.is_empty() {
+            return None;
+        }
+        let tip = match self.phase {
+            GoalPhase::Active => "running",
+            GoalPhase::Paused => "paused",
+            GoalPhase::Complete => "complete",
+            GoalPhase::HandedOff => "starting",
+            _ => "stopped",
+        };
+        let parts: Vec<String> = self
+            .relay
+            .iter()
+            .enumerate()
+            .map(|(i, link)| link.line(i + 1, tip))
+            .collect();
+        Some(parts.join(" -> "))
+    }
+
     /// The `/goal status` lines.
     pub fn summary(&self) -> String {
         let mut out = format!("🎯 goal {} — {}", self.phase.label(), self.objective);
@@ -184,6 +232,9 @@ impl GoalStatus {
                     out.push_str(&format!("\n   resumes at {at} when the window resets"));
                 }
             }
+        }
+        if let Some(chain) = self.relay_line() {
+            out.push_str(&format!("\n   {chain}"));
         }
         if !self.gates.is_empty() {
             out.push_str(&format!("\n   gates: {}", self.gates.join(", ")));
@@ -259,10 +310,27 @@ impl App {
             envelope,
             envelope_edit: None,
             contract: kept_contract,
+            relay: Vec::new(),
             synced_at_ms: now_ms(),
             carry: false,
         });
         carry
+    }
+
+    /// The sessions the goal has run in.
+    pub fn goal_set_relay(&mut self, chain: Vec<GoalRelayLink>) {
+        if let Some(goal) = self.goal.as_mut() {
+            goal.relay = chain;
+        }
+    }
+
+    /// The goal moved to a fresh worker session: this one no longer runs it.
+    pub fn goal_handed_off(&mut self, reason: &str) {
+        if let Some(goal) = self.goal.as_mut() {
+            goal.phase = GoalPhase::HandedOff;
+            goal.request = None;
+            goal.reason = Some(reason.to_string());
+        }
     }
 
     /// The approved contract for the running goal.
@@ -343,6 +411,7 @@ impl App {
             envelope,
             envelope_edit: None,
             contract,
+            relay: Vec::new(),
             synced_at_ms: now_ms(),
             carry: false,
         });

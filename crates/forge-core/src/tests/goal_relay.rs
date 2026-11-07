@@ -51,7 +51,7 @@ async fn a_hand_off_creates_the_successor_and_ends_the_predecessor_turn() {
         ..Config::default()
     };
     config.mesh.auto_memory = false;
-    let session = Session::start(
+    let mut session = Session::start(
         store.clone(),
         Arc::new(Quiet),
         Arc::new(FixedRouter {

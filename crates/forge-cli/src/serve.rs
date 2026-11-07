@@ -287,6 +287,9 @@ pub(crate) struct SessionRegistry {
     pub(crate) signals: crate::serve_fleet_ws::HostSignals,
     /// Other machines, while Forge Anywhere is on (`crate::fleet_peers`).
     pub(crate) remote_hosts: std::sync::RwLock<Option<Arc<dyn crate::fleet_peers::RemoteHosts>>>,
+    /// Where a goal relay asks the daemon to bring up its successor session
+    /// (`crate::serve_relay`); unset outside `forge serve`.
+    relay_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl SessionRegistry {
@@ -297,7 +300,20 @@ impl SessionRegistry {
             draining: std::sync::atomic::AtomicBool::new(false),
             signals: crate::serve_fleet_ws::HostSignals::new(),
             remote_hosts: std::sync::RwLock::new(None),
+            relay_tx: std::sync::OnceLock::new(),
         }
+    }
+
+    pub(crate) fn set_relay_launcher(&self, tx: tokio::sync::mpsc::UnboundedSender<String>) {
+        let _ = self.relay_tx.set(tx);
+    }
+
+    /// Ask the daemon to host `session_id`, a fresh worker a goal was just handed to. False when
+    /// no daemon is listening (a test, a bare driver).
+    pub(crate) fn launch_relay(&self, session_id: String) -> bool {
+        self.relay_tx
+            .get()
+            .is_some_and(|tx| tx.send(session_id).is_ok())
     }
 
     pub(crate) fn notify_fleet(&self) {
@@ -746,6 +762,7 @@ pub(crate) async fn serve_cmd(
     });
     crate::serve_update::start_auto(&state.registry);
     crate::serve_lifecycle::start(&state, config.sessions.clone());
+    crate::serve_relay::start(&state);
     crate::serve_pr_watch::start(&state);
     crate::serve_drain::init();
 
@@ -1398,7 +1415,7 @@ async fn host_pressure_gate(repo: &std::path::Path) -> Option<crate::host_pressu
 }
 
 /// `POST /api/sessions` starts a session.
-async fn create_session(
+pub(crate) async fn create_session(
     State(state): State<Arc<DaemonState>>,
     request: Result<axum::Json<CreateSessionReq>, axum::extract::rejection::JsonRejection>,
 ) -> Response {

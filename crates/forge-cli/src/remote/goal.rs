@@ -27,6 +27,21 @@ pub struct SnapGoal {
     /// when the goal has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contract: Option<SnapContract>,
+    /// The sessions the goal has run in, oldest first (fresh-worker relay); absent for a goal that
+    /// never changed worker.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub relay: Vec<SnapRelay>,
+}
+
+/// One session of the relay chain.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapRelay {
+    pub session_id: String,
+    /// `handed_off` for a session that gave the goal on, else what the goal is doing there.
+    pub state: &'static str,
+    /// `wedged`, `stalled` or `worn`: why it handed the goal on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A goal contract as the clients draw it: a table, one row per assertion.
@@ -137,6 +152,19 @@ impl From<&GoalStatus> for SnapGoal {
                 resumes_at: e.auto_resume_at(),
             }),
             contract: goal.contract.as_ref().map(SnapContract::from),
+            relay: goal
+                .relay
+                .iter()
+                .map(|link| SnapRelay {
+                    session_id: link.session_id.clone(),
+                    state: if link.handed_off.is_some() {
+                        "handed_off"
+                    } else {
+                        goal.phase.wire()
+                    },
+                    reason: link.handed_off.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -145,6 +173,40 @@ impl From<&GoalStatus> for SnapGoal {
 mod tests {
     use super::*;
     use forge_types::goal_contract::{parse_contract, AssertionResult, GoalContract};
+
+    #[test]
+    fn the_snapshot_carries_the_relay_chain_and_omits_it_without_one() {
+        use forge_tui::goal_status::GoalRelayLink;
+        let mut app = forge_tui::App::default();
+        app.goal_begin("ship it", &[], None, None);
+        let bare = serde_json::to_value(SnapGoal::from(app.goal.as_ref().unwrap())).unwrap();
+        assert!(bare.get("relay").is_none());
+        app.goal_set_relay(vec![
+            GoalRelayLink {
+                session_id: "aaaa".into(),
+                handed_off: Some("wedged".into()),
+            },
+            GoalRelayLink {
+                session_id: "bbbb".into(),
+                handed_off: None,
+            },
+        ]);
+        let json = serde_json::to_value(SnapGoal::from(app.goal.as_ref().unwrap())).unwrap();
+        assert_eq!(json["relay"][0]["state"], "handed_off");
+        assert_eq!(json["relay"][0]["reason"], "wedged");
+        assert_eq!(json["relay"][1]["state"], "active");
+        assert!(json["relay"][1].get("reason").is_none());
+        assert_eq!(
+            app.goal.as_ref().unwrap().relay_line().as_deref(),
+            Some("S1 handed off (wedged) -> S2 running")
+        );
+        assert!(app
+            .goal
+            .as_ref()
+            .unwrap()
+            .summary()
+            .contains("S1 handed off (wedged) -> S2 running"));
+    }
 
     #[test]
     fn the_snapshot_carries_the_contract_table_and_omits_it_without_one() {

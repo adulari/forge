@@ -251,6 +251,7 @@ mod envelope {
                 session_usd: 0.0,
                 now,
             },
+            relay: None,
         }
     }
 

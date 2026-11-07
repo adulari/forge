@@ -22,7 +22,10 @@ use forge_core::{GoalEvalRequest, GoalVerdict};
 use forge_types::goal_contract::{failure_prompt, AssertionResult, GoalContract};
 use forge_types::goal_envelope::EnvelopeCheck;
 
+use forge_core::goal_relay::{RelayPolicy, RelayReason};
+
 use super::goal_envelope::{self, pause_message, EnvelopeSources};
+use super::goal_relay::{self, RelayPlan};
 
 use super::*;
 
@@ -361,6 +364,8 @@ pub(crate) enum GoalNext {
     Turn(String),
     /// Run this prompt next unless the user queued a correction, which takes the turn instead.
     Continue(String),
+    /// The goal moved to a fresh worker session: the driver brings it up and ends this run.
+    Relay(RelayPlan),
 }
 
 /// What a finished turn (and its evaluation) looks like to the goal policy, read off the session.
@@ -377,6 +382,9 @@ pub(crate) struct GoalTurnFacts {
     root: std::path::PathBuf,
     /// What the spend envelope is measured against: subscription readings and session cost.
     sources: EnvelopeSources,
+    /// The fresh-worker relay settings; `None` where a run cannot hand its goal on (the headless
+    /// local run has no driver to start the successor).
+    relay: Option<RelayPolicy>,
 }
 
 impl GoalTurnFacts {
@@ -398,7 +406,14 @@ impl GoalTurnFacts {
                 root.to_path_buf()
             },
             sources: EnvelopeSources::read(s),
+            relay: Some(s.relay_policy()),
         }
+    }
+
+    /// For a run that has no driver to start a successor session.
+    pub(crate) fn without_relay(mut self) -> Self {
+        self.relay = None;
+        self
     }
 }
 
@@ -415,6 +430,11 @@ pub(crate) enum GoalStep {
     /// of starting another turn.
     Pause {
         reason: String,
+    },
+    /// The goal wedged, stalled or wore its session out: it continues in a fresh worker session.
+    Relay {
+        reason: RelayReason,
+        detail: String,
     },
 }
 
@@ -476,6 +496,25 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
             return GoalStep::Pause {
                 reason: pause_message(envelope, check),
             };
+        }
+    }
+    if let (Some(policy), false) = (facts.relay.filter(RelayPolicy::allowed), envelope_hit) {
+        match &decision {
+            GoalDecision::Stop(stop) => {
+                if let Some(reason) = RelayReason::of_stop(stop) {
+                    return GoalStep::Relay {
+                        reason,
+                        detail: goal_relay::stop_detail(stop),
+                    };
+                }
+            }
+            GoalDecision::GateFailed { .. } | GoalDecision::Retry { .. } if policy.worn() => {
+                return GoalStep::Relay {
+                    reason: RelayReason::Worn,
+                    detail: format!("compacted {} times", policy.compactions),
+                };
+            }
+            _ => {}
         }
     }
     match decision {
@@ -580,6 +619,19 @@ pub(crate) async fn advance_goal(
             session.lock().await.set_active_goal(None);
             GoalNext::Stop
         }
+        GoalStep::Relay { reason, detail } => {
+            match goal_relay::perform(gs, session, app, reason, &detail).await {
+                Ok(plan) => GoalNext::Relay(plan),
+                Err(why) => {
+                    let stop =
+                        format!("🎯 goal stopped — could not hand it to a fresh worker: {why}");
+                    app.note(&stop);
+                    app.goal_ended(false, &stop);
+                    session.lock().await.set_active_goal(None);
+                    GoalNext::Stop
+                }
+            }
+        }
         GoalStep::Turn(prompt) => GoalNext::Turn(prompt),
         GoalStep::Continue(prompt) => GoalNext::Continue(prompt),
     }
@@ -608,7 +660,7 @@ pub(crate) fn launch_goal_step(
 ) -> Option<LaunchedGoalStep> {
     gs.gen = gen;
     let prompt = match next {
-        GoalNext::Stop => return None,
+        GoalNext::Stop | GoalNext::Relay(_) => return None,
         GoalNext::Evaluate(request) => {
             app.done = false;
             app.tick = 0;

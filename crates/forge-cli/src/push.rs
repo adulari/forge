@@ -524,6 +524,22 @@ pub(crate) fn detect_trigger(
             });
         }
     }
+    let handed_off = |s: &Snapshot| s.goal.as_ref().is_some_and(|g| g.state == "handed_off");
+    if handed_off(cur) && !prev.is_some_and(handed_off) {
+        let why = cur
+            .goal
+            .as_ref()
+            .and_then(|g| g.relay.iter().rev().find_map(|l| l.reason.clone()))
+            .unwrap_or_default();
+        return Some(PushMessage {
+            kind: "done",
+            session: cur.session_id.clone(),
+            title,
+            body: format!("goal handed to a fresh worker ({why})"),
+            seq: cur.prompt_seq,
+            ttl: TTL_COMPLETION,
+        });
+    }
     if prev.is_some_and(|p| p.busy)
         && !cur.busy
         && cur.permission_prompt.is_none()
@@ -1232,6 +1248,37 @@ mod tests {
             session_id: "sess12345678".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn trigger_announces_a_goal_handed_to_a_fresh_worker_once() {
+        use forge_tui::goal_status::GoalRelayLink;
+        let mut app = forge_tui::App::default();
+        app.goal_begin("ship it", &[], None, None);
+        let running = Snapshot {
+            goal: Some(crate::remote::SnapGoal::from(app.goal.as_ref().unwrap())),
+            busy: true,
+            ..snap()
+        };
+        app.goal_set_relay(vec![
+            GoalRelayLink {
+                session_id: "aaaa".into(),
+                handed_off: Some("wedged".into()),
+            },
+            GoalRelayLink {
+                session_id: "bbbb".into(),
+                handed_off: None,
+            },
+        ]);
+        app.goal_handed_off("handed over");
+        let handed = Snapshot {
+            goal: Some(crate::remote::SnapGoal::from(app.goal.as_ref().unwrap())),
+            busy: false,
+            ..snap()
+        };
+        let msg = detect_trigger(Some(&running), &handed, None).expect("a push");
+        assert_eq!(msg.body, "goal handed to a fresh worker (wedged)");
+        assert_eq!(detect_trigger(Some(&handed), &handed, None), None);
     }
 
     #[test]

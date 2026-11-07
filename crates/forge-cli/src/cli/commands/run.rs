@@ -42,6 +42,7 @@ mod goal_headless;
 pub(crate) mod goal_show;
 pub(crate) use goal_headless::*;
 mod goal_progress;
+pub(crate) mod goal_relay;
 pub(crate) use goal_progress::*;
 
 mod setup;

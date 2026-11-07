@@ -71,6 +71,26 @@ pub fn is_worn(after_compactions: u32, compactions: u32) -> bool {
     after_compactions > 0 && compactions >= after_compactions
 }
 
+/// What decides whether a goal moves to a fresh worker now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RelayPolicy {
+    pub max_relays: u32,
+    pub after_compactions: u32,
+    /// Hand-offs that led to the session now running the goal.
+    pub depth: u32,
+    pub compactions: u32,
+}
+
+impl RelayPolicy {
+    pub fn allowed(&self) -> bool {
+        relay_allowed(self.max_relays, self.depth)
+    }
+
+    pub fn worn(&self) -> bool {
+        is_worn(self.after_compactions, self.compactions)
+    }
+}
+
 /// Everything the brief says, already gathered.
 #[derive(Debug, Clone, Default)]
 pub struct BriefFacts {
@@ -257,8 +277,18 @@ impl Session {
             .map_or(0, |p| p.len() as u32)
     }
 
+    /// The relay settings and where this session stands against them.
+    pub fn relay_policy(&self) -> RelayPolicy {
+        RelayPolicy {
+            max_relays: self.config.goal.max_relays,
+            after_compactions: self.config.goal.relay_after_compactions,
+            depth: self.relay_depth(),
+            compactions: self.compaction_count(),
+        }
+    }
+
     /// Gather the facts a successor starts from.
-    pub async fn relay_facts(&self, request: &RelayRequest) -> BriefFacts {
+    pub async fn relay_facts(&mut self, request: &RelayRequest) -> BriefFacts {
         let evidence =
             crate::goal_evidence::collect(self.workspace.root(), &self.id, request.started_unix)
                 .await;
@@ -313,7 +343,10 @@ impl Session {
 
     /// Create the successor session for this goal and mark this session's last turn
     /// `handed_off`. The caller starts the successor's driver.
-    pub async fn hand_off_goal(&self, request: &RelayRequest) -> Result<RelayHandOff, CoreError> {
+    pub async fn hand_off_goal(
+        &mut self,
+        request: &RelayRequest,
+    ) -> Result<RelayHandOff, CoreError> {
         let facts = self.relay_facts(request).await;
         let brief = render_brief(&facts);
         let successor_id = self.store.create_relay_successor(
