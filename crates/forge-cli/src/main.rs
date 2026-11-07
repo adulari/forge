@@ -146,6 +146,7 @@ mod serve_issues;
 mod serve_keybindings;
 mod serve_lifecycle;
 mod serve_media;
+mod serve_merge_queue;
 mod serve_notes;
 mod serve_onboarding;
 mod serve_pairing;

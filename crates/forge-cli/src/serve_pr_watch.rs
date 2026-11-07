@@ -12,6 +12,7 @@
 //! - `GET  /api/pr/watch?session=`   the session's watch, or `null`
 //! - `GET  /api/pr/watches`          every armed watch (Fleet rows, Schedules list)
 //! - `POST /api/pr/watch`            `{session, mode: off|fix|merge, method?: squash|merge|rebase|auto}`
+//! - `GET  /api/pr/queue`            the merge queue per repository (docs/features/merge-queue.md)
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -73,10 +74,19 @@ pub(crate) struct Watch {
     /// daemon restart never pushes the same one twice.
     #[serde(default)]
     pushed: Option<String>,
+    /// Merge queue standing (merge mode only); see `serve_merge_queue`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) queue: Option<crate::serve_merge_queue::QueueInfo>,
+    /// Why the merge queue is not letting this PR merge yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) hold: Option<String>,
+    /// The PR's base branch as of the last poll.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_branch: Option<String>,
 }
 
 impl Watch {
-    fn new(session_id: &str, mode: Mode, method: &str, now: i64) -> Self {
+    pub(crate) fn new(session_id: &str, mode: Mode, method: &str, now: i64) -> Self {
         Self {
             session_id: session_id.to_string(),
             mode,
@@ -94,10 +104,13 @@ impl Watch {
             last_action: None,
             created_at: now,
             pushed: None,
+            queue: None,
+            hold: None,
+            base_branch: None,
         }
     }
 
-    fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         self.mode != Mode::Off && self.state == Phase::Watching
     }
 }
@@ -153,7 +166,7 @@ impl Registry {
         self.lock().get(session).cloned()
     }
 
-    fn all(&self) -> Vec<Watch> {
+    pub(crate) fn all(&self) -> Vec<Watch> {
         let mut rows: Vec<Watch> = self.lock().values().cloned().collect();
         rows.sort_by(|a, b| {
             a.created_at
@@ -188,6 +201,8 @@ impl Registry {
                     w.last_key = None;
                     w.auto_armed = false;
                     w.pushed = None;
+                    w.queue = None;
+                    w.hold = None;
                 })
                 .or_insert_with(|| Watch::new(session, mode, method, now));
             Some(watch.clone())
@@ -231,6 +246,7 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
             get(watch_get).post(watch_set),
         )
         .route(&format!("{base}/api/pr/watches"), get(watches_list))
+        .route(&format!("{base}/api/pr/queue"), get(queue_list))
 }
 
 #[derive(Deserialize)]
@@ -248,6 +264,12 @@ struct WatchRequest {
 
 async fn watch_get(Query(query): Query<WatchQuery>) -> Response {
     json_response(&serde_json::json!({ "watch": registry().get(&query.session) }))
+}
+
+async fn queue_list() -> Response {
+    json_response(&serde_json::json!({
+        "queues": crate::serve_merge_queue::snapshot(&registry().all())
+    }))
 }
 
 async fn watches_list() -> Response {
@@ -367,7 +389,8 @@ async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
         };
         let free = !snapshot.busy && snapshot.question.is_none();
         let mut next = watch.clone();
-        let outcome = poll_once(gh, &root, &mut next, free, now).await;
+        let all = registry().all();
+        let outcome = advance(gh, &root, &mut next, all, free, now, None).await;
         let announcement = settle_push(&mut next, outcome.green);
         registry().update(&watch.session_id, |w| *w = next.clone());
         announce(state, &watch.session_id, announcement).await;
@@ -389,6 +412,41 @@ async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
             state.registry.notify_fleet();
         }
     }
+}
+
+/// One watch's turn: the merge queue's update step for a merge-mode watch, then PR Watch's poll.
+/// A hand-off or a push settles the tick on its own; the poll waits for the next one.
+pub(crate) async fn advance(
+    gh: &Gh,
+    root: &Path,
+    watch: &mut Watch,
+    all: Vec<Watch>,
+    free: bool,
+    now: i64,
+    verify: Option<Vec<crate::serve_merge_queue::Verify>>,
+) -> Outcome {
+    if watch.mode != Mode::Merge {
+        watch.hold = None;
+        watch.queue = None;
+        return poll_once(gh, root, watch, free, now).await;
+    }
+    let before = watch.clone();
+    let pre = crate::serve_merge_queue::before_poll(root, watch, all, free, now, verify).await;
+    if pre.acted {
+        watch.last_checked = Some(now);
+        return Outcome {
+            prompt: pre.prompt,
+            changed: true,
+            ..Outcome::default()
+        };
+    }
+    let mut out = poll_once(gh, root, watch, free, now).await;
+    out.changed |= {
+        let mut left = before;
+        left.last_checked = watch.last_checked;
+        left != *watch
+    };
+    out
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -522,6 +580,9 @@ fn decide(watch: &Watch, pr: &PrSummary, comments: &[String], free: bool) -> Dec
     }
     let conflicting = pr.mergeable == "conflicting" || pr.merge_state == "dirty";
     if watch.mode == Mode::Merge && watch.method == "auto" && !watch.auto_armed && !conflicting {
+        if let Some(reason) = &watch.hold {
+            return Decision::Wait(Some(reason.clone()));
+        }
         return Decision::Merge;
     }
     if pr.checks.pending > 0 {
@@ -561,6 +622,9 @@ fn decide(watch: &Watch, pr: &PrSummary, comments: &[String], free: bool) -> Dec
     }
     if watch.mode != Mode::Merge {
         return Decision::Green;
+    }
+    if let Some(reason) = &watch.hold {
+        return Decision::Wait(Some(reason.clone()));
     }
     if conflicting {
         return Decision::Wait(Some("merge conflicts with the base branch".into()));
@@ -620,6 +684,7 @@ pub(crate) async fn poll_once(
     watch.pr_number = Some(pr.number);
     watch.pr_url = Some(pr.url.clone());
     watch.head_sha = Some(pr.head_sha.clone());
+    watch.base_branch = Some(pr.base_ref.clone()).filter(|b| !b.is_empty());
     if before.last_checked.is_none() {
         watch.seen_comments = comments.clone();
     }
