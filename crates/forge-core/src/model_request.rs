@@ -143,6 +143,9 @@ pub(super) async fn request_provider_response(
     let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
     let mut attempted = std::collections::HashSet::new();
     let mut failures = Vec::new();
+    // Whether any failure of this round of the chain was something waiting cannot cure. Only a
+    // chain that failed wholly as an outage is waited out (outage_wait.rs).
+    let mut non_outage_failure = false;
     // Models the chain reached while subscription pacing holds them: parked here, tried only
     // once every non-held candidate is exhausted (see `admit_paced_held`).
     let mut deferred_held: Vec<String> = Vec::new();
@@ -151,6 +154,32 @@ pub(super) async fn request_provider_response(
     // Consecutive token throttles on this request, and the compactions spent on them. Local: both
     // describe one request's retries, not the turn.
     let mut throttles = throttle_recovery::TokenThrottles::default();
+    // The whole chain is down: wait for the head model on the slow schedule, then start the chain
+    // again from it. Dispatch does not consult the bench, so the head is always probed, and
+    // fallbacks rejoin as their short benches expire.
+    macro_rules! wait_out_dead_chain {
+        ($e:expr, $d:expr) => {
+            if !non_outage_failure
+                && session
+                    .wait_out_outage(&$d.model, &$e, std::time::Duration::ZERO)
+                    .await
+            {
+                *active_model = $d.model.clone();
+                *chain = $d.fallbacks.clone().into_iter();
+                attempted.clear();
+                failures.clear();
+                deferred_held.clear();
+                *last_resort_used = false;
+                failover_hop = 0;
+                continue;
+            }
+            if !non_outage_failure {
+                if let Some(down) = session.provider_down_error(&$d.model, &$e) {
+                    return Err(down);
+                }
+            }
+        };
+    }
     let resp = loop {
         // Bound what we send to the active model's context window (fetched/heuristic), so a
         // long conversation can't overflow it — which otherwise fails the turn as
@@ -321,6 +350,7 @@ pub(super) async fn request_provider_response(
                 // runtime re-probes, so before this a wrong exclusion outlived every observation
                 // that contradicted it.
                 let _ = session.store.clear_health_after_success(active_model);
+                session.outage_recovered(active_model);
                 if !r.content.is_empty() && r.wants_tools() {
                     session.presenter.emit(PresenterEvent::AssistantDone);
                 }
@@ -396,6 +426,7 @@ pub(super) async fn request_provider_response(
                 let permanent = e.is_permanent();
                 attempted.insert(active_model.clone());
                 failures.push(classify_attempt_failure(&e));
+                non_outage_failure |= !crate::outage_wait::is_outage(&e);
                 if permanent {
                     session.record_model_failure(active_model, &e, default_cooldown);
                 }
@@ -591,6 +622,18 @@ pub(super) async fn request_provider_response(
                             *pinned_outage_waited = std::time::Duration::ZERO;
                             *pinned_outage_last_error = None;
                         } else {
+                            // The hot budget is spent and nothing else can serve a pin: keep
+                            // re-sending the real request on the slow schedule until the
+                            // outage allowance ends (outage_wait.rs).
+                            if session
+                                .wait_out_outage(active_model, &e, *pinned_outage_waited)
+                                .await
+                            {
+                                continue;
+                            }
+                            if let Some(down) = session.provider_down_error(active_model, &e) {
+                                return Err(down);
+                            }
                             session.presenter.emit(PresenterEvent::Warning(format!(
                                 "{active_model}: still {} after \
                              {pinned_outage_attempts} backoff retries — failing the turn \
@@ -719,6 +762,7 @@ pub(super) async fn request_provider_response(
                                 continue;
                             }
                             None => {
+                                wait_out_dead_chain!(e, d);
                                 let reason = e.reason();
                                 session.presenter.emit(PresenterEvent::Warning(format!(
                                     "{active_model} {reason} — model chain exhausted: {e}"
@@ -756,6 +800,7 @@ pub(super) async fn request_provider_response(
                         // doesn't exist. Mirror `advance_fallback`'s terminal warning and
                         // carry the error into the returned CoreError.
                         None => {
+                            wait_out_dead_chain!(e, d);
                             let reason = e.reason();
                             session.presenter.emit(PresenterEvent::Warning(format!(
                                 "{active_model} {reason} — model chain exhausted: {e}"

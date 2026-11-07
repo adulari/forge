@@ -103,7 +103,8 @@ pub use handoff_types::{
 pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRefinement};
 pub use history_stats::RowStats;
 pub use interrupted_turn_store::{
-    classify_tail, InterruptedTail, TailRow, TailState, RESTART_INTERRUPT_NOTE, USER_INTERRUPT_NOTE,
+    classify_tail, InterruptedTail, TailRow, TailState, OUTAGE_BACK_MARK, OUTAGE_ENTER_MARK,
+    RESTART_INTERRUPT_NOTE, USER_INTERRUPT_NOTE,
 };
 pub use maintenance::MaintenanceReport;
 pub use memory::{Memory, MemoryAdded};

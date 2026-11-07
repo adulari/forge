@@ -9,6 +9,19 @@ pub const USER_INTERRUPT_NOTE: &str = "⏹ Interrupted by you.";
 /// Prefix of the UI-only note written when a restart found a turn cut off.
 pub const RESTART_INTERRUPT_NOTE: &str = "⚠ Interrupted by a daemon restart.";
 
+/// Leading mark of the UI-only note a turn writes when it starts waiting out a provider outage.
+pub const OUTAGE_ENTER_MARK: &str = "⏸ ";
+/// Leading mark of the UI-only note written when the provider answered again.
+pub const OUTAGE_BACK_MARK: &str = "▶ ";
+
+/// Whether a UI-only system note belongs to a provider outage wait. Such a note is written in the
+/// MIDDLE of a turn, so it must not read as the turn's end: a daemon restart during a long wait
+/// has to re-drive the turn, not take it for finished.
+fn is_outage_note(content: &str) -> bool {
+    (content.starts_with(OUTAGE_ENTER_MARK) && content.contains("provider down since"))
+        || (content.starts_with(OUTAGE_BACK_MARK) && content.contains(" back after "))
+}
+
 /// How far back the transcript tail is read; one assistant tool-call batch plus its results is
 /// far shorter than this.
 const TAIL_ROWS: i64 = 256;
@@ -54,7 +67,9 @@ pub fn classify_tail(newest_first: &[TailRow]) -> TailState {
         if last.role == "system" && last.content.starts_with(USER_INTERRUPT_NOTE) {
             return TailState::UserInterrupted;
         }
-        if !(last.role == "system" && last.content.starts_with(RESTART_INTERRUPT_NOTE)) {
+        if !(last.role == "system"
+            && (last.content.starts_with(RESTART_INTERRUPT_NOTE) || is_outage_note(&last.content)))
+        {
             // A published answer, a budget note, a command echo: the turn ended on it.
             return TailState::Finished;
         }
@@ -64,7 +79,9 @@ pub fn classify_tail(newest_first: &[TailRow]) -> TailState {
     // injects, summaries): they are never the end of a turn.
     let mut rows = newest_first.iter().filter(|r| {
         !(r.role == "system"
-            && (r.visibility != "ui" || r.content.starts_with(RESTART_INTERRUPT_NOTE)))
+            && (r.visibility != "ui"
+                || r.content.starts_with(RESTART_INTERRUPT_NOTE)
+                || is_outage_note(&r.content)))
     });
     let Some(tail) = rows.next() else {
         return TailState::Finished;
@@ -221,6 +238,29 @@ mod tests {
         store
             .note_turn_failure(&sid, "provider busy (503 no_capacity)")
             .unwrap();
+        assert_eq!(store.session_tail_state(&sid).unwrap(), TailState::Finished);
+    }
+
+    #[test]
+    fn an_outage_note_in_the_middle_of_a_turn_does_not_end_it() {
+        let (store, sid) = store_with_session();
+        let enter = format!(
+            "{OUTAGE_ENTER_MARK}drill::flash: provider down since 10:18 (503 no_capacity), \
+             retrying every <=5 min until 18:18. Esc to stop."
+        );
+        store.add_ui_note(&sid, 2, Role::System, &enter).unwrap();
+        assert_eq!(
+            store.session_tail_state(&sid).unwrap(),
+            TailState::Interrupted(InterruptedTail::UnansweredPrompt),
+            "a restart during the wait must re-drive the turn"
+        );
+        let back = format!("{OUTAGE_BACK_MARK}drill::flash back after 4h09m, turn resumed");
+        store.add_ui_note(&sid, 3, Role::System, &back).unwrap();
+        assert_eq!(
+            store.session_tail_state(&sid).unwrap(),
+            TailState::Interrupted(InterruptedTail::UnansweredPrompt)
+        );
+        store.note_turn_failure(&sid, "gave up").unwrap();
         assert_eq!(store.session_tail_state(&sid).unwrap(), TailState::Finished);
     }
 

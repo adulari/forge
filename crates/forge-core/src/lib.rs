@@ -183,6 +183,7 @@ mod session_restore;
 mod session_rewind;
 pub use session_rewind::{RewindScope, SummarizeOutcome, SUMMARIZED_FROM_HERE};
 pub mod host_limits;
+pub mod outage_wait;
 pub mod session_slash_controls;
 mod session_usage_detail;
 mod session_virtual_tools;
@@ -439,6 +440,10 @@ pub enum CoreError {
         reason: &'static str,
         last_error: String,
     },
+    /// A provider that stayed down for the whole `mesh.outage_wait_secs` allowance. The turn
+    /// ends with [`StopReason::ProviderDown`] rather than as an ordinary failure.
+    #[error("{message}")]
+    ProviderDown { model: String, message: String },
     /// The auto-review gate found findings at/above the configured severity and `gate_mode =
     /// "block"` is set — the turn is aborted so the model can fix them before proceeding.
     #[error("auto-review gate blocked: {0}")]
@@ -448,6 +453,16 @@ pub enum CoreError {
     /// aborting the whole process mid-turn.
     #[error("internal invariant violated: {0}")]
     Internal(String),
+}
+
+impl CoreError {
+    /// How a turn that ended in this error is recorded.
+    pub fn stop_reason(&self) -> StopReason {
+        match self {
+            Self::ProviderDown { .. } => StopReason::ProviderDown,
+            _ => StopReason::NoOutput,
+        }
+    }
 }
 
 /// Result of a [`Session::rewind_to`] / [`Session::undo`]: what the file-restore did, plus the
@@ -1868,6 +1883,10 @@ pub struct Session {
     /// One-shot latch for the deadline-reconciliation instruction; re-armed by
     /// [`Session::set_turn_deadline`].
     deadline_reconciled: bool,
+    /// The provider outage this turn is waiting out (`outage_wait.rs`). On the session, not in
+    /// the model loop's locals, so every pass of one turn shares a single horizon. Cleared when
+    /// the provider answers and at the start of each turn.
+    outage: Option<outage_wait::OutageEpisode>,
     /// Env-fight spend cap (quality guards wave 4): consecutive failed env-provisioning shell
     /// commands this turn + the once-per-turn nudge latch. Reset at each turn start.
     env_fight: EnvFightTracker,
@@ -2354,10 +2373,20 @@ impl Session {
     /// task's completion, not by which presenter event fired) — the gap was purely "no visible
     /// error signal", not "stuck busy forever".
     pub fn notify_error(&mut self, msg: &str) {
+        self.notify_failure(msg, StopReason::NoOutput);
+    }
+
+    /// [`Session::notify_error`] for a failed turn: ends it with the stop reason the error
+    /// carries, so a provider that stayed down is `ProviderDown` and not a turn that did nothing.
+    pub fn notify_turn_error(&mut self, msg: &str, error: &CoreError) {
+        self.notify_failure(msg, error.stop_reason());
+    }
+
+    fn notify_failure(&mut self, msg: &str, stop_reason: StopReason) {
         self.presenter.emit(PresenterEvent::Error(msg.to_string()));
         self.presenter.emit(PresenterEvent::Done {
             final_text: String::new(),
-            stop_reason: StopReason::NoOutput,
+            stop_reason,
         });
     }
 
@@ -3157,6 +3186,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         *self.bridge_trace.lock().unwrap() = Default::default();
         self.turn_hard_guard_abort = false;
         self.turn_forced_stop = None;
+        self.outage = None;
         self.bridge_stall = None;
         self.empty_reply_nudged = false;
         self.empty_reply_retries = 0;
@@ -5114,6 +5144,9 @@ mod tests {
 
     #[path = "no_op_turn.rs"]
     mod no_op_turn_tests;
+
+    #[path = "outage_drill.rs"]
+    mod outage_drill_tests;
 
     #[path = "bridge_stall.rs"]
     mod bridge_stall_tests;
@@ -16485,6 +16518,9 @@ mod tests {
         // server `retry_after`; the wait path has its own test that re-enables it with a tiny reset.
         let mut config = Config::default();
         config.mesh.rate_limit_wait_secs = 0;
+        // The hours-long outage wait is opt-in per test: leaving it on would turn every test that
+        // exhausts a pinned budget into an eight hour sleep.
+        config.mesh.outage_wait_secs = 0;
         Session::start(
             store,
             provider,

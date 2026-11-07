@@ -317,6 +317,7 @@ impl Session {
             tools_unavailable_run: false,
             turn_deadline: None,
             deadline_reconciled: false,
+            outage: None,
             env_fight: EnvFightTracker::default(),
             cached_git_branch,
             attribution: Default::default(),
