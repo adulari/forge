@@ -211,6 +211,58 @@ fn verify_for(root: &Path) -> Vec<Verify> {
         .collect()
 }
 
+/// Longest a sweep waits for a head's update step before moving on to the other watches; the
+/// step keeps running and a later sweep applies its result.
+const UPDATE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+const UPDATING: &str = "updating the branch";
+
+/// Update steps by worktree and session: `None` while running, the result once done and not yet applied.
+fn updates() -> &'static std::sync::Mutex<std::collections::HashMap<String, Option<Step>>> {
+    static UPDATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Option<Step>>>,
+    > = std::sync::OnceLock::new();
+    UPDATES.get_or_init(Default::default)
+}
+
+/// The head's update step, run off the sweep: verify and the local CI plan can take many
+/// minutes, and PR Watch must keep serving every other session and repository meanwhile.
+/// `None` while it is still running.
+async fn update_step(
+    root: &Path,
+    session: &str,
+    base: String,
+    verify: Option<Vec<Verify>>,
+) -> Option<Step> {
+    let key = format!("{}\n{session}", root.display());
+    {
+        let mut map = updates().lock().unwrap_or_else(|e| e.into_inner());
+        match map.get(&key) {
+            Some(Some(_)) => return map.remove(&key).flatten(),
+            Some(None) => return None,
+            None => {
+                map.insert(key.clone(), None);
+            }
+        }
+    }
+    let dir = root.to_path_buf();
+    let job_key = key.clone();
+    let job = tokio::spawn(async move {
+        let step = tokio::task::spawn_blocking(move || {
+            let verify = verify.unwrap_or_else(|| verify_for(&dir));
+            run_step(&dir, &base, &verify)
+        })
+        .await
+        .unwrap_or_else(|e| Step::Wait(format!("update step failed: {e}")));
+        let mut map = updates().lock().unwrap_or_else(|e| e.into_inner());
+        map.insert(job_key, Some(step));
+    });
+    if tokio::time::timeout(UPDATE_GRACE, job).await.is_err() {
+        return None;
+    }
+    let mut map = updates().lock().unwrap_or_else(|e| e.into_inner());
+    map.remove(&key).flatten()
+}
+
 /// Queue bookkeeping and, for the head, the update step. Sets `w.hold` for PR Watch.
 pub(crate) async fn before_poll(
     root: &Path,
@@ -302,13 +354,12 @@ pub(crate) async fn before_poll(
         return pre;
     }
 
-    let dir = root.to_path_buf();
-    let step = tokio::task::spawn_blocking(move || {
-        let verify = verify.unwrap_or_else(|| verify_for(&dir));
-        run_step(&dir, &base, &verify)
-    })
-    .await
-    .unwrap_or_else(|e| Step::Wait(format!("update step failed: {e}")));
+    let Some(step) = update_step(root, &w.session_id, base, verify).await else {
+        let info = w.queue.as_mut().expect("set above");
+        info.reason = Some(UPDATING.into());
+        w.hold = info.reason.clone();
+        return pre;
+    };
 
     let info = w.queue.as_mut().expect("set above");
     match step {

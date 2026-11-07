@@ -1023,3 +1023,45 @@ async fn a_failing_local_ci_plan_keeps_the_push_back_and_names_the_step() {
     assert_eq!(ws[1].queue.as_ref().unwrap().state, QueueState::Skipped);
     assert!(!w.gh_log().contains("pr merge 2 "), "{}", w.gh_log());
 }
+
+/// A slow verify must not hold the sweep: the call comes back while the step still runs, and a
+/// later call applies its push.
+#[tokio::test]
+async fn a_slow_update_step_does_not_hold_the_sweep() {
+    let w = World::new(&[("1", "")]);
+    let wt = &w.clones[0];
+    std::fs::write(wt.join("code-1.txt"), "code 1, more\n").unwrap();
+    git(wt, &["commit", "-qam", "unpushed"]);
+    let mut watch = Watch::new("s0", Mode::Merge, "squash", 0);
+    watch.base_branch = Some("main".into());
+    let slow = vec![Verify {
+        name: "verify".into(),
+        command: "sleep 5".into(),
+        cwd: None,
+    }];
+    let started = std::time::Instant::now();
+    let pre = before_poll(wt, &mut watch, vec![], true, 100, Some(slow.clone())).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the sweep waited {:?} for the update step",
+        started.elapsed()
+    );
+    assert!(!pre.acted);
+    assert_eq!(watch.hold.as_deref(), Some(UPDATING));
+    assert_eq!(watch.queue.as_ref().unwrap().state, QueueState::Head);
+    let again = before_poll(wt, &mut watch, vec![], true, 101, Some(slow.clone())).await;
+    assert!(!again.acted, "a second sweep does not start a second step");
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    let mut pre = before_poll(wt, &mut watch, vec![], true, 160, Some(slow.clone())).await;
+    for _ in 0..20 {
+        if pre.acted {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        pre = before_poll(wt, &mut watch, vec![], true, 160, Some(slow.clone())).await;
+    }
+    assert!(pre.acted, "the finished step was applied: {:?}", watch.hold);
+    let info = watch.queue.as_ref().unwrap();
+    assert_eq!(info.state, QueueState::Checks);
+    assert_eq!(info.pushes, 1);
+}
