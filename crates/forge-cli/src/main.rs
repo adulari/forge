@@ -16,9 +16,9 @@ pub(crate) use cli::args::mcp::{McpSyncTarget, McpTransportArg};
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
 pub(crate) use cli::args::{
     AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ControlCmd, ExportScope,
-    FailOnSeverity, GitCmd, HostCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat,
-    PluginCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd,
-    VoiceOp,
+    FailOnSeverity, GitCmd, GoalCmd, HostCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode,
+    OutputFormat, PluginCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd,
+    SkillCmd, VoiceOp,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;

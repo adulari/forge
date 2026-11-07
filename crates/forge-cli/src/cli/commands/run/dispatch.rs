@@ -672,6 +672,7 @@ and keep going."
             max_tokens,
             max_minutes,
             budget,
+            contract,
         } => {
             return gates::goal_outcome(
                 session,
@@ -681,6 +682,7 @@ and keep going."
                 max_tokens,
                 max_minutes,
                 budget,
+                contract,
             )
             .await;
         }

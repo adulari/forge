@@ -113,7 +113,7 @@ fn the_goal_record_round_trips_through_json() {
     let record: GoalRecord = serde_json::from_str(&json).unwrap();
     assert_eq!(record.objective, "harden the importer");
     assert_eq!(record.max_minutes, Some(30));
-    assert!(record.envelope.is_usd());
+    assert!(record.envelope.as_ref().unwrap().is_usd());
     app.goal_clear();
     assert!(GoalRecord::of(&app).is_none());
 }
@@ -153,6 +153,90 @@ fn a_restart_restores_the_goal_paused_with_its_envelope_and_counters() {
     assert_eq!(goal.gates, vec!["cargo test".to_string()]);
     assert!(goal.envelope.as_ref().unwrap().spent);
     assert!(goal.reason.as_deref().unwrap().contains("restart"));
+}
+
+fn contract_goal(app: &mut forge_tui::App) {
+    use forge_types::goal_contract::{parse_contract, AssertionResult, GoalContract};
+    let text = r#"{"assertions":[
+      {"assertion":"a exists","check":"test -f a"},
+      {"assertion":"b exists","check":"test -f b"},
+      {"assertion":"c exists","check":"test -f c"}]}"#;
+    let mut contract = GoalContract::new(parse_contract(text).unwrap());
+    contract.approved = true;
+    app.goal_begin("ship it", &[], None, None);
+    app.goal_set_contract(contract);
+    app.goal_contract_results(
+        (1..=3)
+            .map(|id| AssertionResult {
+                id,
+                passed: id != 3,
+                proof: "test: c: no such file".into(),
+                reason: if id == 3 {
+                    "exit 1".into()
+                } else {
+                    String::new()
+                },
+            })
+            .collect(),
+    );
+}
+
+#[test]
+fn a_contract_goal_without_an_envelope_is_recorded_and_survives_a_restart() {
+    let store = forge_store::Store::open_in_memory().unwrap();
+    let id = store.create_session("/tmp", "Default").unwrap();
+    let mut app = forge_tui::App::default();
+    contract_goal(&mut app);
+    store
+        .set_session_goal_state(&id, GoalRecord::of(&app).as_deref())
+        .unwrap();
+
+    let mut fresh = forge_tui::App::default();
+    restore(&mut fresh, &store, &id);
+    let goal = fresh.goal.as_ref().expect("restored");
+    assert_eq!(goal.phase, forge_tui::goal_status::GoalPhase::Paused);
+    assert!(goal.envelope.is_none());
+    let contract = goal.contract.as_ref().expect("the contract came back");
+    assert_eq!(contract.headline(), "2/3 pass");
+    assert_eq!(contract.failing_ids(), vec![3]);
+    assert!(contract.approved);
+}
+
+#[test]
+fn a_finished_contract_goal_keeps_its_table_and_comes_back_finished() {
+    let store = forge_store::Store::open_in_memory().unwrap();
+    let id = store.create_session("/tmp", "Default").unwrap();
+    let mut app = forge_tui::App::default();
+    contract_goal(&mut app);
+    app.goal_ended(
+        false,
+        "🎯 goal wedged — assertions 3 still fail after 3 validations",
+    );
+    store
+        .set_session_goal_state(&id, GoalRecord::of(&app).as_deref())
+        .unwrap();
+
+    let mut fresh = forge_tui::App::default();
+    restore(&mut fresh, &store, &id);
+    let goal = fresh
+        .goal
+        .as_ref()
+        .expect("the finished goal is still there");
+    assert_eq!(goal.phase, forge_tui::goal_status::GoalPhase::Failed);
+    assert!(goal.reason.as_deref().unwrap().contains("wedged"));
+    assert_eq!(goal.contract.as_ref().unwrap().passed_count(), 2);
+    assert!(
+        notes_of(&mut fresh).is_empty(),
+        "nothing is announced for a goal that already ended"
+    );
+}
+
+#[test]
+fn a_finished_goal_without_a_contract_is_not_recorded() {
+    let mut app = forge_tui::App::default();
+    app.goal_begin("ship it", &[], None, None);
+    app.goal_ended(true, "");
+    assert!(GoalRecord::of(&app).is_none());
 }
 
 fn notes_of(app: &mut forge_tui::App) -> Vec<String> {

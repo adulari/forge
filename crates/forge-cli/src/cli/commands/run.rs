@@ -39,6 +39,7 @@ pub(crate) use goal_control::*;
 pub(crate) mod goal_envelope;
 pub(crate) use goal_envelope::GoalRecord;
 mod goal_headless;
+pub(crate) mod goal_show;
 pub(crate) use goal_headless::*;
 mod goal_progress;
 pub(crate) use goal_progress::*;

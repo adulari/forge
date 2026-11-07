@@ -23,6 +23,70 @@ pub struct SnapGoal {
     /// The spend envelope (`/goal --budget`); absent when the goal has none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub envelope: Option<SnapEnvelope>,
+    /// The validation contract (`/goal --contract`) with the validator's latest results; absent
+    /// when the goal has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract: Option<SnapContract>,
+}
+
+/// A goal contract as the clients draw it: a table, one row per assertion.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapContract {
+    /// The ready-to-show line, e.g. `2/3 pass`.
+    pub headline: String,
+    pub approved: bool,
+    /// How many times the validator has run.
+    pub rounds: u32,
+    pub passed: usize,
+    pub total: usize,
+    pub checked_at: Option<i64>,
+    pub assertions: Vec<SnapAssertion>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapAssertion {
+    pub id: u32,
+    pub text: String,
+    pub command: String,
+    pub expect: String,
+    /// `pass`, `fail`, or `pending` before the validator has run.
+    pub state: &'static str,
+    pub reason: String,
+    /// The tail of the check's output.
+    pub proof: String,
+}
+
+impl From<&forge_types::goal_contract::GoalContract> for SnapContract {
+    fn from(contract: &forge_types::goal_contract::GoalContract) -> Self {
+        Self {
+            headline: contract.headline(),
+            approved: contract.approved,
+            rounds: contract.rounds,
+            passed: contract.passed_count(),
+            total: contract.assertions.len(),
+            checked_at: contract.checked_at,
+            assertions: contract
+                .assertions
+                .iter()
+                .map(|a| {
+                    let result = contract.result(a.id);
+                    SnapAssertion {
+                        id: a.id,
+                        text: a.text.clone(),
+                        command: a.command.clone(),
+                        expect: a.expect.clone(),
+                        state: match result {
+                            Some(r) if r.passed => "pass",
+                            Some(_) => "fail",
+                            None => "pending",
+                        },
+                        reason: result.map(|r| r.reason.clone()).unwrap_or_default(),
+                        proof: result.map(|r| r.proof.clone()).unwrap_or_default(),
+                    }
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A goal's spend envelope: how much of its slice is used, ready to draw as a fill bar.
@@ -72,6 +136,62 @@ impl From<&GoalStatus> for SnapGoal {
                 resets_at: e.resets_at,
                 resumes_at: e.auto_resume_at(),
             }),
+            contract: goal.contract.as_ref().map(SnapContract::from),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use forge_types::goal_contract::{parse_contract, AssertionResult, GoalContract};
+
+    #[test]
+    fn the_snapshot_carries_the_contract_table_and_omits_it_without_one() {
+        let mut app = forge_tui::App::default();
+        app.goal_begin("ship it", &[], None, None);
+        let bare = serde_json::to_value(SnapGoal::from(app.goal.as_ref().unwrap())).unwrap();
+        assert!(bare.get("contract").is_none());
+
+        let text = r#"{"assertions":[
+          {"assertion":"a exists","check":"test -f a","expect":"exit 0"},
+          {"assertion":"b exists","check":"test -f b"},
+          {"assertion":"c exists","check":"test -f c"}]}"#;
+        let mut contract = GoalContract::new(parse_contract(text).unwrap());
+        contract.approved = true;
+        app.goal_set_contract(contract);
+        let before = serde_json::to_value(SnapGoal::from(app.goal.as_ref().unwrap())).unwrap();
+        assert_eq!(before["contract"]["assertions"][0]["state"], "pending");
+        app.goal_contract_results(vec![
+            AssertionResult {
+                id: 1,
+                passed: true,
+                proof: String::new(),
+                reason: String::new(),
+            },
+            AssertionResult {
+                id: 2,
+                passed: false,
+                proof: "no such file".into(),
+                reason: "exit 1".into(),
+            },
+        ]);
+        let v = serde_json::to_value(SnapGoal::from(app.goal.as_ref().unwrap())).unwrap();
+        let c = &v["contract"];
+        assert_eq!(c["headline"], "1/3 pass");
+        assert_eq!(
+            (
+                c["passed"].as_u64(),
+                c["total"].as_u64(),
+                c["rounds"].as_u64()
+            ),
+            (Some(1), Some(3), Some(1))
+        );
+        assert_eq!(c["assertions"][0]["state"], "pass");
+        assert_eq!(c["assertions"][0]["expect"], "exit 0");
+        assert_eq!(c["assertions"][1]["state"], "fail");
+        assert_eq!(c["assertions"][1]["reason"], "exit 1");
+        assert_eq!(c["assertions"][1]["proof"], "no such file");
+        assert_eq!(c["assertions"][2]["state"], "pending");
     }
 }

@@ -1005,6 +1005,12 @@ pub(crate) enum Command {
         #[command(subcommand)]
         cmd: Option<QueueCmd>,
     },
+    /// Inspect `/goal` runs recorded by the daemon. `forge goal show [SESSION]` prints the
+    /// validation contract table (assertion, pass/fail, proof) of a `--contract` goal.
+    Goal {
+        #[command(subcommand)]
+        cmd: GoalCmd,
+    },
     /// The model scoreboard for this repo: wins/losses and the resulting routing boost per
     /// model, learned from `/duel` arenas and `forge queue run --shadow` passes.
     Scoreboard,
@@ -1641,4 +1647,17 @@ impl From<Mode> for forge_types::PermissionMode {
             Mode::Auto => forge_types::PermissionMode::Auto,
         }
     }
+}
+
+#[derive(Subcommand)]
+pub(crate) enum GoalCmd {
+    /// Print a goal's state and its validation contract: each assertion, pass or fail, and the
+    /// proof (the tail of the check's output). Without a session, the newest goal on record.
+    Show {
+        /// Session id or unique prefix.
+        session: Option<String>,
+        /// Print the stored record as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }

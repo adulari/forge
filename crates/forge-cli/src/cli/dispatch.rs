@@ -504,6 +504,11 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Notes { cmd } => crate::cli::commands::notes::notes_cmd(cmd),
         Command::Service { cmd } => service_cmd(cmd),
         Command::Queue { cmd } => queue_cmd(cmd),
+        Command::Goal { cmd } => match cmd {
+            GoalCmd::Show { session, json } => {
+                crate::cli::commands::run::goal_show::goal_show_cmd(session.as_deref(), json)
+            }
+        },
         Command::Scoreboard => scoreboard_cmd(),
         Command::Stats { cmd } => stats_cmd(cmd),
         Command::Turns {

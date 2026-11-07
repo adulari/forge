@@ -234,6 +234,10 @@ pub(crate) struct GoalState {
     pub(crate) eval: GoalEvalTrack,
     /// The spend envelope (`/goal --budget`), when the goal has one.
     pub(crate) envelope: Option<forge_types::goal_envelope::EnvelopeState>,
+    /// The approved validation contract (`/goal --contract`), with the latest validator results.
+    pub(crate) contract: Option<forge_types::goal_contract::GoalContract>,
+    /// Validator bookkeeping (docs/features/goal-contract.md).
+    pub(crate) validation: super::goal_progress::ValidationTrack,
 }
 
 impl GoalState {
@@ -261,6 +265,8 @@ impl GoalState {
                 .map_or(0, |d| d.as_secs() as i64),
             eval: GoalEvalTrack::default(),
             envelope: None,
+            contract: None,
+            validation: Default::default(),
         }
     }
 
@@ -288,6 +294,7 @@ impl GoalState {
         let carry = app.goal_begin(&goal, &gate_cmds, max_tokens, max_minutes);
         let mut state = Self::new(gen, goal, gate_cmds, max_tokens, max_minutes);
         state.envelope = app.goal.as_ref().and_then(|g| g.envelope.clone());
+        state.contract = app.goal.as_ref().and_then(|g| g.contract.clone());
         state.sync_envelope_budget();
         if let Some(carry) = carry {
             state.iter = carry.iteration;

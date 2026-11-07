@@ -288,6 +288,7 @@ async fn capture_git(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
 
 /// `/goal` dispatch body — pins the goal guidance on the session and produces the decomposition
 /// turn. Lives here (not dispatch.rs) with the rest of the autonomy surface.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn goal_outcome(
     session: &std::sync::Arc<tokio::sync::Mutex<forge_core::Session>>,
     app: &mut forge_tui::App,
@@ -296,6 +297,7 @@ pub(crate) async fn goal_outcome(
     max_tokens: Option<u64>,
     max_minutes: Option<u64>,
     budget: Option<String>,
+    contract: bool,
 ) -> anyhow::Result<super::dispatch::DispatchOutcome> {
     use super::dispatch::DispatchOutcome;
     let text = objective.trim().to_string();
@@ -306,7 +308,7 @@ pub(crate) async fn goal_outcome(
             return Ok(DispatchOutcome::Handled);
         }
         app.note(
-            "usage: /goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
+            "usage: /goal <objective> [--contract] [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
              [--budget claude:20%w|$5] — sets the goal and breaks it into tasks",
         );
         return Ok(DispatchOutcome::Handled);
@@ -336,6 +338,10 @@ pub(crate) async fn goal_outcome(
         s.prime_guidance(&[super::goal_session_guidance(&text)])
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         s.set_active_goal(Some(&text));
+        if contract || s.goal_contract_default() {
+            s.request_goal_contract(&text);
+            app.note("📜 drafting a validation contract — approve it to start the goal");
+        }
     }
     app.note(&format!("🎯 goal set — {text}"));
     Ok(DispatchOutcome::StartGoal {

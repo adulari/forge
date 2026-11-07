@@ -318,15 +318,26 @@ pub(crate) struct GoalRecord {
     pub(crate) tokens_used: u64,
     pub(crate) elapsed_secs: u64,
     pub(crate) reason: Option<String>,
-    pub(crate) envelope: EnvelopeState,
+    #[serde(default)]
+    pub(crate) envelope: Option<EnvelopeState>,
+    /// The `--contract` goal's contract and the validator's latest results. A goal that has one
+    /// is kept after it ends, so the morning view still has the table.
+    #[serde(default)]
+    pub(crate) contract: Option<forge_types::goal_contract::GoalContract>,
+    /// Wire tag of the goal's state; absent in records written before contracts (paused).
+    #[serde(default)]
+    pub(crate) phase: Option<String>,
 }
 
 impl GoalRecord {
-    /// `None` unless the goal carries an envelope and is running or paused.
+    /// `None` unless the goal carries an envelope and is running or paused, or carries a
+    /// contract (kept in any state, so a finished goal's table survives a restart).
     pub(crate) fn of(app: &forge_tui::App) -> Option<String> {
         use forge_tui::goal_status::GoalPhase;
         let goal = app.goal.as_ref()?;
-        if !matches!(goal.phase, GoalPhase::Active | GoalPhase::Paused) {
+        let live = matches!(goal.phase, GoalPhase::Active | GoalPhase::Paused);
+        let keeps_envelope = live && goal.envelope.is_some();
+        if !keeps_envelope && goal.contract.is_none() {
             return None;
         }
         let record = Self {
@@ -338,7 +349,9 @@ impl GoalRecord {
             tokens_used: goal.tokens_used,
             elapsed_secs: goal.elapsed_secs,
             reason: goal.reason.clone(),
-            envelope: goal.envelope.clone()?,
+            envelope: goal.envelope.clone().filter(|_| live),
+            contract: goal.contract.clone(),
+            phase: Some(goal.phase.wire().to_string()),
         };
         serde_json::to_string(&record).ok()
     }
@@ -355,6 +368,30 @@ pub(crate) fn restore(app: &mut forge_tui::App, store: &forge_store::Store, sess
     let Ok(record) = serde_json::from_str::<GoalRecord>(&json) else {
         return;
     };
+    use forge_tui::goal_status::GoalPhase;
+    let ended = record
+        .phase
+        .as_deref()
+        .and_then(GoalPhase::from_wire)
+        .filter(|p| !matches!(p, GoalPhase::Active | GoalPhase::Paused));
+    if let Some(phase) = ended {
+        app.goal_restore(
+            &record.objective,
+            &record.gates,
+            record.max_tokens,
+            record.max_minutes,
+            forge_tui::goal_status::GoalCarry {
+                iteration: record.iteration,
+                tokens_used: record.tokens_used,
+                elapsed_secs: record.elapsed_secs,
+            },
+            record.reason,
+            None,
+            record.contract,
+            phase,
+        );
+        return;
+    }
     let reason = record
         .reason
         .or_else(|| Some("interrupted by a restart".to_string()));
@@ -370,6 +407,8 @@ pub(crate) fn restore(app: &mut forge_tui::App, store: &forge_store::Store, sess
         },
         reason,
         record.envelope,
+        record.contract,
+        GoalPhase::Paused,
     );
     let waiting = app
         .goal

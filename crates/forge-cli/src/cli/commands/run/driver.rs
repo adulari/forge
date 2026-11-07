@@ -2292,6 +2292,46 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    async fn a_contract_goal_is_validated_after_its_turn_and_completes_when_every_check_passes() {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        state
+            .submit_line("/goal --contract ship it".into(), None)
+            .await
+            .unwrap();
+        let gen = state.turn_gen;
+
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen).await;
+        let contract = state
+            .app
+            .goal
+            .as_ref()
+            .and_then(|g| g.contract.clone())
+            .expect("the approved contract is on the goal after its first turn");
+        assert_eq!(contract.assertions.len(), 3);
+        assert!(
+            state.turn_handle.is_some(),
+            "the validator runs as its own step, not the evaluator"
+        );
+
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen + 1).await;
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::Complete);
+        let contract = goal.contract.as_ref().unwrap();
+        assert!(contract.all_passed(), "{:?}", contract.results);
+        assert_eq!(contract.rounds, 1);
+        assert!(state.goal_state.is_none());
+        let snap = crate::remote::SnapGoal::from(goal);
+        assert_eq!(snap.contract.as_ref().unwrap().headline, "3/3 pass");
+        assert!(
+            GoalRecord::of(&state.app).is_some(),
+            "a finished contract goal stays on record"
+        );
+    }
+
+    #[tokio::test]
     async fn a_paused_goal_is_not_redriven_and_resume_picks_it_up_again() {
         use forge_tui::goal_status::GoalPhase;
         let mut state = test_driver_state().await;

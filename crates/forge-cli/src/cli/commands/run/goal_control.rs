@@ -74,6 +74,7 @@ pub(crate) async fn goal_control_outcome(
                     None,
                     None,
                     None,
+                    false,
                 )
                 .await;
             }

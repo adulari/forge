@@ -19,6 +19,7 @@ pub(crate) struct GoalRunSpec {
     pub(crate) max_tokens: Option<u64>,
     pub(crate) max_minutes: Option<u64>,
     pub(crate) budget: Option<String>,
+    pub(crate) contract: bool,
 }
 
 /// `Some` when `prompt` is a `/goal …` command, `None` for any other prompt.
@@ -35,12 +36,14 @@ pub(crate) fn parse_goal_prompt(prompt: &str) -> Option<GoalRunSpec> {
             max_tokens,
             max_minutes,
             budget,
+            contract,
         } => Some(GoalRunSpec {
             goal: objective.trim().to_string(),
             gates,
             max_tokens,
             max_minutes,
             budget,
+            contract,
         }),
         _ => None,
     }
@@ -92,6 +95,9 @@ pub(crate) async fn run_goal_headless(
         .prime_guidance(&[goal_session_guidance(&spec.goal)])
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     session.set_active_goal(Some(&spec.goal));
+    if spec.contract || session.goal_contract_default() {
+        session.request_goal_contract(&spec.goal);
+    }
     let mut prompt = goal_start_prompt(&spec.goal);
     let mut gs = GoalState::new(0, spec.goal, spec.gates, spec.max_tokens, spec.max_minutes);
     let mut turn_guidance = guidance.to_vec();
@@ -123,7 +129,26 @@ pub(crate) async fn run_goal_headless(
         drop(outcome);
         gs.eval.pending_tokens = total_tokens(session).saturating_sub(before);
         gs.eval.slot.lock().unwrap().take();
-        if session.goal_evaluator_enabled() && !session.run_budget_hit_last_turn() {
+        if gs.contract.is_none() {
+            match adopt_contract_outcome(&mut gs, session.take_goal_contract_outcome()) {
+                Some(Ok(contract)) => {
+                    for line in contract.table_lines() {
+                        eprintln!("{line}");
+                    }
+                }
+                Some(Err(reason)) => return Ok(GoalRunEnd::NotMet(reason)),
+                None => {}
+            }
+        }
+        if let Some(contract) = gs.contract.clone() {
+            if !session.run_budget_hit_last_turn() {
+                let results = tokio::select! {
+                    r = session.validate_goal_contract(&contract) => r,
+                    _ = &mut interrupted => return Ok(interrupted_end()),
+                };
+                *gs.validation.slot.lock().unwrap() = Some(results);
+            }
+        } else if session.goal_evaluator_enabled() && !session.run_budget_hit_last_turn() {
             let request = gs.eval_request();
             let verdict = tokio::select! {
                 v = session.evaluate_goal(&request) => v,
