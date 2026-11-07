@@ -455,7 +455,11 @@ impl OutagePusher {
     /// A probe of the wait at `now_unix`, for an outage that began at `since_unix`. True exactly
     /// once per turn: the first probe after the outage has lasted [`OUTAGE_PUSH_AFTER_SECS`].
     pub(crate) fn outage_probe(&mut self, now_unix: u64, since_unix: u64) -> bool {
-        if self.announced || now_unix.saturating_sub(since_unix) < outage_push_after_secs() {
+        self.outage_probe_after(now_unix, since_unix, outage_push_after_secs())
+    }
+
+    fn outage_probe_after(&mut self, now_unix: u64, since_unix: u64, after_secs: u64) -> bool {
+        if self.announced || now_unix.saturating_sub(since_unix) < after_secs {
             return false;
         }
         self.announced = true;
@@ -1271,23 +1275,23 @@ mod tests {
         let mut pusher = OutagePusher::default();
         let since = 1_000;
         assert!(
-            !pusher.outage_probe(since + 15, since),
+            !pusher.outage_probe_after(since + 15, since, OUTAGE_PUSH_AFTER_SECS),
             "a blip is not news"
         );
-        assert!(!pusher.outage_probe(since + 119, since));
-        assert!(pusher.outage_probe(since + 120, since));
+        assert!(!pusher.outage_probe_after(since + 119, since, OUTAGE_PUSH_AFTER_SECS));
+        assert!(pusher.outage_probe_after(since + 120, since, OUTAGE_PUSH_AFTER_SECS));
         assert!(
-            !pusher.outage_probe(since + 600, since),
+            !pusher.outage_probe_after(since + 600, since, OUTAGE_PUSH_AFTER_SECS),
             "one push per turn"
         );
         assert!(pusher.recovered());
         assert!(!pusher.recovered(), "one recovery push");
         assert!(
-            !pusher.outage_probe(since + 900, since),
+            !pusher.outage_probe_after(since + 900, since, OUTAGE_PUSH_AFTER_SECS),
             "a second episode in the same turn"
         );
         pusher.new_turn();
-        assert!(pusher.outage_probe(since + 900, since));
+        assert!(pusher.outage_probe_after(since + 900, since, OUTAGE_PUSH_AFTER_SECS));
     }
 
     #[test]

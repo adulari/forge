@@ -139,6 +139,9 @@ async fn a_daemon_session_waits_through_a_503_then_completes_and_pushes_both_end
         ("FORGE_MESH__OUTAGE_WAIT_SECS", "600".into()),
     ]);
     crate::push::OUTAGE_PUSH_AFTER_TEST.store(0, Ordering::SeqCst);
+    // The custom-provider registry is process-wide and an earlier test may have seeded it from
+    // another config; read this test's `drill` gateway into it.
+    forge_config::reload_provider_registries();
 
     let ua_secret = p256::SecretKey::from_slice(&[42u8; 32]).unwrap();
     let ua_public = ua_secret.public_key().to_sec1_point(false);

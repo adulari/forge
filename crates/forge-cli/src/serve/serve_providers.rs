@@ -956,6 +956,8 @@ mod tests {
     #[tokio::test]
     async fn daemon_routes_store_and_remove_keys_without_echoing_them() {
         use tower::ServiceExt;
+        // Key and config writes land under XDG_CONFIG_HOME, which other daemon tests move.
+        let _env = crate::serve::tests::FORGE_DB_LOCK.lock().await;
 
         let state = Arc::new(DaemonState {
             registry: Arc::new(super::super::SessionRegistry::new()),
@@ -998,6 +1000,8 @@ mod tests {
     #[tokio::test]
     async fn the_providers_route_carries_a_key_verdict_until_the_key_is_replaced() {
         use tower::ServiceExt;
+        // Key and config writes land under XDG_CONFIG_HOME, which other daemon tests move.
+        let _env = crate::serve::tests::FORGE_DB_LOCK.lock().await;
 
         let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
         let state = Arc::new(DaemonState {
