@@ -68,9 +68,51 @@ fn footer(m: &CiMenu) -> String {
         return " Running the plan ".to_string();
     }
     format!(
-        " {} move {sep} r run {sep} R reload {sep} Esc close ",
-        g().up_down
+        " {} move {sep} Enter {} {sep} r run {sep} R reload {sep} Esc close ",
+        g().up_down,
+        if m.expanded {
+            "hide output"
+        } else {
+            "show output"
+        }
     )
+}
+
+/// Rows the detail pane takes under the list when open.
+const DETAIL_ROWS: usize = 9;
+
+/// The focused row opened up: a skip's reason, or a step's command, environment and the tail of
+/// its output. When it does not fit, the output keeps its last lines (where the error is).
+fn detail_lines(r: &CiRow, rows: usize, width: usize) -> Vec<Line<'static>> {
+    let faint = |t: String| Line::from(Span::styled(trunc(&t, width), styles::faint()));
+    if r.state == CiState::Skip {
+        return vec![faint(format!("Skipped: {}", r.detail))];
+    }
+    let mut head: Vec<Line<'static>> = r
+        .command
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .take(3)
+        .map(|l| Line::from(Span::styled(trunc(&format!("$ {l}"), width), styles::fg())))
+        .collect();
+    if !r.env.is_empty() {
+        head.push(faint(format!("env  {}", r.env.join(" "))));
+    }
+    let mut tail: Vec<Line<'static>> = r
+        .tail
+        .lines()
+        .map(|l| Line::from(Span::styled(trunc(l, width), styles::err())))
+        .collect();
+    if tail.is_empty() && r.state == CiState::Fail {
+        tail.push(faint("(no output captured)".to_string()));
+    }
+    let room = rows.saturating_sub(head.len());
+    if tail.len() > room {
+        tail.drain(..tail.len() - room);
+    }
+    head.extend(tail);
+    head.truncate(rows);
+    head
 }
 
 pub(crate) fn render_ci_menu(f: &mut Frame, app: &App, region: Rect) {
@@ -81,7 +123,13 @@ pub(crate) fn render_ci_menu(f: &mut Frame, app: &App, region: Rect) {
     surface::dim_backdrop(f, region);
     let card_w = region.width.saturating_sub(2).clamp(1, 120);
     let inner_w = (card_w as usize).saturating_sub(2 + 2 * crate::overlays::PAD_X as usize);
-    let want = m.rows.len().max(1) as u16 + 4;
+    let want = m.rows.len().max(1) as u16
+        + 4
+        + if m.expanded {
+            DETAIL_ROWS as u16 + 1
+        } else {
+            0
+        };
     let padded = want + 2 + 2 * crate::overlays::PAD_Y;
     let card_h = if padded >= crate::overlays::SHORT_REGION {
         padded
@@ -122,8 +170,9 @@ pub(crate) fn render_ci_menu(f: &mut Frame, app: &App, region: Rect) {
         )
     } else if m.running {
         format!(
-            "{} Running\u{2026} fail-fast, results appear when it ends",
-            g().spin(m.tick as usize)
+            "{} Running {}\u{2026} fail-fast, results appear when it ends",
+            g().spin(m.tick as usize),
+            m.progress.as_deref().unwrap_or("")
         )
     } else {
         m.summary
@@ -143,7 +192,12 @@ pub(crate) fn render_ci_menu(f: &mut Frame, app: &App, region: Rect) {
         height: inner.height.saturating_sub(1 + notice_rows),
         ..inner
     };
-    let h = body.height as usize;
+    let detail_h = if m.expanded && !m.rows.is_empty() {
+        DETAIL_ROWS.min((body.height as usize).saturating_sub(4))
+    } else {
+        0
+    };
+    let h = (body.height as usize).saturating_sub(if detail_h > 0 { detail_h + 1 } else { 0 });
     let offset = m
         .cursor
         .saturating_sub(h.saturating_sub(1))
@@ -162,7 +216,37 @@ pub(crate) fn render_ci_menu(f: &mut Frame, app: &App, region: Rect) {
             .map(|(i, r)| row_line(r, i == m.cursor, inner_w))
             .collect()
     };
-    f.render_widget(Paragraph::new(lines), body);
+    f.render_widget(
+        Paragraph::new(lines),
+        Rect {
+            height: h as u16,
+            ..body
+        },
+    );
+    if detail_h > 0 {
+        if let Some(row) = m.rows.get(m.cursor) {
+            let y = body.y + h as u16;
+            f.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "\u{2500}".repeat(inner_w),
+                    styles::faint(),
+                ))),
+                Rect {
+                    y,
+                    height: 1,
+                    ..body
+                },
+            );
+            f.render_widget(
+                Paragraph::new(detail_lines(row, detail_h, inner_w)),
+                Rect {
+                    y: y + 1,
+                    height: detail_h as u16,
+                    ..body
+                },
+            );
+        }
+    }
     if let Some(n) = &m.notice {
         let (style, glyph) = match n.tone {
             Tone::Ok => (styles::ok(), g().ok),

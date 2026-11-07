@@ -32,6 +32,12 @@ pub struct CiRow {
     /// The command for a step, the reason for a skip.
     pub detail: String,
     pub secs: u64,
+    /// The step's whole script, empty for a skip.
+    pub command: String,
+    /// `K=V` pairs the step runs with.
+    pub env: Vec<String>,
+    /// Output tail of a step that failed or timed out.
+    pub tail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +56,10 @@ pub struct CiMenu {
     pub cursor: usize,
     /// `Last run 3 min ago: 12 passed, 1 failed`.
     pub summary: Option<String>,
+    /// The step in flight while a run is going, e.g. `2/5 lint / Unit tests`.
+    pub progress: Option<String>,
+    /// Show the focused row's command, environment and output tail under the list.
+    pub expanded: bool,
     pub notice: Option<Notice>,
     pub tick: u32,
     refresh: bool,
@@ -74,11 +84,20 @@ impl CiMenu {
     }
 
     pub fn apply(&mut self, rows: Vec<CiRow>, summary: Option<String>) {
+        let ran = self.running;
         self.loading = false;
         self.running = false;
+        self.progress = None;
         self.rows = rows;
         self.summary = summary;
         self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+        // A run that failed lands on the step that failed, with its output open.
+        if ran {
+            if let Some(i) = self.rows.iter().position(|r| r.state == CiState::Fail) {
+                self.cursor = i;
+                self.expanded = true;
+            }
+        }
     }
 
     pub fn notify(&mut self, tone: Tone, text: impl Into<String>) {
@@ -116,7 +135,14 @@ impl CiMenu {
                 self.loading = true;
                 self.refresh = true;
             }
-            KeyKind::Char('r') | KeyKind::Enter => {
+            KeyKind::Enter | KeyKind::Right | KeyKind::Left => {
+                self.expanded = match key {
+                    KeyKind::Left => false,
+                    KeyKind::Right => true,
+                    _ => !self.expanded,
+                };
+            }
+            KeyKind::Char('r') => {
                 if self.running || self.loading {
                     return CiAction::None;
                 }

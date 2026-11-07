@@ -15,6 +15,8 @@ type Loaded = Result<(Vec<CiRow>, Option<String>), String>;
 pub(crate) struct CiMenuDriver {
     tx: mpsc::UnboundedSender<Loaded>,
     rx: mpsc::UnboundedReceiver<Loaded>,
+    /// The repository of the run in flight, whose progress the overlay shows.
+    running_in: Option<PathBuf>,
 }
 
 fn root() -> PathBuf {
@@ -46,6 +48,9 @@ fn tui_rows(view: &CiView) -> Vec<CiRow> {
             name: r.name.clone(),
             detail: r.detail.clone(),
             secs: r.secs,
+            command: r.command.clone(),
+            env: r.env.clone(),
+            tail: r.tail.clone(),
         })
         .collect()
 }
@@ -70,7 +75,11 @@ fn load(root: &Path, run: bool) -> Loaded {
 impl CiMenuDriver {
     pub(crate) fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
-        Self { tx, rx }
+        Self {
+            tx,
+            rx,
+            running_in: None,
+        }
     }
 
     fn spawn(&self, root: PathBuf, run: bool) {
@@ -103,7 +112,7 @@ impl CiMenuDriver {
                     if ran && failed {
                         app.ci_menu.notify(
                             forge_tui::ci_menu::Tone::Err,
-                            "The plan failed; the model sees the same step on a goal or ship",
+                            "The plan failed: the same step stops a goal or a ship until it passes",
                         );
                     }
                 }
@@ -114,6 +123,14 @@ impl CiMenuDriver {
             }
             dirty = true;
         }
+        if app.ci_menu.running {
+            app.ci_menu.progress = self
+                .running_in
+                .as_deref()
+                .and_then(crate::ci_run::live::for_cwd)
+                .and_then(|ci| ci.running)
+                .map(|r| format!("{}/{} {}", r.index, r.total, r.name));
+        }
         if app.ci_menu.running || app.ci_menu.loading {
             app.ci_menu.tick = app.ci_menu.tick.wrapping_add(1);
             dirty = true;
@@ -123,7 +140,9 @@ impl CiMenuDriver {
 
     pub(crate) fn key(&mut self, app: &mut App, key: KeyKind) {
         if app.ci_menu.key(key) == CiAction::Run {
-            self.spawn(root(), true);
+            let root = root();
+            self.running_in = Some(root.clone());
+            self.spawn(root, true);
         }
     }
 }
