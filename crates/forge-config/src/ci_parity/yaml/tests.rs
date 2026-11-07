@@ -37,6 +37,15 @@ fn comments_and_quotes() {
 }
 
 #[test]
+fn non_ascii_plain_scalars_parse_without_panicking() {
+    let y = ok("a: Build — release ✓\nb: Café ✓ # note\nc: [é, ü]\nd: ${{ x }} — ✓ # c\n");
+    assert_eq!(y.get("a"), Some(&s("Build — release ✓")));
+    assert_eq!(y.get("b"), Some(&s("Café ✓")));
+    assert_eq!(y.get("c").and_then(Yaml::as_seq).unwrap(), [s("é"), s("ü")]);
+    assert_eq!(y.get("d"), Some(&s("${{ x }} — ✓")));
+}
+
+#[test]
 fn expressions_stay_verbatim_and_do_not_split_keys() {
     let y = ok("env:\n  A: ${{ secrets.X }}\n  B: ${{ a == 'b' && c || d }}\nif: ${{ github.event_name == 'push' }}\n${{ matrix.k }}: v\n");
     let env = y.get("env").unwrap();

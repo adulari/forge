@@ -461,8 +461,9 @@ fn strip_comment(text: &str) -> String {
     let bytes = t.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if t[i..].starts_with("${{") {
-            match t[i..].find("}}") {
+        // Byte-level so `i` may sit inside a multibyte char without slicing `t` there.
+        if bytes[i..].starts_with(b"${{") {
+            match bytes[i..].windows(2).position(|w| w == b"}}") {
                 Some(end) => {
                     i += end + 2;
                     continue;
