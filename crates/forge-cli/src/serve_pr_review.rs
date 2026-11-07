@@ -7,20 +7,29 @@
 //! pushes. A clean review lets the merge proceed. The verdict lives on the watch record
 //! (`pr-watch.json`), so every surface that shows a watch shows the review too.
 //!
-//! Routes: `GET /api/pr/review?pr=|session=` the stored review with every finding.
+//! Reviews run as background jobs (`jobs`), so a slow reviewer never delays other watches' polls;
+//! the owner can override a held merge or dismiss a finding (`owner`).
+//!
+//! Routes: `GET /api/pr/review?pr=|session=` the stored review with every finding;
+//! `POST /api/pr/review/action` `{session | pr, action: merge_anyway|dismiss, finding?, by?}`.
 
-use std::path::Path;
+mod jobs;
+mod owner;
+
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Query, State};
 use axum::response::Response;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use serde::{Deserialize, Serialize};
 
 use crate::serve::{err_response, json_response, DaemonState};
 use crate::serve_pr::{Gh, PrSummary};
 use crate::serve_pr_watch::{registry, Announcement, Watch};
+use jobs::{jobs, Poll};
+pub(crate) use owner::{carry_owner_edits, Owner};
 
 const MAX_DIFF_BYTES: usize = 150_000;
 /// A failed review is not retried sooner than this.
@@ -29,6 +38,8 @@ const RETRY_SECS: i64 = 300;
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum Verdict {
+    /// A background job is reviewing this head (or is queued for a slot).
+    Running,
     Clean,
     Findings,
     Error,
@@ -45,6 +56,9 @@ pub(crate) struct ReviewFinding {
     pub(crate) fix: String,
     /// At or above the configured severity: this one holds the merge.
     pub(crate) blocking: bool,
+    /// The owner dismissed this finding; it no longer blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dismissed: Option<Owner>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -62,16 +76,51 @@ pub(crate) struct ReviewState {
     /// The push for this head's findings has been delivered.
     #[serde(default)]
     pub(crate) announced: bool,
+    /// The owner let this head merge without waiting for the review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_anyway: Option<Owner>,
 }
 
 impl ReviewState {
+    fn started(head_sha: &str, rounds: u32, now: i64) -> Self {
+        Self {
+            head_sha: head_sha.to_string(),
+            verdict: Verdict::Running,
+            findings: Vec::new(),
+            model: None,
+            error: None,
+            reviewed_at: now,
+            fix_sent: false,
+            rounds,
+            announced: false,
+            merge_anyway: None,
+        }
+    }
+
     pub(crate) fn confirmed(&self) -> usize {
         self.findings.iter().filter(|f| f.blocking).count()
     }
 
     /// The row text: `review clean`, `review: 2 confirmed, fixing`.
     pub(crate) fn summary(&self) -> String {
+        if let Some(owner) = &self.merge_anyway {
+            return format!("review overridden by {}", owner.by);
+        }
+        let dismissed = self
+            .findings
+            .iter()
+            .filter(|f| f.dismissed.is_some())
+            .count();
+        let base = self.verdict_text();
+        if dismissed > 0 && self.verdict != Verdict::Running {
+            return format!("{base} ({dismissed} dismissed)");
+        }
+        base
+    }
+
+    fn verdict_text(&self) -> String {
         match self.verdict {
+            Verdict::Running => "review running".into(),
             Verdict::Clean => "review clean".into(),
             Verdict::Error => "review failed, will retry".into(),
             Verdict::Findings if self.fix_sent => {
@@ -176,23 +225,54 @@ pub(crate) async fn gate(
     if !settings.enabled {
         return Gate::Pass;
     }
+    let jobs = jobs();
+    jobs.forget_other_heads(&watch.session_id, &pr.head_sha);
     let rounds = watch.review.as_ref().map_or(0, |r| r.rounds);
     let current = watch
         .review
         .as_ref()
         .filter(|r| r.head_sha == pr.head_sha)
         .cloned();
+    if current.as_ref().is_some_and(|r| r.merge_anyway.is_some()) {
+        return Gate::Pass;
+    }
+    let spawn = |watch: &mut Watch| {
+        let job = Job {
+            reviewer: reviewer.clone(),
+            settings: settings.clone(),
+            gh: gh.clone(),
+            root: root.to_path_buf(),
+            session_id: watch.session_id.clone(),
+            pr_number: pr.number,
+            head_sha: pr.head_sha.clone(),
+            rounds,
+            now,
+        };
+        let session = watch.session_id.clone();
+        watch.review = Some(ReviewState::started(&pr.head_sha, rounds, now));
+        jobs.start(&watch.session_id, &pr.head_sha, job.run(), move || {
+            registry().poll_soon(&session)
+        });
+        Gate::Wait("review running".into())
+    };
     let state = match current {
+        None => return spawn(watch),
         Some(r) if r.verdict == Verdict::Error && now - r.reviewed_at >= RETRY_SECS => {
-            run(&*reviewer, &settings, gh, root, watch, pr, rounds, now).await
+            return spawn(watch)
+        }
+        Some(r) if r.verdict == Verdict::Running => {
+            match jobs.poll(&watch.session_id, &pr.head_sha) {
+                Poll::Running => return Gate::Wait("review running".into()),
+                Poll::Missing => return spawn(watch),
+                Poll::Done(done) => *done,
+            }
         }
         Some(r) => r,
-        None => run(&*reviewer, &settings, gh, root, watch, pr, rounds, now).await,
     };
     let verdict = state.verdict;
     watch.review = Some(state);
     match verdict {
-        Verdict::Clean => Gate::Pass,
+        Verdict::Clean | Verdict::Running => Gate::Pass,
         Verdict::Error => {
             let why = watch
                 .review
@@ -237,64 +317,70 @@ fn findings_gate(watch: &mut Watch, pr: &PrSummary, settings: &Settings, free: b
     Gate::Fix(fix_prompt(pr, &review.findings))
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn run(
-    reviewer: &dyn Reviewer,
-    settings: &Settings,
-    gh: &Gh,
-    root: &Path,
-    watch: &Watch,
-    pr: &PrSummary,
+/// Everything one background review needs, owned so it outlives the poll that started it.
+struct Job {
+    reviewer: Arc<dyn Reviewer>,
+    settings: Settings,
+    gh: Gh,
+    root: PathBuf,
+    session_id: String,
+    pr_number: u64,
+    head_sha: String,
     rounds: u32,
     now: i64,
-) -> ReviewState {
-    let mut state = ReviewState {
-        head_sha: pr.head_sha.clone(),
-        verdict: Verdict::Clean,
-        findings: Vec::new(),
-        model: None,
-        error: None,
-        reviewed_at: now,
-        fix_sent: false,
-        rounds,
-        announced: false,
-    };
-    let number = pr.number.to_string();
-    let diff = match gh.run(root, &["pr", "diff", &number], None).await {
-        Ok(diff) => clip(diff),
-        Err(e) => {
-            return failed(
-                state,
-                format!("could not read the PR diff: {}", e.message()),
-            )
-        }
-    };
-    if diff.trim().is_empty() {
-        return state;
-    }
-    let request = ReviewRequest {
-        session_id: &watch.session_id,
-        pr_number: pr.number,
-        head_sha: &pr.head_sha,
-        diff: &diff,
-    };
-    match reviewer.review(&request).await {
-        Err(e) => failed(state, e),
-        Ok(reviewed) => {
-            let mut findings = reviewed.findings;
-            findings.sort_by_key(|f| std::cmp::Reverse(rank(&f.severity)));
-            findings.truncate(settings.max_findings);
-            for f in &mut findings {
-                f.blocking = rank(&f.severity) >= settings.threshold.weight();
+}
+
+impl Job {
+    async fn run(self) -> ReviewState {
+        let mut state = ReviewState::started(&self.head_sha, self.rounds, self.now);
+        state.verdict = Verdict::Clean;
+        let number = self.pr_number.to_string();
+        let diff = match self
+            .gh
+            .run(&self.root, &["pr", "diff", &number], None)
+            .await
+        {
+            Ok(diff) => clip(diff),
+            Err(e) => {
+                return failed(
+                    state,
+                    format!("could not read the PR diff: {}", e.message()),
+                )
             }
-            state.model = reviewed.model;
-            if findings.iter().any(|f| f.blocking) {
-                state.verdict = Verdict::Findings;
+        };
+        if diff.trim().is_empty() {
+            return state;
+        }
+        let request = ReviewRequest {
+            session_id: &self.session_id,
+            pr_number: self.pr_number,
+            head_sha: &self.head_sha,
+            diff: &diff,
+        };
+        match self.reviewer.review(&request).await {
+            Err(e) => failed(state, e),
+            Ok(reviewed) => {
+                let mut findings = reviewed.findings;
+                findings.sort_by_key(|f| std::cmp::Reverse(rank(&f.severity)));
+                findings.truncate(self.settings.max_findings);
+                for f in &mut findings {
+                    f.blocking = rank(&f.severity) >= self.settings.threshold.weight();
+                }
+                state.model = reviewed.model;
+                if findings.iter().any(|f| f.blocking) {
+                    state.verdict = Verdict::Findings;
+                }
+                state.findings = findings;
+                state
             }
-            state.findings = findings;
-            state
         }
     }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 fn failed(mut state: ReviewState, why: String) -> ReviewState {
@@ -499,6 +585,7 @@ impl Reviewer for AssayReviewer {
                 why: f.rationale,
                 fix: f.suggested_fix,
                 blocking: false,
+                dismissed: None,
             })
             .collect();
         Ok(Reviewed { findings, model })
@@ -506,7 +593,12 @@ impl Reviewer for AssayReviewer {
 }
 
 pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
-    Router::new().route(&format!("{base}/api/pr/review"), get(review_get))
+    Router::new()
+        .route(&format!("{base}/api/pr/review"), get(review_get))
+        .route(
+            &format!("{base}/api/pr/review/action"),
+            post(owner::review_action),
+        )
 }
 
 #[derive(Deserialize)]

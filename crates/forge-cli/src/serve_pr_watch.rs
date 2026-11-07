@@ -183,6 +183,11 @@ impl Registry {
         rows
     }
 
+    /// A background job finished for `session`: poll it on the next tick, not after the interval.
+    pub(crate) fn poll_soon(&self, session: &str) {
+        self.update(session, |w| w.last_checked = w.last_checked.map(|_| 0));
+    }
+
     fn update(&self, session: &str, change: impl FnOnce(&mut Watch)) {
         let mut guard = self.lock();
         if let Some(watch) = guard.get_mut(session) {
@@ -209,6 +214,7 @@ impl Registry {
     pub(crate) fn store(&self, session: &str, mut next: Watch) {
         self.update(session, |w| {
             crate::serve_merge_queue::carry_owner_edits(w, &mut next);
+            crate::serve_pr_review::carry_owner_edits(w, &mut next);
             *w = next;
         });
     }
