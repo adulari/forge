@@ -483,7 +483,9 @@ async fn run_agent_loop(
                             // the chain again, instead of failing the parent's spawn.
                             let allowance =
                                 std::time::Duration::from_secs(ctx.config.mesh.outage_wait_secs);
-                            let wait = if allowance.is_zero() || !crate::outage_wait::is_outage(&e)
+                            let wait = if allowance.is_zero()
+                                || !crate::outage_wait::is_outage(&e)
+                                || !child_may_wait_out_outage(&decision)
                             {
                                 None
                             } else {
@@ -1088,6 +1090,13 @@ pub async fn orchestrate(
 pub(crate) fn summary(text: &str) -> String {
     let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
     line.chars().take(120).collect()
+}
+
+/// Whether a child may sit out a provider outage. Only a model someone chose (a pin) or a routed
+/// chain with fallbacks is worth hours of waiting; an agent type's tier default was never checked
+/// for reachability (an unreachable `ollama::` default would otherwise stall the parent's turn).
+fn child_may_wait_out_outage(decision: &RoutingDecision) -> bool {
+    decision.pinned || !decision.fallbacks.is_empty()
 }
 
 #[cfg(test)]
@@ -1744,6 +1753,25 @@ mod tests {
         let calls = provider.calls.load(std::sync::atomic::Ordering::SeqCst);
         let notes = notes.lock().unwrap().clone();
         (out, calls, notes)
+    }
+
+    #[test]
+    fn only_a_pinned_or_routed_child_waits_out_an_outage() {
+        let mut d = RoutingDecision {
+            effort: None,
+            tier: TaskTier::Trivial,
+            model: "ollama::llama3.2".into(),
+            rationale: "pinned by agent type 'scout'".into(),
+            fallbacks: Vec::new(),
+            pinned: false,
+            unroutable: false,
+        };
+        assert!(!child_may_wait_out_outage(&d), "a tier default fails fast");
+        d.fallbacks = vec!["groq::x".into()];
+        assert!(child_may_wait_out_outage(&d), "a routed chain may wait");
+        d.fallbacks.clear();
+        d.pinned = true;
+        assert!(child_may_wait_out_outage(&d), "a pin may wait");
     }
 
     #[tokio::test(start_paused = true)]
