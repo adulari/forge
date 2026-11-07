@@ -112,6 +112,33 @@ describe("GoalBanner", () => {
     expect(buttons.has("goal-resume")).toBe(true);
   });
 
+  it("draws the contract table with a mark, the check and the proof per assertion", () => {
+    const contract = {
+      headline: "1/2 pass",
+      approved: true,
+      rounds: 1,
+      passed: 1,
+      total: 2,
+      checked_at: 1_700_000_000,
+      assertions: [
+        { id: 1, text: "a exists", command: "test -f a.txt", expect: "", state: "pass" as const, reason: "", proof: "" },
+        { id: 2, text: "b says ready", command: "cat b.txt", expect: "", state: "fail" as const, reason: "exit 1", proof: "cat: b.txt: No such file" },
+      ],
+    };
+    const { html } = render(snapshot({ goal: goal({ contract }) }));
+    expect(html).toContain("Contract · 1/2 pass");
+    expect(html).toContain("1. a exists");
+    expect(html).toContain("2. b says ready");
+    expect(html).toContain("cat b.txt");
+    expect(html).toContain("exit 1 · cat: b.txt: No such file");
+    expect(html).toContain("✓");
+    expect(html).toContain("✗");
+  });
+
+  it("omits the contract table for a goal without one", () => {
+    expect(render(snapshot({ goal: goal() })).html).not.toContain("Contract");
+  });
+
   it("omits the envelope row for a goal without one", () => {
     expect(render(snapshot({ goal: goal() })).html).not.toContain("envelope");
   });

@@ -1,4 +1,4 @@
-import type { GoalPhase, RemoteInput, Snapshot, SnapshotEnvelope, SnapshotGoal } from "./ws";
+import type { GoalPhase, RemoteInput, Snapshot, SnapshotContract, SnapshotEnvelope, SnapshotGoal } from "./ws";
 
 export interface GoalView {
   objective: string;
@@ -16,6 +16,8 @@ export interface GoalView {
   reason: string | null;
   pending: "pause" | "clear" | null;
   envelope: SnapshotEnvelope | null;
+  /** The validation contract table, when the goal was started with one. */
+  contract: SnapshotContract | null;
 }
 
 /** The goal an older host announces only through the CLI's transient notes. */
@@ -55,6 +57,7 @@ function fromWire(goal: SnapshotGoal): GoalView {
     reason: goal.reason,
     pending: goal.pending,
     envelope: goal.envelope ?? null,
+    contract: goal.contract ?? null,
   };
 }
 
@@ -77,6 +80,7 @@ export function resolveGoal(snapshot: Pick<Snapshot, "goal" | "notes"> | null): 
     reason: null,
     pending: null,
     envelope: null,
+    contract: null,
   };
 }
 
@@ -100,6 +104,12 @@ export function goalActions(goal: GoalView): GoalAction[] {
   }
   if (goal.phase === "paused") return ["resume", "edit", "clear"];
   return ["clear"];
+}
+
+/** The prompt that starts a goal; `contract` asks for a validation contract to be drafted and
+ * approved first (`/goal --contract`). */
+export function goalStartCommand(objective: string, contract: boolean): string {
+  return `/goal ${contract ? "--contract " : ""}${objective.trim()}`;
 }
 
 export function goalInput(action: GoalAction, objective?: string): RemoteInput {
@@ -176,4 +186,42 @@ export function goalMeta(goal: GoalView, nowMs: number): string {
   }
   if (goal.gates > 0) parts.push(`${goal.gates} ${goal.gates === 1 ? "gate" : "gates"}`);
   return parts.join(" · ");
+}
+
+export interface ContractRow {
+  id: number;
+  text: string;
+  state: "pass" | "fail" | "pending";
+  /** Symbol shown beside the row; the colour is never the only signal. */
+  mark: string;
+  command: string;
+  /** Why it failed, then the last line of proof; empty for a pass without output. */
+  detail: string;
+}
+
+/** The contract table the panel draws, one row per assertion; `null` when the goal has none. */
+export function contractRows(goal: GoalView): ContractRow[] | null {
+  const contract = goal.contract;
+  if (!contract) return null;
+  return contract.assertions.map((a) => {
+    const lastProof = a.proof
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .pop();
+    const detail = a.state === "fail" ? [a.reason, lastProof].filter(Boolean).join(" · ") : (lastProof ?? "");
+    return {
+      id: a.id,
+      text: a.text,
+      state: a.state,
+      mark: a.state === "pass" ? "✓" : a.state === "fail" ? "✗" : "·",
+      command: a.command,
+      detail,
+    };
+  });
+}
+
+/** `Contract · 2/3 pass`, or `Contract · 3 assertions` before the validator has run. */
+export function contractHeadline(goal: GoalView): string | null {
+  return goal.contract ? `Contract · ${goal.contract.headline}` : null;
 }

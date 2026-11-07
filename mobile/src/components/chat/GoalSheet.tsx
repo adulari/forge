@@ -8,12 +8,14 @@ import { Target } from "lucide-react-native";
 import React, { useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
+import { goalStartCommand } from "../../lib/goalState";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type } from "../../theme/typography";
 import { Button } from "../ds/Button";
 import { Input } from "../ds/Input";
 import { Sheet } from "../ds/Sheet";
+import { Switch } from "../ds/Switch";
 
 export function GoalSheet({
   visible,
@@ -32,13 +34,14 @@ export function GoalSheet({
   const tokens = useTokens();
   const editing = mode === "edit";
   const [goal, setGoal] = useState(initialValue);
+  const [contract, setContract] = useState(false);
   useEffect(() => {
     if (visible) setGoal(initialValue);
   }, [visible, initialValue]);
   const submit = () => {
     const value = goal.trim();
     if (value) {
-      onSubmit(editing ? `/goal edit ${value}` : `/goal ${value}`);
+      onSubmit(editing ? `/goal edit ${value}` : goalStartCommand(value, contract));
       setGoal("");
       onClose();
     }
@@ -70,6 +73,17 @@ export function GoalSheet({
           returnKeyType="send"
           onSubmitEditing={submit}
         />
+        {editing ? null : (
+          <View style={styles.contractRow}>
+            <View style={styles.contractText}>
+              <Text style={[type.bodyBold, { color: tokens.ink }]}>Validation contract</Text>
+              <Text style={[type.sub, { color: tokens.ink3 }]}>
+                Forge drafts 3 to 12 checks first and asks you to approve them. The goal is done only when an independent validator passes every one.
+              </Text>
+            </View>
+            <Switch value={contract} onValueChange={setContract} accessibilityLabel="Validation contract" testID="goal-contract-switch" />
+          </View>
+        )}
         <Button label={editing ? "Save wording" : "Set goal and start"} onPress={submit} disabled={!goal.trim()} fullWidth />
       </View>
     </Sheet>
@@ -80,5 +94,7 @@ const styles = StyleSheet.create({
   content: { paddingHorizontal: space.space16, paddingBottom: space.space16, gap: space.space12 },
   label: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   dash: { width: 6, height: 2 },
+  contractRow: { flexDirection: "row", alignItems: "center", gap: space.space12 },
+  contractText: { flex: 1, gap: 2 },
   title: { flexDirection: "row", alignItems: "center", gap: space.space8 },
 });

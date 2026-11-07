@@ -3,12 +3,15 @@ import { describe, expect, it } from "vitest";
 import {
   budgetFraction,
   compactTokens,
+  contractHeadline,
+  contractRows,
   deriveNoteGoal,
   envelopeFraction,
   formatElapsed,
   goalActions,
   goalInput,
   goalMeta,
+  goalStartCommand,
   liveElapsedSecs,
   resumeLine,
   resolveGoal,
@@ -145,5 +148,43 @@ describe("goal readouts", () => {
     expect(budgetFraction(goal)).toBeCloseTo(0.25);
     expect(budgetFraction({ ...goal, maxTokens: null })).toBeNull();
     expect(goalMeta(goal, 1_000_000)).toBe("turn 3 · 12.5k / 50k tok · 1m 30s / 30m · 1 gate");
+  });
+});
+
+describe("contract", () => {
+  const contract = {
+    headline: "1/3 pass",
+    approved: true,
+    rounds: 2,
+    passed: 1,
+    total: 3,
+    checked_at: 1_700_000_000,
+    assertions: [
+      { id: 1, text: "a exists", command: "test -f a.txt", expect: "exit 0", state: "pass" as const, reason: "", proof: "" },
+      { id: 2, text: "b says ready", command: "cat b.txt", expect: "", state: "fail" as const, reason: 'output does not contain "ready"', proof: "pending\nnot yet\n" },
+      { id: 3, text: "c exists", command: "test -f c.txt", expect: "", state: "pending" as const, reason: "", proof: "" },
+    ],
+  };
+
+  it("turns the host's contract into table rows with a mark per state", () => {
+    const goal = resolveGoal({ goal: wire({ contract }), notes: [] });
+    const rows = goal && contractRows(goal);
+    expect(rows?.map((r) => r.mark)).toEqual(["✓", "✗", "·"]);
+    expect(rows?.[1].detail).toBe('output does not contain "ready" · not yet');
+    expect(rows?.[0].detail).toBe("");
+    expect(goal && contractHeadline(goal)).toBe("Contract · 1/3 pass");
+  });
+
+  it("is absent for a goal without a contract or from an older host", () => {
+    const goal = resolveGoal({ goal: wire(), notes: [] });
+    expect(goal && contractRows(goal)).toBeNull();
+    expect(goal && contractHeadline(goal)).toBeNull();
+  });
+});
+
+describe("goalStartCommand", () => {
+  it("asks for a contract only when the switch is on", () => {
+    expect(goalStartCommand("  ship it ", false)).toBe("/goal ship it");
+    expect(goalStartCommand("ship it", true)).toBe("/goal --contract ship it");
   });
 });

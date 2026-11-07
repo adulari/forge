@@ -8,6 +8,8 @@ import { StyleSheet, Text, View } from "react-native";
 
 import {
   budgetFraction,
+  contractHeadline,
+  contractRows,
   envelopeFraction,
   GOAL_PHASE_LABEL,
   type GoalAction,
@@ -162,6 +164,33 @@ function GoalBannerBody({ goal, send }: { goal: GoalView; send: GoalBannerProps[
             </View>
           </>
         ) : null}
+        {contractRows(goal) ? (
+          <View style={styles.contract} testID="goal-contract">
+            <Text style={[typeScale.section, { color: tokens.ink2 }]}>{contractHeadline(goal)}</Text>
+            {contractRows(goal)?.map((row) => (
+              <View key={row.id} style={styles.row} testID={`goal-contract-${row.id}`}>
+                <Text
+                  style={[
+                    typeScale.meta,
+                    { color: row.state === "pass" ? tokens.success : row.state === "fail" ? tokens.danger : tokens.ink3 },
+                  ]}
+                  accessibilityLabel={row.state}
+                >
+                  {row.mark}
+                </Text>
+                <View style={styles.rowBody}>
+                  <Text style={[typeScale.meta, { color: tokens.ink }]}>{`${row.id}. ${row.text}`}</Text>
+                  <Text style={[styles.meta, { color: tokens.ink3 }]} numberOfLines={1}>{row.command}</Text>
+                  {row.detail ? (
+                    <Text style={[styles.meta, { color: row.state === "fail" ? tokens.danger : tokens.ink3 }]} numberOfLines={2}>
+                      {row.detail}
+                    </Text>
+                  ) : null}
+                </View>
+              </View>
+            ))}
+          </View>
+        ) : null}
       </Card>
       <GoalSheet
         visible={editing}
@@ -188,6 +217,9 @@ const styles = StyleSheet.create({
   spacer: { flex: 1 },
   actions: { flexDirection: "row", alignItems: "center", gap: space.space4 },
   action: { flexDirection: "row", alignItems: "center", gap: space.space4, minHeight: 28, paddingHorizontal: space.space8, borderRadius: 6 },
+  contract: { gap: space.space4, marginTop: space.space8 },
+  row: { flexDirection: "row", gap: space.space8 },
+  rowBody: { flex: 1, gap: 1 },
   meta: { fontFamily: monoFamily.regular, fontSize: 11, lineHeight: 15 },
   track: { height: 2, borderRadius: 1, overflow: "hidden", marginTop: space.space4 },
   fill: { height: 2 },

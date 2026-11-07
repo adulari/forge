@@ -193,6 +193,34 @@ export interface SnapshotGoal {
   pending: "pause" | "clear" | null;
   /** The spend envelope (`/goal --budget`). Absent when the goal has none or the host predates it. */
   envelope?: SnapshotEnvelope | null;
+  /** The validation contract of a `/goal --contract` run and the validator's latest results.
+   * Absent when the goal has none or the host predates it. */
+  contract?: SnapshotContract | null;
+}
+
+/** One row of a goal contract: `state` is `pass`, `fail`, or `pending` before the validator has
+ * run. `proof` is the tail of the check's output. */
+export interface SnapshotAssertion {
+  id: number;
+  text: string;
+  command: string;
+  expect: string;
+  state: "pass" | "fail" | "pending";
+  reason: string;
+  proof: string;
+}
+
+export interface SnapshotContract {
+  /** The host's ready-to-show line, e.g. `2/3 pass`. */
+  headline: string;
+  approved: boolean;
+  /** How many times the validator has run. */
+  rounds: number;
+  passed: number;
+  total: number;
+  /** Unix seconds of the last validator run. */
+  checked_at: number | null;
+  assertions: SnapshotAssertion[];
 }
 
 /** How much of a goal's spend envelope is used. `unit` is `percent` of a subscription window or
