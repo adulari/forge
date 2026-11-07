@@ -111,14 +111,17 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![successor, predecessor, reason, detail, brief, now],
         )?;
+        // The fleet slot moves only if the predecessor held one: a terminal-hosted goal's
+        // successor must not be flagged daemon-driven, or the terminal's switch refuses it.
+        tx.execute(
+            "UPDATE session SET daemon_live = \
+             (SELECT daemon_live FROM session WHERE id = ?2) WHERE id = ?1",
+            [successor, predecessor],
+        )?;
         tx.execute(
             "UPDATE session SET worktree_path = NULL, daemon_live = 0, \
              done_at = COALESCE(done_at, ?2) WHERE id = ?1",
             rusqlite::params![predecessor, now],
-        )?;
-        tx.execute(
-            "UPDATE session SET daemon_live = 1 WHERE id = ?1",
-            [successor],
         )?;
         tx.commit()?;
         Ok(())
@@ -406,6 +409,25 @@ mod tests {
         assert_eq!(store.relay_tail(&c).unwrap(), c);
         let done = store.session_lifecycle(std::slice::from_ref(&a)).unwrap();
         assert!(done[&a].1.is_some(), "the predecessor is done");
+    }
+
+    #[test]
+    fn a_terminal_hosted_goal_hands_off_without_entering_the_daemon_fleet() {
+        let store = Store::open_in_memory().unwrap();
+        let a = store.create_session("/repo/wt", "bypass").unwrap();
+        store.set_session_worktree(&a, "/repo/wt").unwrap();
+        let b = store
+            .create_relay_successor(&a, "wedged", "same set", "BRIEF")
+            .unwrap();
+        assert!(
+            !store.session_daemon_live(&b).unwrap(),
+            "a terminal relay's successor is not daemon-driven, so the terminal can switch to it"
+        );
+        assert!(!store.daemon_live_sessions().unwrap().contains(&b));
+        assert_eq!(
+            store.session_worktree(&b).unwrap().as_deref(),
+            Some("/repo/wt")
+        );
     }
 
     #[test]
