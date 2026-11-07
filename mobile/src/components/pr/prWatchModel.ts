@@ -43,6 +43,8 @@ export function watchStatus(watch: PrWatch | null): WatchStatus {
           tone: "accent",
           detail: queue.last_update ? `${queue.last_update}. ${detailed ?? ""}`.trim() : detailed,
         };
+      case "held":
+        return { label: "Held", tone: "neutral", detail: detailed };
       case "skipped":
         return { label: "Handed back", tone: "warn", detail: detailed };
     }

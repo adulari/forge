@@ -278,6 +278,8 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/issues/drain", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/issues/drains");
     await transport.fetch("fany://host-1/api/issues/drain/cancel", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/pr/queue");
+    await transport.fetch("fany://host-1/api/pr/queue/action", { method: "POST", body: "{}" });
 
     expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
       ["workspace_entries", "?session=s1&path=src"],
@@ -304,6 +306,8 @@ describe("AnywhereTransport", () => {
       ["drain_issues", ""],
       ["list_issue_drains", ""],
       ["cancel_issue_drain", ""],
+      ["pr_queue", ""],
+      ["pr_queue_action", ""],
     ]);
     await expect(
       transport.fetch("fany://host-1/api/schedules", { method: "POST", body: "{}" }),

@@ -68,6 +68,10 @@ describe("watchStatus in the merge queue", () => {
     ).toMatchObject({ label: "Handed back", tone: "warn", detail: "conflicts in src/a.rs" });
   });
 
+  it("labels a held row", () => {
+    expect(watchStatus({ ...base, queue: { ...queue, state: "held" } }).label).toBe("Held");
+  });
+
   it("ignores queue data on a fix-mode watch", () => {
     expect(watchStatus({ ...base, mode: "fix", queue }).label).toBe("Watching");
   });

@@ -85,7 +85,10 @@ export type BridgeRoute =
   // Backlog drain: several issues, a few at a time, under an optional spend envelope.
   | "drain_issues"
   | "list_issue_drains"
-  | "cancel_issue_drain";
+  | "cancel_issue_drain"
+  // Merge queue standing across repos, and the owner's hold / release / front / retry.
+  | "pr_queue"
+  | "pr_queue_action";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -330,6 +333,8 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/issues/drain": { POST: "drain_issues" },
     "/api/issues/drains": { GET: "list_issue_drains" },
     "/api/issues/drain/cancel": { POST: "cancel_issue_drain" },
+    "/api/pr/queue": { GET: "pr_queue" },
+    "/api/pr/queue/action": { POST: "pr_queue_action" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };

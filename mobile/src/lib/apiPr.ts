@@ -245,7 +245,7 @@ export interface PrWatch {
   hold?: string | null;
 }
 
-export type PrQueueState = "queued" | "head" | "checks" | "skipped";
+export type PrQueueState = "queued" | "head" | "checks" | "held" | "skipped";
 
 export interface PrQueueInfo {
   repo: string;
@@ -264,6 +264,8 @@ export interface PrQueueRow {
   reason: string | null;
   pushes: number;
   last_update: string | null;
+  /** The owner paused this row; it keeps no position and does not block the queue. */
+  held?: boolean;
 }
 
 export interface PrRepoQueue {
@@ -271,7 +273,21 @@ export interface PrRepoQueue {
   rows: PrQueueRow[];
 }
 
-export const getPrQueue = (baseUrl: string) => request<{ queues: PrRepoQueue[] }>(baseUrl, "/api/pr/queue");
+export interface PrQueueResponse {
+  queues: PrRepoQueue[];
+}
+
+export const getPrQueue = (baseUrl: string) => request<PrQueueResponse>(baseUrl, "/api/pr/queue");
+
+export type PrQueueAction = "hold" | "release" | "front" | "retry";
+
+export interface PrQueueActionResponse extends PrQueueResponse {
+  ok: boolean;
+  message: string;
+}
+
+export const postPrQueueAction = (baseUrl: string, body: { session: string; action: PrQueueAction }) =>
+  post<PrQueueActionResponse>(baseUrl, "/api/pr/queue/action", body);
 
 export const getPrWatch = (baseUrl: string, session: string) =>
   request<{ watch: PrWatch | null }>(baseUrl, `/api/pr/watch${query({ session })}`);
