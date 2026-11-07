@@ -646,6 +646,7 @@ async fn drive_session(
     let mut child_links = crate::serve_agents::ChildLinks::default();
     let mut model_pinned = false;
     let mut dirty = true;
+    let mut ci_watch = crate::ci_run::live::Watch::default();
     // The most recent genuine turn failure (PresenterEvent::Error), latched so the busy falling
     // edge pushes "failed" instead of "done". Cleared when the next turn starts.
     let mut turn_error: Option<String> = None;
@@ -950,6 +951,7 @@ async fn drive_session(
                 }
             }
         }
+        dirty |= ci_watch.changed();
         if dirty || st.busy {
             st.app.busy = st.busy;
             if st.busy {

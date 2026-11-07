@@ -47,7 +47,7 @@ pub(crate) fn ensure_ci_gate(gates: &mut Vec<GateState>, cwd: &std::path::Path) 
 
 async fn run_ci_gate(cwd: &std::path::Path) -> (bool, String) {
     let root = cwd.to_path_buf();
-    match tokio::task::spawn_blocking(move || crate::ci_run::automatic_check(&root)).await {
+    match tokio::task::spawn_blocking(move || crate::ci_run::automatic_check(&root, "goal")).await {
         Ok(crate::ci_run::Check::Passed(summary)) => (true, summary),
         Ok(crate::ci_run::Check::Skipped(why)) => (true, format!("skipped: {why}")),
         Ok(crate::ci_run::Check::Failed(text)) => (false, text),

@@ -330,9 +330,11 @@ pub struct RemoteUrl {
 /// posture. `temper` remains the human-facing label for older clients.
 pub const PROTOCOL_VERSION: u32 = 10;
 
+pub(crate) mod ci;
 mod event_log;
 mod goal;
 mod thread_error;
+pub use ci::SnapCi;
 use event_log::lock_event_log;
 pub use event_log::{EventLog, SnapshotFrame, EVENT_LOG_CAP};
 pub use goal::SnapGoal;
@@ -748,6 +750,11 @@ pub struct Snapshot {
     /// client shows it as a banner on the session. Absent otherwise and from older hosts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outage: Option<SnapOutage>,
+    /// The local CI plan for the session's repository (additive): plan size, the run in flight,
+    /// the last run per step and the step holding a goal or push back. Absent until the
+    /// repository has had a run. The plan itself is `GET /api/sessions/{id}/ci`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci: Option<SnapCi>,
 }
 
 /// A turn waiting out a provider outage. Times are unix seconds.
@@ -884,6 +891,7 @@ impl Default for Snapshot {
             worktree_base: None,
             live_tail: None,
             outage: None,
+            ci: None,
         }
     }
 }

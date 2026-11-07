@@ -138,11 +138,20 @@ fn automatic_check_respects_settings_and_empty_plans() {
     let dir = repo(WF);
     std::fs::create_dir_all(dir.path().join(".forge")).unwrap();
     std::fs::write(dir.path().join(".forge/ci.toml"), "[ci]\ngate = \"off\"\n").unwrap();
-    assert!(matches!(automatic_check(dir.path()), Check::Skipped(_)));
+    assert!(matches!(
+        automatic_check(dir.path(), "push"),
+        Check::Skipped(_)
+    ));
     let empty = tempfile::tempdir().unwrap();
-    assert!(matches!(automatic_check(empty.path()), Check::Skipped(_)));
+    assert!(matches!(
+        automatic_check(empty.path(), "push"),
+        Check::Skipped(_)
+    ));
     std::fs::remove_file(dir.path().join(".forge/ci.toml")).unwrap();
-    assert!(matches!(automatic_check(dir.path()), Check::Passed(_)));
+    assert!(matches!(
+        automatic_check(dir.path(), "push"),
+        Check::Passed(_)
+    ));
 }
 
 #[test]

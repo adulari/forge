@@ -10,6 +10,8 @@ use forge_config::ci_parity::report::{load_report, save_report, CiReport, StepRe
 use forge_config::ci_parity::settings::{apply_overrides, load_settings, CiSettings, GateMode};
 use sha2::Digest as _;
 
+pub(crate) mod live;
+
 const TAIL_CHARS: usize = 3000;
 
 /// Set to `off` to disable every automatic use of the plan (finish gate, pre-push) at once.
@@ -270,6 +272,10 @@ pub(crate) fn run_plan(
     let begun = Instant::now();
     let budget = Duration::from_secs(settings.total_budget_secs);
     let mut halted = false;
+    let tracked = opts.only.is_none();
+    if tracked {
+        live::begin(root, plan.steps.len(), plan.skips.len());
+    }
     for (i, step) in steps.iter().enumerate() {
         let command = step.run.trim().to_string();
         let mut result = StepResult {
@@ -282,6 +288,9 @@ pub(crate) fn run_plan(
         };
         if halted {
             on_event(Event::Done { result: &result });
+            if tracked {
+                live::step_done(root, &result);
+            }
             report.results.push(result);
             continue;
         }
@@ -297,6 +306,9 @@ pub(crate) fn run_plan(
             total: steps.len(),
             step,
         });
+        if tracked {
+            live::step_started(root, &step.name, i + 1, steps.len());
+        }
         if cached {
             result.status = StepStatus::Cached;
         } else if begun.elapsed() >= budget {
@@ -325,13 +337,26 @@ pub(crate) fn run_plan(
             }
         }
         on_event(Event::Done { result: &result });
+        if tracked {
+            live::step_done(root, &result);
+        }
         report.results.push(result);
     }
     report.finished_unix = now_unix();
-    if opts.only.is_none() {
+    if tracked {
         let _ = save_report(root, &report);
+        live::finished(root, &report);
     }
     report
+}
+
+/// The step's environment as `K=V` pairs, without the cargo output-shaping noise.
+fn shown_env(step: &CiStep) -> Vec<String> {
+    step.env
+        .iter()
+        .filter(|(k, _)| !k.starts_with("CARGO_TERM") && !k.starts_with("CARGO_PROFILE"))
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect()
 }
 
 /// What the model (or the owner) reads when the plan fails: step, command, env, output tail.
@@ -346,14 +371,7 @@ pub(crate) fn failure_text(plan: &CiPlan, report: &CiReport) -> String {
         .steps
         .iter()
         .find(|s| s.key == f.key)
-        .map(|s| {
-            s.env
-                .iter()
-                .filter(|(k, _)| !k.starts_with("CARGO_TERM") && !k.starts_with("CARGO_PROFILE"))
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
+        .map(|s| shown_env(s).join(" "))
         .unwrap_or_default();
     format!(
         "Local CI step failed: {}\nStep key: {}\nCommand: {}\nEnvironment: {}\nOutput (tail):\n{}\n\
@@ -375,8 +393,9 @@ pub(crate) enum Check {
     Failed(String),
 }
 
-/// The automatic check used before a push and as the `/goal` finish gate.
-pub(crate) fn automatic_check(root: &Path) -> Check {
+/// The automatic check used before a push and as the `/goal` finish gate. `via` names what is
+/// waiting on it (`goal` or `push`), so a failing step can be shown as what blocked it.
+pub(crate) fn automatic_check(root: &Path, via: &'static str) -> Check {
     if std::env::var(KILL_SWITCH_ENV).is_ok_and(|v| v.eq_ignore_ascii_case("off")) {
         return Check::Skipped(format!("{KILL_SWITCH_ENV}=off"));
     }
@@ -392,6 +411,7 @@ pub(crate) fn automatic_check(root: &Path) -> Check {
         let (pass, _, _) = report.counts();
         Check::Passed(format!("{pass} local CI steps passed"))
     } else {
+        live::blocked(root, via, &report);
         Check::Failed(failure_text(&plan, &report))
     }
 }
@@ -411,6 +431,21 @@ pub(crate) enum ViewState {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct ViewRow {
     pub(crate) state: ViewState,
+    /// `workflow::job::step`, what `forge ci run --step` and `.forge/ci.toml` match; empty for a
+    /// skip.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) key: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) job: String,
+    /// The step's whole script (`detail` is its first line).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) command: String,
+    /// The environment the step runs with, as `K=V`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) env: Vec<String>,
+    /// The tail of the output of a step that failed or timed out.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub(crate) tail: String,
     pub(crate) name: String,
     /// The command for a step, the reason for a skip.
     pub(crate) detail: String,
@@ -454,6 +489,14 @@ pub(crate) fn rows_for(plan: &CiPlan, report: Option<&CiReport>) -> Vec<ViewRow>
                 .unwrap_or("");
             ViewRow {
                 state,
+                key: step.key.clone(),
+                job: step.job.clone(),
+                command: step.run.trim().to_string(),
+                env: shown_env(step),
+                tail: result
+                    .filter(|_| state == ViewState::Fail)
+                    .map(|r| r.tail.clone())
+                    .unwrap_or_default(),
                 name: format!("{} / {}", step.job, step.name),
                 detail: first.to_string(),
                 secs: result.map_or(0, |r| r.secs),
@@ -467,6 +510,11 @@ pub(crate) fn rows_for(plan: &CiPlan, report: Option<&CiReport>) -> Vec<ViewRow>
             .collect();
         ViewRow {
             state: ViewState::Skip,
+            key: String::new(),
+            job: s.job.clone().unwrap_or_default(),
+            command: String::new(),
+            env: Vec::new(),
+            tail: String::new(),
             name: if at.is_empty() {
                 s.workflow.clone()
             } else {
@@ -500,7 +548,7 @@ pub(crate) fn summary_for(report: Option<&CiReport>) -> Option<String> {
 
 /// `Some(failure text)` when the local CI plan fails and the push must not happen. Blocking.
 pub(crate) fn push_blocker(root: &Path) -> Option<String> {
-    match automatic_check(root) {
+    match automatic_check(root, "push") {
         Check::Failed(text) => Some(text),
         Check::Passed(_) | Check::Skipped(_) => None,
     }

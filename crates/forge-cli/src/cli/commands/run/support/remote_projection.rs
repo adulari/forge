@@ -197,6 +197,7 @@ pub(crate) fn build_snapshot_frame(
             lines: t.lines,
             elapsed_ms: t.elapsed_ms,
         }),
+        ci: crate::ci_run::live::for_cwd(std::path::Path::new(ident.cwd)),
     }
 }
 
@@ -397,3 +398,6 @@ mod job_notice_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ci_tests;
