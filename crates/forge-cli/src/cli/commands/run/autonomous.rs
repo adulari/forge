@@ -365,6 +365,12 @@ pub(crate) fn dequeue_prompt(queue: &mut Vec<String>, app: &mut forge_tui::App) 
 pub(crate) fn finish_interrupted_presenter(app: &mut forge_tui::App) {
     app.workflow.on_interrupt();
     app.apply(forge_tui::PresenterEvent::AssistantDone);
+    // The aborted task never emits its own Done, so an outage or retry wait it was showing would
+    // stay on the status bar, spinner and "Esc stops" included, long after Esc stopped it.
+    app.apply(forge_tui::PresenterEvent::Done {
+        final_text: String::new(),
+        stop_reason: forge_types::StopReason::Interrupted,
+    });
 }
 
 /// A model-skip retries the same logical autonomous turn under a fresh generation. Keep `/loop`
@@ -672,4 +678,30 @@ pub(crate) fn spawn_refine(
             sess.notify_error(&format!("refine failed: {e}"));
         }
     })
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::*;
+
+    #[test]
+    fn an_interrupt_during_an_outage_wait_clears_the_outage_status() {
+        let mut app = forge_tui::App::default();
+        app.busy = true;
+        app.apply(forge_tui::PresenterEvent::ProviderOutage {
+            model: "drill::flash".into(),
+            since: 1,
+            next_try: 2,
+            attempt: 1,
+            until: 3,
+            reason: "503 no_capacity".into(),
+        });
+        app.apply(forge_tui::PresenterEvent::ModelSearch {
+            model: "drill::flash".into(),
+            retrying: true,
+        });
+        finish_interrupted_presenter(&mut app);
+        assert!(app.provider_outage.is_none());
+        assert!(app.model_search.is_none());
+    }
 }
