@@ -92,12 +92,25 @@ pub(crate) fn resolve_config(
         return Ok(None);
     }
     let budget = cfg.budget.trim();
+    let provider = forge_config::provider_of(model);
+    if !provider.is_empty() && !forge_config::is_known_provider(provider) {
+        return Err(format!(
+            "'{provider}' is not a known provider in expert model {model}; run `forge models` \
+             for usable ids or `forge auth` to add a provider"
+        ));
+    }
     if !is_subscription_model(model) {
         if budget.is_empty() {
             return Ok(Some((model.to_string(), None)));
         }
         let spec = EnvelopeSpec::parse(budget, None)
             .map_err(|e| format!("[harness.expert] budget: {e}"))?;
+        if !matches!(spec.kind, EnvelopeKind::Usd) {
+            return Err(format!(
+                "[harness.expert] budget '{budget}' is a subscription window slice, but {model} \
+                 is billed per token; use a dollar budget such as \"$2\" or leave it empty"
+            ));
+        }
         return Ok(Some((model.to_string(), Some(spec))));
     }
     let Some(family) = subscription_family(model) else {
@@ -193,6 +206,29 @@ pub(crate) fn status_line(model: &str, consults: u32, envelope: Option<&Envelope
         }
     }
     line
+}
+
+impl ExpertReply {
+    /// What the owner reads in the scrollback: the cause and, after it, what the model is told
+    /// to do. The model gets both, so the owner must too.
+    pub(crate) fn owner_line(&self) -> String {
+        match (self.diagnosis.is_empty(), self.next_step.is_empty()) {
+            (false, false) => format!("{} Next: {}", self.diagnosis, self.next_step),
+            (false, true) => self.diagnosis.clone(),
+            (true, _) => format!("Next: {}", self.next_step),
+        }
+    }
+}
+
+/// Why a consult produced no advice, for the owner: the label's outcome and, for a failed call,
+/// the provider's own words.
+pub(crate) fn failure_line(label: &str, detail: &str) -> String {
+    let outcome = label.rsplit(':').next().unwrap_or(label);
+    if detail.is_empty() {
+        format!("no usable reply ({outcome})")
+    } else {
+        format!("no usable reply ({outcome}: {detail})")
+    }
 }
 
 /// The expert's JSON reply. A reply with neither a diagnosis nor a next step is not one.
@@ -552,21 +588,55 @@ impl Session {
         if trigger != Trigger::Done && active.is_some_and(|a| a == model) {
             return Ok(None);
         }
-        let health = self.provider_readiness().health;
-        if !forge_mesh::privacy::allows(&self.config, &model)
-            || !crate::auxiliary_candidates::usable_for_side_call(
-                &model,
-                &health,
-                self.catalog.as_ref(),
-            )
-        {
-            return Ok(None);
-        }
+        self.model_problem(&model)?;
         Ok(Some(Resolved {
             model,
             spec,
             counted: true,
         }))
+    }
+
+    /// Why `model` cannot take a side call right now, as a sentence: privacy mode, a benched
+    /// model, or a keyless local endpoint nothing has vouched for.
+    fn model_problem(&self, model: &str) -> Result<(), String> {
+        if let Some(reason) = forge_mesh::privacy::retention_block(&self.config, model) {
+            return Err(format!("privacy mode blocks {model} ({reason})"));
+        }
+        let health = self.provider_readiness().health;
+        if health.is_benched(model) {
+            return Err(format!(
+                "{model} is benched after recent failures; see `forge models`"
+            ));
+        }
+        if !crate::auxiliary_candidates::usable_for_side_call(model, &health, self.catalog.as_ref())
+        {
+            return Err(format!(
+                "{model} is a local or keyless endpoint that has not answered model discovery; \
+                 start the server and check `forge models`"
+            ));
+        }
+        Ok(())
+    }
+
+    /// Tell the owner, once per session, that a configured expert cannot be used, at the first
+    /// turn rather than at the first stall hours in.
+    pub(crate) fn note_expert_problem(&mut self) {
+        let cfg = &self.config.harness.expert;
+        if !cfg.is_set() || self.expert.config_error_told {
+            return;
+        }
+        let problem = match resolve_config(cfg) {
+            Err(why) => Some(why),
+            Ok(Some((model, _))) => self.model_problem(&model).err(),
+            Ok(None) => None,
+        };
+        if let Some(why) = problem {
+            self.expert.config_error_told = true;
+            tracing::warn!(%why, "ignoring [harness.expert]");
+            self.presenter.emit(PresenterEvent::Warning(format!(
+                "expert unavailable: {why}"
+            )));
+        }
     }
 
     /// [`Self::peek_expert`], telling the owner once per session why a configured expert is
@@ -637,8 +707,10 @@ impl Session {
                 None
             }
             EnvelopeCheck::Unverified => Some(format!(
-                "the expert budget cannot be checked (no fresh usage reading after \
-                 {UNVERIFIED_CONSULTS_MAX} consults)"
+                "the expert budget ({}) cannot be checked: no fresh plan-usage reading came back \
+                 after {UNVERIFIED_CONSULTS_MAX} consults. Run `forge doctor` to check the \
+                 login, or clear [harness.expert] model to stop using it",
+                self.config.harness.expert.budget.trim()
             )),
         }
     }
@@ -728,7 +800,7 @@ impl Session {
         self.presenter.emit(PresenterEvent::ExpertConsult {
             trigger: trigger.as_str().to_string(),
             model: r.model.clone(),
-            summary: clip_chars(summary, 160),
+            summary: clip_chars(summary, 400),
             status,
         });
     }
@@ -772,13 +844,8 @@ impl Session {
         };
         let (label, parsed) = judge(&call, Trigger::Stall);
         let summary = parsed.as_ref().map_or_else(
-            || {
-                format!(
-                    "no usable reply ({})",
-                    label.trim_start_matches("expert/stall:")
-                )
-            },
-            |p| p.diagnosis.clone(),
+            || failure_line(&label, &call.detail),
+            ExpertReply::owner_line,
         );
         self.settle_consult(&r, Trigger::Stall, &label, &call.usage, &summary);
         parsed.map(|p| (r, p))
@@ -829,20 +896,18 @@ impl Session {
         {
             Ok(raw) => raw,
             Err(why) => {
+                self.presenter.emit(PresenterEvent::Warning(format!(
+                    "expert not consulted: {why}"
+                )));
                 return Ok(format!(
                     "The expert was not consulted: {why}. Go on with your own judgement."
-                ))
+                ));
             }
         };
         let (label, parsed) = judge(&raw, Trigger::Tool);
         let summary = parsed.as_ref().map_or_else(
-            || {
-                format!(
-                    "no usable reply ({})",
-                    label.trim_start_matches("expert/tool:")
-                )
-            },
-            |p| p.diagnosis.clone(),
+            || failure_line(&label, &raw.detail),
+            ExpertReply::owner_line,
         );
         self.settle_consult(&r, Trigger::Tool, &label, &raw.usage, &summary);
         Ok(tool_answer(&r.model, &label, parsed.as_ref()))

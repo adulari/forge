@@ -341,22 +341,28 @@ impl Session {
             reasoning_tokens = usage.reasoning_tokens.unwrap_or(0),
             "advisor review"
         );
-        let summary = advice.as_ref().and_then(|a| a.notes.first()).map_or_else(
-            || {
-                format!(
-                    "done review: {}",
-                    outcome.label().trim_start_matches("advisor/done:")
-                )
-            },
-            |n| n.text.clone(),
-        );
+        let summary = match advice.as_ref().and_then(|a| a.notes.first()) {
+            Some(n) => {
+                let kind = if n.blocker { "blocker" } else { "concern" };
+                match advice.as_ref().map(|a| a.next_step.as_str()) {
+                    Some(step) if !step.is_empty() => {
+                        format!("{kind}: {} Next: {step}", n.text)
+                    }
+                    _ => format!("{kind}: {}", n.text),
+                }
+            }
+            None if outcome == Outcome::Silent => "no concerns".to_string(),
+            None => crate::expert::failure_line(outcome.label(), &detail),
+        };
         self.settle_consult(&reviewer, Trigger::Done, outcome.label(), &usage, &summary);
         match (outcome, advice) {
             (Outcome::Redrive, Some(advice)) => {
                 self.keep_answer_across_verification(pre_review, answer);
                 let first = advice.notes.first().cloned();
                 let _ = self.push_nudge(redrive_text(&advice));
-                if let Some(first) = first {
+                // The expert's consult line already carries the note; only the advisor, which
+                // has no line of its own, needs this one.
+                if let (Some(first), false) = (first, reviewer.counted) {
                     let kind = if first.blocker { "blocker" } else { "concern" };
                     self.presenter.emit(PresenterEvent::Warning(format!(
                         "advisor: {kind} — {}",
@@ -366,10 +372,13 @@ impl Session {
                 true
             }
             (Outcome::Silent, _) => {
-                self.presenter
-                    .emit(PresenterEvent::Progress("advisor: no concerns".to_string()));
+                if !reviewer.counted {
+                    self.presenter
+                        .emit(PresenterEvent::Progress("advisor: no concerns".to_string()));
+                }
                 false
             }
+            _ if reviewer.counted => false,
             _ => {
                 let why = if detail.is_empty() {
                     String::new()

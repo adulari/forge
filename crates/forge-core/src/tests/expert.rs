@@ -8,6 +8,7 @@ use forge_types::goal_envelope::{EnvelopeCheck, EnvelopeSpec};
 
 const CHEAP: &str = "direct::scripted";
 const EXPERT: &str = "anthropic::expert-test";
+const CODEX_EXPERT: &str = "codex-cli::expert-test";
 const ADVICE: &str = r#"{"diagnosis":"you keep reading lines of big.txt that hold nothing","next_step":"grep for TODO in src/ instead"}"#;
 
 type Plan = Box<dyn Fn(usize) -> Option<(String, Vec<forge_types::ToolCall>)> + Send + Sync>;
@@ -356,11 +357,9 @@ async fn a_spent_budget_refuses_the_next_consult_with_a_note() {
     // The window reads 90% when the first consult is checked; the expert's own call lifts it to
     // 96%, which is past a 5% slice.
     let mut r = run(Box::new(novel_read), vec![ADVICE], Some(96.0), |c| {
-        c.harness.expert.model = EXPERT.into();
+        c.harness.expert.model = CODEX_EXPERT.into();
         c.harness.expert.budget = "codex:5%w".into();
     });
-    // The budget only gates a subscription window when the family matches the model; an API
-    // expert may carry a window budget too, metered the same way.
     let _ = r.store.record_codex_quota(&forge_types::QuotaHint {
         provider: "codex-cli".into(),
         window: "weekly".into(),
@@ -570,6 +569,129 @@ fn only_a_meterable_subscription_with_a_matching_budget_resolves() {
         "no usage meter"
     );
     assert!(resolve_config(&cfg("anthropic::sonnet", "lots")).is_err());
+    assert!(resolve_config(&cfg("anthropic::sonnet", "$2"))
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn a_typo_in_the_provider_or_a_window_budget_on_an_api_model_says_what_to_do() {
+    use crate::expert::resolve_config;
+    let cfg = |model: &str, budget: &str| forge_config::expert::ExpertConfig {
+        model: model.into(),
+        budget: budget.into(),
+        ..Default::default()
+    };
+    let typo = resolve_config(&cfg("anthrpic::sonnet", "")).unwrap_err();
+    assert!(
+        typo.contains("'anthrpic' is not a known provider"),
+        "{typo}"
+    );
+    assert!(typo.contains("forge models"), "{typo}");
+    let wrong = resolve_config(&cfg("anthropic::sonnet", "codex:5%w")).unwrap_err();
+    assert!(wrong.contains("billed per token"), "{wrong}");
+    assert!(wrong.contains("\"$2\""), "{wrong}");
+}
+
+#[tokio::test]
+async fn an_unusable_expert_is_reported_at_the_first_turn_not_at_the_first_stall() {
+    let mut r = run(Box::new(|_| None), vec![], None, |c| {
+        c.harness.expert.model = "anthrpic::sonnet".into();
+    });
+    r.session.run_turn("say hi").await.unwrap();
+    assert_eq!(
+        r.warnings("expert unavailable: 'anthrpic' is not a known provider"),
+        1
+    );
+    r.session.run_turn("say hi again").await.unwrap();
+    assert_eq!(r.warnings("expert unavailable"), 1, "told once per session");
+}
+
+#[tokio::test]
+async fn privacy_mode_blocking_the_expert_is_said_not_silently_skipped() {
+    let mut r = run(Box::new(|_| None), vec![], None, |c| {
+        with_expert(c);
+        c.privacy.zero_retention = true;
+        c.privacy.retains.insert("direct".into(), false);
+    });
+    r.session.run_turn("say hi").await.unwrap();
+    assert_eq!(
+        r.warnings("expert unavailable: privacy mode blocks anthropic::expert-test"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_refused_consult_expert_call_is_shown_to_the_owner_too() {
+    let plan: Plan = Box::new(|n| {
+        (n < 4).then(|| {
+            (
+                "Asking again.".into(),
+                vec![call(
+                    CONSULT_EXPERT_TOOL,
+                    serde_json::json!({"question": format!("attempt {n}")}),
+                )],
+            )
+        })
+    });
+    let mut r = run(plan, vec![ADVICE], None, |c| {
+        with_expert(c);
+        c.harness.expert.max_consults_per_turn = 2;
+    });
+    r.session.run_turn("find the parser").await.unwrap();
+    assert_eq!(r.expert_models().len(), 2);
+    assert_eq!(
+        r.warnings("expert not consulted: this turn already used its 2 expert consults"),
+        2,
+        "attempts three and four"
+    );
+}
+
+#[tokio::test]
+async fn an_expert_done_review_shows_one_line_with_its_severity_and_no_advisor_echo() {
+    let blocker = r#"{"verdict":"blocker","notes":[{"severity":"blocker","text":"out.txt was never read back"}],"next_step":"cat out.txt"}"#;
+    let plan: Plan = Box::new(|n| match n {
+        0 => Some((
+            String::new(),
+            vec![call(
+                "write_file",
+                serde_json::json!({"path": "out.txt", "content": "hello"}),
+            )],
+        )),
+        _ => None,
+    });
+    let mut r = run(plan, vec![blocker], None, with_expert);
+    r.session.run_turn("write out.txt").await.unwrap();
+    let consults = r.consult_events();
+    assert_eq!(consults.len(), 1);
+    assert_eq!(
+        consults[0].1,
+        "blocker: out.txt was never read back Next: cat out.txt"
+    );
+    assert_eq!(
+        r.warnings("advisor:"),
+        0,
+        "the consult line is the one line"
+    );
+}
+
+#[tokio::test]
+async fn the_consult_line_carries_the_next_step_the_model_was_told() {
+    let mut r = run(Box::new(novel_read), vec![ADVICE], None, |c| {
+        with_expert(c);
+        c.harness.expert.max_consults_per_turn = 1;
+    });
+    r.session.run_turn("read everything").await.unwrap();
+    let consults = r.consult_events();
+    assert_eq!(consults.len(), 1);
+    assert!(
+        consults[0].1.contains("you keep reading lines of big.txt")
+            && consults[0]
+                .1
+                .contains("Next: grep for TODO in src/ instead"),
+        "{}",
+        consults[0].1
+    );
 }
 
 #[tokio::test]
@@ -660,7 +782,7 @@ async fn an_unreadable_window_allows_only_a_few_consults_per_session() {
         })
     });
     let mut r = run(plan, vec![ADVICE], None, |c| {
-        with_expert(c);
+        c.harness.expert.model = CODEX_EXPERT.into();
         c.harness.expert.budget = "codex:5%w".into();
         c.harness.expert.max_consults_per_turn = 10;
     });
@@ -670,11 +792,8 @@ async fn an_unreadable_window_allows_only_a_few_consults_per_session() {
         3,
         "no reading: three consults, then refused"
     );
-    assert!(
-        r.session
-            .transcript
-            .iter()
-            .any(|m| m.role == Role::Tool
-                && m.content.contains("the expert budget cannot be checked"))
-    );
+    assert!(r.session.transcript.iter().any(|m| m.role == Role::Tool
+        && m.content
+            .contains("the expert budget (codex:5%w) cannot be checked")
+        && m.content.contains("forge doctor")));
 }

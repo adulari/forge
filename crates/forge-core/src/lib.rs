@@ -3246,6 +3246,7 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.turn_unfinished_tasks.clear();
         self.advisor_reviewed = false;
         self.expert.begin_turn();
+        self.note_expert_problem();
         self.env_fight = EnvFightTracker::default();
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
