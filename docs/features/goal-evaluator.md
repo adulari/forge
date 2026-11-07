@@ -56,6 +56,9 @@ The evaluator runs as its own background step between turns, spawned like a turn
 going, the phone shows the session busy, and Esc or a remote interrupt stops it the same way it
 stops a turn.
 
+A goal started with `--contract` skips the evaluator: an independent validator that runs the
+approved assertions decides completion instead (see [goal contract](goal-contract.md)).
+
 ## 3. Model choice and cost
 
 The evaluator uses the side-call model every other optional side call uses (recap, suggestions,
