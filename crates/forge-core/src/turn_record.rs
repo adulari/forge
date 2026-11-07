@@ -237,6 +237,7 @@ pub(crate) fn error_reason(error: &CoreError) -> (&'static str, Option<&'static 
     let kind = stop_failure_kind(error);
     let reason = match error {
         CoreError::Provider(_) => "provider_error",
+        CoreError::ProviderDown { .. } => "provider_down",
         CoreError::NoHealthyModel { .. } => "no_healthy_model",
         CoreError::ModelUnavailable { .. } => "pinned_rejected",
         CoreError::TurnBlocked(_) => "review_blocked",

@@ -323,6 +323,17 @@ async fn t3c_the_horizon_ends_the_turn_as_provider_down() {
         "{waited:?}"
     );
     assert!(d.notes().iter().all(|n| !n.starts_with('▶')));
+    assert_eq!(
+        d.session.last_end_reason().as_deref(),
+        Some("provider_down")
+    );
+    let notes = d.notes();
+    assert!(
+        notes
+            .last()
+            .is_some_and(|n| n.starts_with("⚠ Turn failed:") && n.contains("gave up waiting")),
+        "the outage's outcome is the last stored note: {notes:?}"
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -566,4 +577,45 @@ async fn t7c_the_horizon_bounds_the_turn_start_wait() {
         started.elapsed()
     );
     assert!(d.outage_events() >= 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn t4_the_recovery_line_comes_before_the_answer_it_unblocked() {
+    let provider = Arc::new(OutageProvider::new(
+        0,
+        mins(20),
+        Fault::Busy {
+            retry_after_secs: None,
+        },
+    ));
+    let mut d = drill(provider, pinned("drill::flash"), ALLOWANCE);
+    let out = d.session.run_turn("fix it").await.unwrap();
+    assert_eq!(out.text, "DRILL-OK");
+    let events = d.events.lock().unwrap();
+    let recovered = events
+        .iter()
+        .position(|e| matches!(e, PresenterEvent::ProviderRecovered { .. }))
+        .expect("a recovery event");
+    let answer = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                PresenterEvent::AssistantDelta(_) | PresenterEvent::AssistantText(_)
+            )
+        })
+        .expect("the answer");
+    assert!(recovered < answer, "recovery after the answer: {events:?}");
+    let back_warnings = events
+        .iter()
+        .filter(|e| matches!(e, PresenterEvent::Warning(w) if w.starts_with('▶')))
+        .count();
+    assert_eq!(back_warnings, 1);
+    drop(events);
+    let back: Vec<_> = d
+        .notes()
+        .into_iter()
+        .filter(|n| n.starts_with('▶'))
+        .collect();
+    assert_eq!(back.len(), 1, "one stored recovery note");
 }

@@ -5,7 +5,9 @@
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
 
-use crate::interrupted_turn_store::{classify_tail, InterruptedTail, TailRow, TailState};
+use crate::interrupted_turn_store::{
+    classify_tail, is_outage_note, InterruptedTail, TailRow, TailState,
+};
 use crate::{Result, Store};
 
 /// What the transcript ended with when the turn closed.
@@ -397,8 +399,9 @@ impl Store {
             .optional()?
         };
         if let Some((role, visibility, content)) = newest {
-            let _ = content;
-            if role == "system" && visibility == "ui" {
+            // An outage note is written in the middle of the turn: it says the wait began, never
+            // how the turn ended.
+            if role == "system" && visibility == "ui" && !is_outage_note(&content) {
                 return Ok(false);
             }
         }
@@ -591,6 +594,23 @@ mod tests {
             .project_unfinished_turns(0, "/work/none", 10)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn a_stop_after_an_outage_wait_is_still_noted() {
+        let (store, sid) = store_with_prompt();
+        let seq = store.next_message_seq(&sid).unwrap();
+        store
+            .add_ui_note(
+                &sid,
+                seq,
+                Role::System,
+                "⏸ drill::flash: provider down since 10:18 (503), retrying every <=5 min until 18:18. Esc to stop.",
+            )
+            .unwrap();
+        assert!(store
+            .note_turn_stopped(&sid, "⚠ Turn failed: provider still down")
+            .unwrap());
     }
 
     #[test]

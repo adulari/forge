@@ -17,7 +17,7 @@ pub const OUTAGE_BACK_MARK: &str = "▶ ";
 /// Whether a UI-only system note belongs to a provider outage wait. Such a note is written in the
 /// MIDDLE of a turn, so it must not read as the turn's end: a daemon restart during a long wait
 /// has to re-drive the turn, not take it for finished.
-fn is_outage_note(content: &str) -> bool {
+pub(crate) fn is_outage_note(content: &str) -> bool {
     (content.starts_with(OUTAGE_ENTER_MARK) && content.contains("provider down since"))
         || (content.starts_with(OUTAGE_BACK_MARK) && content.contains(" back after "))
 }
