@@ -580,6 +580,70 @@ async fn a_push_during_a_review_reviews_the_new_head_and_drops_the_old_result() 
     assert!(calls(dir.path()).contains("--match-head-commit bbbb2222"));
 }
 
+#[tokio::test]
+async fn a_superseded_head_s_review_is_aborted_and_gives_its_slot_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let held = Held::new();
+    install_held(&held);
+    let mut watch = Watch::new("s1", Mode::Merge, "squash", 0);
+    for (sha, now) in [("aaaa1111", 10), ("bbbb2222", 20), ("cccc3333", 30)] {
+        view(dir.path(), sha);
+        poll_once(&gh, dir.path(), &mut watch, true, now).await;
+        pause().await;
+    }
+    assert_eq!(
+        jobs().running(),
+        1,
+        "only the current head is still reviewed"
+    );
+    assert_eq!(
+        held.started.load(Ordering::SeqCst),
+        3,
+        "the newest head's review got a permit the superseded ones gave back"
+    );
+    held.release.add_permits(1);
+    settle().await;
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 40).await;
+    assert!(out.merged);
+    assert!(calls(dir.path()).contains("--match-head-commit cccc3333"));
+}
+
+#[tokio::test]
+async fn a_relay_mid_review_hands_the_running_review_to_the_successor() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let held = Held::new();
+    install_held(&held);
+    let (from, to) = ("review-relay-pred", "review-relay-succ");
+    let mut watch = registry().arm(from, Mode::Merge, "squash", 0).unwrap();
+    view(dir.path(), "aaaa1111");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    pause().await;
+    assert_eq!(held.started.load(Ordering::SeqCst), 1);
+    registry().store(from, watch);
+    assert!(registry().rekey(from, to));
+    let mut watch = registry().get(to).expect("the watch followed the goal");
+    assert_eq!(watch.review.as_ref().unwrap().verdict, Verdict::Running);
+
+    poll_once(&gh, dir.path(), &mut watch, true, 20).await;
+    pause().await;
+    assert_eq!(
+        held.started.load(Ordering::SeqCst),
+        1,
+        "the successor reads the predecessor's review instead of paying for a second one"
+    );
+    held.release.add_permits(1);
+    settle().await;
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 30).await;
+    assert!(
+        out.merged,
+        "the moved review's result is read under the successor"
+    );
+    assert_eq!(jobs().running(), 0);
+    registry().disarm(to);
+}
+
 fn act(
     watch: &mut Watch,
     action: owner::ReviewAction,

@@ -25,9 +25,13 @@ impl Registry {
         let Some(mut watch) = guard.remove(from) else {
             return false;
         };
-        if !guard.contains_key(to) {
+        let jobs = crate::serve_pr_review::jobs::jobs();
+        if guard.contains_key(to) {
+            jobs.forget_session(from);
+        } else {
             watch.session_id = to.to_string();
             guard.insert(to.to_string(), watch);
+            jobs.rekey(from, to);
         }
         self.persist(&guard);
         true

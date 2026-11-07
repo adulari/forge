@@ -256,12 +256,11 @@ pub(crate) async fn gate(
             rounds,
             now,
         };
-        let session = watch.session_id.clone();
         let mut running = ReviewState::started(&pr.head_sha, rounds, now);
         running.errors = errors;
         watch.review = Some(running);
-        jobs.start(&watch.session_id, &pr.head_sha, job.run(), move || {
-            registry().poll_soon(&session)
+        jobs.start(&watch.session_id, &pr.head_sha, job.run(), |session| {
+            registry().poll_soon(session)
         });
         Gate::Wait("review running".into())
     };
