@@ -66,9 +66,13 @@ struct Harness {
 }
 
 fn harness(replies: &[&str], ask_answer: &str, config: Config) -> Harness {
+    harness_with(replies, ask_answer, config, true)
+}
+
+fn harness_with(replies: &[&str], ask_answer: &str, config: Config, attended: bool) -> Harness {
     let dir = tempfile::tempdir().unwrap();
     let capture = CapturePresenter {
-        attended: true,
+        attended,
         ask_answer: ask_answer.to_string(),
         ..CapturePresenter::default()
     };
@@ -288,4 +292,15 @@ async fn a_command_that_writes_is_refused_and_not_run() {
     assert!(!results[1].passed && results[1].reason.contains("refused"));
     assert!(!h.dir.path().join("created.txt").exists());
     assert!(!h.dir.path().join("also.txt").exists());
+}
+
+#[tokio::test]
+async fn an_unattended_session_accepts_the_contract_it_cannot_ask_about() {
+    let mut h = harness_with(&[GOOD], "Cancel", Config::default(), false);
+    h.session.request_goal_contract("write notes.txt");
+    h.session.resolve_goal_contract().await;
+    assert!(matches!(
+        h.session.take_goal_contract_outcome(),
+        Some(ContractOutcome::Approved(_))
+    ));
 }

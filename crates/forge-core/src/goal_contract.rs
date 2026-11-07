@@ -98,6 +98,11 @@ impl Session {
         self.contract_outcome = None;
     }
 
+    /// `[goal] contract`: every goal drafts a contract, as if started with `--contract`.
+    pub fn goal_contract_default(&self) -> bool {
+        self.config.goal.contract
+    }
+
     pub fn goal_contract_requested(&self) -> bool {
         self.pending_contract_goal.is_some()
     }
@@ -136,7 +141,9 @@ impl Session {
                             .to_string(),
                     ),
                 }));
-            if self.mode == PermissionMode::Bypass {
+            // Nobody to ask (a headless run, a daemon goal with no client attached) or standing
+            // authorization (Bypass): the card above is the record, the run goes on.
+            if self.mode == PermissionMode::Bypass || !self.presenter.is_attended() {
                 contract.approved = true;
                 break ContractOutcome::Approved(contract);
             }
