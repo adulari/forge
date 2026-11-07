@@ -136,6 +136,7 @@ impl Presenter for PrintPresenter {
                 reason,
                 ..
             } => self.trace(&crate::outage_line(&model, since, next_try, until, &reason)),
+            PresenterEvent::TurnStopped { text, .. } => self.error(&text),
             PresenterEvent::ProviderRecovered { model, down_secs } => {
                 self.trace(&crate::recovered_line(&model, down_secs));
             }

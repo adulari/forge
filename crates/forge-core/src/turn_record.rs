@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use forge_store::Store;
-use forge_types::{LoopOutcome, StopReason};
+use forge_types::{LoopOutcome, PresenterEvent, StopReason};
 
 use crate::hooks_turn::stop_failure_kind;
 use crate::mid_intent::ends_mid_intent;
@@ -78,6 +78,29 @@ pub fn describe_end(reason: &str) -> (String, String) {
             "check the hook output, then send continue",
         ),
         "internal" => ("internal error", "send continue to retry"),
+        "final_answer" => ("finished", "nothing to do"),
+        "final_answer_mid_intent" => (
+            "answer left a step undone",
+            "send continue to make it do the step",
+        ),
+        "final_answer_open_tasks" => ("tasks left open", "send continue to finish them"),
+        "daemon_restart_or_crash" => (
+            "daemon restarted mid-turn",
+            "send continue to pick the work back up",
+        ),
+        "daemon_shutdown" => ("daemon shut down", "send continue once it is back"),
+        "interrupted" => ("stopped by you", "send continue to resume"),
+        "plan_presented" => ("plan awaiting approval", "approve or revise the plan"),
+        "abandoned" => ("never closed", "send continue to retry"),
+        other if other.starts_with("unknown_") => {
+            return (
+                format!(
+                    "earlier history, {}",
+                    shape_label(&other["unknown_".len()..])
+                ),
+                "recorded before end reasons existed".to_string(),
+            )
+        }
         other => {
             return (
                 other.replace('_', " "),
@@ -86,6 +109,90 @@ pub fn describe_end(reason: &str) -> (String, String) {
         }
     };
     (label.to_string(), advice.to_string())
+}
+
+/// Whether sending `continue` is the right answer to a turn that ended for `reason`: the work
+/// is intact and a fresh attempt picks it up. Not the hard stops that need the person to change
+/// something first (a budget cap, a pinned model, a blocked review, no working model).
+pub fn is_resumable(reason: &str) -> bool {
+    matches!(
+        reason,
+        "stalled"
+            | "tasks_unfinished"
+            | "provider_down"
+            | "provider_error"
+            | "interrupted"
+            | "daemon_restart_or_crash"
+            | "final_answer_mid_intent"
+    )
+}
+
+/// Whether an unattended run (`forge run`) must report this end as a failed run.
+pub fn end_fails_run(reason: &str) -> bool {
+    !matches!(reason, "final_answer" | "plan_presented" | "interrupted")
+        && !reason.starts_with("unknown_")
+}
+
+/// One turn as the apps and `forge turns` show it: the stored facts plus the plain label and the
+/// way out, so no surface prints a raw enum name.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TurnEndView {
+    pub id: i64,
+    pub session_id: String,
+    pub started_at: i64,
+    pub ended_at: Option<i64>,
+    pub reason: String,
+    pub label: String,
+    pub advice: String,
+    pub shape: Option<String>,
+    pub shape_label: Option<String>,
+    pub finished: bool,
+    pub resumable: bool,
+}
+
+impl TurnEndView {
+    pub fn from_row(row: &forge_store::TurnRow) -> Self {
+        let reason = row.end_reason.clone().unwrap_or_else(|| "running".into());
+        let (label, advice) = if row.end_reason.is_some() {
+            describe_end(&reason)
+        } else {
+            ("still running".into(), "wait for it".into())
+        };
+        Self {
+            id: row.id,
+            session_id: row.session_id.clone(),
+            started_at: row.started_at,
+            ended_at: row.ended_at,
+            finished: matches!(reason.as_str(), "final_answer" | "plan_presented"),
+            resumable: is_resumable(&reason),
+            reason,
+            label,
+            advice,
+            shape_label: row.last_role_shape.as_deref().map(shape_label),
+            shape: row.last_role_shape.clone(),
+        }
+    }
+}
+
+/// The plain wording of the tail classifier's shape of a closed turn.
+pub fn shape_label(shape: &str) -> String {
+    match shape {
+        "finished" => "answered",
+        "unanswered_prompt" => "prompt never answered",
+        "pending_tool_calls" => "tool calls left pending",
+        "unanswered_tool_results" => "tool results never read",
+        other => return other.replace('_', " "),
+    }
+    .to_string()
+}
+
+/// The plain label for an end-reason count row (`final_answer` is "finished", not the enum).
+pub fn end_label(reason: &str) -> String {
+    if reason == "running" {
+        "still running".into()
+    } else {
+        describe_end(reason).0
+    }
 }
 
 /// The note text for a non-success end.
@@ -182,7 +289,27 @@ impl Session {
             }
             Ok(_) => stop_note(&reason),
         };
-        let _ = self.store.note_turn_stopped(&self.id, &note);
+        let wrote = self
+            .store
+            .note_turn_stopped(&self.id, &note)
+            .unwrap_or(false);
+        // An error end already reached the surfaces as an Error event, and a stop an earlier note
+        // explained must not be said twice.
+        if wrote && result.is_ok() {
+            self.presenter.emit(PresenterEvent::TurnStopped {
+                reason,
+                text: note.trim_start_matches("⚠ ").to_string(),
+            });
+        }
+    }
+
+    /// The stored end reason of the session's newest closed turn.
+    pub fn last_end_reason(&self) -> Option<String> {
+        self.store
+            .last_closed_turn(&self.id)
+            .ok()
+            .flatten()
+            .and_then(|row| row.end_reason)
     }
 
     fn open_task_count(&self) -> usize {

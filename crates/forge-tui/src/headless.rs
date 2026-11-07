@@ -200,6 +200,12 @@ impl Presenter for HeadlessPresenter {
                     out!("{text}");
                 }
             }
+            PresenterEvent::TurnStopped { text, .. } => {
+                if std::mem::take(&mut self.mid_line) {
+                    out!();
+                }
+                eprintln!("  ⚠ {}", clean(&text));
+            }
             PresenterEvent::ProviderRecovered { model, down_secs } => {
                 let text = crate::recovered_line(&model, down_secs);
                 if self.styled {

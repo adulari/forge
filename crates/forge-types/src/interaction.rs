@@ -215,6 +215,16 @@ pub enum PresenterEvent {
         until: u64,
         reason: String,
     },
+    /// The turn stopped short and the core stored the "Turn stopped (<reason>): <what to do>" note
+    /// for it. Sent once, from the choke point that writes the note, so a live surface shows the
+    /// line the moment the turn ends instead of after a resume. Never sent for an error end (the
+    /// `Error` event says that) or when the newest row already explained the stop.
+    TurnStopped {
+        /// The stored `turn.end_reason`.
+        reason: String,
+        /// `Turn stopped (<plain reason>): <what to do>`, without a glyph.
+        text: String,
+    },
     /// The provider answered again after a [`PresenterEvent::ProviderOutage`] wait; the turn
     /// carries on.
     ProviderRecovered {

@@ -1440,6 +1440,10 @@ impl App {
                 });
                 self.set_turn_activity(TurnPhase::Recovering, "provider down — waiting");
             }
+            PresenterEvent::TurnStopped { text, .. } => {
+                let text = sanitize_terminal_text(&text);
+                self.push_notice(NoticeKind::Warn, &text);
+            }
             PresenterEvent::ProviderRecovered { .. } => {
                 self.provider_outage = None;
                 self.model_search = None;

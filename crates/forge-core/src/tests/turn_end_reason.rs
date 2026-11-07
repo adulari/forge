@@ -215,3 +215,113 @@ async fn a_stalled_ok_end_gets_a_stop_note() {
         .unwrap()
         .starts_with("⚠ Turn stopped (no progress)"));
 }
+
+#[test]
+fn only_the_recoverable_ends_offer_continue() {
+    for reason in [
+        "stalled",
+        "tasks_unfinished",
+        "provider_down",
+        "provider_error",
+        "interrupted",
+        "daemon_restart_or_crash",
+        "final_answer_mid_intent",
+    ] {
+        assert!(crate::is_resumable(reason), "{reason}");
+    }
+    for reason in [
+        "final_answer",
+        "budget_exhausted",
+        "pinned_rejected",
+        "review_blocked",
+    ] {
+        assert!(!crate::is_resumable(reason), "{reason}");
+    }
+    assert!(crate::end_fails_run("final_answer_mid_intent"));
+    assert!(crate::end_fails_run("provider_down"));
+    assert!(!crate::end_fails_run("final_answer"));
+}
+
+#[test]
+fn every_end_reason_has_a_plain_label() {
+    for reason in [
+        "final_answer",
+        "final_answer_mid_intent",
+        "final_answer_open_tasks",
+        "daemon_restart_or_crash",
+        "daemon_shutdown",
+        "interrupted",
+        "abandoned",
+        "unknown_finished",
+    ] {
+        let label = crate::end_label(reason);
+        assert!(!label.contains('_'), "{reason} -> {label}");
+    }
+    assert_eq!(crate::end_label("final_answer"), "finished");
+}
+
+#[tokio::test]
+async fn a_stop_note_reaches_the_presenter_once_and_an_error_end_adds_none() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let capture = CapturePresenter {
+        attended: true,
+        ..Default::default()
+    };
+    let events = Arc::clone(&capture.events);
+    let mut config = Config::default();
+    config.recap.enabled = false;
+    config.suggest.enabled = false;
+    config.mesh.auto_memory = false;
+    let mut session = Session::start(
+        Arc::clone(&store),
+        Arc::new(Script {
+            steps: Mutex::new(vec![Step::Reply("done", vec![])]),
+            steer: None,
+            calls: Default::default(),
+        }),
+        Arc::new(FixedRouter {
+            model: "direct::scripted".into(),
+            fallbacks: vec![],
+        }),
+        ToolRegistry::with_core_tools_in(test_workspace()),
+        Box::new(capture),
+        config,
+        test_workspace().to_str().expect("workspace path is UTF-8"),
+    )
+    .unwrap();
+    session.run_turn("go").await.unwrap();
+    let stopped = |events: &Arc<Mutex<Vec<PresenterEvent>>>| {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, PresenterEvent::TurnStopped { .. }))
+            .count()
+    };
+    assert_eq!(stopped(&events), 0, "a final answer says nothing");
+    let open = |session: &mut Session| {
+        let id = store.open_turn(&session.id, 99).unwrap();
+        session
+            .turn_row
+            .store(id, std::sync::atomic::Ordering::SeqCst);
+    };
+    open(&mut session);
+    session.finish_turn_row(&Ok(LoopOutcome::stalled(String::new())));
+    assert_eq!(stopped(&events), 1);
+    let text = events
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|e| match e {
+            PresenterEvent::TurnStopped { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(text.starts_with("Turn stopped (no progress): "), "{text}");
+    open(&mut session);
+    session.finish_turn_row(&Ok(LoopOutcome::stalled(String::new())));
+    assert_eq!(stopped(&events), 1, "the note is already the newest row");
+    open(&mut session);
+    session.finish_turn_row(&Err(CoreError::Internal("boom".into())));
+    assert_eq!(stopped(&events), 1, "an error end has its own Error line");
+}

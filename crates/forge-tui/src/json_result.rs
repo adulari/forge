@@ -84,6 +84,7 @@ impl Presenter for JsonResultPresenter {
         match event {
             PresenterEvent::Error(msg) => eprintln!("error: {msg}"),
             PresenterEvent::Warning(msg) => eprintln!("warning: {msg}"),
+            PresenterEvent::TurnStopped { text, .. } => eprintln!("warning: {text}"),
             PresenterEvent::Done {
                 final_text,
                 stop_reason,

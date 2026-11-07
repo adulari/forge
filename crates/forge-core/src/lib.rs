@@ -122,7 +122,9 @@ pub mod hooks_session;
 mod hooks_subagent;
 mod hooks_turn;
 mod turn_record;
-pub use turn_record::{describe_end, stop_note};
+pub use turn_record::{
+    describe_end, end_fails_run, end_label, is_resumable, shape_label, stop_note, TurnEndView,
+};
 mod hooks_worktree;
 pub mod host_move;
 mod stop_guards;

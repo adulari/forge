@@ -368,6 +368,9 @@ impl Presenter for StreamJsonPresenter {
                 "provider_recovered",
                 json!({ "model": model, "down_secs": down_secs }),
             ),
+            PresenterEvent::TurnStopped { reason, text } => {
+                self.system("turn_stopped", json!({ "reason": reason, "message": text }))
+            }
             PresenterEvent::Warning(msg) => self.system("warning", json!({ "message": msg })),
             PresenterEvent::Error(msg) => self.system("error", json!({ "message": msg })),
             PresenterEvent::Done {
