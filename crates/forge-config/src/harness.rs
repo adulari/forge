@@ -110,6 +110,17 @@ pub struct HarnessConfig {
     /// Second-model review at DONE (docs/features/advisor.md).
     #[serde(default)]
     pub advisor: crate::advisor::AdvisorConfig,
+    /// Whether the model gets the `update_tasks` task-list tool. `false` is the no-task-list arm
+    /// of the task-list A/B: the tool is not advertised (nor in the `run_code` catalog), a call is
+    /// refused, and the system prompt stops mentioning it. Default `true` until the A/B decides.
+    #[serde(default = "default_true")]
+    pub task_tool: bool,
+    /// Whether open tasks drive the model onward: the continue re-drive when it signs off with
+    /// tasks open, the stale-task escalation, question and turn-start list note, and the
+    /// mid-intent nudge standing aside for the task gate. `None` keeps the built-in behaviour (all
+    /// on); `Some(false)` is the no-task-nudges arm of the A/B. Default `None` until the A/B decides.
+    #[serde(default, deserialize_with = "lenient_opt_bool")]
+    pub task_nudges: Option<bool>,
 }
 
 impl Default for HarnessConfig {
@@ -141,7 +152,32 @@ impl Default for HarnessConfig {
             lsp_nav: false,
             subagent_output_schema: false,
             advisor: crate::advisor::AdvisorConfig::default(),
+            task_tool: true,
+            task_nudges: None,
         }
+    }
+}
+
+/// An optional bool that also accepts the text the `/config` editor writes for an unset optional
+/// (`"true"`, `"false"`, or empty for unset).
+fn lenient_opt_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Text(String),
+    }
+    match Option::<Raw>::deserialize(d)? {
+        None => Ok(None),
+        Some(Raw::Bool(b)) => Ok(Some(b)),
+        Some(Raw::Text(t)) => match t.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(None),
+            "true" | "on" | "yes" | "1" => Ok(Some(true)),
+            "false" | "off" | "no" | "0" => Ok(Some(false)),
+            other => Err(serde::de::Error::custom(format!(
+                "expected true, false or empty, got '{other}'"
+            ))),
+        },
     }
 }
 

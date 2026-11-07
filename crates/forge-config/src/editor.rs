@@ -876,6 +876,33 @@ mod tests {
     }
 
     #[test]
+    fn task_list_switches_default_to_todays_behaviour_and_parse_from_text() {
+        let load = |toml: &str| -> Config {
+            Figment::from(Serialized::defaults(Config::default()))
+                .merge(Toml::string(toml))
+                .extract()
+                .unwrap()
+        };
+        let empty = load("[harness]\n");
+        assert!(empty.harness.task_tool);
+        assert_eq!(empty.harness.task_nudges, None);
+        let off = load("[harness]\ntask_tool = false\ntask_nudges = false\n");
+        assert!(!off.harness.task_tool);
+        assert_eq!(off.harness.task_nudges, Some(false));
+        // The editor writes an optional as text, and an environment variable is text too.
+        let typed = load("[harness]\ntask_nudges = \"true\"\n");
+        assert_eq!(typed.harness.task_nudges, Some(true));
+        for path in ["harness.task_tool", "harness.task_nudges"] {
+            assert_ne!(
+                setting_group_and_label(path).0,
+                "Harness",
+                "{path} needs a curated row"
+            );
+            assert!(setting_help(path).is_some(), "{path} needs help text");
+        }
+    }
+
+    #[test]
     fn missing_edit_file_starts_with_an_empty_table() {
         let dir = tempfile::tempdir().unwrap();
         let table = read_edit_table(&dir.path().join("missing.toml")).unwrap();
