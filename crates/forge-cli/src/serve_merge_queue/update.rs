@@ -5,6 +5,7 @@
 //! is never used: its commits are authored by github-actions[bot], which parks CI at
 //! `action_required` and deadlocks the PR.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -241,7 +242,21 @@ fn resolve_changelogs(root: &Path, paths: &[String]) -> Result<(), Vec<String>> 
     }
 }
 
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
 fn run_verify(root: &Path, v: &Verify) -> Result<(), String> {
+    run_verify_within(root, v, VERIFY_TIMEOUT)
+}
+
+fn run_verify_within(root: &Path, v: &Verify, timeout: Duration) -> Result<(), String> {
     let dir = v
         .cwd
         .as_deref()
@@ -255,25 +270,29 @@ fn run_verify(root: &Path, v: &Verify) -> Result<(), String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("could not start: {e}"))?;
+    // Drained while the child runs: a full pipe buffer (~64 KiB) would block it forever.
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
     let started = Instant::now();
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() > VERIFY_TIMEOUT => {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out after {}s", VERIFY_TIMEOUT.as_secs()));
+                return Err(format!("timed out after {}s", timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
             Err(e) => return Err(e.to_string()),
         }
-    }
-    let output = child.wait_with_output().map_err(|e| e.to_string())?;
-    if output.status.success() {
+    };
+    let stdout = stdout.join().unwrap_or_default();
+    let stderr = stderr.join().unwrap_or_default();
+    if status.success() {
         return Ok(());
     }
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    let mut text = String::from_utf8_lossy(&stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&stderr));
     Err(text)
 }
 
@@ -400,5 +419,26 @@ pub(crate) fn run_step(root: &Path, base: &str, verify: &[Verify]) -> Step {
         merged: needs_merge,
         resolved,
         verified,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_output_larger_than_a_pipe_buffer_does_not_hang() {
+        let dir = tempfile::tempdir().unwrap();
+        let v = Verify {
+            name: "Verify".into(),
+            command: "yes line | head -n 20000; yes err | head -n 20000 >&2; exit 1".into(),
+            cwd: None,
+        };
+        let started = Instant::now();
+        let err = run_verify_within(dir.path(), &v, Duration::from_secs(20)).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(20), "{err}");
+        assert!(!err.starts_with("timed out"), "{err}");
+        assert!(err.trim_end().ends_with("err"), "{}", tail(&err));
+        assert_eq!(err.matches("line\n").count(), 20000);
     }
 }
