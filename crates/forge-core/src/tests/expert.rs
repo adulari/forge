@@ -98,7 +98,7 @@ struct Run {
     events: Arc<Mutex<Vec<PresenterEvent>>>,
     main_calls: Arc<std::sync::atomic::AtomicUsize>,
     expert_calls: Arc<Mutex<Vec<(String, String)>>>,
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
 }
 
 fn run(
@@ -160,7 +160,7 @@ fn run(
         events,
         main_calls,
         expert_calls,
-        dir,
+        _dir: dir,
     }
 }
 
@@ -543,11 +543,10 @@ fn a_dollar_budget_counts_the_experts_own_spend() {
 #[test]
 fn only_a_meterable_subscription_with_a_matching_budget_resolves() {
     use crate::expert::resolve_config;
-    let cfg = |model: &str, budget: &str| {
-        let mut c = forge_config::expert::ExpertConfig::default();
-        c.model = model.into();
-        c.budget = budget.into();
-        c
+    let cfg = |model: &str, budget: &str| forge_config::expert::ExpertConfig {
+        model: model.into(),
+        budget: budget.into(),
+        ..Default::default()
     };
     assert!(resolve_config(&cfg("", "")).unwrap().is_none());
     assert!(resolve_config(&cfg("anthropic::sonnet", ""))
@@ -571,4 +570,78 @@ fn only_a_meterable_subscription_with_a_matching_budget_resolves() {
         "no usage meter"
     );
     assert!(resolve_config(&cfg("anthropic::sonnet", "lots")).is_err());
+}
+
+#[tokio::test]
+async fn a_bridged_models_question_is_answered_from_the_stored_transcript_within_the_cap() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let id = store.create_session(".", "Bypass").unwrap();
+    store
+        .add_message(&id, 0, Role::User, "fix the parser in src/parse.rs", None)
+        .unwrap();
+    let expert_calls: Arc<Mutex<Vec<(String, String)>>> = Arc::default();
+    let provider: Arc<dyn Provider> = Arc::new(Scripted {
+        plan: Box::new(|_| None),
+        expert_replies: vec![ADVICE],
+        main_calls: Arc::default(),
+        expert_calls: expert_calls.clone(),
+        store: store.clone(),
+        bump_quota_to: None,
+    });
+    let mut config = Config::default();
+    config.harness.expert.model = EXPERT.into();
+    config.harness.expert.max_consults_per_turn = 1;
+    let mut bridge = crate::BridgeExpert::default();
+    let answer = bridge
+        .consult(
+            &provider,
+            &store,
+            &config,
+            &id,
+            Some(3),
+            "where is the bug?",
+        )
+        .await;
+    assert!(
+        answer.contains("Next step: grep for TODO in src/ instead"),
+        "{answer}"
+    );
+    assert_eq!(expert_calls.lock().unwrap().len(), 1);
+    assert_eq!(
+        store
+            .count_side_calls_since(&id, "expert/tool:", 0)
+            .unwrap(),
+        1
+    );
+    let capped = bridge
+        .consult(&provider, &store, &config, &id, Some(3), "again?")
+        .await;
+    assert!(
+        capped.contains("this turn already used its 1 expert consults"),
+        "{capped}"
+    );
+    assert_eq!(expert_calls.lock().unwrap().len(), 1, "no second call");
+    let next_turn = bridge
+        .consult(&provider, &store, &config, &id, Some(9), "a new turn")
+        .await;
+    assert!(next_turn.contains("Expert (anthropic::expert-test) answers."));
+    config.harness.expert.model = String::new();
+    let none = crate::BridgeExpert::default()
+        .consult(&provider, &store, &config, &id, Some(1), "q")
+        .await;
+    assert!(none.contains("No expert is available"));
+}
+
+#[test]
+fn a_stored_turn_detail_reads_back_as_the_consults_it_recorded() {
+    let (n, who) = crate::expert_of_detail(Some(
+        r#"{"expert_consults":3,"expert_model":"m","expert_triggers":["stall","stall","tool"]}"#,
+    ));
+    assert_eq!(n, Some(3));
+    assert_eq!(who.as_deref(), Some("m (stall, tool)"));
+    assert_eq!(
+        crate::expert_of_detail(Some(r#"{"model":"m"}"#)),
+        (None, None)
+    );
+    assert_eq!(crate::expert_of_detail(None), (None, None));
 }

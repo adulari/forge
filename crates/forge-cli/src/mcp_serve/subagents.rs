@@ -261,6 +261,42 @@ pub(super) fn interrupt_running(
 }
 
 impl ForgeMcp {
+    /// Bridge-side `consult_expert`: the same cap, budget and answer as the direct path, with the
+    /// transcript read back from the parent session's store rows.
+    pub(super) async fn handle_consult_expert(&self, args: &Value) -> CallToolResult {
+        let Ok(session_id) = std::env::var(forge_core::snapshot::ENV_SESSION) else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "error: consult_expert needs a Forge session to read",
+            )]);
+        };
+        let question = args
+            .get("question")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let (provider, _router) = crate::build_provider_and_router(
+            &self.config,
+            false,
+            None,
+            None,
+            Default::default(),
+            Default::default(),
+        );
+        let answer = self
+            .expert
+            .lock()
+            .await
+            .consult(
+                &provider,
+                &self.tasks_store,
+                &self.config,
+                &session_id,
+                forge_core::snapshot::current_seq(),
+                question,
+            )
+            .await;
+        CallToolResult::success(vec![ContentBlock::text(answer)])
+    }
+
     /// The subagent support to advertise: none while the parent thread has delegation off.
     pub(super) fn visible_subagents(&self) -> Option<&LazySubagents> {
         self.subagents

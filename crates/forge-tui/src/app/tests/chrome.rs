@@ -766,6 +766,30 @@ fn streaming_tool_input_and_hidden_thinking_replace_the_buffered_event_count() {
 }
 
 #[test]
+fn an_expert_consult_leaves_a_scrollback_line_a_status_row_and_a_snapshot_field() {
+    let mut app = App::default();
+    let line = "expert: codex-oauth::gpt-5.6-sol · 1 consult · 2.1% of weekly window";
+    assert_eq!(app.remote_snapshot().expert, None);
+    app.apply(PresenterEvent::ExpertConsult {
+        trigger: "stall".into(),
+        model: "codex-oauth::gpt-5.6-sol".into(),
+        summary: "you keep reading lines that hold nothing".into(),
+        status: line.into(),
+    });
+    let scrollback = flush_text(&mut app);
+    assert!(scrollback.contains(line), "{scrollback}");
+    assert!(scrollback.contains("(stall): you keep reading lines that hold nothing"));
+    assert_eq!(app.remote_snapshot().expert.as_deref(), Some(line));
+    app.status_open = true;
+    let status = screen_wh(&app, 150, 30);
+    assert!(status.contains("EXPERT"), "{status}");
+    assert!(
+        status.contains("1 consult · 2.1% of weekly window"),
+        "{status}"
+    );
+}
+
+#[test]
 fn auxiliary_model_work_replaces_the_stale_tool_result_phase() {
     let mut app = App::default();
     app.on_turn_start();

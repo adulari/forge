@@ -272,6 +272,218 @@ pub fn consult_expert_spec() -> ToolSpec {
     }
 }
 
+fn persist_quota_hints(store: &forge_store::Store, model: &str, hints: &[forge_types::QuotaHint]) {
+    let live_plan = model
+        .starts_with("codex-oauth::")
+        .then(forge_provider::fresh_live_codex_plan)
+        .flatten();
+    for hint in hints {
+        if model.starts_with("codex-oauth::") {
+            let _ = store.record_live_codex_account(hint, live_plan.as_deref());
+        } else if hint.provider == "codex-cli" || hint.provider == "codex-oauth" {
+            let _ = store.record_codex_quota(hint);
+        } else {
+            let _ = store.record_quota(hint);
+        }
+    }
+}
+
+/// One tool-less completion on `model`, bounded by `timeout_secs`. Every failure is a value.
+async fn raw_call(
+    provider: &Arc<dyn Provider>,
+    pricing: &forge_mesh::pricing::Pricing,
+    model: &str,
+    system: &str,
+    input: String,
+    cache_key: String,
+    timeout_secs: u64,
+) -> (RawCall, Vec<forge_types::QuotaHint>) {
+    let messages = [Message::system(system), Message::user(input)];
+    let options = CompletionOptions {
+        effort: Some(EffortLevel::Medium),
+        max_output_tokens: Some(MAX_OUTPUT_TOKENS),
+        prompt_cache_key: Some(cache_key),
+        ..CompletionOptions::default()
+    };
+    let mut sink = |_: StreamEvent| {};
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs.max(1)),
+        provider.complete_with(model, &messages, &[], &options, &mut sink),
+    )
+    .await;
+    let failed = |detail: String, timed_out: bool| RawCall {
+        content: None,
+        usage: forge_types::Usage::default(),
+        detail,
+        truncated: false,
+        timed_out,
+    };
+    match result {
+        Err(_) => (failed("timed out".to_string(), true), Vec::new()),
+        Ok(Err(error)) => (
+            failed(clip_chars(&error.to_string(), 80), false),
+            Vec::new(),
+        ),
+        Ok(Ok(reply)) => {
+            let usage = priced(pricing, model, &reply.usage);
+            let truncated = usage.output_tokens >= u64::from(MAX_OUTPUT_TOKENS).saturating_sub(64)
+                || (reply.content.trim().is_empty() && usage.reasoning_tokens.unwrap_or(0) > 0);
+            (
+                RawCall {
+                    content: Some(reply.content),
+                    usage,
+                    detail: String::new(),
+                    truncated,
+                    timed_out: false,
+                },
+                reply.quotas,
+            )
+        }
+    }
+}
+
+/// The reply a self-initiated consult hands back to the model.
+fn tool_answer(model: &str, label: &str, parsed: Option<&ExpertReply>) -> String {
+    match parsed {
+        Some(reply) => {
+            let mut text = format!("Expert ({model}) answers.\n");
+            if !reply.diagnosis.is_empty() {
+                text.push_str(&format!("Diagnosis: {}\n", reply.diagnosis));
+            }
+            if !reply.next_step.is_empty() {
+                text.push_str(&format!("Next step: {}\n", reply.next_step));
+            }
+            text.push_str("The expert can be wrong: check it against the files before acting.");
+            text
+        }
+        None => format!(
+            "The expert gave no usable answer ({}). Go on with your own judgement.",
+            label.trim_start_matches("expert/tool:")
+        ),
+    }
+}
+
+/// How a raw reply to a consult reads: the usage-row label and the parsed advice.
+fn judge(call: &RawCall, trigger: Trigger) -> (String, Option<ExpertReply>) {
+    let t = trigger.as_str();
+    match &call.content {
+        None if call.timed_out => (format!("expert/{t}:timeout"), None),
+        None => (format!("expert/{t}:error"), None),
+        Some(_) if call.truncated => (format!("expert/{t}:truncated"), None),
+        Some(content) => match parse_reply(content) {
+            Some(reply) => (format!("expert/{t}:advice"), Some(reply)),
+            None => (format!("expert/{t}:unparsed"), None),
+        },
+    }
+}
+
+/// Whether `consult_expert` should be offered through `forge mcp-serve`: an expert is set, the
+/// tool trigger is on and the configuration resolves.
+pub fn expert_tool_configured(config: &Config) -> bool {
+    let cfg = &config.harness.expert;
+    cfg.is_set() && cfg.triggers.tool && matches!(resolve_config(cfg), Ok(Some(_)))
+}
+
+/// The expert state of one `forge mcp-serve` process: the bridged model's consults, capped per
+/// turn and metered like the direct path's.
+#[derive(Default)]
+pub struct BridgeExpert {
+    turn_seq: Option<i64>,
+    consults: u32,
+    usd_spent: f64,
+    envelope: Option<EnvelopeState>,
+}
+
+impl BridgeExpert {
+    /// Answer a bridged model's `consult_expert` question from the parent session's stored
+    /// transcript. The parent counts the recorded `expert/tool:*` rows into the turn's detail.
+    pub async fn consult(
+        &mut self,
+        provider: &Arc<dyn Provider>,
+        store: &forge_store::Store,
+        config: &Config,
+        session_id: &str,
+        turn_seq: Option<i64>,
+        question: &str,
+    ) -> String {
+        let question = question.trim();
+        if question.is_empty() {
+            return "error: consult_expert needs a `question`".to_string();
+        }
+        let cfg = &config.harness.expert;
+        let (model, spec) = match resolve_config(cfg) {
+            Ok(Some(resolved)) if cfg.is_set() && cfg.triggers.tool => resolved,
+            _ => {
+                return "No expert is available for this session. Go on with your own judgement."
+                    .to_string()
+            }
+        };
+        if self.turn_seq != turn_seq {
+            self.turn_seq = turn_seq;
+            self.consults = 0;
+        }
+        let refuse = |why: String| {
+            format!("The expert was not consulted: {why}. Go on with your own judgement.")
+        };
+        if self.consults >= cfg.max_consults_per_turn {
+            return refuse(format!(
+                "this turn already used its {} expert consults",
+                cfg.max_consults_per_turn
+            ));
+        }
+        if let Some(spec) = &spec {
+            let windows = store.subscription_windows().unwrap_or_default();
+            let now = chrono::Utc::now().timestamp();
+            if meter(&mut self.envelope, spec, &windows, self.usd_spent, now)
+                == EnvelopeCheck::Spent
+            {
+                return refuse(format!(
+                    "the expert budget ({}) is spent",
+                    cfg.budget.trim()
+                ));
+            }
+        }
+        self.consults += 1;
+        let transcript: Vec<Message> = store
+            .load_messages(session_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|m| Message {
+                reasoning: None,
+                provider_items: None,
+                role: m.role,
+                content: m.content,
+                tool_calls: m.tool_calls,
+                tool_call_id: m.tool_call_id,
+                images: Vec::new(),
+                visibility: m.visibility,
+                kind: m.kind,
+            })
+            .collect();
+        let input = consult_input(&transcript, "The agent asked for help.", Some(question));
+        let pricing = forge_mesh::pricing::Pricing::from_config(config);
+        let (call, hints) = raw_call(
+            provider,
+            &pricing,
+            &model,
+            EXPERT_SYSTEM,
+            input,
+            format!("{session_id}:expert"),
+            cfg.timeout_secs,
+        )
+        .await;
+        persist_quota_hints(store, &model, &hints);
+        self.usd_spent += call.usage.cost_usd;
+        let (label, parsed) = judge(&call, Trigger::Tool);
+        if let Err(error) =
+            store.record_side_call_usage_for(session_id, &label, Some(&model), &call.usage)
+        {
+            tracing::warn!(%error, "expert usage was not recorded");
+        }
+        tool_answer(&model, &label, parsed.as_ref())
+    }
+}
+
 /// Per-session and per-turn expert bookkeeping.
 #[derive(Debug, Default)]
 pub(crate) struct ExpertState {
@@ -285,6 +497,8 @@ pub(crate) struct ExpertState {
     pub status: Option<String>,
     /// A configuration problem already told to the owner this session.
     pub config_error_told: bool,
+    /// The stored seq of the prompt that opened this turn, where its bridged consults start.
+    pub prompt_seq: i64,
 }
 
 impl ExpertState {
@@ -413,24 +627,6 @@ impl Session {
         }
     }
 
-    fn persist_quota_hints(&mut self, model: &str, hints: &[forge_types::QuotaHint]) {
-        let live_plan = model
-            .starts_with("codex-oauth::")
-            .then(forge_provider::fresh_live_codex_plan)
-            .flatten();
-        for hint in hints {
-            if model.starts_with("codex-oauth::") {
-                let _ = self
-                    .store
-                    .record_live_codex_account(hint, live_plan.as_deref());
-            } else if hint.provider == "codex-cli" || hint.provider == "codex-oauth" {
-                let _ = self.store.record_codex_quota(hint);
-            } else {
-                let _ = self.store.record_quota(hint);
-            }
-        }
-    }
-
     /// Make one consult call. `Err` is a refusal in a sentence (cap, budget, spend, deadline);
     /// the call was not made. `Ok` is whatever came back, judged by the caller, who then
     /// settles it with [`Self::settle_consult`].
@@ -454,51 +650,18 @@ impl Session {
             model: r.model.clone(),
             purpose: purpose.to_string(),
         });
-        let messages = [Message::system(system), Message::user(input)];
-        let options = CompletionOptions {
-            effort: Some(EffortLevel::Medium),
-            max_output_tokens: Some(MAX_OUTPUT_TOKENS),
-            prompt_cache_key: Some(format!("{}:expert", self.id)),
-            ..CompletionOptions::default()
-        };
-        let provider = self.provider.clone();
         let started = std::time::Instant::now();
-        let mut sink = |_: StreamEvent| {};
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs.max(1)),
-            provider.complete_with(&r.model, &messages, &[], &options, &mut sink),
+        let (call, hints) = raw_call(
+            &self.provider,
+            &self.pricing,
+            &r.model,
+            system,
+            input,
+            format!("{}:expert", self.id),
+            timeout_secs,
         )
         .await;
-        let call = match result {
-            Err(_) => RawCall {
-                content: None,
-                usage: forge_types::Usage::default(),
-                detail: "timed out".to_string(),
-                truncated: false,
-                timed_out: true,
-            },
-            Ok(Err(error)) => RawCall {
-                content: None,
-                usage: forge_types::Usage::default(),
-                detail: clip_chars(&error.to_string(), 80),
-                truncated: false,
-                timed_out: false,
-            },
-            Ok(Ok(reply)) => {
-                let usage = priced(&self.pricing, &r.model, &reply.usage);
-                self.persist_quota_hints(&r.model, &reply.quotas);
-                let truncated = usage.output_tokens
-                    >= u64::from(MAX_OUTPUT_TOKENS).saturating_sub(64)
-                    || (reply.content.trim().is_empty() && usage.reasoning_tokens.unwrap_or(0) > 0);
-                RawCall {
-                    content: Some(reply.content),
-                    usage,
-                    detail: String::new(),
-                    truncated,
-                    timed_out: false,
-                }
-            }
-        };
+        persist_quota_hints(&self.store, &r.model, &hints);
         self.expert.usd_spent += call.usage.cost_usd;
         tracing::info!(
             model = r.model,
@@ -591,24 +754,17 @@ impl Session {
                 return None;
             }
         };
-        let (label, parsed) = match &call.content {
-            None => ("expert/stall:error", None),
-            Some(_) if call.truncated => ("expert/stall:truncated", None),
-            Some(content) => match parse_reply(content) {
-                Some(reply) => ("expert/stall:advice", Some(reply)),
-                None => ("expert/stall:unparsed", None),
-            },
-        };
-        let summary = parsed
-            .as_ref()
-            .map(|p| p.diagnosis.clone())
-            .unwrap_or_else(|| {
+        let (label, parsed) = judge(&call, Trigger::Stall);
+        let summary = parsed.as_ref().map_or_else(
+            || {
                 format!(
                     "no usable reply ({})",
                     label.trim_start_matches("expert/stall:")
                 )
-            });
-        self.settle_consult(&r, Trigger::Stall, label, &call.usage, &summary);
+            },
+            |p| p.diagnosis.clone(),
+        );
+        self.settle_consult(&r, Trigger::Stall, &label, &call.usage, &summary);
         parsed.map(|p| (r, p))
     }
 
@@ -662,41 +818,72 @@ impl Session {
                 ))
             }
         };
-        let (label, parsed) = match &raw.content {
-            None => ("expert/tool:error", None),
-            Some(_) if raw.truncated => ("expert/tool:truncated", None),
-            Some(content) => match parse_reply(content) {
-                Some(reply) => ("expert/tool:advice", Some(reply)),
-                None => ("expert/tool:unparsed", None),
-            },
-        };
-        let summary = parsed
-            .as_ref()
-            .map(|p| p.diagnosis.clone())
-            .unwrap_or_else(|| {
+        let (label, parsed) = judge(&raw, Trigger::Tool);
+        let summary = parsed.as_ref().map_or_else(
+            || {
                 format!(
                     "no usable reply ({})",
                     label.trim_start_matches("expert/tool:")
                 )
-            });
-        self.settle_consult(&r, Trigger::Tool, label, &raw.usage, &summary);
-        Ok(match parsed {
-            Some(reply) => {
-                let mut text = format!("Expert ({}) answers.\n", r.model);
-                if !reply.diagnosis.is_empty() {
-                    text.push_str(&format!("Diagnosis: {}\n", reply.diagnosis));
-                }
-                if !reply.next_step.is_empty() {
-                    text.push_str(&format!("Next step: {}\n", reply.next_step));
-                }
-                text.push_str("The expert can be wrong: check it against the files before acting.");
-                text
-            }
-            None => format!(
-                "The expert gave no usable answer ({}). Go on with your own judgement.",
-                label.trim_start_matches("expert/tool:")
-            ),
-        })
+            },
+            |p| p.diagnosis.clone(),
+        );
+        self.settle_consult(&r, Trigger::Tool, &label, &raw.usage, &summary);
+        Ok(tool_answer(&r.model, &label, parsed.as_ref()))
+    }
+
+    /// Consults a bridged model made through `forge mcp-serve` this turn: that process records a
+    /// usage row per consult and nothing else reaches this one. Fold them into the turn's count
+    /// and show the status line.
+    pub(crate) fn fold_bridge_consults(&mut self) {
+        let Ok(stored) =
+            self.store
+                .count_side_calls_since(&self.id, "expert/tool:", self.expert.prompt_seq)
+        else {
+            return;
+        };
+        let direct = self
+            .expert
+            .turn_triggers
+            .iter()
+            .filter(|t| **t == "tool")
+            .count() as u32;
+        let bridged = stored.saturating_sub(direct);
+        if bridged == 0 {
+            return;
+        }
+        let Ok(Some((model, spec))) = resolve_config(&self.config.harness.expert) else {
+            return;
+        };
+        self.expert.turn_consults += bridged;
+        self.expert.session_consults += bridged;
+        self.expert.turn_model = Some(model.clone());
+        self.expert
+            .turn_triggers
+            .extend(std::iter::repeat_n("tool", bridged as usize));
+        if let Some(spec) = &spec {
+            let windows = self.store.subscription_windows().unwrap_or_default();
+            let now = chrono::Utc::now().timestamp();
+            meter(
+                &mut self.expert.envelope,
+                spec,
+                &windows,
+                self.expert.usd_spent,
+                now,
+            );
+        }
+        let status = status_line(
+            &model,
+            self.expert.session_consults,
+            self.expert.envelope.as_ref().filter(|_| spec.is_some()),
+        );
+        self.expert.status = Some(status.clone());
+        self.presenter.emit(PresenterEvent::ExpertConsult {
+            trigger: "tool".to_string(),
+            model,
+            summary: format!("{bridged} asked through the bridge"),
+            status,
+        });
     }
 
     /// The turn's expert facts for the stored turn detail.

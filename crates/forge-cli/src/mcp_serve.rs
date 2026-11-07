@@ -127,6 +127,8 @@ struct ForgeMcp {
     /// The bridged turn's progress ledger (`progress.rs`): nudges a call that earns one, refuses
     /// every call once the turn is stopped.
     progress: std::sync::Mutex<forge_core::BridgeProgress>,
+    /// The bridged model's `consult_expert` consults (per-turn cap, budget meter).
+    expert: tokio::sync::Mutex<forge_core::BridgeExpert>,
 }
 
 fn parse_bridge_tasks(args: &Value) -> Result<Vec<forge_types::TodoItem>, &'static str> {
@@ -329,6 +331,10 @@ impl ForgeMcp {
         if name == forge_core::RECALL_TOOL {
             let session_id = std::env::var(forge_core::snapshot::ENV_SESSION).ok();
             return Ok(self.handle_recall(session_id.as_deref(), &args));
+        }
+        // The expert on call: answered from the parent session's stored transcript.
+        if name == forge_core::CONSULT_EXPERT_TOOL {
+            return Ok(self.handle_consult_expert(&args).await);
         }
 
         // On-demand memory write — bridge model can persist a durable fact mid-turn (parity with
@@ -804,6 +810,12 @@ impl ForgeMcp {
                 .to_string(),
             Arc::new(ts_schema),
         ));
+        // The expert on call, only while one is configured and the model may ask for it.
+        if forge_core::expert_tool_configured(&self.config) {
+            let es = forge_core::consult_expert_spec();
+            let es_schema: JsonObject = es.schema.as_object().cloned().unwrap_or_default();
+            tools.push(Tool::new(es.name, es.description, Arc::new(es_schema)));
+        }
         // Always advertise the on-demand memory tool so a bridge model can persist facts mid-turn.
         let rs = forge_core::remember_spec();
         let rs_schema: JsonObject = rs.schema.as_object().cloned().unwrap_or_default();
@@ -981,6 +993,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         lean,
         auto_classify: Default::default(),
         progress,
+        expert: Default::default(),
     };
     clock.mark("mcp-serve: registry");
     if http {
@@ -1128,6 +1141,7 @@ mod tests {
             lean: false,
             auto_classify: Default::default(),
             progress: Default::default(),
+            expert: Default::default(),
         }
     }
 
@@ -1395,7 +1409,36 @@ mod tests {
             lean,
             auto_classify: Default::default(),
             progress: Default::default(),
+            expert: Default::default(),
         }
+    }
+
+    #[test]
+    fn consult_expert_is_advertised_to_a_bridge_only_when_an_expert_is_configured() {
+        let names = |server: &ForgeMcp| -> Vec<String> {
+            server
+                .tool_list()
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        let mut off = test_server(true);
+        assert!(!names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()));
+        off.config.harness.expert.model = "anthropic::sonnet".into();
+        assert!(
+            names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()),
+            "core on the lean surface"
+        );
+        off.config.harness.expert.triggers.tool = false;
+        assert!(!names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()));
+        off.config.harness.expert.triggers.tool = true;
+        off.config.harness.expert.model = "codex-oauth::gpt-5.6-sol".into();
+        assert!(
+            !names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()),
+            "a subscription expert without a budget stays hidden"
+        );
+        off.config.harness.expert.budget = "codex:5%w".into();
+        assert!(names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()));
     }
 
     /// An `McpConfig` with one active (never-actually-connected) stdio server, enough for

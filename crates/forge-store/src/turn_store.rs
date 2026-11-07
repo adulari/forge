@@ -176,6 +176,25 @@ impl Store {
         Ok(rows)
     }
 
+    /// Closed turns since `since` (unix secs) that consulted the expert on call, newest first.
+    pub fn recent_expert_turns(
+        &self,
+        since: i64,
+        session_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TurnRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {COLS} FROM turn WHERE ended_at IS NOT NULL AND started_at >= ?1 \
+             AND (?2 IS NULL OR session_id = ?2) AND detail_json LIKE '%\"expert_consults\"%' \
+             ORDER BY started_at DESC, id DESC LIMIT ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![since, session_id, limit as i64], row_of)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// The session's newest closed turn.
     pub fn last_closed_turn(&self, session_id: &str) -> Result<Option<TurnRow>> {
         let conn = self.lock()?;
@@ -584,5 +603,25 @@ mod tests {
             .note_turn_stopped(&sid, "⚠ Turn stopped (stalled): again")
             .unwrap());
         assert_eq!(store.session_tail_state(&sid).unwrap(), TailState::Finished);
+    }
+
+    #[test]
+    fn expert_turns_are_the_closed_turns_whose_detail_counts_consults() {
+        let (store, sid) = store_with_prompt();
+        let plain = store.open_turn(&sid, 0).unwrap();
+        store
+            .close_turn(plain, "final_answer", Some("{\"model\":\"m\"}"))
+            .unwrap();
+        let consulted = store.open_turn(&sid, 0).unwrap();
+        store
+            .close_turn(consulted, "stalled", Some("{\"expert_consults\":1}"))
+            .unwrap();
+        let rows = store.recent_expert_turns(0, Some(&sid), 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, consulted);
+        assert!(store
+            .recent_expert_turns(0, Some("other"), 10)
+            .unwrap()
+            .is_empty());
     }
 }

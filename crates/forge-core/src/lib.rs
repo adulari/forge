@@ -125,7 +125,8 @@ mod hooks_subagent;
 mod hooks_turn;
 mod turn_record;
 pub use turn_record::{
-    describe_end, end_fails_run, end_label, is_resumable, shape_label, stop_note, TurnEndView,
+    describe_end, end_fails_run, end_label, expert_of_detail, is_resumable, shape_label, stop_note,
+    TurnEndView,
 };
 mod hooks_worktree;
 pub mod host_move;
@@ -237,7 +238,7 @@ pub mod worktree_reclaim;
 pub mod worktree_setup;
 pub mod zero_retention;
 
-pub use expert::{consult_expert_spec, CONSULT_EXPERT_TOOL};
+pub use expert::{consult_expert_spec, expert_tool_configured, BridgeExpert, CONSULT_EXPERT_TOOL};
 pub use llm_router::LlmRouter;
 pub use pinned_context::render_task_list;
 pub use recall::{recall_spec, RECALL_TOOL};

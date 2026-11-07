@@ -148,6 +148,34 @@ pub struct TurnEndView {
     pub shape_label: Option<String>,
     pub finished: bool,
     pub resumable: bool,
+    /// Expert consults this turn spent (`[harness.expert]`); absent when it made none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expert_consults: Option<u32>,
+    /// `codex-oauth::gpt-5.6-sol (stall, done)`: who was consulted and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expert: Option<String>,
+}
+
+/// The expert consults a stored turn detail records, and a short description of them.
+pub fn expert_of_detail(detail_json: Option<&str>) -> (Option<u32>, Option<String>) {
+    let Some(detail) = detail_json.and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok())
+    else {
+        return (None, None);
+    };
+    let Some(n) = detail["expert_consults"].as_u64().filter(|n| *n > 0) else {
+        return (None, None);
+    };
+    let model = detail["expert_model"].as_str().unwrap_or("expert");
+    let mut triggers: Vec<&str> = Vec::new();
+    for t in detail["expert_triggers"].as_array().into_iter().flatten() {
+        if let Some(t) = t.as_str().filter(|t| !triggers.contains(t)) {
+            triggers.push(t);
+        }
+    }
+    (
+        Some(n as u32),
+        Some(format!("{model} ({})", triggers.join(", "))),
+    )
 }
 
 impl TurnEndView {
@@ -158,7 +186,10 @@ impl TurnEndView {
         } else {
             ("still running".into(), "wait for it".into())
         };
+        let (expert_consults, expert) = expert_of_detail(row.detail_json.as_deref());
         Self {
+            expert_consults,
+            expert,
             id: row.id,
             session_id: row.session_id.clone(),
             started_at: row.started_at,
@@ -219,6 +250,7 @@ impl Session {
     /// call this: they are not prompts. A turn still open here is the plan turn whose approval
     /// re-runs the build turn.
     pub(crate) fn open_turn_row(&mut self, prompt_seq: i64) {
+        self.expert.prompt_seq = prompt_seq;
         let previous = self.turn_row.swap(0, Ordering::SeqCst);
         if previous != 0 {
             let _ = self.store.close_turn(previous, "plan_presented", None);
@@ -250,6 +282,7 @@ impl Session {
             "open_tasks": open_tasks,
             "mutations": self.mutations_this_turn,
         });
+        self.fold_bridge_consults();
         if let Some(expert) = self.expert_turn_detail() {
             if let (Some(map), Some(extra)) = (detail.as_object_mut(), expert.as_object()) {
                 map.extend(extra.clone());

@@ -58,6 +58,7 @@ pub(crate) fn turns_cmd(args: TurnsArgs) -> Result<()> {
     }
     let counts = store.turn_end_counts(since, session.as_deref())?;
     let unfinished = store.recent_unfinished_turns(since, session.as_deref(), args.limit)?;
+    let consulted = store.recent_expert_turns(since, session.as_deref(), args.limit)?;
     if args.json {
         let counts: serde_json::Map<String, serde_json::Value> = counts
             .iter()
@@ -67,10 +68,12 @@ pub(crate) fn turns_cmd(args: TurnsArgs) -> Result<()> {
             "since": since,
             "counts": counts,
             "unfinished": unfinished,
+            "expert_turns": consulted.iter().map(forge_core::TurnEndView::from_row).collect::<Vec<_>>(),
         });
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else {
         print!("{}", render(&counts, &unfinished, &args.since));
+        print!("{}", render_expert(&consulted));
     }
     Ok(())
 }
@@ -115,6 +118,34 @@ pub(crate) fn render(counts: &[(String, i64)], unfinished: &[TurnRow], since: &s
                 &t.session_id[..t.session_id.len().min(8)]
             ));
         }
+    }
+    out
+}
+
+/// The turns that consulted the expert on call, with how many consults and which triggers.
+pub(crate) fn render_expert(turns: &[TurnRow]) -> String {
+    if turns.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\nLast {} turns that consulted the expert\n  {:<7} {:<12} {:<9} {:<34} {}\n",
+        turns.len(),
+        "id",
+        "time",
+        "consults",
+        "expert (triggers)",
+        "session"
+    );
+    for t in turns {
+        let view = forge_core::TurnEndView::from_row(t);
+        out.push_str(&format!(
+            "  {:<7} {:<12} {:<9} {:<34} {}\n",
+            t.id,
+            when(t.started_at),
+            view.expert_consults.unwrap_or(0),
+            view.expert.as_deref().unwrap_or("-"),
+            &t.session_id[..t.session_id.len().min(8)]
+        ));
     }
     out
 }
@@ -179,5 +210,30 @@ mod tests {
             render(&[], &[], "7d"),
             "No turns recorded in the last 7d.\n"
         );
+    }
+
+    #[test]
+    fn the_report_lists_turns_that_consulted_the_expert() {
+        let row = TurnRow {
+            id: 4,
+            session_id: "feedface12345678".into(),
+            prompt_seq: 0,
+            started_at: 1_700_000_000,
+            ended_at: Some(1_700_000_050),
+            end_reason: Some("final_answer".into()),
+            detail_json: Some(
+                r#"{"expert_consults":2,"expert_model":"codex-oauth::gpt-5.6-sol","expert_triggers":["stall","done"]}"#
+                    .into(),
+            ),
+            last_role_shape: None,
+        };
+        let text = render_expert(&[row]);
+        assert!(text.contains("turns that consulted the expert"), "{text}");
+        assert!(
+            text.contains("codex-oauth::gpt-5.6-sol (stall, done)"),
+            "{text}"
+        );
+        assert!(text.contains("feedface"), "{text}");
+        assert_eq!(render_expert(&[]), "");
     }
 }
