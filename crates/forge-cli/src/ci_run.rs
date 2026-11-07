@@ -255,7 +255,8 @@ pub(crate) fn run_plan(
     settings: &CiSettings,
     opts: &RunOptions,
     on_event: &mut dyn FnMut(Event<'_>),
-) -> CiReport {
+) -> Result<CiReport, String> {
+    let _guard = live::acquire(root)?;
     let tree = tree_fingerprint(root);
     let previous = load_report(root).filter(|r| r.tree == tree && !opts.fresh);
     let steps: Vec<&CiStep> = plan
@@ -301,14 +302,14 @@ pub(crate) fn run_plan(
                     && matches!(r.status, StepStatus::Pass | StepStatus::Cached)
             })
         });
+        if tracked {
+            live::step_started(root, &step.name, i + 1, steps.len());
+        }
         on_event(Event::Start {
             index: i + 1,
             total: steps.len(),
             step,
         });
-        if tracked {
-            live::step_started(root, &step.name, i + 1, steps.len());
-        }
         if cached {
             result.status = StepStatus::Cached;
         } else if begun.elapsed() >= budget {
@@ -347,7 +348,7 @@ pub(crate) fn run_plan(
         let _ = save_report(root, &report);
         live::finished(root, &report);
     }
-    report
+    Ok(report)
 }
 
 /// The step's environment as `K=V` pairs, without the cargo output-shaping noise.
@@ -406,7 +407,10 @@ pub(crate) fn automatic_check(root: &Path, via: &'static str) -> Check {
     if plan.steps.is_empty() {
         return Check::Skipped("no runnable workflow steps".to_string());
     }
-    let report = run_plan(root, &plan, &settings, &RunOptions::default(), &mut |_| {});
+    let report = match run_plan(root, &plan, &settings, &RunOptions::default(), &mut |_| {}) {
+        Ok(report) => report,
+        Err(busy) => return Check::Failed(busy),
+    };
     if report.stopped.is_none()
         && !report.results.is_empty()
         && report

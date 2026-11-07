@@ -31,6 +31,8 @@ export interface CiPlanResponse {
   gate: "auto" | "off";
   /** Present after a run: every step passed (or its tool is not installed on the host). */
   ok?: boolean;
+  /** The step in flight while a run is going on the host, whoever started it. */
+  running?: { name: string; index: number; total: number } | null;
 }
 
 export const getSessionCi = (baseUrl: string, sessionId: string) =>

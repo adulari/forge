@@ -160,7 +160,8 @@ pub(crate) fn ci_cmd(cmd: Option<CiCmd>) -> Result<()> {
                         eprintln!("      {:?} ({}s)", result.status, result.secs)
                     }
                 }
-            });
+            })
+            .map_err(|busy| anyhow::anyhow!(busy))?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {

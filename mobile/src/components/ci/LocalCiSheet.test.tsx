@@ -103,6 +103,15 @@ describe("LocalCiSheet", () => {
     expect(html).toContain("disabled");
   });
 
+  it("keeps Run disabled and labelled while the host still runs, even after a failed request", () => {
+    state.plan = { ...plan, running: { name: "lint / clippy", index: 2, total: 2 } };
+    state.error = null;
+    const html = render();
+    expect(html).toContain("Running on the host…");
+    expect(html).toContain("Running the plan on the host");
+    expect(html).toMatch(/<button disabled=""[^>]*data-run="1">Running on the host/);
+  });
+
   it("offers no Run when nothing in the workflows can run, and says why", () => {
     state.plan = { ...plan, rows: [plan.rows[2]], summary: null, ok: undefined };
     const html = render();

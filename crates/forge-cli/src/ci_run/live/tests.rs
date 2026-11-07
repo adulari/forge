@@ -30,7 +30,8 @@ fn a_finished_run_is_visible_per_step_with_the_plan_size() {
         &settings,
         &RunOptions::default(),
         &mut |_| {},
-    );
+    )
+    .unwrap();
     let ci = for_cwd(dir.path()).expect("the run is recorded");
     assert_eq!((ci.runnable, ci.skipped), (2, 1));
     assert_eq!(ci.ok, Some(true));
@@ -84,7 +85,8 @@ fn a_saved_run_is_shown_after_a_restart_and_the_wire_form_is_additive() {
         &settings,
         &RunOptions::default(),
         &mut |_| {},
-    );
+    )
+    .unwrap();
     let restored = from_report(&report);
     assert_eq!(restored.runnable, 2);
     assert_eq!(restored.ok, Some(true));

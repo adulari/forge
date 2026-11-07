@@ -16,7 +16,8 @@ export function useSessionCi(sessionId: string | null, enabled: boolean, poll: b
     enabled: baseUrl != null && sessionId != null && enabled,
     staleTime: 0,
     retry: false,
-    refetchInterval: poll ? POLL_MS : false,
+    // Polling also follows the host: a run the request gave up on is still going.
+    refetchInterval: (query) => (poll || query.state.data?.running != null ? POLL_MS : false),
   });
 }
 

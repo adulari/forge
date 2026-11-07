@@ -64,7 +64,7 @@ fn load(root: &Path, run: bool) -> Loaded {
             &settings,
             &RunOptions::default(),
             &mut |_| {},
-        ))
+        )?)
     } else {
         load_report(root)
     };

@@ -17,7 +17,7 @@ const WF: &str = "name: CI\non:\n  pull_request:\nenv:\n  STRICT: \"1\"\njobs:\n
 
 fn run(root: &Path, opts: &RunOptions) -> (CiPlan, CiReport) {
     let (plan, settings) = make_plan(root);
-    let report = run_plan(root, &plan, &settings, opts, &mut |_| {});
+    let report = run_plan(root, &plan, &settings, opts, &mut |_| {}).unwrap();
     (plan, report)
 }
 
@@ -112,7 +112,8 @@ fn a_step_that_outruns_its_timeout_is_killed_and_reported() {
         &short,
         &RunOptions::default(),
         &mut |_| {},
-    );
+    )
+    .unwrap();
     assert_eq!(report.results[0].status, StepStatus::Timeout);
     assert!(report.results[0].tail.contains("timed out"));
 }
@@ -174,4 +175,124 @@ fn a_plan_whose_every_step_is_not_installed_is_skipped_not_failed() {
         Check::Passed(why) => panic!("claimed a pass when nothing ran: {why}"),
     }
     assert!(push_blocker(dir.path()).is_none());
+}
+
+fn wf(cmd: &str) -> String {
+    format!("on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: lint\n        run: {cmd}\n")
+}
+
+#[test]
+fn a_second_run_on_a_running_root_is_refused_and_does_not_start() {
+    let dir = repo(&wf("echo fine"));
+    let (plan, settings) = make_plan(dir.path());
+    let held = live::acquire(dir.path()).unwrap();
+    live::begin(dir.path(), 2, 0);
+    live::step_started(dir.path(), "lint", 1, 2);
+    let err = run_plan(
+        dir.path(),
+        &plan,
+        &settings,
+        &RunOptions::default(),
+        &mut |_| panic!("a refused run must not start a step"),
+    )
+    .unwrap_err();
+    assert_eq!(
+        err,
+        "a local CI run is already in progress on this worktree (step 1/2: lint)"
+    );
+    assert!(matches!(
+        automatic_check(dir.path(), "push"),
+        Check::Failed(m) if m.contains("already in progress")
+    ));
+    drop(held);
+    assert!(run_plan(
+        dir.path(),
+        &plan,
+        &settings,
+        &RunOptions::default(),
+        &mut |_| {}
+    )
+    .is_ok());
+}
+
+#[test]
+fn two_concurrent_runs_on_one_root_run_exactly_once() {
+    let dir = repo(&wf("echo fine"));
+    let (plan, settings) = make_plan(dir.path());
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let first = std::thread::scope(|s| {
+        let (root, plan_ref, settings_ref) = (dir.path(), &plan, &settings);
+        let first = s.spawn(move || {
+            run_plan(
+                root,
+                plan_ref,
+                settings_ref,
+                &RunOptions::default(),
+                &mut |e| {
+                    if matches!(e, Event::Start { .. }) {
+                        started_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                    }
+                },
+            )
+        });
+        started_rx.recv().unwrap();
+        let second = run_plan(
+            dir.path(),
+            &plan,
+            &settings,
+            &RunOptions::default(),
+            &mut |_| panic!("the second run must not start a step"),
+        );
+        release_tx.send(()).unwrap();
+        let refused = second.unwrap_err();
+        assert!(
+            refused.contains("already in progress") && refused.contains("step 1/1: lint"),
+            "{refused}"
+        );
+        first.join().unwrap()
+    });
+    assert!(first.unwrap().ok());
+}
+
+#[test]
+fn the_root_is_freed_after_a_failing_or_panicking_run() {
+    let dir = repo(&wf("exit 1"));
+    let (plan, settings) = make_plan(dir.path());
+    let failed = run_plan(
+        dir.path(),
+        &plan,
+        &settings,
+        &RunOptions::default(),
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(!failed.ok());
+    let panicked = std::thread::scope(|s| {
+        s.spawn(|| {
+            let _ = run_plan(
+                dir.path(),
+                &plan,
+                &settings,
+                &RunOptions::default(),
+                &mut |e| {
+                    if matches!(e, Event::Start { .. }) {
+                        panic!("boom");
+                    }
+                },
+            );
+        })
+        .join()
+    });
+    assert!(panicked.is_err());
+    assert!(live::for_cwd(dir.path()).unwrap().running.is_none());
+    assert!(run_plan(
+        dir.path(),
+        &plan,
+        &settings,
+        &RunOptions::default(),
+        &mut |_| {}
+    )
+    .is_ok());
 }

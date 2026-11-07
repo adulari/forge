@@ -15,11 +15,13 @@ use crate::remote::ci::{SnapCi, SnapCiBlock, SnapCiRunning, SnapCiStep};
 struct Registry {
     by_root: BTreeMap<PathBuf, SnapCi>,
     looked_up: BTreeSet<PathBuf>,
+    held: BTreeSet<PathBuf>,
 }
 
 static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
     by_root: BTreeMap::new(),
     looked_up: BTreeSet::new(),
+    held: BTreeSet::new(),
 });
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
@@ -62,6 +64,40 @@ fn step_of(result: &StepResult) -> SnapCiStep {
         status: status_word(result.status),
         secs: result.secs,
     }
+}
+
+/// Held for the length of one run on a root; dropping it (on any exit, a panic included) frees
+/// the root and clears a step left marked as running.
+pub(crate) struct RunGuard(PathBuf);
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+        reg.held.remove(&self.0);
+        if let Some(ci) = reg.by_root.get_mut(&self.0) {
+            ci.running = None;
+        }
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Claim `root` for a run, or say what is already running on it.
+pub(crate) fn acquire(root: &Path) -> Result<RunGuard, String> {
+    let key = root.to_path_buf();
+    let mut reg = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    if reg.held.contains(&key) {
+        let step = reg
+            .by_root
+            .get(&key)
+            .and_then(|ci| ci.running.as_ref())
+            .map(|r| format!(" (step {}/{}: {})", r.index, r.total, r.name))
+            .unwrap_or_default();
+        return Err(format!(
+            "a local CI run is already in progress on this worktree{step}"
+        ));
+    }
+    reg.held.insert(key.clone());
+    Ok(RunGuard(key))
 }
 
 pub(crate) fn begin(root: &Path, runnable: usize, skipped: usize) {

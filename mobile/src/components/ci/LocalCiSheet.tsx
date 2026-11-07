@@ -28,6 +28,9 @@ export function LocalCiSheet({ visible, onClose, sessionId }: Props) {
   // A failing step opens by default (its output tail is the point); a tap overrides either way.
   const [toggled, setToggled] = useState<Record<string, boolean>>({});
   const data = plan.data;
+  // A run whose request failed client-side, or one started elsewhere, still holds the worktree.
+  const onHost = data?.running != null;
+  const busy = run.isPending || onHost;
   const { steps, skips } = ciSections(data);
   const failure = plan.error?.message ?? run.error?.message ?? null;
 
@@ -40,16 +43,16 @@ export function LocalCiSheet({ visible, onClose, sessionId }: Props) {
           accessibilityLiveRegion="polite"
           testID="local-ci-headline"
         >
-          {failure ?? ciHeadline(data, run.isPending)}
+          {failure ?? ciHeadline(data, busy)}
         </Text>
-        {data?.summary && !run.isPending ? (
+        {data?.summary && !busy ? (
           <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{data.summary}</Text>
         ) : null}
         {ciGateNote(data) ? <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{ciGateNote(data)}</Text> : null}
         <Button
-          label={run.isPending ? "Running…" : "Run"}
+          label={run.isPending ? "Running…" : onHost ? "Running on the host…" : "Run"}
           onPress={() => run.mutate()}
-          disabled={run.isPending || sessionId == null || steps.length === 0}
+          disabled={busy || sessionId == null || steps.length === 0}
           testID="local-ci-run"
         />
         {steps.map((row) => (
