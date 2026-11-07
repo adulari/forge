@@ -9,6 +9,7 @@ All notable changes to Forge are documented here. The format follows
 ### Added
 
 - Merge queue: PRs Forge watches in merge mode land one at a time per repository. The head is brought up to date by merging the base into the session's worktree as its own git identity (never `gh pr update-branch`), changelog-only conflicts are resolved keeping both sides' entries, the project's `verify`/`check` actions run on the merged result before the push, and a real conflict or a failing check hands the PR back to its session while the queue carries on. `forge prs queue`, `GET /api/pr/queue`, a line in the away brief and the PR Watch rows show it. See docs/features/merge-queue.md.
+- Merge queue controls on every surface: `/queue` in the terminal (position, state and reason per PR, with hold, release, move to front and retry), a Merge queue section on `forge board`, a Merge queue page on the phone and desktop (Pull requests, Settings, command palette), and `forge prs queue hold|release|front|retry <pr>` over `POST /api/pr/queue/action`, which Forge Anywhere bridges. A held PR neither lands nor blocks the PRs behind it; a PR whose verification fails now shows the failing output tail as its reason.
 
 ## [2.28.1] - 2026-11-06
 

@@ -36,25 +36,60 @@ against the new main.
 
 ## Not blocking the queue
 
-A PR that conflicts for real, fails its verification, sits on a detached HEAD or has its push
+A PR that conflicts for real, fails its verification (the reason ends with the last lines of the
+failing output), sits on a detached HEAD or has its push
 refused is marked `skipped` with the reason and the queue moves on. When its session pushes (the
 PR head changes), it re-enters at its original place. A dirty worktree, a busy session or a failed
 fetch only wait; they are retried. A PR whose watch blocks (closed, giving up after fix turns)
 leaves the queue like any finished one.
 
+## Owner controls
+
+Four actions act on one queued PR, from any surface:
+
+- **Hold** takes the PR out of the line without dropping its watch. It neither lands nor blocks the
+  PRs behind it, and is shown as `held` with no position.
+- **Release** puts a held PR back at its place.
+- **Move to front** makes the PR the next to land (the earlier head is simply behind it). It is a
+  rank stored on the queue entry, so it survives a daemon restart.
+- **Retry** re-enters a handed-back (`skipped`) PR without waiting for a push: the update step and
+  the verification run again at once, and the PR is handed back again if they still fail.
+
+A PR that has not been polled yet has no queue entry, so an action on it is refused with a 409
+until its first poll. What the owner chose while a poll was running is kept when the poll's result
+is stored, so a hold pressed mid-update is not lost.
+
 ## Surfaces
 
+- Terminal: `/queue` (also in the command palette and `/help`) opens an overlay listing each
+  repository's queue with position, PR, state (`next to land`, `queued`, `in checks`, `held`,
+  `handed back`, `merged`) and the reason. Up/Down move, `h` hold, `r` release, `f` front, `t` retry,
+  Enter does the action that fits the row (hold, release or retry), `R` refreshes; it polls every four
+  seconds. An action a row cannot take says why instead of being sent.
+- `forge board`: a Merge queue section under the columns while any PR is waiting, held or handed
+  back (hidden on a short terminal). The `B` brief carries the one-line summary.
 - `forge prs queue [--json]`: position, state and reason per PR, per repository.
+  `forge prs queue hold|release|front|retry <pr>` takes a PR number (or a session id when the same
+  number is queued in two repositories) and prints the resulting queue.
 - `GET /api/pr/queue`: `{queues: [{repo, rows: [{session_id, pr_number, pr_url, position, state,
-  reason, pushes, last_update}]}]}`; state is `head`, `queued`, `checks`, `skipped`, `merged` or
-  `blocked`. `GET /api/pr/watches` carries the same `queue` object on each merge-mode watch.
-- Phone and desktop: the PR Watch panel and the Schedules list label a queued watch (Queued to
-  merge, Landing next, Updated in checks, Handed back) with the position or reason.
+  held, reason, pushes, last_update}]}]}`; state is `head`, `queued`, `checks`, `held`, `skipped`,
+  `merged` or `blocked`. `GET /api/pr/watches` carries the same `queue` object on each merge-mode
+  watch.
+- `POST /api/pr/queue/action`: `{session | pr, action: hold|release|front|retry}` answers
+  `{ok, message, queues}`, 404 for an unknown PR, 409 for an action the PR cannot take. It needs the
+  `workspace-write` scope like the other `/api/pr/` writes. Forge Anywhere bridges both routes
+  (`pr_queue`, `pr_queue_action`); the body carries no text the agent would act on.
+- Phone and desktop: a Merge queue page (Pull requests screen, Settings, command palette) with the
+  same list and the four actions per row. The PR Watch panel and the Schedules list also label a
+  queued watch (Queued to merge, Landing next, Updated in checks, Held, Handed back).
 - Away brief (`forge brief`, `B` on the board): a `Merge queue: 3 waiting, next PR #12 (checks),
-  1 handed back` line.
+  1 held, 1 handed back` line.
 
-Not built: a dedicated interactive queue overlay in the TUI (the board shows the brief line and
-the CLI prints the table), and reordering the queue by hand.
+## Not done
+
+- The board's queue section is read-only; the actions are in `/queue` and `forge prs queue`.
+- Hand-ordering is per repository queue and by one move-to-front; there is no arbitrary drag
+  to a position.
 
 ## Tests
 
@@ -64,3 +99,9 @@ CHANGELOG entry under one heading plus distinct code, a fourth with a real code 
 merges in order with verification seeing the previous PRs' code, the conflicting PR handed back
 without blocking the rest and landing after its session resolves it. The drill is
 `~/.cache/forge-burn-demo/run4/mergeq/drill.sh`.
+
+The same tests drive the owner actions (hold, release, front, retry), the HTTP routes, and the
+daemon's own `sweep()` over the 3+1 drill with real sessions. In the sweep tests the verification
+comes from the project's `[[actions]]` config (`verify_for`, project trust set in the test
+environment); a second drill breaks one PR's verification and checks that it is skipped with the
+failing output tail as its reason, retried on request, and landed once its session fixes it.
