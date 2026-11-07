@@ -78,6 +78,9 @@ pub(crate) struct ValidationTrack {
     /// The failing assertion numbers of the previous run, and how many runs in a row repeated them.
     pub(crate) last_failing: Vec<u32>,
     pub(crate) unchanged: usize,
+    /// A mission's milestone passed on the last validation and the contract moved to the next:
+    /// the number of the one that passed, until the relay (or the in-place start) takes it.
+    pub(crate) milestone_passed: Option<u32>,
 }
 
 fn normalized(items: &[String]) -> Vec<String> {
@@ -292,6 +295,13 @@ async fn contract_decision(state: &mut GoalState, cwd: &Path) -> GoalDecision {
     if fresh && contract.all_passed() {
         return finish_with_gates(state, GOAL_COMPLETE_REASON, cwd).await;
     }
+    if fresh {
+        if let Some(prompt) = super::goal_mission::advance_if_passed(state) {
+            return goal_budget_check(state).unwrap_or(GoalDecision::Retry {
+                prompt: Some(prompt),
+            });
+        }
+    }
     if state.iter >= GOAL_MAX_ITERS {
         return GoalDecision::Stop("🎯 goal stopped — iteration ceiling".to_string());
     }
@@ -499,6 +509,15 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
             };
         }
     }
+    if let Some(passed) = gs.validation.milestone_passed.take() {
+        let hosted = facts.relay.is_some_and(|policy| policy.max_relays > 0);
+        if hosted && !envelope_hit && matches!(decision, GoalDecision::Retry { .. }) {
+            return GoalStep::Relay {
+                reason: RelayReason::Milestone,
+                detail: format!("milestone {passed} passed"),
+            };
+        }
+    }
     if let (Some(policy), false) = (facts.relay.filter(RelayPolicy::allowed), envelope_hit) {
         match &decision {
             GoalDecision::Stop(stop) => {
@@ -580,7 +599,7 @@ pub(crate) async fn advance_goal(
             if !session.lock().await.run_budget_hit_last_turn() {
                 gs.eval.evaluating = true;
                 gs.validation.slot.lock().unwrap().take();
-                return GoalNext::Validate(contract);
+                return GoalNext::Validate(contract.validation_scope());
             }
         }
         let s = session.lock().await;

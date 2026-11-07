@@ -273,12 +273,12 @@ impl Provider for ContractWorld {
         } else if first.starts_with(forge_core::goal_evaluator::GOAL_EVALUATOR_MARKER) {
             self.evaluations.fetch_add(1, Ordering::SeqCst);
             reply.content = verdict_json(true, &[]);
-        } else if !tools.is_empty() && messages.last().is_some_and(|m| m.role == Role::User) {
+        } else if !tools.is_empty() && messages.last().is_some_and(|m| m.role != Role::Tool) {
             // A worker turn starts from a user prompt; its follow-up after a tool result and the
             // tool-less side calls (recap, title) are not new turns.
             let n = self.turns.fetch_add(1, Ordering::SeqCst);
-            if let Some(last) = messages.last() {
-                self.prompts.lock().unwrap().push(last.content.clone());
+            if let Some(prompt) = messages.iter().rev().find(|m| m.role == Role::User) {
+                self.prompts.lock().unwrap().push(prompt.content.clone());
             }
             if self.creates {
                 let name = ["a.txt", "b.txt", "c.txt"][n.min(2)];
@@ -415,4 +415,37 @@ async fn a_goal_whose_contract_cannot_be_drafted_does_not_start() {
     };
     assert!(reason.contains("goal not started"), "{reason}");
     assert_eq!(w.turns.load(Ordering::SeqCst), 0, "the worker never ran");
+}
+
+#[tokio::test]
+async fn a_headless_mission_starts_the_next_milestone_in_the_same_session() {
+    let mut w = world(CONTRACT, false);
+    let end = run_world(
+        &mut w,
+        GoalRunSpec {
+            goal: "--mission ship the thing".into(),
+            ..spec(&[], None)
+        },
+    )
+    .await;
+    assert_eq!(end, GoalRunEnd::Met);
+    assert_eq!(
+        w.turns.load(Ordering::SeqCst),
+        2,
+        "one turn per milestone: there is no driver to host a fresh worker"
+    );
+    let prompts = w.prompts.lock().unwrap().clone();
+    assert!(
+        prompts[1].contains("Milestone 1 passed. Now milestone 2/2"),
+        "{}",
+        prompts[1]
+    );
+    assert_eq!(w.evaluations.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn the_mission_flag_rides_in_the_goal_text_until_the_run_starts() {
+    let spec = parse_goal_prompt("/goal --mission ship it").unwrap();
+    assert!(!spec.contract);
+    assert_eq!(spec.goal, "--mission ship it");
 }

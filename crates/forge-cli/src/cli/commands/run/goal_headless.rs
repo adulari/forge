@@ -73,7 +73,7 @@ fn total_tokens(session: &Session) -> u64 {
 /// dropping the in-flight turn or evaluation, keeping whatever already streamed.
 pub(crate) async fn run_goal_headless(
     session: &mut Session,
-    spec: GoalRunSpec,
+    mut spec: GoalRunSpec,
     guidance: &[String],
     cwd: &Path,
     interrupted: impl Future<Output = ()>,
@@ -91,11 +91,15 @@ pub(crate) async fn run_goal_headless(
                 .to_string(),
         ));
     }
+    let (goal, mission) = super::goal_mission::take_flag(&spec.goal);
+    spec.goal = goal;
     session
         .prime_guidance(&[goal_session_guidance(&spec.goal)])
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     session.set_active_goal(Some(&spec.goal));
-    if spec.contract || session.goal_contract_default() {
+    if mission {
+        session.request_goal_mission(&spec.goal);
+    } else if spec.contract || session.goal_contract_default() {
         session.request_goal_contract(&spec.goal);
     }
     let mut prompt = goal_start_prompt(&spec.goal);
@@ -142,8 +146,9 @@ pub(crate) async fn run_goal_headless(
         }
         if let Some(contract) = gs.contract.clone() {
             if !session.run_budget_hit_last_turn() {
+                let scope = contract.validation_scope();
                 let results = tokio::select! {
-                    r = session.validate_goal_contract(&contract) => r,
+                    r = session.validate_goal_contract(&scope) => r,
                     _ = &mut interrupted => return Ok(interrupted_end()),
                 };
                 *gs.validation.slot.lock().unwrap() = Some(results);

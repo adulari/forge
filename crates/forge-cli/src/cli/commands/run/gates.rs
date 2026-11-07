@@ -333,7 +333,7 @@ pub(crate) async fn goal_outcome(
     contract: bool,
 ) -> anyhow::Result<super::dispatch::DispatchOutcome> {
     use super::dispatch::DispatchOutcome;
-    let text = objective.trim().to_string();
+    let (text, mission) = super::goal_mission::take_flag(&objective);
     if text.is_empty() {
         if let Some(goal) = &app.goal {
             let summary = goal.summary();
@@ -341,7 +341,7 @@ pub(crate) async fn goal_outcome(
             return Ok(DispatchOutcome::Handled);
         }
         app.note(
-            "usage: /goal <objective> [--contract] [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
+            "usage: /goal <objective> [--contract|--mission] [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
              [--budget claude:20%w|$5] — sets the goal and breaks it into tasks",
         );
         return Ok(DispatchOutcome::Handled);
@@ -371,7 +371,10 @@ pub(crate) async fn goal_outcome(
         s.prime_guidance(&[super::goal_session_guidance(&text)])
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         s.set_active_goal(Some(&text));
-        if contract || s.goal_contract_default() {
+        if mission {
+            s.request_goal_mission(&text);
+            app.note("🧭 drafting a mission - approve its milestones to start the goal");
+        } else if contract || s.goal_contract_default() {
             s.request_goal_contract(&text);
             app.note("📜 drafting a validation contract — approve it to start the goal");
         }

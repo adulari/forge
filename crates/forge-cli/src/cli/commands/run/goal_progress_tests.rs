@@ -444,3 +444,151 @@ async fn a_contract_goal_also_waits_for_the_ci_plan() {
     let d = finish_with_gates(&mut gs, GOAL_COMPLETE_REASON, repo.path()).await;
     assert!(matches!(d, GoalDecision::GateFailed { .. }));
 }
+
+mod mission {
+    use super::*;
+    use forge_types::goal_contract::mission::parse_mission;
+
+    fn mission_state() -> GoalState {
+        let items = |t: &str| {
+            format!(
+                r#"{{"title":"{t}","assertions":[{{"assertion":"{t} a","check":"true"}},{{"assertion":"{t} b","check":"true"}}]}}"#
+            )
+        };
+        let reply = format!(
+            r#"{{"milestones":[{},{},{}]}}"#,
+            items("lexer"),
+            items("parser"),
+            items("cli")
+        );
+        let mut contract = parse_mission(&reply, 6).unwrap().into_contract().unwrap();
+        contract.approved = true;
+        let mut gs = state(&[]);
+        gs.contract = Some(contract);
+        gs
+    }
+
+    fn validated(gs: &mut GoalState, passing: &[u32]) {
+        let contract = gs.contract.as_mut().unwrap();
+        let results = contract
+            .active_assertions()
+            .map(|a| forge_types::goal_contract::AssertionResult {
+                id: a.id,
+                passed: passing.contains(&a.id),
+                proof: if passing.contains(&a.id) {
+                    String::new()
+                } else {
+                    "missing".into()
+                },
+                reason: if passing.contains(&a.id) {
+                    String::new()
+                } else {
+                    "exit 1".into()
+                },
+            })
+            .collect();
+        contract.record(results, 1);
+        gs.validation.fresh = true;
+    }
+
+    fn current(gs: &GoalState) -> u32 {
+        gs.contract.as_ref().unwrap().mission_ref().unwrap().current
+    }
+
+    #[tokio::test]
+    async fn a_passing_milestone_moves_the_mission_on_with_the_next_milestones_prompt() {
+        let mut gs = mission_state();
+        validated(&mut gs, &[1, 2]);
+        let prompt = retry_prompt(decide(&mut gs, false, 0, 0, None).await).unwrap();
+        assert!(
+            prompt.contains("Milestone 1 passed. Now milestone 2/3: parser"),
+            "{prompt}"
+        );
+        assert_eq!(current(&gs), 2);
+        assert_eq!(gs.validation.milestone_passed, Some(1));
+        assert_eq!(
+            gs.contract.as_ref().unwrap().headline(),
+            "milestone 2/3: 0/2 pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_milestone_goes_back_to_the_worker_and_stays_put() {
+        let mut gs = mission_state();
+        validated(&mut gs, &[1]);
+        let prompt = retry_prompt(decide(&mut gs, true, 0, 0, None).await).unwrap();
+        assert!(prompt.contains("assertion 2 failed"), "{prompt}");
+        assert!(!prompt.contains("regression"), "{prompt}");
+        assert_eq!(current(&gs), 1);
+        assert_eq!(gs.validation.milestone_passed, None);
+    }
+
+    #[tokio::test]
+    async fn a_broken_earlier_assertion_becomes_the_prompt_and_blocks_the_boundary() {
+        let mut gs = mission_state();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        // Milestone 2 is done, but assertion 1 of milestone 1 no longer holds.
+        validated(&mut gs, &[2, 3, 4]);
+        let prompt = retry_prompt(decide(&mut gs, false, 0, 0, None).await).unwrap();
+        assert!(
+            prompt.contains("REGRESSION (milestone 1) assertion 1 failed"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Fix the regression first"), "{prompt}");
+        assert_eq!(
+            current(&gs),
+            2,
+            "the mission does not advance over a regression"
+        );
+        assert_eq!(gs.validation.milestone_passed, None);
+    }
+
+    #[tokio::test]
+    async fn the_mission_is_achieved_only_when_the_last_milestone_and_all_earlier_ones_pass() {
+        let mut gs = mission_state();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        validated(&mut gs, &[1, 2, 3, 4, 5]);
+        let decision = decide(&mut gs, true, 0, 0, None).await;
+        assert!(
+            matches!(decision, GoalDecision::Retry { .. }),
+            "milestone 3 itself fails"
+        );
+        let mut gs = mission_state();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        validated(&mut gs, &[2, 3, 4, 5, 6]);
+        let decision = decide(&mut gs, true, 0, 0, None).await;
+        assert!(
+            matches!(decision, GoalDecision::Retry { .. }),
+            "a regression in milestone 1 blocks the finish"
+        );
+        let mut gs = mission_state();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        validated(&mut gs, &[1, 2, 3, 4, 5, 6]);
+        match decide(&mut gs, false, 0, 0, None).await {
+            GoalDecision::Stop(reason) => assert!(is_goal_complete_reason(&reason), "{reason}"),
+            _ => panic!("expected the mission to complete"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wedge_rule_counts_only_the_active_failing_set() {
+        let mut gs = mission_state();
+        for round in 0..GOAL_EVAL_WEDGED_TURNS {
+            validated(&mut gs, &[1]);
+            let decision = decide(&mut gs, false, 0, 0, None).await;
+            if round + 1 < GOAL_EVAL_WEDGED_TURNS {
+                retry_prompt(decision);
+            } else {
+                match decision {
+                    GoalDecision::Stop(reason) => {
+                        assert!(reason.contains("assertions 2 still fail"), "{reason}")
+                    }
+                    _ => panic!("expected a wedge"),
+                }
+            }
+        }
+    }
+}

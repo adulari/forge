@@ -3030,4 +3030,120 @@ pub(super) mod tests {
             forge_tui::goal_status::GoalPhase::HandedOff
         );
     }
+
+    #[tokio::test]
+    async fn a_mission_hands_each_passed_milestone_to_a_fresh_worker_and_finishes_after_a_restart()
+    {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        state
+            .submit_line("/goal --mission ship it".into(), None)
+            .await
+            .unwrap();
+        let gen = state.turn_gen;
+        let (pred, store) = {
+            let s = state.session.lock().await;
+            (s.id().to_string(), s.store.clone())
+        };
+
+        // The first turn ends, the approved mission is adopted and milestone 1 is validated.
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen).await;
+        let contract = state
+            .app
+            .goal
+            .as_ref()
+            .and_then(|g| g.contract.clone())
+            .expect("the approved mission is on the goal");
+        let mission = contract
+            .mission_ref()
+            .expect("a mission, not a flat contract");
+        assert_eq!((mission.current, mission.total()), (1, 2));
+        assert_eq!(contract.headline(), "milestone 1/2: 2 assertions");
+        assert!(state.turn_handle.is_some(), "the validator runs");
+
+        // Milestone 1 passes: the goal moves to a fresh worker on milestone 2.
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen + 1).await;
+        let link = store
+            .relay_successor(&pred)
+            .unwrap()
+            .expect("a successor took milestone 2");
+        assert_eq!(link.reason, "milestone");
+        assert_eq!(link.detail, "milestone 1 passed");
+        assert!(state.goal_state.is_none(), "this worker's run is over");
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::HandedOff);
+        let snap = crate::remote::SnapGoal::from(goal);
+        let snap_mission = snap.contract.as_ref().unwrap().mission.as_ref().unwrap();
+        assert_eq!(snap_mission.current, 2);
+        assert_eq!(snap_mission.progress, "milestone 2/2: 0/2 pass");
+        assert_eq!(snap_mission.milestones[0].state, "done");
+        assert_eq!(snap_mission.milestones[1].state, "active");
+        assert_eq!(
+            crate::remote::SnapGoal::handed_off_body(Some(&snap), "milestone"),
+            "mission: milestone 1/2 passed - the next one starts in a fresh worker"
+        );
+        let brief = store.relay_brief(&link.successor_id).unwrap().unwrap();
+        for needle in [
+            "Mission: you are on milestone 2/2 - the workspace is usable",
+            "finished its milestone (milestone 1 passed)",
+            "PASS 1. the workspace directory exists",
+            "NOT RUN 3. the working directory resolves",
+        ] {
+            assert!(brief.contains(needle), "{needle}\n{brief}");
+        }
+        assert_eq!(
+            store
+                .session_goal_state(&link.successor_id)
+                .unwrap()
+                .map(|j| {
+                    serde_json::from_str::<serde_json::Value>(&j).unwrap()["contract"]["mission"]
+                        ["current"]
+                        .clone()
+                }),
+            Some(serde_json::json!(2)),
+            "the successor's goal record is on milestone 2"
+        );
+
+        // The daemon restarts before the worker's first turn: it comes back on milestone 2 and
+        // runs the goal from the brief.
+        state
+            .session
+            .lock()
+            .await
+            .reset_resumed(&link.successor_id)
+            .unwrap();
+        let mut app = App::default();
+        goal_envelope::restore(&mut app, &store, &link.successor_id);
+        assert_eq!(
+            app.goal
+                .as_ref()
+                .unwrap()
+                .contract
+                .as_ref()
+                .unwrap()
+                .headline(),
+            "milestone 2/2: 0/2 pass"
+        );
+        state.app = app;
+        state.goal_state = None;
+        let outcome = goal_relay::successor_outcome(&state.session, &mut state.app)
+            .await
+            .expect("the successor starts its goal");
+        state.handle_outcome(outcome);
+        let gen = state.turn_gen;
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen).await;
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen + 1).await;
+
+        // The last milestone passes with the first still passing: the mission is achieved.
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::Complete, "{:?}", goal.reason);
+        let contract = goal.contract.as_ref().unwrap();
+        assert!(contract.all_passed(), "{:?}", contract.results);
+        assert_eq!(contract.results.len(), 4);
+        assert!(store.relay_successor(&link.successor_id).unwrap().is_none());
+    }
 }
