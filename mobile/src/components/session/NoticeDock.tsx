@@ -21,9 +21,13 @@ export interface NoticeDockProps {
   onDismiss: () => void;
   dismissLabel: string;
   testID: string;
+  /** Pressing the headline opens something (a sheet) instead of unfolding details. */
+  onOpen?: () => void;
+  /** A button beside the headline for the one thing the notice tells the person to do. */
+  action?: { label: string; onPress: () => void };
 }
 
-export function NoticeDock({ tone, icon: Icon, title, summary, details, onDismiss, dismissLabel, testID }: NoticeDockProps) {
+export function NoticeDock({ tone, icon: Icon, title, summary, details, onDismiss, dismissLabel, testID, onOpen, action }: NoticeDockProps) {
   const tokens = useTokens();
   const [open, setOpen] = useState(false);
   const accent = tone === "danger" ? tokens.danger : tokens.warn;
@@ -36,9 +40,9 @@ export function NoticeDock({ tone, icon: Icon, title, summary, details, onDismis
     >
       <View style={styles.header}>
         <MiniPressable
-          onPress={foldable ? () => setOpen((value) => !value) : undefined}
-          disabled={!foldable}
-          accessibilityRole={foldable ? "button" : "text"}
+          onPress={foldable ? () => setOpen((value) => !value) : onOpen}
+          disabled={!foldable && !onOpen}
+          accessibilityRole={foldable || onOpen ? "button" : "text"}
           accessibilityState={foldable ? { expanded: open } : undefined}
           accessibilityLabel={`${title}. ${summary}${foldable ? (open ? ". Hide details" : ". Show details") : ""}`}
           wash={false}
@@ -52,6 +56,17 @@ export function NoticeDock({ tone, icon: Icon, title, summary, details, onDismis
             {summary}
           </Text>
         </MiniPressable>
+        {action ? (
+          <MiniPressable
+            onPress={action.onPress}
+            accessibilityRole="button"
+            accessibilityLabel={action.label}
+            style={[styles.action, { borderColor: accent }]}
+            testID={`${testID}-action`}
+          >
+            <Text style={[typeScale.meta, { color: tokens.ink }]}>{action.label}</Text>
+          </MiniPressable>
+        ) : null}
         <MiniPressable
           onPress={onDismiss}
           accessibilityRole="button"
@@ -93,6 +108,14 @@ const styles = StyleSheet.create({
     minHeight: 30,
   },
   summary: { flex: 1, minWidth: 0 },
+  action: {
+    borderWidth: StyleSheet.hairlineWidth * 2,
+    borderRadius: radii.radius8,
+    paddingHorizontal: space.space8,
+    paddingVertical: space.space2,
+    marginRight: space.space4,
+    justifyContent: "center",
+  },
   dismiss: { paddingHorizontal: space.space8, paddingVertical: space.space4, minHeight: 30, justifyContent: "center" },
   details: {
     fontFamily: monoFamily.regular,

@@ -991,7 +991,7 @@ export function SessionChat() {
 
       <CardSlot />
 
-      <IntegrityDocks baseUrl={baseUrl} sessionId={sessionId} snapshot={snapshot} />
+      <IntegrityDocks baseUrl={baseUrl} sessionId={sessionId} snapshot={snapshot} onSendPrompt={(text) => handleSend(text, [])} />
 
       <SubagentStrip
         subagents={snapshot?.subagents ?? []}

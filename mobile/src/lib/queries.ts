@@ -33,6 +33,10 @@ import {
   type ModelReportResponse,
   getModels,
   getModelReport,
+  type SessionTurnsResponse,
+  type TurnsSummaryResponse,
+  getSessionTurns,
+  getTurnsSummary,
   type ProvidersResponse,
   type StoreProviderKeyRequest,
   type SetProviderEnabledRequest,
@@ -222,6 +226,8 @@ function keys(baseUrl: string | null) {
     workflows: (sessionId?: string) => ["workflows", baseUrl, sessionId ?? null] as const,
     models: ["models", baseUrl] as const,
     modelReport: (days: number) => ["models", "report", baseUrl, days] as const,
+    sessionTurns: (sessionId: string) => ["sessions", "turns", baseUrl, sessionId] as const,
+    turnsSummary: (days: number) => ["turns", "summary", baseUrl, days] as const,
     providers: ["providers", baseUrl] as const,
     hooks: ["hooks", baseUrl] as const,
     crews: ["crews", baseUrl] as const,
@@ -681,6 +687,30 @@ export function useModelReport(days: number) {
     staleTime: 60_000,
     retry: false,
     refetchOnWindowFocus: isFocused,
+  });
+}
+
+/** How one session's recent turns ended (the "Turn endings" sheet). Only fetched while it is open. */
+export function useSessionTurns(sessionId: string, enabled: boolean) {
+  const { baseUrl } = useAuth();
+  return useQuery<SessionTurnsResponse>({
+    queryKey: keys(baseUrl).sessionTurns(sessionId),
+    queryFn: () => getSessionTurns(baseUrl as string, sessionId),
+    enabled: baseUrl != null && enabled,
+    staleTime: 0,
+    retry: false,
+  });
+}
+
+/** Turn endings across the host's sessions over the last `days` days. */
+export function useTurnsSummary(days: number, enabled: boolean) {
+  const { baseUrl } = useAuth();
+  return useQuery<TurnsSummaryResponse>({
+    queryKey: keys(baseUrl).turnsSummary(days),
+    queryFn: () => getTurnsSummary(baseUrl as string, days),
+    enabled: baseUrl != null && enabled,
+    staleTime: 0,
+    retry: false,
   });
 }
 

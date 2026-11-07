@@ -25,6 +25,7 @@ export type BridgeRoute =
   | "list_skills"
   | "list_models"
   | "model_report"
+  | "turns_summary"
   | "read_config"
   | "update_config"
   | "list_hooks"
@@ -48,6 +49,7 @@ export type BridgeRoute =
   | "git_diff"
   | "session_diff"
   | "session_agents"
+  | "session_turns"
   | "blame"
   | "session_jobs"
   | "session_job_tail"
@@ -289,6 +291,7 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/skills": { GET: "list_skills" },
     "/api/models": { GET: "list_models" },
     "/api/models/report": { GET: "model_report" },
+    "/api/turns/summary": { GET: "turns_summary" },
     "/api/config": { GET: "read_config", PUT: "update_config" },
     "/api/hooks": { GET: "list_hooks" },
     "/api/plans": { GET: "list_plans" },
@@ -362,6 +365,10 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
   const sessionAgents = path.match(/^\/api\/sessions\/([^/]+)\/agents$/);
   if (sessionAgents && method === "GET") {
     return { route: "session_agents", parameters: [sessionPathParameter(sessionAgents[1])] };
+  }
+  const sessionTurns = path.match(/^\/api\/sessions\/([^/]+)\/turns$/);
+  if (sessionTurns && method === "GET") {
+    return { route: "session_turns", parameters: [sessionPathParameter(sessionTurns[1])] };
   }
   const sessionJobs = path.match(/^\/api\/sessions\/([^/]+)\/jobs$/);
   if (sessionJobs && method === "GET") {

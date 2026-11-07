@@ -10,14 +10,17 @@ import { getHistoryIntegrity } from "../../lib/api";
 import { readGapAck } from "../../lib/serverStorageKeys";
 import { gapAckKey, liveGapNotice, missingRowsNotice, needsAck, type GapNotice } from "../../lib/historyGap";
 import { hasMoreDetail, threadErrorKey, threadErrorTitle } from "../../lib/threadError";
-import { turnEndKey, turnEndTitle } from "../../lib/turnEnd";
+import { continuePrompt, turnEndAdvice, turnEndKey, turnEndTitle, visibleTurnEnd } from "../../lib/turnEnd";
 import type { Snapshot } from "../../lib/ws";
 import { NoticeDock } from "./NoticeDock";
+import { TurnEndingsSheet } from "./TurnEndingsSheet";
 
 export interface IntegrityDocksProps {
   baseUrl: string | null;
   sessionId: string;
   snapshot: Snapshot | null;
+  /** Sends a prompt as the person: the turn-stopped banner's Continue button uses it. */
+  onSendPrompt?: (text: string) => void;
 }
 
 function useStoredGapNotice(baseUrl: string | null, sessionId: string, refreshKey: number): {
@@ -60,7 +63,7 @@ function useStoredGapNotice(baseUrl: string | null, sessionId: string, refreshKe
   return { notice, acknowledge };
 }
 
-export function IntegrityDocks({ baseUrl, sessionId, snapshot }: IntegrityDocksProps) {
+export function IntegrityDocks({ baseUrl, sessionId, snapshot, onSendPrompt }: IntegrityDocksProps) {
   const threadError = snapshot?.thread_error ?? null;
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const errorKey = threadError ? threadErrorKey(threadError) : null;
@@ -68,7 +71,11 @@ export function IntegrityDocks({ baseUrl, sessionId, snapshot }: IntegrityDocksP
     if (errorKey == null) setDismissedError(null);
   }, [errorKey]);
 
-  const turnEnd = snapshot?.last_turn_end ?? null;
+  const turnEnd = visibleTurnEnd(snapshot?.last_turn_end, snapshot?.busy);
+  const [endingsOpen, setEndingsOpen] = useState(false);
+  const [endingsMounted, setEndingsMounted] = useState(false);
+  const prompt = turnEnd ? continuePrompt(turnEnd) : null;
+  const sendContinue = prompt != null && onSendPrompt ? () => onSendPrompt(prompt) : undefined;
   const [dismissedEnd, setDismissedEnd] = useState<string | null>(null);
   const endKey = turnEnd ? turnEndKey(turnEnd) : null;
 
@@ -104,10 +111,23 @@ export function IntegrityDocks({ baseUrl, sessionId, snapshot }: IntegrityDocksP
           tone="warn"
           icon={AlertTriangle}
           title={turnEndTitle(turnEnd)}
-          summary="The last turn did not finish. Send continue to pick it up."
+          summary={turnEndAdvice(turnEnd)}
+          onOpen={() => {
+            setEndingsMounted(true);
+            setEndingsOpen(true);
+          }}
+          action={sendContinue ? { label: "Continue", onPress: sendContinue } : undefined}
           onDismiss={() => setDismissedEnd(endKey)}
           dismissLabel="Dismiss turn notice"
           testID="turn-end-dock"
+        />
+      ) : null}
+      {endingsMounted ? (
+        <TurnEndingsSheet
+          visible={endingsOpen}
+          onClose={() => setEndingsOpen(false)}
+          sessionId={sessionId}
+          onContinue={sendContinue}
         />
       ) : null}
       {notices.map((notice) => (

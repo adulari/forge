@@ -137,3 +137,16 @@ the last turns that did not finish; the model report card (`forge models --repor
 page) ends with the same counts. `forge turns --backfill` classifies turns recorded before the
 table existed from the transcript tail (shape only, reason `unknown_<shape>`); it prints, and
 `--write` stores them.
+
+Every surface shows and acts on the same ends. The core emits one `TurnStopped` presenter event
+when it writes the stop note (never for an error end, which has its own Error line, and never when
+an earlier note already explained the stop), so the TUI prints the line the moment the turn ends;
+headless `forge run` prints it once on stderr and exits non-zero for every end reason that is not
+a finished answer (`final_answer_mid_intent`, `final_answer_open_tasks` and `provider_down`
+included). `/turns` in the TUI lists the counts for the session and the project (7 days) and the
+recent turns that stopped short; Enter shows what happened and what to do. The daemon serves
+`GET /api/sessions/{id}/turns` and `GET /api/turns/summary?days=7` (both bridged), with a plain
+`label`, the `advice` and a `resumable` flag per turn. The app and desktop banner opens a "Turn
+endings" sheet and offers a Continue button (it sends `continue`) when the reason is resumable;
+the banner is hidden as soon as the next turn runs. `forge turns` prints the same plain labels;
+the raw reason names are in `--json` only.

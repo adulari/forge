@@ -269,6 +269,8 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/sessions/s1/claude");
     await transport.fetch("fany://host-1/api/sessions/s1/claude", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/claude/sessions/0a1b-22/continue", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/turns?limit=5");
+    await transport.fetch("fany://host-1/api/turns/summary?days=7");
     await transport.fetch("fany://host-1/api/issues?session=s1&state=open");
     await transport.fetch("fany://host-1/api/issues/detail?session=s1&number=4");
     await transport.fetch("fany://host-1/api/issues/start", { method: "POST", body: "{}" });
@@ -292,6 +294,8 @@ describe("AnywhereTransport", () => {
       ["session_claude", "s1"],
       ["export_session_claude", "s1"],
       ["continue_claude_session", "0a1b-22"],
+      ["session_turns", "s1"],
+      ["turns_summary", "?days=7"],
       ["list_issues", "?session=s1&state=open"],
       ["issue_detail", "?session=s1&number=4"],
       ["start_issue", ""],

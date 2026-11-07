@@ -1293,6 +1293,35 @@ export function getSessionAgents(baseUrl: string, id: string): Promise<AgentInde
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/agents`);
 }
 
+/** One turn as the host reports how it ended: the plain label and the way out are the host's
+ * words, so no client prints a raw end-reason name. */
+export interface TurnEndRow {
+  id: number;
+  session_id: string;
+  started_at: number;
+  ended_at: number | null;
+  reason: string;
+  label: string;
+  advice: string;
+  shape: string | null;
+  shape_label: string | null;
+  finished: boolean;
+  resumable: boolean;
+}
+export interface TurnEndCount { reason: string; label: string; count: number }
+export interface SessionTurnsResponse { session_id: string; counts: TurnEndCount[]; turns: TurnEndRow[] }
+export interface TurnsSummaryResponse { since: number; days: number; counts: TurnEndCount[]; unfinished: TurnEndRow[] }
+
+/** How a session's recent turns ended. An older host answers an error ("no endings to show"). */
+export function getSessionTurns(baseUrl: string, id: string, limit = 20): Promise<SessionTurnsResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/turns${qs({ limit })}`);
+}
+
+/** Counts by end reason and the recent turns that did not finish, across the host's sessions. */
+export function getTurnsSummary(baseUrl: string, days = 7): Promise<TurnsSummaryResponse> {
+  return request(baseUrl, `/api/turns/summary${qs({ days })}`);
+}
+
 export interface SpendTotals {
   input_tokens: number;
   /** Null when no call of the session reported a cache split. */
