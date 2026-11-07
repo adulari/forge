@@ -394,6 +394,20 @@ CREATE TABLE IF NOT EXISTS provider_verdict (
     last_seen  INTEGER NOT NULL
 );
 
+-- One row per prompt-started turn and why it ended (NULL ended_at = running, or killed by a crash
+-- until the next daemon start sweeps it). Also created in migration_0056.
+CREATE TABLE IF NOT EXISTS turn (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    prompt_seq      INTEGER NOT NULL,
+    started_at      INTEGER NOT NULL,
+    ended_at        INTEGER,
+    end_reason      TEXT,
+    detail_json     TEXT,
+    last_role_shape TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_turn_session_started ON turn(session_id, started_at);
+
 -- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
 -- queued headless task; a drain executes them in isolated worktrees and records the outcome
 -- back onto the row. Local machine state only — deliberately not in PORTABLE_METADATA_TABLES

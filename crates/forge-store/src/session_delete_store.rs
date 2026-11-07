@@ -186,6 +186,7 @@ fn delete_tree(conn: &rusqlite::Connection, targets: &[DeleteTarget]) -> Result<
             [id],
         )?;
         tx.execute("DELETE FROM mesh_outcome WHERE session_id = ?1", [id])?;
+        tx.execute("DELETE FROM turn WHERE session_id = ?1", [id])?;
         tx.execute("DELETE FROM harness_refinement WHERE session_id = ?1", [id])?;
         tx.execute(
             "DELETE FROM fleet_message WHERE target_session_id = ?1",
