@@ -71,6 +71,7 @@ fn result(id: u32, passed: bool, proof: &str) -> AssertionResult {
         } else {
             "exit 1".to_string()
         },
+        artifact: None,
     }
 }
 
@@ -142,4 +143,40 @@ fn contract_round_trips_through_json_with_defaults() {
     assert_eq!(serde_json::from_str::<GoalContract>(&json).unwrap(), c);
     let old: GoalContract = serde_json::from_str(r#"{"assertions":[]}"#).unwrap();
     assert!(!old.approved && old.results.is_empty());
+}
+
+#[test]
+fn a_behaviour_assertion_parses_without_a_read_only_check() {
+    let reply = r#"{"assertions":[
+      {"assertion":"a exists","check":"test -f a"},
+      {"assertion":"b exists","check":"test -f b"},
+      {"assertion":"/health says ok v2","behaviour":{"run":"python3 s.py $FORGE_QA_PORT",
+        "probe":"GET http://127.0.0.1:$FORGE_QA_PORT/health","expect":"ok v2","cleanup":"rm -f x"}},
+      {"assertion":"no probe","behaviour":{"run":"x"}}]}"#;
+    let parsed = parse_contract(reply).unwrap();
+    assert_eq!(parsed.len(), 3, "a behaviour without a probe is dropped");
+    let b = parsed[2].behaviour.as_ref().unwrap();
+    assert_eq!(b.expect, "ok v2");
+    assert_eq!(b.cleanup, "rm -f x");
+    assert!(parsed[2].command.starts_with("behaviour: run `python3"));
+    assert!(parsed[0].behaviour.is_none());
+}
+
+#[test]
+fn a_result_with_a_screenshot_prints_its_path() {
+    let mut c = GoalContract::new(vec![Assertion {
+        id: 1,
+        text: "page shows the button".into(),
+        command: "behaviour: run `x`, probe `screenshot u`".into(),
+        expect: String::new(),
+        contains: None,
+        behaviour: None,
+    }]);
+    let mut r = result(1, true, "ok");
+    r.artifact = Some("/ev/qa-1.png".into());
+    c.record(vec![r], 1);
+    assert!(c
+        .table_lines()
+        .iter()
+        .any(|l| l.contains("screenshot: /ev/qa-1.png")));
 }

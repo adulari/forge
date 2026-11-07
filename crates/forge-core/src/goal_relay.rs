@@ -397,6 +397,7 @@ mod tests {
                 command: "test -f notes.txt".into(),
                 expect: String::new(),
                 contains: None,
+                behaviour: None,
             },
             Assertion {
                 id: 2,
@@ -404,6 +405,7 @@ mod tests {
                 command: "cat notes.txt".into(),
                 expect: String::new(),
                 contains: Some("ready".into()),
+                behaviour: None,
             },
         ]);
         c.approved = true;
@@ -414,12 +416,14 @@ mod tests {
                     passed: true,
                     proof: String::new(),
                     reason: String::new(),
+                    artifact: None,
                 },
                 AssertionResult {
                     id: 2,
                     passed: false,
                     proof: "draft\nnot yet".into(),
                     reason: "missing ready".into(),
+                    artifact: None,
                 },
             ],
             100,

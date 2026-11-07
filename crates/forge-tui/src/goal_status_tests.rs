@@ -244,6 +244,7 @@ mod contract {
             } else {
                 "exit 1".into()
             },
+            artifact: None,
         }
     }
 

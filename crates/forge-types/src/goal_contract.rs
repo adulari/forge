@@ -8,12 +8,13 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod behaviour;
 pub mod mission;
 
 pub const MIN_ASSERTIONS: usize = 3;
 pub const MAX_ASSERTIONS: usize = 12;
-const TEXT_CHARS: usize = 200;
-const COMMAND_CHARS: usize = 400;
+pub(crate) const TEXT_CHARS: usize = 200;
+pub(crate) const COMMAND_CHARS: usize = 400;
 /// How much of a check's output is kept as proof and fed back to the worker.
 pub const PROOF_CHARS: usize = 600;
 
@@ -31,6 +32,10 @@ pub struct Assertion {
     /// When set the output must also contain this text; the exit code must be 0 either way.
     #[serde(default)]
     pub contains: Option<String>,
+    /// Set for a behaviour assertion: the QA runner starts the thing and probes it, and `command`
+    /// holds the one-line summary. Absent for a read-only check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub behaviour: Option<behaviour::Behaviour>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +47,9 @@ pub struct AssertionResult {
     /// One line on why it failed; empty when it passed.
     #[serde(default)]
     pub reason: String,
+    /// A screenshot a behaviour probe took, stored in the session's evidence folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<String>,
 }
 
 /// A contract and what the validator has found so far. `approved` is false only while the card
@@ -162,6 +170,9 @@ impl GoalContract {
             if let Some(last) = r.proof.lines().rev().find(|l| !l.trim().is_empty()) {
                 out.push(format!("     proof: {}", clip(last.trim(), 160)));
             }
+            if let Some(path) = &r.artifact {
+                out.push(format!("     screenshot: {path}"));
+            }
         }
     }
 }
@@ -187,7 +198,7 @@ pub fn tail(text: &str, max: usize) -> String {
     }
 }
 
-fn text_of(value: Option<&serde_json::Value>) -> String {
+pub(crate) fn text_of(value: Option<&serde_json::Value>) -> String {
     match value {
         Some(serde_json::Value::String(s)) => s.trim().to_string(),
         Some(serde_json::Value::Number(n)) => n.to_string(),
@@ -218,6 +229,9 @@ fn assertion_from(value: &serde_json::Value, id: u32) -> Option<Assertion> {
             "description",
         ],
     ));
+    let behaviour = map
+        .get("behaviour")
+        .and_then(behaviour::Behaviour::from_value);
     let check = first_of(map, &["check", "command", "cmd"]);
     let (command, mut expect, mut contains) = match check {
         Some(serde_json::Value::String(s)) => (s.trim().to_string(), String::new(), None),
@@ -234,6 +248,19 @@ fn assertion_from(value: &serde_json::Value, id: u32) -> Option<Assertion> {
     if contains.is_none() {
         contains = Some(text_of(map.get("contains"))).filter(|s| !s.is_empty());
     }
+    if let Some(b) = behaviour {
+        if text.is_empty() {
+            return None;
+        }
+        return Some(Assertion {
+            id,
+            text: clip(&text, TEXT_CHARS),
+            command: clip(&b.summary(), COMMAND_CHARS),
+            expect: b.expect.clone(),
+            contains: None,
+            behaviour: Some(b),
+        });
+    }
     if text.is_empty() || command.is_empty() {
         return None;
     }
@@ -243,6 +270,7 @@ fn assertion_from(value: &serde_json::Value, id: u32) -> Option<Assertion> {
         command: clip(&command, COMMAND_CHARS),
         expect: clip(&expect, TEXT_CHARS),
         contains: contains.map(|c| clip(&c, TEXT_CHARS)),
+        behaviour: None,
     })
 }
 

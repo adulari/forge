@@ -40,6 +40,7 @@ fn result(id: u32, passed: bool) -> AssertionResult {
         } else {
             "exit 1".into()
         },
+        artifact: None,
     }
 }
 

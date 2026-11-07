@@ -86,6 +86,7 @@ async fn a_hand_off_creates_the_successor_and_ends_the_predecessor_turn() {
         command: "cat a.txt".into(),
         expect: String::new(),
         contains: Some("two".into()),
+        behaviour: None,
     }]);
     contract.approved = true;
     contract.record(
@@ -94,6 +95,7 @@ async fn a_hand_off_creates_the_successor_and_ends_the_predecessor_turn() {
             passed: false,
             proof: "one".into(),
             reason: "output lacks two".into(),
+            artifact: None,
         }],
         1,
     );
@@ -194,6 +196,7 @@ async fn a_milestone_hand_off_briefs_the_next_milestone_and_is_not_a_failure_rel
         passed: true,
         proof: String::new(),
         reason: String::new(),
+        artifact: None,
     };
     contract.record(vec![pass(1), pass(2)], 1);
     assert!(contract.advance_milestone());

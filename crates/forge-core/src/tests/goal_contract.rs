@@ -58,15 +58,15 @@ impl Provider for DrafterProvider {
     }
 }
 
-struct Harness {
-    session: Session,
+pub(super) struct Harness {
+    pub(super) session: Session,
     events: Arc<Mutex<Vec<PresenterEvent>>>,
     drafts: Arc<Mutex<Vec<String>>>,
     other_calls: Arc<Mutex<usize>>,
-    dir: tempfile::TempDir,
+    pub(super) dir: tempfile::TempDir,
 }
 
-fn harness(replies: &[&str], ask_answer: &str, config: Config) -> Harness {
+pub(super) fn harness(replies: &[&str], ask_answer: &str, config: Config) -> Harness {
     harness_with(replies, ask_answer, config, true)
 }
 

@@ -67,6 +67,7 @@ pub mod goal_contract;
 pub mod goal_evaluator;
 mod goal_evidence;
 pub mod goal_mission;
+mod goal_qa;
 pub mod goal_relay;
 mod shell_batch;
 mod silence_guard;
@@ -5377,6 +5378,9 @@ mod tests {
 
     #[path = "goal_contract.rs"]
     mod goal_contract_tests;
+
+    #[path = "goal_qa.rs"]
+    mod goal_qa_tests;
 
     #[path = "goal_relay.rs"]
     mod goal_relay_session_tests;

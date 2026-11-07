@@ -36,7 +36,14 @@ Rules: the check must exit 0 exactly when the assertion holds. It must be READ-O
 head, tail, wc, grep, test, diff, jq, git status/log/diff/show, stat, ...): no builds, no tests \
 that write, no redirects to files, no network. A behaviour or file statement becomes a command \
 (`test -f path`, `grep -q 'text' path`, `git log --oneline | grep -q 'subject'`). Prefer checks \
-that fail now and pass only when the work is really done. One fact per assertion, no duplicates.";
+that fail now and pass only when the work is really done. One fact per assertion, no duplicates.\n\
+When the goal is about something that RUNS (a server, a CLI, a page), add behaviour assertions \
+that a QA runner executes after the read-only checks pass, instead of `check`: \
+{\"assertion\": \"...\", \"behaviour\": {\"run\": \"command that starts it on port \
+$FORGE_QA_PORT or in $FORGE_QA_DIR\", \"probe\": \"GET http://127.0.0.1:$FORGE_QA_PORT/path | \
+screenshot <url> | a shell command\", \"expect\": \"text the probe must show\", \
+\"cleanup\": \"optional\", \"ready\": \"optional: port | line:<text>\"}}. Behaviour \
+assertions may build and write; they run in a scratch port/dir, not on the person's real setup.";
 
 /// What the contract flow settled on, left for the goal loop.
 #[derive(Debug, Clone, PartialEq)]
@@ -232,9 +239,10 @@ impl Session {
                 rejected.clear();
                 continue;
             };
-            let (kept, refused): (Vec<Assertion>, Vec<Assertion>) = parsed
-                .into_iter()
-                .partition(|a| crate::permission::is_read_only_shell(&a.command));
+            let (kept, refused): (Vec<Assertion>, Vec<Assertion>) =
+                parsed.into_iter().partition(|a| {
+                    a.behaviour.is_some() || crate::permission::is_read_only_shell(&a.command)
+                });
             if kept.len() >= MIN_ASSERTIONS {
                 return Ok(renumber(kept));
             }
@@ -314,8 +322,26 @@ impl Session {
         let timeout = self.config.goal.contract_check_timeout_secs.clamp(1, 600);
         let mut results = Vec::with_capacity(contract.assertions.len());
         for assertion in &contract.assertions {
-            results.push(self.run_contract_check(assertion, timeout).await);
+            if assertion.behaviour.is_none() {
+                results.push(self.run_contract_check(assertion, timeout).await);
+            }
         }
+        // Behaviour assertions start things up, so they wait until every read-only check passes.
+        let read_only_clear = results.iter().all(|r| r.passed);
+        for assertion in contract.assertions.iter().filter(|a| a.behaviour.is_some()) {
+            results.push(if read_only_clear {
+                self.run_behaviour_check(assertion, timeout).await
+            } else {
+                AssertionResult {
+                    id: assertion.id,
+                    passed: false,
+                    proof: String::new(),
+                    reason: "not run: the read-only checks must pass first".to_string(),
+                    artifact: None,
+                }
+            });
+        }
+        results.sort_by_key(|r| r.id);
         let failing: Vec<String> = results
             .iter()
             .filter(|r| !r.passed)
@@ -341,6 +367,7 @@ impl Session {
             passed: false,
             proof,
             reason,
+            artifact: None,
         };
         let args = serde_json::json!({
             "command": assertion.command,
@@ -404,6 +431,7 @@ impl Session {
             passed: true,
             proof,
             reason: String::new(),
+            artifact: None,
         }
     }
 }
