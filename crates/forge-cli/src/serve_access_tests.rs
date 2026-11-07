@@ -281,6 +281,7 @@ async fn a_viewer_reads_but_gets_typed_refusals_for_everything_else() {
         ("GET", "/api/terminals", "terminal"),
         ("PUT", "/api/workspace/file", "workspace-write"),
         ("POST", "/api/sessions/s1/ship", "workspace-write"),
+        ("POST", "/api/sessions/s1/ci/run", "prompt"),
         ("POST", "/api/pr/watch", "workspace-write"),
         ("GET", "/api/providers", "manage-providers"),
     ] {

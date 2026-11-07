@@ -112,6 +112,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
             })
         }
         RouteId::SessionDiff
+        | RouteId::SessionCi
         | RouteId::SessionAgents
         | RouteId::SessionJobs
         | RouteId::SessionTurns
@@ -119,6 +120,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
             let id = single_path_parameter(request)?;
             let leaf = match request.route {
                 RouteId::SessionDiff => "diff",
+                RouteId::SessionCi => "ci",
                 RouteId::SessionAgents => "agents",
                 RouteId::SessionTurns => "turns",
                 RouteId::SessionHistorySearch => "history/search",
@@ -150,7 +152,8 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         | RouteId::SetSessionMode
         | RouteId::SessionMessage
         | RouteId::SessionShip
-        | RouteId::SessionDone => {
+        | RouteId::SessionDone
+        | RouteId::SessionCiRun => {
             if request.parameters.is_empty() || request.parameters.len() > 2 {
                 bail!("session route requires one path parameter and an optional query");
             }
@@ -164,6 +167,7 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
                 RouteId::SessionMessage => "message",
                 RouteId::SessionShip => "ship",
                 RouteId::SessionDone => "done",
+                RouteId::SessionCiRun => "ci/run",
                 _ => unreachable!(),
             };
             Ok(RouteTarget {
@@ -716,6 +720,43 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Local CI: the plan is a read, the run a POST, neither needs the ship opt-in, and each maps
+    /// to exactly one method and path.
+    #[test]
+    fn local_ci_routes_map_to_one_method_and_path_and_skip_the_ship_opt_in() {
+        let cases: [(RouteId, &str, &str); 2] = [
+            (RouteId::SessionCi, "GET", "/api/sessions/session_7/ci"),
+            (
+                RouteId::SessionCiRun,
+                "POST",
+                "/api/sessions/session_7/ci/run",
+            ),
+        ];
+        for (route, method, path) in cases {
+            let bridged = request(route, method, &["session_7"]);
+            let target = route_target(&bridged).unwrap();
+            assert_eq!(target.path, path, "{route:?}");
+            assert_eq!(target.method.as_str(), method, "{route:?}");
+            assert!(validate_command_request(&bridged).is_ok(), "{route:?}");
+            assert!(!needs_ship_opt_in(route), "{route:?}");
+            for other in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                if other != method {
+                    assert!(
+                        validate_command_request(&request(route, other, &["session_7"])).is_err(),
+                        "{route:?} must refuse {other}"
+                    );
+                }
+            }
+            for bad in ["../x", "a/b", "", "s 1", "s%2f", "..", "s?x=1"] {
+                assert!(
+                    route_target(&request(route, method, &[bad])).is_err(),
+                    "{route:?} must reject session id {bad:?}"
+                );
+            }
+            assert!(route_target(&request(route, method, &[])).is_err());
         }
     }
 

@@ -180,6 +180,13 @@ pub enum RouteId {
     SessionShip,
     /// `POST /api/sessions/{id}/done`: mark a session done (a lifecycle flag, nothing runs).
     SessionDone,
+    /// `GET /api/sessions/{id}/ci`: the repository's workflows as a local CI plan with the last
+    /// run's result per step (docs/features/ci-parity.md). Read-only.
+    SessionCi,
+    /// `POST /api/sessions/{id}/ci/run`: run that plan on the host. It executes the repository's
+    /// own workflow commands in the session's worktree, like a turn does, so it is a session
+    /// action on the same footing as `SessionMessage`, not a ship/push route.
+    SessionCiRun,
     WebSocket,
     TerminalWebSocket,
 }
@@ -358,6 +365,21 @@ mod tests {
             (RouteId::PrWatchSet, "pr_watch_set"),
             (RouteId::SessionShip, "session_ship"),
             (RouteId::SessionDone, "session_done"),
+        ] {
+            let encoded = serde_json::to_value(route).expect("encode route");
+            assert_eq!(encoded, name);
+            assert_eq!(
+                serde_json::from_value::<RouteId>(encoded).expect("decode route"),
+                route
+            );
+        }
+    }
+
+    #[test]
+    fn local_ci_routes_use_stable_snake_case_names() {
+        for (route, name) in [
+            (RouteId::SessionCi, "session_ci"),
+            (RouteId::SessionCiRun, "session_ci_run"),
         ] {
             let encoded = serde_json::to_value(route).expect("encode route");
             assert_eq!(encoded, name);
