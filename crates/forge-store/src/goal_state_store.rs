@@ -16,6 +16,20 @@ impl Store {
         Ok(())
     }
 
+    /// The most recently created session that still has a goal record, with its JSON: what
+    /// `forge goal show` prints when no session is named.
+    pub fn latest_goal_state(&self) -> Result<Option<(String, String)>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT id, goal_state FROM session WHERE goal_state IS NOT NULL \
+                 ORDER BY rowid DESC LIMIT 1",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?)
+    }
+
     pub fn session_goal_state(&self, session_id: &str) -> Result<Option<String>> {
         Ok(self
             .lock()?
@@ -47,5 +61,25 @@ mod tests {
         );
         store.set_session_goal_state(&id, None).unwrap();
         assert_eq!(store.session_goal_state(&id).unwrap(), None);
+    }
+
+    #[test]
+    fn the_latest_goal_state_is_the_newest_session_that_has_one() {
+        let store = Store::open_in_memory().unwrap();
+        assert_eq!(store.latest_goal_state().unwrap(), None);
+        let old = store.create_session("/tmp", "Default").unwrap();
+        let new = store.create_session("/tmp", "Default").unwrap();
+        let none = store.create_session("/tmp", "Default").unwrap();
+        store
+            .set_session_goal_state(&old, Some("{\"n\":1}"))
+            .unwrap();
+        store
+            .set_session_goal_state(&new, Some("{\"n\":2}"))
+            .unwrap();
+        assert_eq!(
+            store.latest_goal_state().unwrap(),
+            Some((new.clone(), "{\"n\":2}".to_string()))
+        );
+        let _ = none;
     }
 }
