@@ -137,6 +137,19 @@ impl Store {
         Ok(())
     }
 
+    /// How many scout runs (`spawn_agents` of the built-in `scout` agent) the session made at or
+    /// after message `from_seq`.
+    pub fn count_scout_calls_since(&self, session_id: &str, from_seq: i64) -> Result<u32> {
+        let n: i64 = self.lock()?.query_row(
+            "SELECT COUNT(*) FROM tool_call t JOIN message m ON m.id = t.message_id
+             WHERE m.session_id = ?1 AND m.seq >= ?2 AND t.tool_name = 'spawn_agents'
+             AND t.args_json LIKE '%\"agent\":\"scout\"%'",
+            (session_id, from_seq),
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
     /// Number of tool calls recorded in a session, across every turn.
     pub fn session_tool_call_count(&self, session_id: &str) -> Result<u64> {
         let n: i64 = self.lock()?.query_row(

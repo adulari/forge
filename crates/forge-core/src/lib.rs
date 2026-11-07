@@ -196,6 +196,7 @@ mod session_rewind;
 pub use session_rewind::{RewindScope, SummarizeOutcome, SUMMARIZED_FROM_HERE};
 pub mod host_limits;
 pub mod outage_wait;
+mod scouts;
 pub mod session_slash_controls;
 mod session_usage_detail;
 mod session_virtual_tools;
@@ -2479,6 +2480,7 @@ impl Session {
             specs.push(spawn_spec);
             // Follow-ups to already-spawned children (persistent subagents). Advertised beside
             // spawn_agents — a fresh session simply has no children yet and the tool says so.
+            specs.extend(scouts::specs(&self.config.harness));
             specs.push(subagent::send_to_agent_spec());
             specs.push(workflow::run_workflow_spec());
             // Retained async subagents (RFC retained-async-subagents): status + cancellation for
@@ -5212,6 +5214,8 @@ mod tests {
     mod mcp_elicitation_tests;
     #[path = "placeholder_args.rs"]
     mod placeholder_args_tests;
+    #[path = "scouts.rs"]
+    mod scouts_tests;
     #[path = "subagent_schema.rs"]
     mod subagent_schema_tests;
 

@@ -125,6 +125,10 @@ pub struct HarnessConfig {
     /// on); `Some(false)` is the no-task-nudges arm of the A/B. Default `None` until the A/B decides.
     #[serde(default, deserialize_with = "lenient_opt_bool")]
     pub task_nudges: Option<bool>,
+    /// The `scout` tool: a throwaway read-only orientation run that returns a cited brief
+    /// (docs/features/scouts.md).
+    #[serde(default)]
+    pub scouts: crate::scouts::ScoutsMode,
 }
 
 impl Default for HarnessConfig {
@@ -159,6 +163,7 @@ impl Default for HarnessConfig {
             expert: crate::expert::ExpertConfig::default(),
             task_tool: true,
             task_nudges: None,
+            scouts: crate::scouts::ScoutsMode::default(),
         }
     }
 }

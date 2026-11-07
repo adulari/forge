@@ -31,6 +31,7 @@ pub use compact_checkpoint::CompactConfig;
 mod compact_model;
 mod config_diagnostics;
 mod harness;
+pub mod scouts;
 pub mod setting_sources;
 pub mod skill_usage;
 mod system_prompt_overrides;
@@ -115,6 +116,7 @@ pub use paths::{
 };
 pub use progress_guard::ProgressGuardMode;
 pub use project_dirs::{project_resource_dirs, repo_top};
+pub use scouts::ScoutsMode;
 pub use vision_fallback::VisionFallback;
 pub use workspace_state::{
     adopt_legacy_state, legacy_state_subdir, prepare_workspace_state, state_subdir,

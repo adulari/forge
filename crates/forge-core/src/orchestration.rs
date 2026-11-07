@@ -126,9 +126,11 @@ impl Session {
             asker: self.presenter.is_attended().then_some(asker),
             ..ctx
         };
+        let mut scouted = crate::scouts::Tally::default();
         let (combined, all_ok) = {
             let presenter = std::sync::Mutex::new(&mut self.presenter);
             let mut on_event = |ev: subagent::Lifecycle| {
+                scouted.note(&ev);
                 if let Ok(mut p) = presenter.lock() {
                     p.emit(lifecycle_event(ev));
                 }
@@ -181,6 +183,7 @@ impl Session {
             None => combined,
         };
 
+        let combined = self.finish_scout(&call.args, &scouted, combined, all_ok);
         self.store.record_tool_call(
             msg_id,
             &call.name,

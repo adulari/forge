@@ -197,6 +197,25 @@ impl Store {
         Ok(rows)
     }
 
+    /// Closed turns since `since` (unix secs) that ran scouts, newest first.
+    pub fn recent_scout_turns(
+        &self,
+        since: i64,
+        session_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TurnRow>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {COLS} FROM turn WHERE ended_at IS NOT NULL AND started_at >= ?1 \
+             AND (?2 IS NULL OR session_id = ?2) AND detail_json LIKE '%\"scouts\"%' \
+             ORDER BY started_at DESC, id DESC LIMIT ?3"
+        ))?;
+        let rows = stmt
+            .query_map(params![since, session_id, limit as i64], row_of)?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     /// The session's newest closed turn.
     pub fn last_closed_turn(&self, session_id: &str) -> Result<Option<TurnRow>> {
         let conn = self.lock()?;

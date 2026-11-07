@@ -64,7 +64,8 @@ impl Session {
     /// is replayed as the provider produced it, and a request that differs from the response's own
     /// items cannot reuse the previous one.
     pub(crate) fn resolve_model_call(&self, call: &forge_types::ToolCall) -> forge_types::ToolCall {
-        let mut resolved = self.resolve_deferred_call(call);
+        let mut resolved =
+            crate::scouts::rewrite(&self.config.harness, self.resolve_deferred_call(call));
         resolved.args = self.normalized_call_args(&resolved.name, &resolved.args);
         resolved
     }

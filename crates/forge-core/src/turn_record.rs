@@ -163,6 +163,9 @@ pub struct TurnEndView {
     /// `codex-oauth::gpt-5.6-sol (stall, done)`: who was consulted and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expert: Option<String>,
+    /// Scout runs this turn made (`[harness] scouts`); absent when it made none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scouts: Option<u32>,
 }
 
 /// The expert consults a stored turn detail records, and a short description of them.
@@ -196,7 +199,14 @@ impl TurnEndView {
             ("still running".into(), "wait for it".into())
         };
         let (expert_consults, expert) = expert_of_detail(row.detail_json.as_deref());
+        let scouts =
+            serde_json::from_str::<serde_json::Value>(row.detail_json.as_deref().unwrap_or(""))
+                .ok()
+                .and_then(|d| d["scouts"].as_u64())
+                .filter(|n| *n > 0)
+                .map(|n| n as u32);
         Self {
+            scouts,
             expert_consults,
             expert,
             id: row.id,
@@ -293,6 +303,9 @@ impl Session {
             "mutations": self.mutations_this_turn,
         });
         self.fold_bridge_consults();
+        if let Some(n) = self.scouts_this_turn() {
+            detail["scouts"] = n.into();
+        }
         if let Some(expert) = self.expert_turn_detail() {
             if let (Some(map), Some(extra)) = (detail.as_object_mut(), expert.as_object()) {
                 map.extend(extra.clone());

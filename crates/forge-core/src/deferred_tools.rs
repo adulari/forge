@@ -44,6 +44,7 @@ pub const CORE_TOOLS: &[&str] = &[
 pub const DIRECT_CORE_EXTRA: &[&str] = &[
     "ask_user",
     "spawn_agents",
+    "scout",
     crate::codemode::RUN_CODE_TOOL,
     forge_tools::PYTHON_TOOL,
 ];
