@@ -54,9 +54,9 @@ pub(crate) fn help(path: &str) -> Option<&'static str> {
         "harness.task_nudges" => "Whether open tasks push the model onward: the continue re-drive when it signs off with tasks open, the stale-task escalation and question, the turn-start list note. Type true or false; empty keeps the built-in behaviour (on). One arm of the task-list A/B; the default will be set by its result.",
         "harness.advisor.enabled" => "Before a turn that changed something finishes, a second model reads the work once and can send it back once with up to 4 notes. Skipped for CLI bridges and subscription models. Default off.",
         "harness.advisor.model" => "Model that reviews. Empty uses the model driving the turn. A Claude Sonnet-class model is the recommended setting; small models truncated on large transcripts in the replay.",
-        "harness.expert.model" => "A stronger model consulted once when the turn stalls, at DONE and when the model asks. A subscription model (codex-oauth, codex-cli, claude-cli) works only with a budget. Empty means no expert.",
+        "harness.expert.model" => "A stronger model to ask once when the turn stalls, at DONE and when the model asks, written provider::model (for example codex-oauth::gpt-5.6-sol). A subscription model (codex-oauth, codex-cli, claude-cli) also needs a budget. Empty means no expert.",
         "harness.expert.max_consults_per_turn" => "Consults one turn may spend across stall, DONE and on-request (default 2).",
-        "harness.expert.budget" => "A slice of a subscription window the expert may use, like a goal envelope: codex:5%w, claude:10%5h, or $2 for an API model. Required for a subscription expert; consults stop once it is spent.",
+        "harness.expert.budget" => "How much the expert may use. A codex model takes a slice of the ChatGPT window (codex:5%w is 5% of the week), a claude-cli model a Claude one (claude:10%5h); an API model takes dollars ($2) or nothing. Required for a subscription expert; consults stop once it is spent.",
         "harness.expert.timeout_secs" => "Seconds before an expert call is abandoned and the turn goes on without it (default 120).",
         "harness.expert.triggers.stall" => "Consult the expert before Forge nudges or stops a turn that is going in circles.",
         "harness.expert.triggers.done" => "Send the DONE review to the expert instead of the advisor model.",
@@ -64,4 +64,21 @@ pub(crate) fn help(path: &str) -> Option<&'static str> {
         "harness.advisor.timeout_secs" => "Seconds before an advisor call is abandoned and the turn finishes as it would have (default 120).",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::help;
+
+    #[test]
+    fn the_expert_model_and_budget_help_show_the_spelling_to_type() {
+        let model = help("harness.expert.model").unwrap();
+        assert!(model.contains("provider::model"), "{model}");
+        assert!(model.contains("codex-oauth::gpt-5.6-sol"), "{model}");
+        let budget = help("harness.expert.budget").unwrap();
+        for spelling in ["codex:5%w", "claude:10%5h", "$2"] {
+            assert!(budget.contains(spelling), "{budget}");
+        }
+        assert!(budget.contains("API model"), "{budget}");
+    }
 }

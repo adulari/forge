@@ -96,10 +96,17 @@ pass rates; that needs the A/B below.
   (consults, expert and triggers); `forge turns --json` has `expert_turns`; the daemon's turn views
   carry `expert_consults` and `expert`.
 - TUI: a scrollback line per consult (`expert: <model> · 1 consult · 2.1% of weekly window (stall):
-  <diagnosis>`) and an `EXPERT` row in `/status`. Headless prints the same line.
+  <diagnosis> Next: <next step>`) and an `EXPERT` row in `/status`. `forge run` prints the same line
+  (`-p` too, on stderr with the trace). A refused consult, whatever the trigger, prints
+  `expert not consulted: <why>`.
 - Remote snapshot: an additive `expert` string, shown above the composer docks on the phone and
   desktop session screen.
-- Settings: `harness.expert.*` appear in the TUI and app settings.
+- Settings: `harness.expert.*` appear in the TUI and app settings (search `expert`). A saved
+  setting that cannot work yet (a subscription model without its budget, a typo'd provider, a
+  window budget on an API model) is flagged right after the save: a `⚠` line in the TUI overlay and
+  a warning under the model and budget fields in the app. The same reason is shown once at the
+  first turn of a session, with privacy mode, a benched model and a keyless endpoint that has not
+  answered discovery.
 
 ## Offline replay
 
