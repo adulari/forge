@@ -5,23 +5,24 @@ fn entry(phase: Stage, head: &str, failures: u32) -> Entry {
         head: head.into(),
         phase,
         failures,
+        turns: 0,
     }
 }
 
 #[test]
 fn a_watch_with_no_fix_turn_or_no_note_polls_as_usual() {
-    assert_eq!(verdict(None, 1, "h1", true), Verdict::Proceed);
+    assert_eq!(verdict(None, 1, "h1", true, 0), Verdict::Proceed);
     let sent = entry(Stage::Sent, "h0", 0);
-    assert_eq!(verdict(Some(&sent), 0, "h1", true), Verdict::Proceed);
+    assert_eq!(verdict(Some(&sent), 0, "h1", true, 0), Verdict::Proceed);
 }
 
 #[test]
 fn only_a_commit_after_the_fix_prompt_is_checked_and_only_when_the_session_is_idle() {
     let sent = entry(Stage::Sent, "h0", 0);
-    assert_eq!(verdict(Some(&sent), 1, "h0", true), Verdict::Proceed);
-    assert_eq!(verdict(Some(&sent), 1, "h1", false), Verdict::Hold);
+    assert_eq!(verdict(Some(&sent), 1, "h0", true, 0), Verdict::Proceed);
+    assert_eq!(verdict(Some(&sent), 1, "h1", false, 0), Verdict::Hold);
     assert_eq!(
-        verdict(Some(&sent), 1, "h1", true),
+        verdict(Some(&sent), 1, "h1", true, 0),
         Verdict::Check("h1".into())
     );
 }
@@ -29,19 +30,22 @@ fn only_a_commit_after_the_fix_prompt_is_checked_and_only_when_the_session_is_id
 #[test]
 fn a_running_check_holds_and_a_failed_head_holds_until_the_session_pushes_another() {
     assert_eq!(
-        verdict(Some(&entry(Stage::Running, "h1", 0)), 1, "h1", true),
+        verdict(Some(&entry(Stage::Running, "h1", 0)), 1, "h1", true, 0),
         Verdict::Hold
     );
     let failed = entry(Stage::Failed, "h1", 1);
-    assert_eq!(verdict(Some(&failed), 1, "h1", true), Verdict::Hold);
+    assert_eq!(verdict(Some(&failed), 1, "h1", true, 0), Verdict::Hold);
     assert_eq!(
-        verdict(Some(&failed), 1, "h2", true),
+        verdict(Some(&failed), 1, "h2", true, 0),
         Verdict::Check("h2".into())
     );
     let hopeless = entry(Stage::Failed, "h2", MAX_LOCAL_FAILURES);
-    assert_eq!(verdict(Some(&hopeless), 1, "h2", true), Verdict::GiveUp);
+    assert!(matches!(
+        verdict(Some(&hopeless), 1, "h2", true, 0),
+        Verdict::GiveUp(_)
+    ));
     assert_eq!(
-        verdict(Some(&entry(Stage::Passed, "h1", 0)), 1, "h1", true),
+        verdict(Some(&entry(Stage::Passed, "h1", 0)), 1, "h1", true, 0),
         Verdict::Proceed
     );
 }
@@ -121,16 +125,19 @@ async fn a_fix_that_fails_the_plan_goes_back_to_the_session_and_is_never_merged_
     note_prompt("ci-fail", dir.path());
 
     assert!(matches!(
-        holds("ci-fail", dir.path(), 1, true, &tx).await,
+        holds("ci-fail", dir.path(), 1, true, 0, &tx).await,
         Hold::No
     ));
     commit(dir.path(), "fix1");
     assert!(
-        matches!(holds("ci-fail", dir.path(), 1, false, &tx).await, Hold::Yes),
+        matches!(
+            holds("ci-fail", dir.path(), 1, false, 0, &tx).await,
+            Hold::Yes
+        ),
         "a busy session is left to finish its turn"
     );
     assert!(matches!(
-        holds("ci-fail", dir.path(), 1, true, &tx).await,
+        holds("ci-fail", dir.path(), 1, true, 0, &tx).await,
         Hold::Yes
     ));
     let text = prompt(&mut rx).await;
@@ -139,20 +146,23 @@ async fn a_fix_that_fails_the_plan_goes_back_to_the_session_and_is_never_merged_
     let head = head_of(dir.path()).unwrap();
     settled("ci-fail", &head).await;
     assert!(
-        matches!(holds("ci-fail", dir.path(), 1, true, &tx).await, Hold::Yes),
+        matches!(
+            holds("ci-fail", dir.path(), 1, true, 0, &tx).await,
+            Hold::Yes
+        ),
         "the same failing head holds the merge"
     );
 
     commit(dir.path(), "fix2");
     assert!(matches!(
-        holds("ci-fail", dir.path(), 1, true, &tx).await,
+        holds("ci-fail", dir.path(), 1, true, 0, &tx).await,
         Hold::Yes
     ));
     prompt(&mut rx).await;
     settled("ci-fail", &head_of(dir.path()).unwrap()).await;
     assert!(matches!(
-        holds("ci-fail", dir.path(), 1, true, &tx).await,
-        Hold::GiveUp(2)
+        holds("ci-fail", dir.path(), 1, true, 0, &tx).await,
+        Hold::GiveUp(why) if why.contains("after 2 tries")
     ));
 }
 
@@ -163,13 +173,59 @@ async fn a_fix_that_passes_the_plan_lets_the_watch_carry_on() {
     note_prompt("ci-pass", dir.path());
     commit(dir.path(), "fix1");
     assert!(matches!(
-        holds("ci-pass", dir.path(), 1, true, &tx).await,
+        holds("ci-pass", dir.path(), 1, true, 0, &tx).await,
         Hold::Yes
     ));
     settled("ci-pass", &head_of(dir.path()).unwrap()).await;
     assert!(matches!(
-        holds("ci-pass", dir.path(), 1, true, &tx).await,
+        holds("ci-pass", dir.path(), 1, true, 0, &tx).await,
         Hold::No
     ));
     assert!(rx.try_recv().is_err(), "a passing plan sends nothing");
+}
+
+#[test]
+fn a_failed_head_the_session_answered_without_a_commit_gives_up_instead_of_holding_forever() {
+    let mut failed = entry(Stage::Failed, "h1", 1);
+    failed.turns = 3;
+    assert_eq!(
+        verdict(Some(&failed), 1, "h1", true, 3),
+        Verdict::Hold,
+        "the failure prompt has not been answered yet"
+    );
+    assert_eq!(
+        verdict(Some(&failed), 1, "h1", false, 4),
+        Verdict::Hold,
+        "the session is still on it"
+    );
+    match verdict(Some(&failed), 1, "h1", true, 4) {
+        Verdict::GiveUp(why) => assert!(why.contains("without a new commit"), "{why}"),
+        other => panic!("a session that stopped without a commit still holds: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_session_that_stops_after_a_failed_check_releases_the_watch() {
+    let dir = repo("echo boom-output >&2; exit 3");
+    let (tx, mut rx) = mpsc::channel(4);
+    note_prompt("ci-stop", dir.path());
+    commit(dir.path(), "fix1");
+    assert!(matches!(
+        holds("ci-stop", dir.path(), 1, true, 5, &tx).await,
+        Hold::Yes
+    ));
+    prompt(&mut rx).await;
+    settled("ci-stop", &head_of(dir.path()).unwrap()).await;
+    assert!(matches!(
+        holds("ci-stop", dir.path(), 1, true, 5, &tx).await,
+        Hold::Yes
+    ));
+    assert!(matches!(
+        holds("ci-stop", dir.path(), 1, false, 6, &tx).await,
+        Hold::Yes
+    ));
+    match holds("ci-stop", dir.path(), 1, true, 6, &tx).await {
+        Hold::GiveUp(why) => assert!(why.contains("without a new commit"), "{why}"),
+        Hold::Yes | Hold::No => panic!("the watch is still held after the session stopped"),
+    }
 }

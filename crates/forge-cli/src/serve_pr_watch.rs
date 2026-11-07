@@ -468,7 +468,7 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
             continue;
         };
         let free = !snapshot.busy && snapshot.question.is_none();
-        if local_ci::gate(state, &watch, &root, free, &handle.input_tx).await {
+        if local_ci::gate(state, &watch, &root, free, &handle).await {
             continue;
         }
         let mut next = watch.clone();

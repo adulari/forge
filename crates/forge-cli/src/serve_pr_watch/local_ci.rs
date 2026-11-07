@@ -30,6 +30,9 @@ struct Entry {
     head: String,
     phase: Stage,
     failures: u32,
+    /// The session's finished-turn count when the check of `head` started. A count that moved
+    /// while `head` did not means the session answered the failure prompt without a commit.
+    turns: u64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -40,8 +43,9 @@ enum Verdict {
     Hold,
     /// Check this head now (then hold).
     Check(String),
-    /// The session keeps failing the local plan: stop the watch.
-    GiveUp,
+    /// The session keeps failing the local plan, or stopped without fixing it: stop the watch
+    /// with this reason.
+    GiveUp(String),
 }
 
 type Table = Arc<Mutex<HashMap<String, Entry>>>;
@@ -75,11 +79,12 @@ pub(super) fn note_prompt(session: &str, root: &Path) {
             head,
             phase: Stage::Sent,
             failures: 0,
+            turns: 0,
         },
     );
 }
 
-fn verdict(entry: Option<&Entry>, fix_turns: u32, head: &str, free: bool) -> Verdict {
+fn verdict(entry: Option<&Entry>, fix_turns: u32, head: &str, free: bool, turns: u64) -> Verdict {
     let Some(entry) = entry.filter(|_| fix_turns > 0) else {
         return Verdict::Proceed;
     };
@@ -93,7 +98,14 @@ fn verdict(entry: Option<&Entry>, fix_turns: u32, head: &str, free: bool) -> Ver
             }
         }
         Stage::Sent | Stage::Passed => Verdict::Proceed,
-        Stage::Failed if entry.failures >= MAX_LOCAL_FAILURES => Verdict::GiveUp,
+        Stage::Failed if entry.failures >= MAX_LOCAL_FAILURES => Verdict::GiveUp(format!(
+            "the fix still fails the repository's CI steps locally after {MAX_LOCAL_FAILURES} tries"
+        )),
+        Stage::Failed if free && turns != entry.turns => Verdict::GiveUp(
+            "the fix fails the repository's CI steps locally and the session stopped without a \
+             new commit"
+                .to_string(),
+        ),
         Stage::Failed => Verdict::Hold,
     }
 }
@@ -113,6 +125,7 @@ fn settle(session: &str, head: &str, failed: bool) -> Entry {
         head: head.to_string(),
         phase: Stage::Sent,
         failures: 0,
+        turns: 0,
     });
     entry.head = head.to_string();
     entry.phase = if failed { Stage::Failed } else { Stage::Passed };
@@ -129,6 +142,7 @@ pub(super) async fn holds(
     root: &Path,
     fix_turns: u32,
     free: bool,
+    turns: u64,
     input: &mpsc::Sender<RemoteInput>,
 ) -> Hold {
     let Some(head) = head_of(root) else {
@@ -139,10 +153,10 @@ pub(super) async fn holds(
         .unwrap_or_else(|e| e.into_inner())
         .get(session)
         .cloned();
-    match verdict(current.as_ref(), fix_turns, &head, free) {
+    match verdict(current.as_ref(), fix_turns, &head, free, turns) {
         Verdict::Proceed => Hold::No,
         Verdict::Hold => Hold::Yes,
-        Verdict::GiveUp => Hold::GiveUp(MAX_LOCAL_FAILURES),
+        Verdict::GiveUp(why) => Hold::GiveUp(why),
         Verdict::Check(head) => {
             if let Some(entry) = table()
                 .lock()
@@ -151,6 +165,7 @@ pub(super) async fn holds(
             {
                 entry.phase = Stage::Running;
                 entry.head.clone_from(&head);
+                entry.turns = turns;
             }
             let (session, root, input) = (session.to_string(), root.to_path_buf(), input.clone());
             tokio::spawn(check(session, root, head, input));
@@ -166,17 +181,17 @@ pub(super) async fn gate(
     watch: &super::Watch,
     root: &Path,
     free: bool,
-    input: &mpsc::Sender<RemoteInput>,
+    handle: &crate::cli::commands::run::SessionDriverHandle,
 ) -> bool {
-    match holds(&watch.session_id, root, watch.fix_turns, free, input).await {
+    let turns = handle.snapshot_rx.borrow().snapshot.turns_finished;
+    let input = &handle.input_tx;
+    match holds(&watch.session_id, root, watch.fix_turns, free, turns, input).await {
         Hold::No => false,
         Hold::Yes => true,
-        Hold::GiveUp(times) => {
+        Hold::GiveUp(why) => {
             super::registry().update(&watch.session_id, |w| {
                 w.state = super::Phase::Blocked;
-                w.blocked_reason = Some(format!(
-                    "the fix still fails the repository's CI steps locally after {times} tries"
-                ));
+                w.blocked_reason = Some(why.clone());
             });
             state.registry.notify_fleet();
             true
@@ -187,8 +202,9 @@ pub(super) async fn gate(
 pub(super) enum Hold {
     No,
     Yes,
-    /// Stop the watch: the session failed the local plan this many times in a row.
-    GiveUp(u32),
+    /// Stop the watch with this reason: the session keeps failing the local plan, or stopped
+    /// without a commit after it failed.
+    GiveUp(String),
 }
 
 async fn check(session: String, root: PathBuf, head: String, input: mpsc::Sender<RemoteInput>) {
