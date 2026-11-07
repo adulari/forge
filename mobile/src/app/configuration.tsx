@@ -22,11 +22,12 @@ import { space } from "../theme/tokens";
 import { type } from "../theme/typography";
 import { WorktreeSettingsSection } from "../components/settings/WorktreeSettingsSection";
 import { SettingsShell } from "./(tabs)/settings";
+import { configWarning } from "../lib/configWarnings";
 import { usePullRefresh } from "../lib/usePullRefresh";
 
 type Scope = "user" | "project";
 
-function ConfigFieldRowBody({ field, scope, showSeparator }: { field: ConfigField; scope: Scope; showSeparator: boolean }) {
+function ConfigFieldRowBody({ field, scope, showSeparator, warning }: { field: ConfigField; scope: Scope; showSeparator: boolean; warning: string | null }) {
   const tokens = useTokens();
   const mutation = useUpdateConfig();
   const [draft, setDraft] = useState(field.value);
@@ -87,12 +88,12 @@ function ConfigFieldRowBody({ field, scope, showSeparator }: { field: ConfigFiel
   if (field.field_type === "enum") {
     return <View style={fieldStyle}><Text style={[type.body, { color: tokens.ink }]}>{field.label}</Text><Text style={[type.sub, { color: error ? tokens.danger : tokens.ink3 }]}>{subtitle}</Text>{segmentFits(field.options) ? <Segmented options={field.options.map((option) => ({ value: option, label: option }))} value={draft} onChange={(value) => { setDraft(value); save(value); }} /> : <View style={styles.optionWrap}>{field.options.map((option) => <Chip key={option} label={option} selected={option === draft} onPress={() => { setDraft(option); save(option); }} />)}</View>}</View>;
   }
-  return <View style={fieldStyle}><Input label={field.label} value={draft} onChangeText={setDraft}  keyboardType={field.field_type === "int" || field.field_type === "float" ? "decimal-pad" : "default"} autoCapitalize="none" autoCorrect={false} error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} /><Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text>{field.modified ? <Pressable onPress={() => save(undefined)} accessibilityRole="button" accessibilityLabel={`Reset ${field.label}`}><Text style={[styles.reset, { color: tokens.accent }]}>Reset to default ({field.default || "empty"})</Text></Pressable> : null}</View>;
+  return <View style={fieldStyle}><Input label={field.label} value={draft} onChangeText={setDraft}  keyboardType={field.field_type === "int" || field.field_type === "float" ? "decimal-pad" : "default"} autoCapitalize="none" autoCorrect={false} error={error ?? undefined} accessibilityLabel={field.label} /><Button label="Save" variant="secondary" onPress={() => save(draft)} disabled={mutation.isPending || draft === field.value} loading={mutation.isPending} />{warning ? <Text style={[type.sub, { color: tokens.danger }]} testID={`cfg-warning-${field.key}`}>{warning}</Text> : null}<Text style={[type.sub, { color: tokens.ink3 }]}>{field.help ?? `${field.key} · ${field.source}`}</Text>{field.modified ? <Pressable onPress={() => save(undefined)} accessibilityRole="button" accessibilityLabel={`Reset ${field.label}`}><Text style={[styles.reset, { color: tokens.accent }]}>Reset to default ({field.default || "empty"})</Text></Pressable> : null}</View>;
 }
 
-function ConfigFieldRow(props: { field: ConfigField; scope: Scope; showSeparator: boolean; highlighted: boolean }) {
+function ConfigFieldRow(props: { field: ConfigField; scope: Scope; showSeparator: boolean; highlighted: boolean; warning: string | null }) {
   const tokens = useTokens();
-  return <View nativeID={`cfg-${props.field.key}`} style={props.highlighted ? { backgroundColor: tokens.selection } : undefined}><ConfigFieldRowBody field={props.field} scope={props.scope} showSeparator={props.showSeparator} /></View>;
+  return <View nativeID={`cfg-${props.field.key}`} style={props.highlighted ? { backgroundColor: tokens.selection } : undefined}><ConfigFieldRowBody field={props.field} scope={props.scope} showSeparator={props.showSeparator} warning={props.warning} /></View>;
 }
 
 /** Whether an enum's options fit one segmented row on a phone. Four long values ("default ·
@@ -132,7 +133,7 @@ function ConfigurationScreenBody() {
     {query.isError ? <Text style={[type.body, { color: tokens.danger }]}>{`Could not load configuration: ${query.error?.message || "unknown error"}. Pull to retry.`}</Text> : null}
     {query.isLoading ? <Text style={[type.body, { color: tokens.ink3 }]}>Loading your effective configuration…</Text> : null}
     {!query.isLoading && !query.isError && fields.length === 0 ? <Text style={[type.body, { color: tokens.ink3 }]}>No settings match that search.</Text> : null}
-    {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader>{group === "Worktrees" ? <WorktreeSettingsSection fields={fields} /> : fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} showSeparator={index < fields.length - 1} highlighted={field.key === lit} />)}</View>)}
+    {groups.map(([group, fields]) => <View key={group}><SectionHeader>{group}</SectionHeader>{group === "Worktrees" ? <WorktreeSettingsSection fields={fields} /> : fields.map((field, index) => <ConfigFieldRow key={field.key} field={field} scope={scope} showSeparator={index < fields.length - 1} highlighted={field.key === lit} warning={configWarning(query.data, field.key)} />)}</View>)}
   </Screen>;
 }
 

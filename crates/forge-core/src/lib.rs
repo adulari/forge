@@ -239,7 +239,10 @@ pub mod worktree_reclaim;
 pub mod worktree_setup;
 pub mod zero_retention;
 
-pub use expert::{consult_expert_spec, expert_tool_configured, BridgeExpert, CONSULT_EXPERT_TOOL};
+pub use expert::{
+    consult_expert_spec, expert_config_problem, expert_tool_configured, BridgeExpert,
+    CONSULT_EXPERT_TOOL,
+};
 pub use llm_router::LlmRouter;
 pub use pinned_context::render_task_list;
 pub use recall::{recall_spec, RECALL_TOOL};

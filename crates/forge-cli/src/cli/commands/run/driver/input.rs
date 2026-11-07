@@ -57,7 +57,7 @@ impl DriverState {
                     match result {
                         Ok(()) => {
                             self.app.config_editor.rows = config_editor_rows();
-                            self.app.config_editor.status = Some(format!("✓ saved {path}"));
+                            self.app.config_editor.status = Some(config_saved_status(&path));
                         }
                         Err(e) => self.app.config_editor.status = Some(format!("✗ {e}")),
                     }

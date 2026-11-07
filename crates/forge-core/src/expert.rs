@@ -420,6 +420,17 @@ pub fn expert_tool_configured(config: &Config) -> bool {
     cfg.is_set() && cfg.triggers.tool && matches!(resolve_config(cfg), Ok(Some(_)))
 }
 
+/// Why a configured `[harness.expert]` cannot be used, as a sentence, or `None` when none is set
+/// or it resolves. Settings screens show it right after a save, because the problem usually
+/// appears between two edits (a subscription model before its budget).
+pub fn expert_config_problem(config: &Config) -> Option<String> {
+    let cfg = &config.harness.expert;
+    if cfg.model.trim().is_empty() {
+        return None;
+    }
+    resolve_config(cfg).err()
+}
+
 /// The expert state of one `forge mcp-serve` process: the bridged model's consults, capped per
 /// turn and metered like the direct path's.
 #[derive(Default)]

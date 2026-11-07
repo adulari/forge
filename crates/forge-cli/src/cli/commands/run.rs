@@ -288,6 +288,24 @@ fn verdict_sentence(v: &forge_store::ProviderVerdict) -> String {
 }
 
 /// Every editable setting as `/config` editor rows.
+/// What the settings overlay says after saving `path`: the saved line, plus why the expert on
+/// call still cannot be used when the save left `[harness.expert]` unusable.
+pub(crate) fn config_saved_status(path: &str) -> String {
+    let problem = path
+        .starts_with("harness.expert")
+        .then(|| forge_config::load().ok())
+        .flatten()
+        .and_then(|config| forge_core::expert_config_problem(&config));
+    saved_status_with(path, problem.as_deref())
+}
+
+fn saved_status_with(path: &str, problem: Option<&str>) -> String {
+    match problem {
+        Some(why) => format!("⚠ saved {path}, but the expert is unavailable: {why}"),
+        None => format!("✓ saved {path}"),
+    }
+}
+
 pub(crate) fn config_editor_rows() -> Vec<forge_tui::SettingRow> {
     let verdicts: std::collections::HashMap<String, forge_store::ProviderVerdict> =
         crate::open_store()
@@ -1845,7 +1863,7 @@ pub(crate) async fn run_chat_tui(
                                 }
                                 panes::apply_config(&mut app, &path, &value);
                                 app.config_editor.rows = config_editor_rows();
-                                app.config_editor.status = Some(format!("✓ saved {path}"));
+                                app.config_editor.status = Some(config_saved_status(&path));
                             }
                             Err(e) => app.config_editor.status = Some(format!("✗ {e}")),
                         }
@@ -5697,6 +5715,25 @@ pub(crate) use support::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_an_expert_setting_that_leaves_it_unusable_says_so() {
+        assert_eq!(
+            saved_status_with("harness.expert.model", None),
+            "✓ saved harness.expert.model"
+        );
+        let warned = saved_status_with(
+            "harness.expert.model",
+            Some("codex-oauth::gpt-5.6-sol is a subscription model: set [harness.expert] budget"),
+        );
+        assert!(warned.starts_with("⚠ saved harness.expert.model, but the expert is unavailable:"));
+        assert!(warned.contains("set [harness.expert] budget"));
+        assert_eq!(
+            config_saved_status("tui.theme"),
+            "✓ saved tui.theme",
+            "other settings never load the expert"
+        );
+    }
 
     #[test]
     fn plan_step_status_follows_the_task_the_step_seeded() {

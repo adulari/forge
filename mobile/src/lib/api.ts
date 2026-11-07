@@ -34,6 +34,14 @@ export class ApiError extends Error {
 
 export interface ConfigResponse {
   fields: ConfigField[];
+  /** A saved setting that cannot work yet (an expert model without its budget), keyed by field.
+   * Absent on older daemons and when nothing is wrong. */
+  warnings?: ConfigWarning[];
+}
+
+export interface ConfigWarning {
+  key: string;
+  text: string;
 }
 
 export interface HostIdentity {
