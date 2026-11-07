@@ -530,7 +530,10 @@ pub(super) async fn request_provider_response(
                         // Surface the real text and fail the turn instead of burning the budget.
                         let overloaded = e.is_overloaded();
                         let message = e.to_string();
-                        let fast = attempt_started.elapsed() <= DETERMINISTIC_REJECTION_WINDOW;
+                        // A refused connection or a failed lookup is instant and identical every
+                        // time too, but nothing answered: that is the network, never a refusal.
+                        let fast = attempt_started.elapsed() <= DETERMINISTIC_REJECTION_WINDOW
+                            && !e.is_unreachable();
                         let repeated = !overloaded
                             && pinned_outage_last_error.as_deref() == Some(message.as_str());
                         *pinned_outage_last_error = (fast && !overloaded).then(|| message.clone());

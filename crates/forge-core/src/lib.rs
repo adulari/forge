@@ -13627,6 +13627,55 @@ mod tests {
         assert!(!text.contains("isn't available"), "{text}");
     }
 
+    fn connection_refused(_m: &str) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Unavailable(
+            "could not connect: error sending request for url \
+             (http://127.0.0.1:1/v1/chat/completions): tcp connect error: Connection refused \
+             (os error 111)"
+                .into(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_connection_is_backed_off_not_called_a_rejection() {
+        // An unreachable provider answers instantly with the same text every time, which is the
+        // shape of a rejection. It failed the turn after one 5s backoff as "its provider rejected
+        // it twice" and told the user to pick another model; nothing had answered at all.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: connection_refused,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = 120;
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let started = tokio::time::Instant::now();
+        let err = session
+            .run_turn("fix the bug")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("rejected"), "{err}");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(60),
+            "the pinned budget is spent before the turn gives up, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            events.lock().unwrap().iter().any(|e| matches!(e,
+                PresenterEvent::Warning(w) if w.contains("provider unreachable (could not connect"))),
+            "the wait is announced as an unreachable provider"
+        );
+    }
+
     #[tokio::test]
     async fn pinned_model_fails_fast_on_an_identical_instant_rejection() {
         // Live case (OpenCode Go, 2026-09-02): a model served on a different endpoint answered

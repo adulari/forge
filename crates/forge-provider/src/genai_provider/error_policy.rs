@@ -234,22 +234,7 @@ pub(super) fn is_auth_config_failure(text: &str) -> bool {
         || l.contains("requires api key")
 }
 
-/// A failure to reach the endpoint at all (refused, unresolved, reset before a response), as
-/// opposed to an answer from it.
-pub(super) fn is_transport_failure(text: &str) -> bool {
-    let l = text.to_lowercase();
-    [
-        "error sending request",
-        "connection refused",
-        "tcp connect error",
-        "error trying to connect",
-        "dns error",
-        "failed to lookup address",
-        "could not connect",
-    ]
-    .iter()
-    .any(|marker| l.contains(marker))
-}
+pub(super) use crate::error::is_transport_failure;
 
 /// An id with no `provider::` prefix that matches none of genai's name patterns (`gpt-*`,
 /// `claude-*`, `gemini-*`, …). genai sends such an id to its Ollama fallback, which Forge points at
