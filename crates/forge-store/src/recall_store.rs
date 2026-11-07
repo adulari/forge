@@ -9,6 +9,17 @@
 
 use super::*;
 
+/// SQL condition, over a `message` row aliased `m` (pass `"m."`), that drops the
+/// `ui` display copy of a final reply: the turn loop stores each answer twice, once for the model
+/// (`llm_only`) and once for the screen (`ui`), so a search would list every answer twice.
+fn not_ui_copy(m: &str) -> String {
+    format!(
+        "NOT ({m}visibility = 'ui' AND EXISTS (SELECT 1 FROM message p
+           WHERE p.session_id = {m}session_id AND p.seq = {m}seq - 1
+             AND p.visibility = 'llm_only' AND p.content = {m}content))"
+    )
+}
+
 /// Characters of one row's content that reach the index. Bounds the index of a session full of
 /// 32k-char tool results; a word past the cut is still found by reading the range around it.
 const INDEX_CONTENT_CHARS: usize = 16_000;
@@ -113,7 +124,7 @@ impl Store {
         };
         let pending: Vec<(i64, String, String)> = {
             let mut stmt = conn.prepare(&format!(
-                "SELECT m.rowid, m.id, m.content, m.tool_calls_json
+                "SELECT m.rowid, m.id, m.content, m.tool_calls_json, m.seq
                  FROM message m
                  LEFT JOIN message_fts f ON f.rowid = m.rowid AND f.message_id = m.id
                  WHERE m.session_id = ?1 AND {state} AND f.rowid IS NULL
@@ -122,10 +133,24 @@ impl Store {
             let rows = stmt.query_map([session_id], |row| {
                 let content: String = row.get(2)?;
                 let calls: Option<String> = row.get(3)?;
+                let seq: i64 = row.get(4)?;
                 let mut text = clip_chars(&content, INDEX_CONTENT_CHARS).0;
                 if let Some(calls) = calls.filter(|c| c != "[]") {
-                    text.push(' ');
-                    text.push_str(&clip_chars(&calls, INDEX_CALLS_CHARS).0);
+                    // Name and arguments only: the call id is noise, and it is what a hit on a
+                    // content-less carrier row would otherwise show as its snippet.
+                    let calls: Vec<String> =
+                        transcript_read_store::parse_tool_calls_with_diagnostic(
+                            session_id,
+                            Some(seq),
+                            Some(&calls),
+                        )
+                        .into_iter()
+                        .map(|call| format!("{} {}", call.name, call.args))
+                        .collect();
+                    if !calls.is_empty() {
+                        text.push(' ');
+                        text.push_str(&clip_chars(&calls.join(" "), INDEX_CALLS_CHARS).0);
+                    }
                 }
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, text))
             })?;
@@ -199,8 +224,10 @@ impl Store {
              FROM message_fts
              JOIN message m ON m.rowid = message_fts.rowid AND m.id = message_fts.message_id
              WHERE message_fts MATCH ?1 AND message_fts.session_id = ?2 AND {state}
+               AND {dup}
              ORDER BY message_fts.rank, m.seq
-             LIMIT ?3"
+             LIMIT ?3",
+            dup = not_ui_copy("m."),
         ))?;
         let mut run = |expression: &str| -> Result<Vec<FoldedHit>> {
             let rows = stmt.query_map(
@@ -264,9 +291,10 @@ impl Store {
     ) -> Result<FoldedRead> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&format!(
-            "SELECT seq, role, content, tool_calls_json FROM message
-             WHERE session_id = ?1 AND {state} AND seq >= ?2 AND seq <= ?3
-             ORDER BY seq"
+            "SELECT seq, role, content, tool_calls_json FROM message m
+             WHERE m.session_id = ?1 AND {state} AND m.seq >= ?2 AND m.seq <= ?3 AND {dup}
+             ORDER BY m.seq",
+            dup = not_ui_copy("m."),
         ))?;
         let mut rows = stmt.query(rusqlite::params![session_id, seq_from, seq_to])?;
         let mut out = FoldedRead::default();
@@ -517,6 +545,70 @@ mod tests {
         assert_eq!(rest.rows.first().unwrap().seq, resume);
         // The live tail (seq 9) is not folded history.
         assert_eq!(rest.rows.last().unwrap().seq, 8);
+    }
+
+    #[test]
+    fn a_reply_stored_for_the_model_and_the_screen_is_found_and_read_once() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "pick the cache key", None)
+            .unwrap();
+        store
+            .add_llm_only_message_full(
+                &sid,
+                1,
+                Role::Assistant,
+                "use v3 tenant keys",
+                None,
+                &[],
+                None,
+            )
+            .unwrap();
+        store
+            .add_ui_note(&sid, 2, Role::Assistant, "use v3 tenant keys")
+            .unwrap();
+        for seq in 3..8 {
+            store
+                .add_message(&sid, seq, Role::User, "filler", None)
+                .unwrap();
+        }
+        store.compact_session_store(&sid, "S", 2).unwrap();
+        let hits = store.search_folded(&sid, "tenant keys", 5).unwrap();
+        assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [1]);
+        let rows = store.read_folded(&sid, 0, 4, 10_000).unwrap().rows;
+        assert_eq!(rows.iter().map(|r| r.seq).collect::<Vec<_>>(), [0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn a_tool_call_row_is_found_by_its_arguments_and_shows_no_call_id() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "start", None)
+            .unwrap();
+        let call = forge_types::ToolCall {
+            id: "call_00_zzzIDzzz".into(),
+            name: "read_file".into(),
+            args: serde_json::json!({"path": "billing/invoice.rs"}),
+        };
+        store
+            .add_message_full(&sid, 1, Role::Assistant, "", None, &[call], None)
+            .unwrap();
+        for seq in 2..8 {
+            store
+                .add_message(&sid, seq, Role::User, "filler", None)
+                .unwrap();
+        }
+        store.compact_session_store(&sid, "S", 2).unwrap();
+        let hits = store.search_folded(&sid, "invoice", 5).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].snippet.contains("read_file"),
+            "{:?}",
+            hits[0].snippet
+        );
+        assert!(!hits[0].snippet.contains("zzzID"), "{:?}", hits[0].snippet);
     }
 
     #[test]
