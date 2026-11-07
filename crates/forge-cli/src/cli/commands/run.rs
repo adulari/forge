@@ -101,6 +101,7 @@ mod agents_menu;
 mod anywhere_menu;
 mod ci_menu;
 mod dispatch;
+mod dispatch_types;
 mod fork_cmd;
 mod heartbeat_cmd;
 mod host_menu;
