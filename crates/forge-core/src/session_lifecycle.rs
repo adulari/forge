@@ -230,6 +230,8 @@ impl Session {
             catalog_unannounced: false,
             tasks,
             pending_plan: None,
+            pending_contract_goal: None,
+            contract_outcome: None,
             task_scope: None,
             mcp: None,
             lattice: None,
