@@ -122,6 +122,60 @@ async fn a_turn_is_ended_at_its_dollar_cap_after_one_warning() {
 }
 
 #[tokio::test]
+async fn a_capped_turn_leaves_every_tool_call_answered_and_says_why() {
+    let store = Arc::new(Store::open_in_memory().unwrap());
+    let mut config = priced_config();
+    config.mesh.budget.turn_warn_usd = 0.0;
+    config.mesh.budget.turn_cap_usd = 2.0;
+    config.mesh.budget.session_warn_usd = 0.0;
+    config.mesh.budget.session_cap_usd = 0.0;
+    let (provider, _calls) = EndlessToolProvider::new(1000);
+    let (mut session, _events) = session_with(&store, provider, config);
+
+    let out = session.run_turn("keep reading").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::BudgetExhausted);
+
+    let stored = store.load_all_messages(&session.id).unwrap();
+    let answered: Vec<&str> = stored
+        .iter()
+        .filter_map(|m| m.tool_call_id.as_deref())
+        .collect();
+    for call in stored.iter().flat_map(|m| m.tool_calls.iter()) {
+        assert!(
+            answered.contains(&call.id.as_str()),
+            "tool call {} has no result: the transcript would be rejected on resume",
+            call.id
+        );
+    }
+    let skipped: Vec<_> = stored
+        .iter()
+        .filter(|m| m.role == Role::Tool && m.content.starts_with("not run: turn spend cap"))
+        .collect();
+    assert_eq!(skipped.len(), 1, "the call the cap stopped is closed");
+    // Side-call usage anchors ("memory", "suggest") follow every finished turn and are not
+    // conversation; the last real message is what a resumed session continues from.
+    let last = stored
+        .iter()
+        .rfind(|m| m.role != Role::System || m.content.contains(' '))
+        .unwrap();
+    assert!(
+        last.role == Role::Assistant && last.content.contains("turn spend cap"),
+        "the reason is the last thing in the history: {:?}",
+        (last.role, &last.content)
+    );
+    session.transcript.iter().enumerate().for_each(|(i, m)| {
+        if !m.tool_calls.is_empty() {
+            assert!(
+                session.transcript[i + 1..]
+                    .iter()
+                    .any(|r| r.role == Role::Tool),
+                "the in-memory transcript is valid too"
+            );
+        }
+    });
+}
+
+#[tokio::test]
 async fn the_next_turn_gets_a_fresh_allowance() {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let mut config = priced_config();

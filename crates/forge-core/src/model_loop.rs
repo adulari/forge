@@ -314,6 +314,13 @@ impl Session {
             }
 
             if let Some(text) = self.hard_guard_after_call(resp.usage.cost_usd) {
+                if resp.wants_tools() {
+                    self.close_unrun_tool_calls(&resp.tool_calls, &text)?;
+                } else {
+                    // The reply streamed to the person but is stored provider-only until a turn
+                    // accepts it; this turn ends here, so publish it before the reason below.
+                    self.publish_terminal_answer(&resp.content)?;
+                }
                 final_text = text;
                 hit_step_cap = false;
                 halted_by_loop_guard = true;
@@ -813,6 +820,13 @@ impl Session {
             final_text = self.abort_for_step_ceiling(limit);
             halted_by_loop_guard = true;
             hard_guard_abort = true;
+        }
+
+        // A hard stop's reason (spend or token cap, run budget, headless stall, unfinished-task
+        // abort) used to travel only in the turn's result and a live event, so a session read
+        // later ended on a tool call or a tool result with no word of why. Keep it in the history.
+        if hard_guard_abort && !final_text.trim().is_empty() {
+            self.publish_terminal_answer(&final_text.clone())?;
         }
 
         // A loop guard (or an unrecoverable empty reply) can end a turn that did real work with

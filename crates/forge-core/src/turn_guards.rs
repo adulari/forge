@@ -107,6 +107,40 @@ impl Session {
         }
     }
 
+    /// Answer every tool call of an assistant message the turn is about to abandon, so the stored
+    /// transcript stays valid (a call with no result is rejected by every provider and leaves a
+    /// resumed session dangling) and says in plain words why nothing ran. `text` is the abort's
+    /// final text; its first clause names the cap.
+    pub(crate) fn close_unrun_tool_calls(
+        &mut self,
+        calls: &[forge_types::ToolCall],
+        text: &str,
+    ) -> Result<(), CoreError> {
+        let cap = text
+            .trim_start_matches("ERROR: ")
+            .trim_start_matches("Stopped: ")
+            .split([';', '\u{2014}'])
+            .next()
+            .unwrap_or("")
+            .trim();
+        let result = format!("not run: {cap}");
+        for call in calls {
+            let seq = self.next_seq();
+            self.store.add_message_full(
+                &self.id,
+                seq,
+                Role::Tool,
+                &result,
+                None,
+                &[],
+                Some(&call.id),
+            )?;
+            self.transcript
+                .push(Message::tool_result(&call.id, result.clone()));
+        }
+        Ok(())
+    }
+
     /// End the turn for the per-turn input-token ceiling. Returns the final text to adopt.
     pub(crate) fn abort_for_token_ceiling(&mut self) -> String {
         let cap = self.config.mesh.max_turn_input_tokens;
