@@ -15,6 +15,7 @@ pub use provider_items::ProviderItems;
 pub mod child_env;
 pub mod deferred_call;
 pub mod effort;
+pub mod goal_contract;
 pub mod goal_envelope;
 pub mod interaction;
 mod permission_mode;
