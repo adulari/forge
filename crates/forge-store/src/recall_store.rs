@@ -128,6 +128,7 @@ impl Store {
                  FROM message m
                  LEFT JOIN message_fts f ON f.rowid = m.rowid AND f.message_id = m.id
                  WHERE m.session_id = ?1 AND {state} AND f.rowid IS NULL
+                   AND m.role != 'system'
                    AND (m.content != '' OR COALESCE(m.tool_calls_json, '') NOT IN ('', '[]'))"
             ))?;
             let rows = stmt.query_map([session_id], |row| {
@@ -224,7 +225,7 @@ impl Store {
              FROM message_fts
              JOIN message m ON m.rowid = message_fts.rowid AND m.id = message_fts.message_id
              WHERE message_fts MATCH ?1 AND message_fts.session_id = ?2 AND {state}
-               AND {dup}
+               AND m.role != 'system' AND {dup}
              ORDER BY message_fts.rank, m.seq
              LIMIT ?3",
             dup = not_ui_copy("m."),
@@ -578,6 +579,34 @@ mod tests {
         assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [1]);
         let rows = store.read_folded(&sid, 0, 4, 10_000).unwrap().rows;
         assert_eq!(rows.iter().map(|r| r.seq).collect::<Vec<_>>(), [0, 1, 3, 4]);
+    }
+
+    #[test]
+    fn harness_injected_system_rows_are_not_searchable() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/x", "default").unwrap();
+        store
+            .add_message(&sid, 0, Role::User, "name the cache key", None)
+            .unwrap();
+        store
+            .add_message(
+                &sid,
+                1,
+                Role::System,
+                "Relevant code (Lattice): cache.py:1 function cache_key",
+                None,
+            )
+            .unwrap();
+        for seq in 2..8 {
+            store
+                .add_message(&sid, seq, Role::User, "filler", None)
+                .unwrap();
+        }
+        store.compact_session_store(&sid, "S", 2).unwrap();
+        let hits = store.search_folded(&sid, "cache", 5).unwrap();
+        assert_eq!(hits.iter().map(|h| h.seq).collect::<Vec<_>>(), [0]);
+        let all = store.search_session_history(&sid, "cache", 5).unwrap();
+        assert_eq!(all.iter().map(|h| h.seq).collect::<Vec<_>>(), [0]);
     }
 
     #[test]
