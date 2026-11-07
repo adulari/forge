@@ -55,7 +55,7 @@ pub mod notes_overlay;
 pub mod onboarding;
 mod outage_text;
 mod overlays;
-pub(crate) use outage_text::{outage_line, recovered_line};
+pub use outage_text::{outage_line, recovered_line};
 mod peer_message;
 pub mod perf;
 mod picker;

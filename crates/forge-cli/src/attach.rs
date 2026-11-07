@@ -122,6 +122,23 @@ struct ClientSnapshot {
     revision: Option<u64>,
     #[serde(default)]
     closed: bool,
+    /// Set while the turn waits out a provider outage.
+    #[serde(default)]
+    outage: Option<ClientOutage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+struct ClientOutage {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    since_unix: u64,
+    #[serde(default)]
+    next_try_unix: u64,
+    #[serde(default)]
+    until_unix: u64,
+    #[serde(default)]
+    reason: String,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -583,6 +600,30 @@ struct Renderer {
     shown_base: Option<String>,
     printed_live: Vec<String>,
     held_live: Option<String>,
+    shown_outage: Option<ClientOutage>,
+}
+
+/// The line `forge attach` prints when the outage state changes: the same wording as the local
+/// status bar when a wait starts or its next probe moves, the recovery line when it ends.
+fn outage_notice(
+    shown: &Option<ClientOutage>,
+    now: &Option<ClientOutage>,
+    now_unix: u64,
+) -> Option<String> {
+    match (shown, now) {
+        (_, Some(o)) if shown.as_ref() != Some(o) => Some(forge_tui::outage_line(
+            &o.model,
+            o.since_unix,
+            o.next_try_unix,
+            o.until_unix,
+            &o.reason,
+        )),
+        (Some(o), None) => Some(forge_tui::recovered_line(
+            &o.model,
+            now_unix.saturating_sub(o.since_unix),
+        )),
+        _ => None,
+    }
 }
 
 impl Renderer {
@@ -654,6 +695,14 @@ impl Renderer {
             println!("· {n}");
         }
         self.printed_notes = snap.notes.clone();
+
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        if let Some(line) = outage_notice(&self.shown_outage, &snap.outage, now_unix) {
+            println!("{line}");
+        }
+        self.shown_outage.clone_from(&snap.outage);
 
         // Turn boundary: announce when a turn finishes so the operator knows it's their move.
         if self.was_busy
@@ -867,6 +916,42 @@ mod tests {
         assert_eq!(snap.prompt_seq, 4);
         assert_eq!(snap.revision, Some(12));
         assert!(!snap.closed);
+    }
+
+    #[test]
+    fn attach_prints_the_outage_line_on_change_and_the_recovery_line_at_the_end() {
+        let down = |next| {
+            Some(ClientOutage {
+                model: "inferhub::flash".into(),
+                since_unix: 1_000,
+                next_try_unix: next,
+                until_unix: 40_000,
+                reason: "503 no_capacity".into(),
+            })
+        };
+        let line = outage_notice(&None, &down(1_300), 1_010).expect("a wait began");
+        assert!(line.contains("inferhub down since"), "{line}");
+        assert!(line.contains("503 no_capacity"), "{line}");
+        assert_eq!(outage_notice(&down(1_300), &down(1_300), 1_020), None);
+        assert!(outage_notice(&down(1_300), &down(1_600), 1_310).is_some());
+        let back = outage_notice(&down(1_600), &None, 1_000 + 4 * 3600 + 9 * 60).unwrap();
+        assert_eq!(back, "  · inferhub::flash back after 4h09m, turn resumed");
+        assert_eq!(outage_notice(&None, &None, 1_000), None);
+    }
+
+    #[test]
+    fn client_snapshot_reads_the_outage_field() {
+        let snap: ClientSnapshot = serde_json::from_str(
+            r#"{"session_id":"s","outage":{"model":"m::x","provider":"m","since_unix":5,"next_try_unix":9,"until_unix":99,"attempts":2,"reason":"503"}}"#,
+        )
+        .unwrap();
+        assert_eq!(snap.outage.unwrap().next_try_unix, 9);
+        assert!(
+            serde_json::from_str::<ClientSnapshot>(r#"{"session_id":"s"}"#)
+                .unwrap()
+                .outage
+                .is_none()
+        );
     }
 
     #[test]

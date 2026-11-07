@@ -9,13 +9,7 @@ pub(crate) fn clock(secs: u64) -> String {
     .to_string()
 }
 
-pub(crate) fn outage_line(
-    model: &str,
-    since: u64,
-    next_try: u64,
-    until: u64,
-    reason: &str,
-) -> String {
+pub fn outage_line(model: &str, since: u64, next_try: u64, until: u64, reason: &str) -> String {
     format!(
         "  · {} down since {} ({reason}) · next try {} · until {}",
         forge_config::provider_of(model),
@@ -25,7 +19,7 @@ pub(crate) fn outage_line(
     )
 }
 
-pub(crate) fn recovered_line(model: &str, down_secs: u64) -> String {
+pub fn recovered_line(model: &str, down_secs: u64) -> String {
     let span = match (down_secs / 3600, down_secs / 60 % 60) {
         (0, 0) => format!("{down_secs}s"),
         (0, m) => format!("{m}m"),
