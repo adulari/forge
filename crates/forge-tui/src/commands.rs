@@ -185,6 +185,8 @@ pub enum CommandAction {
     Control,
     /// Open the turn endings overlay (`/turns`).
     Turns,
+    /// Open the goal contract table (`/contract`).
+    Contract,
     /// Open the agent CLI install/update menu (`/clis`).
     AgentClis,
     /// Show or hide the session strip (`/strip [on|off]`).
@@ -577,6 +579,7 @@ pub fn parse_command(line: &str) -> CommandAction {
         "sidebar" => CommandAction::Sidebar(arg),
         "jobs" | "shells" => CommandAction::Jobs,
         "turns" => CommandAction::Turns,
+        "contract" => CommandAction::Contract,
         "history" => CommandAction::History(arg.trim().to_string()),
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,

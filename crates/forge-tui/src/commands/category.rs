@@ -1,7 +1,9 @@
 /// Product-facing categories for the stable command registry.
 pub fn command_category(name: &str) -> &'static str {
     match name {
-        "new" | "plan" | "execute" | "goal" | "loop" | "workflow" | "duel" => "Start work",
+        "new" | "plan" | "execute" | "goal" | "contract" | "loop" | "workflow" | "duel" => {
+            "Start work"
+        }
         "sessions" | "resume" | "replay" | "rewind" | "undo" | "checkpoint" | "checkpoints"
         | "compact" | "uncompact" | "status" | "reground" | "refine" | "clear" | "btw"
         | "export" | "star" | "done" | "delete" | "archived" | "context" | "rename" | "cls"

@@ -41,6 +41,7 @@ pub(crate) use goal_envelope::GoalRecord;
 mod goal_headless;
 pub(crate) mod goal_show;
 pub(crate) use goal_headless::*;
+mod contract_menu;
 mod goal_progress;
 pub(crate) mod goal_relay;
 pub(crate) use goal_progress::*;

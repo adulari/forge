@@ -49,6 +49,9 @@ pub enum PickerKind {
     /// The turn endings overlay (`/turns`): counts by end reason for the session and project, then
     /// the recent turns that did not finish. Enter on a turn shows what happened and what to do.
     Turns,
+    /// The goal contract table (`/contract`): one row per assertion with its state; Enter shows
+    /// the check and the full proof. Each row's `id` is `assertion:<n>`.
+    Contract,
 }
 
 /// One row in an interactive picker: an opaque `id` the loop acts on, plus two display strings.

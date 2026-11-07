@@ -61,6 +61,11 @@ pub const COMMANDS: &[Command] = &[
         usage: "/turns",
     },
     Command {
+        name: "contract",
+        desc: "the goal's validation contract: each assertion, pass or fail, and its proof",
+        usage: "/contract",
+    },
+    Command {
         name: "sessions",
         desc: "browse & resume past sessions",
         usage: "/sessions",

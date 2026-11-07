@@ -1001,6 +1001,7 @@ and keep going."
                 None => app.note("/turns is not ready for this turn yet; try again in a moment"),
             }
         }
+        CommandAction::Contract => super::contract_menu::open(app),
         CommandAction::AgentClis => agents_menu::open_or_explain(app, tui.is_some()),
         CommandAction::Anywhere if tui.is_some() => app.anywhere_menu.open(),
         CommandAction::Import if tui.is_some() => app.import_menu.open(super::import_menu::fallback_dir()),

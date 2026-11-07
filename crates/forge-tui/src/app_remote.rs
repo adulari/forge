@@ -201,6 +201,7 @@ pub fn picker_kind_wire(kind: crate::commands::PickerKind) -> &'static str {
         P::ErrorReport => "picker:error_report",
         P::ControlTools => "picker:control_tools",
         P::Turns => "picker:turns",
+        P::Contract => "picker:contract",
     }
 }
 
