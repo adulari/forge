@@ -407,6 +407,24 @@ pub(crate) fn automatic_check(root: &Path, via: &'static str) -> Check {
         return Check::Skipped("no runnable workflow steps".to_string());
     }
     let report = run_plan(root, &plan, &settings, &RunOptions::default(), &mut |_| {});
+    if report.stopped.is_none()
+        && !report.results.is_empty()
+        && report
+            .results
+            .iter()
+            .all(|r| r.status == StepStatus::Skipped)
+    {
+        // Nothing ran, so nothing failed: a missing tool is not a reason to refuse the push.
+        let commands: Vec<String> = report
+            .results
+            .iter()
+            .map(|r| format!("`{}`", r.command.lines().next().unwrap_or("")))
+            .collect();
+        return Check::Skipped(format!(
+            "every runnable step is not installed here: {}",
+            commands.join(", ")
+        ));
+    }
     if report.ok() {
         let (pass, _, _) = report.counts();
         Check::Passed(format!("{pass} local CI steps passed"))

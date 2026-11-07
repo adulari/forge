@@ -163,3 +163,15 @@ fn a_missing_tool_is_skipped_not_failed() {
     assert_eq!(report.results[1].status, StepStatus::Pass);
     assert!(report.ok());
 }
+
+#[test]
+fn a_plan_whose_every_step_is_not_installed_is_skipped_not_failed() {
+    let wf = "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: test\n        run: definitely-not-installed-xyz test\n";
+    let dir = repo(wf);
+    match automatic_check(dir.path(), "push") {
+        Check::Skipped(why) => assert!(why.contains("definitely-not-installed-xyz test"), "{why}"),
+        Check::Failed(why) => panic!("blocked on a plan where nothing ran: {why}"),
+        Check::Passed(why) => panic!("claimed a pass when nothing ran: {why}"),
+    }
+    assert!(push_blocker(dir.path()).is_none());
+}
