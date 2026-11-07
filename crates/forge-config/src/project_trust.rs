@@ -37,6 +37,7 @@ const SAFE_TOP_LEVEL: &[&str] = &[
     "project",
     "model_effort",
     "compact_cap",
+    "compact",
     "stop_hook_max_blocks",
 ];
 

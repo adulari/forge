@@ -25,6 +25,8 @@ pub mod cc_rules;
 pub mod chat;
 pub mod codemode;
 mod commit_policy;
+mod compact_checkpoint;
+pub use compact_checkpoint::CompactConfig;
 mod compact_model;
 mod config_diagnostics;
 mod harness;
@@ -175,6 +177,9 @@ pub struct Config {
     /// Git integration settings (co-authoring, hook installation).
     #[serde(default)]
     pub git: GitConfig,
+    /// Checkpoint compaction at a landed slice (`[compact]`).
+    #[serde(default)]
+    pub compact: CompactConfig,
     /// LSP-backed live diagnostics fed back into the turn after edits (lsp.md). Off = inert.
     #[serde(default)]
     pub lsp: LspConfig,
@@ -2979,6 +2984,7 @@ impl Default for Config {
             hooks: Vec::new(),
             stop_hook_max_blocks: default_stop_hook_max_blocks(),
             git: GitConfig::default(),
+            compact: CompactConfig::default(),
             lsp: LspConfig::default(),
             autofix: AutofixConfig::default(),
             assay: AssayConfig::default(),
