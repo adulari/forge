@@ -27,9 +27,11 @@ const READ_BUDGET_CHARS: usize = MAX_OUTPUT_CHARS - 600;
 
 /// The one line added to the system prompt while `recall` is advertised.
 pub(crate) const SYSTEM_LINE: &str =
-    "\n- Earlier parts of this session were folded into a summary. The `recall` tool searches and \
-reads the folded history: use it to recover the detail behind a summary line or an old task \
-before you ask the user or drop work.";
+    "\n- Earlier parts of this session were folded into a summary. When you need something from \
+them that the summary does not state exactly (a quoted line, a number, a file's contents, the \
+reason behind a decision), call the `recall` tool (search a few distinctive words, then read the \
+seq range) instead of reconstructing it from memory or guessing from what is still visible, and \
+before you ask the user or drop work whose detail you cannot place.";
 
 /// The `ToolSpec` advertised to the model for [`RECALL_TOOL`].
 pub fn recall_spec() -> ToolSpec {
@@ -38,7 +40,8 @@ pub fn recall_spec() -> ToolSpec {
         description: "Search or read this session's folded history: the messages a compaction \
             replaced with a summary. They are exact and complete in the store. Use `search` with \
             a few distinctive words (a file name, an error, a decision) to find where something \
-            was discussed, then `read` the seq range around a hit. Read-only; it never reaches \
+            was discussed, then `read` the seq range around a hit. Use it whenever the summary lacks the \
+            exact text, value or reason you need; do not guess it. Read-only; it never reaches \
             other sessions. The summary's \"Earlier episodes\" list says which seq ranges exist. \
             Output is capped at 8,000 characters; tool results are clipped, so re-run the \
             command or read the file if you need the full output."
@@ -237,6 +240,12 @@ mod tests {
                 .unwrap();
         }
         (store, sid)
+    }
+
+    #[test]
+    fn the_prompt_and_the_tool_tell_the_model_not_to_reconstruct_folded_detail() {
+        assert!(SYSTEM_LINE.contains("instead of reconstructing it"));
+        assert!(recall_spec().description.contains("do not guess it"));
     }
 
     #[test]

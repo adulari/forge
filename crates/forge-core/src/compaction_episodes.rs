@@ -13,7 +13,7 @@ use crate::compaction_summary::SUMMARY_PREFIX;
 
 /// The heading of the section, which `split_episodes` looks for.
 pub(crate) const EPISODES_HEADING: &str = "## Earlier episodes (message seq ranges)";
-const EPISODES_INTRO: &str = "These messages were folded out of your context. Each is still stored: use the `recall` tool to search them or read a seq range, before you ask the user or drop work whose detail you cannot place.";
+const EPISODES_INTRO: &str = "These messages were folded out of your context. Each is still stored: use the `recall` tool to search them or read a seq range whenever you need exact text, a value or a reason the summary above does not state; do not reconstruct or guess it, and recall before you ask the user or drop work whose detail you cannot place.";
 /// Lines in the list, merged down to this many.
 pub(crate) const MAX_EPISODE_LINES: usize = 12;
 const TOPIC_CHARS: usize = 100;
@@ -193,6 +193,19 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_index_says_recall_is_for_exact_detail_not_guesses() {
+        let text = render_episodes(
+            &[],
+            &[Episode {
+                from: 0,
+                to: 3,
+                topic: "decide".into(),
+            }],
+        );
+        assert!(text.contains("do not reconstruct or guess it"), "{text}");
     }
 
     #[test]
