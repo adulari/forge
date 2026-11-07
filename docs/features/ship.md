@@ -60,3 +60,37 @@ carries no `gh` routes).
 
 The session must be hosted by the daemon for PR Watch to act; a terminal-chat session is armed but
 only watched once it is resumed on the daemon (the `watch` step says so).
+
+## Ship over Anywhere
+
+From a phone that reaches the host through the Anywhere relay (away from the LAN), Ship works
+the same as on a direct connection, with one switch the owner has to flip first:
+
+```toml
+[anywhere]
+allow_ship_over_relay = false   # default; true lets a paired device ship over the relay
+```
+
+It is also in `/config` (Anywhere > Ship over Anywhere) and in the app's host settings. The relay
+cannot change it: `anywhere.*` is a direct-only config section, so flip it on the host itself or
+from a direct connection.
+
+- **Off (default).** The Ship sheet reads "Ship over Anywhere is off on this host: enable it in
+  host settings", and the host answers `403 ship_over_relay_off` (naming
+  `anywhere.allow_ship_over_relay`) to `POST /api/sessions/{id}/ship` and to arming PR Watch
+  (`POST /api/pr/watch`). Nothing is committed, pushed or queued.
+- **On.** Ship commits only the session's files, pushes without force, reuses an existing PR and
+  arms PR Watch in merge mode, so the PR enters the merge queue. A replayed signed command is
+  acknowledged once by the host's command journal and never runs twice.
+- **Always on.** The PR list, PR detail and diff, PR status and checks, the PR Watch read, the
+  merge queue (a queue row opens the PR in the app) and `done` on a session. A host too old to
+  bridge them makes the app say "update the host". Creating, commenting on and merging a PR, and
+  GitHub Actions, still need a direct connection; Ship plus the merge queue covers landing a PR.
+
+The trade-off: with the switch on, anything that can sign a command as one of your account's
+devices can make the host commit the session's working files, push the branch to its remote and
+queue the PR for merge, with you away from the machine. Devices paired over the relay act with the
+owner's authority (they are not scoped like a viewer link), so a lost or compromised device can ship
+until you revoke it (`forge anywhere devices --revoke`). Leave it off if you do not need to ship
+from the road. Direct paired links keep their scopes: Ship and PR Watch writes need
+`workspace-write`, so a view-only or prompt-only link gets `403`.
