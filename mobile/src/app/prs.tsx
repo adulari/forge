@@ -21,7 +21,9 @@ import { Sheet } from "../components/ds/Sheet";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import type { PrListRow, PrState } from "../lib/apiPr";
 import { useSessions } from "../lib/queries";
-import { useAllPrs, usePrAvailable } from "../lib/queriesPr";
+import { useAllPrs, usePrAvailable, usePrQueue } from "../lib/queriesPr";
+import { queueSummary, summaryLabel } from "../components/pr/mergeQueueModel";
+import { router } from "expo-router";
 import { usePullRefresh } from "../lib/usePullRefresh";
 import { SettingsShell } from "./(tabs)/settings";
 import { useTokens } from "../theme/ThemeProvider";
@@ -61,6 +63,7 @@ function PrsBody() {
     state,
   );
   const queryClient = useQueryClient();
+  const queue = usePrQueue();
   const pull = usePullRefresh(async () => {
     await Promise.all([...results.map((r) => r.refetch()), queryClient.invalidateQueries({ queryKey: ["issues"] })]);
   });
@@ -99,6 +102,13 @@ function PrsBody() {
             ? "Pull requests across the projects on this host."
             : "Start a session on an issue; Forge opens the pull request and PR Watch follows it."
         }
+      />
+      <ListRow
+        title="Merge queue"
+        subtitle={queue.data ? summaryLabel(queueSummary(queue.data)) : "PRs landing one at a time"}
+        onPress={() => router.push("/merge-queue")}
+        showSeparator={false}
+        accessibilityLabel="Open the merge queue"
       />
       <Segmented options={VIEWS} value={view} onChange={setView} />
       {view === "issues" ? <IssuesList sessionIds={reps.map((r) => r.sessionId)} /> : null}

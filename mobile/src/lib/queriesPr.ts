@@ -10,6 +10,7 @@ import {
   getPrDetail,
   getPrDiff,
   getPrList,
+  getPrQueue,
   getPrStatus,
   getPrWatch,
   getPrWatches,
@@ -17,6 +18,7 @@ import {
   getWorkflowRuns,
   getWorkflows,
   mergePr,
+  postPrQueueAction,
   runAction,
   setPrWatch,
   type PrState,
@@ -245,6 +247,34 @@ export function useShipSession() {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["pr"] });
       void queryClient.invalidateQueries({ queryKey: ["git"] });
+    },
+  });
+}
+
+const QUEUE_POLL_MS = 5_000;
+
+/** Merge queue standing per repo. Bridged, so any signed-in connection works; polls while mounted. */
+export function usePrQueue() {
+  const { baseUrl } = useAuth();
+  return useQuery({
+    queryKey: ["pr", "queue", baseUrl],
+    queryFn: () => getPrQueue(baseUrl as string).then((r) => r.queues),
+    enabled: baseUrl != null,
+    refetchInterval: QUEUE_POLL_MS,
+  });
+}
+
+export function useQueueAction() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof postPrQueueAction>[1]) => postPrQueueAction(baseUrl as string, body),
+    onSuccess: (result) => {
+      // The reply already carries the fresh queues; show them before the refetch lands.
+      queryClient.setQueryData(["pr", "queue", baseUrl], result.queues);
+      void queryClient.invalidateQueries({ queryKey: ["pr", "queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watch"] });
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });
     },
   });
 }
