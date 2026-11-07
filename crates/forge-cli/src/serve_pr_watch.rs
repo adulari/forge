@@ -94,6 +94,9 @@ pub(crate) struct Watch {
     /// The independent review of the PR's current head (`serve_pr_review`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) review: Option<crate::serve_pr_review::ReviewState>,
+    /// Bumped by every owner (re-)arm, so a sweep that started before it cannot write back.
+    #[serde(default)]
+    arm_seq: u64,
 }
 
 impl Watch {
@@ -120,11 +123,19 @@ impl Watch {
             hold: None,
             base_branch: None,
             review: None,
+            arm_seq: 0,
         }
     }
 
     pub(crate) fn active(&self) -> bool {
         self.mode != Mode::Off && self.state == Phase::Watching
+    }
+
+    /// Both rows come from the same owner arm (an off-then-on starts a new row and created_at).
+    fn same_arm(&self, other: &Watch) -> bool {
+        self.arm_seq == other.arm_seq
+            && self.mode == other.mode
+            && self.created_at == other.created_at
     }
 }
 
@@ -216,9 +227,25 @@ impl Registry {
         result
     }
 
-    /// Store a poll's result, keeping what the owner did to the queue while it ran.
+    /// The live row for `watch`'s session, if any, still matches the arm the poll started from.
+    fn live_arm(&self, watch: &Watch) -> Option<bool> {
+        let guard = self.lock();
+        let live = guard.get(&watch.session_id)?;
+        Some(live.same_arm(watch))
+    }
+
+    /// The owner re-armed, switched or turned off a watch that was armed when the poll began.
+    fn superseded(&self, watch: &Watch, tracked: bool) -> bool {
+        tracked && self.live_arm(watch) != Some(true)
+    }
+
+    /// Store a poll's result, keeping what the owner did to the queue while it ran. A re-arm
+    /// (or mode switch) while it ran supersedes the whole result.
     pub(crate) fn store(&self, session: &str, mut next: Watch) {
         self.update(session, |w| {
+            if !w.same_arm(&next) {
+                return;
+            }
             crate::serve_merge_queue::carry_owner_edits(w, &mut next);
             crate::serve_pr_review::carry_owner_edits(w, &mut next);
             *w = next;
@@ -246,6 +273,7 @@ impl Registry {
                     w.queue = None;
                     w.hold = None;
                     w.review = None;
+                    w.arm_seq = w.arm_seq.wrapping_add(1);
                 })
                 .or_insert_with(|| Watch::new(session, mode, method, now));
             Some(watch.clone())
@@ -520,7 +548,11 @@ pub(crate) async fn advance(
         return poll_once(gh, root, watch, free, now).await;
     }
     let before = watch.clone();
+    let tracked = registry().live_arm(watch).is_some();
     let pre = crate::serve_merge_queue::before_poll(root, watch, all, free, now, verify).await;
+    if registry().superseded(watch, tracked) {
+        return Outcome::default();
+    }
     if pre.acted {
         watch.last_checked = Some(now);
         return Outcome {
@@ -620,6 +652,7 @@ pub(crate) async fn poll_once(
     now: i64,
 ) -> Outcome {
     let before = watch.clone();
+    let tracked = registry().live_arm(watch).is_some();
     watch.last_checked = Some(now);
     let fields = format!("{SUMMARY_FIELDS},comments,reviews,autoMergeRequest");
     let raw = match gh.run(root, &["pr", "view", "--json", &fields], None).await {
@@ -667,6 +700,9 @@ pub(crate) async fn poll_once(
                 Decision::Wait(None)
             }
         };
+    }
+    if decision == Decision::Merge && registry().superseded(watch, tracked) {
+        decision = Decision::Wait(Some("the watch was re-armed while this poll ran".into()));
     }
     auto_merge::disarm_before_acting(gh, root, watch, &pr, &value, &mut decision).await;
     match decision {

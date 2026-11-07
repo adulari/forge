@@ -492,3 +492,23 @@ async fn a_fix_turn_waits_while_auto_merge_cannot_be_turned_off() {
     let fix = poll_once(&gh, dir.path(), &mut watch, true, 90).await;
     assert!(fix.prompt.is_some() && !watch.auto_armed);
 }
+
+#[tokio::test]
+async fn an_owner_rearm_during_a_sweep_is_not_undone_and_blocks_the_merge() {
+    let id = "rearm-during-sweep";
+    registry().arm(id, Mode::Merge, "squash", 1);
+    let mut stale = registry().get(id).unwrap();
+    registry().arm(id, Mode::Fix, "squash", 2);
+
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    view(dir.path(), "OPEN", GREEN, "CLEAN", "");
+    let outcome = poll_once(&gh, dir.path(), &mut stale, true, 10).await;
+    assert!(!outcome.merged);
+    assert!(!calls(dir.path()).contains("pr merge"));
+
+    registry().store(id, stale);
+    let live = registry().get(id).unwrap();
+    assert_eq!(live.mode, Mode::Fix);
+    registry().arm(id, Mode::Off, "squash", 3);
+}
