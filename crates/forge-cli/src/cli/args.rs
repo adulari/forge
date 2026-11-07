@@ -663,6 +663,10 @@ pub(crate) enum Command {
         /// PEM keys, Bearer …) and `password=…`-style values as `[redacted]`.
         #[arg(long)]
         no_redact: bool,
+        /// Search the session's whole history for these words instead of replaying it, folded
+        /// (compacted-away) messages included. Prints ranked hits with their seq. Single id only.
+        #[arg(long, value_name = "WORDS", conflicts_with_all = ["html", "rerun"])]
+        search: Option<String>,
     },
     /// The counterfactual: branch a past session BEFORE turn N — every earlier turn held
     /// verbatim as fixed context — and re-ask that one prompt, optionally on a different model.

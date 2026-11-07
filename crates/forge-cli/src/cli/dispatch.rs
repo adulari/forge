@@ -275,8 +275,11 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             html,
             rerun,
             no_redact,
+            search,
         } => {
-            if rerun {
+            if let Some(query) = search {
+                replay_search_cmd(&ids, &query, json, !no_redact)
+            } else if rerun {
                 replay_rerun_cmd(&ids).await
             } else {
                 replay_cmd(&ids, json, html.as_deref(), !no_redact)
