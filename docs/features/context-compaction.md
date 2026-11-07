@@ -176,8 +176,60 @@ of summarizing again, and one notice says so (`compaction_budget.rs`, `compactio
 `RUST_LOG=forge_agent_core=info` logs the summarizer chain and why a candidate was skipped or
 failed.
 
+### Recall: reaching what a compaction folded away
+
+A compaction used to be a one-way door for the model. The folded rows stay in the store
+(`active = 0, compacted = 1`), but only the human's `/uncompact` and `forge replay` reached them,
+so a stalled task whose detail had been summarized away could only be asked about or dropped (an
+unattended session blocks on the ask or loses the work). Every recorded incident in the long
+sessions began after a compaction: the Sep 9 narration stall, the stalled-task redrive, the Sep 16
+empty summary.
+
+- **`recall` tool** (`recall.rs`). Read-only, no permission prompt, answers from this session's
+  own rows only. `action: "search"` takes `query` (a few words, any order; every word must match,
+  falling back to any) and returns up to 12 hits as `seq [role]: snippet`, best first.
+  `action: "read"` takes `from_seq` and `to_seq` (default `from_seq + 40`) and returns the folded
+  rows in that range, a tool result clipped to 1,500 chars and any other row to 6,000, with a
+  `[clipped]` mark, and stops at the character budget with `continue with recall read
+  from_seq=N`. A whole result is capped at 8,000 characters. The model sees it only once the
+  session has a folded row (`Store::has_folded_history`), so a short session pays nothing, and it
+  is a core tool, not deferred behind `tool_search`. One line of `FORGE_SYSTEM` is added only while
+  it is advertised. A chat-style question about earlier work ("what did we decide") counts as tool
+  intent for a trivial-tier turn (`tool_intent.rs`), otherwise that turn would be sent without it.
+- **Both paths.** The direct path dispatches it in `tool_dispatch.rs`; the CLI bridge serves it
+  from `forge mcp-serve` (`mcp_serve.rs`), scoped to the parent session through
+  `FORGE_CHECKPOINT_SESSION`, listed only when that session has folded rows. Both call
+  `forge_core::recall::run`. It is not in the `run_code` catalog (virtual tools are not), though a
+  script may still call `tools.recall`.
+- **Index** (`recall_store.rs`, migration 57). `message_fts` is an FTS5 table (bundled SQLite,
+  porter tokenizer) filled lazily: the first search of a session indexes its folded rows, later
+  searches top up whatever is new, and the migration itself scans nothing. Message content never
+  changes after it is written, so the index only says which words a row holds; whether a row
+  counts as folded is read from `message.compacted` at query time. A fold, `/uncompact`, a rewind
+  and a sync apply therefore need no bookkeeping, and an unfolded row simply stops matching. Each
+  index row carries the message id, so a rowid SQLite hands out again after a delete cannot match
+  the wrong row; deleting a session drops its index rows. Row text is cut at 16,000 chars plus the
+  first 2,000 of its tool-call JSON before it is indexed.
+- **Episode index** (`compaction_episodes.rs`). Each summary carries `## Earlier episodes (message
+  seq ranges)`: one `- seq A-B: <first line of the user prompt that opened it>` per episode, built
+  by the harness from the rows being folded (`Store::fold_preview`), so it costs no model output
+  and cannot be paraphrased away. At most 12 lines; beyond that the neighbours covering the fewest
+  messages merge. A later compaction reads the previous list back out of the summary it absorbs
+  (the summarizer never sees it), appends its own episodes and merges again, so the index survives
+  summary-of-summaries. It sits before the verbatim section and says to use `recall`.
+- **Guidance.** The stalled-task escalation (`task_staleness.rs`) no longer says "ask the user or
+  drop it" on its own: after a compaction it tells the model to `recall` (search the task's words,
+  read the range) as the one reading step it allows, and to ask or drop only if recall finds
+  nothing.
+- **For the owner.** TUI `/history <words>` (palette entry; interactive overlay): ranked hits over
+  the whole history with a `folded` mark, Enter reads the messages around a hit. Daemon
+  `GET /api/sessions/{id}/history/search?q=&limit=` returns `{hits: [{seq, role, snippet,
+  folded}]}`; it is a typed `session_history_search` bridge route, and the desktop/mobile session
+  menu has a Search history sheet that jumps to the hit. `forge replay <id> --search <words>`
+  prints the same hits.
+
 **Deferred**
-- Protecting specific messages; configurable keep-count; summary-of-summaries; restoring the
+- Protecting specific messages; configurable keep-count; restoring the
   invoked skill/command guidance and the orchestration/harness one-shots (still stored messages
   that a compaction folds); persisting the approved plan across a resume.
 
