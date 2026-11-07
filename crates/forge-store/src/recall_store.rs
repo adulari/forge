@@ -672,4 +672,110 @@ mod tests {
         assert!(preview[1].head.is_empty());
         assert!(store.fold_preview(&sid, 99).unwrap().is_empty());
     }
+
+    fn index_rows(store: &Store, sid: &str) -> i64 {
+        store
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM message_fts WHERE session_id = ?1",
+                [sid],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn stage(store: &Store, cursor: i64, kind: &str, id: &str, op: &str, payload: Vec<u8>) {
+        store
+            .stage_remote_sync_record(&RemoteSyncRecord {
+                cursor,
+                sender_device_id: [0x70; 16],
+                record_kind: kind.into(),
+                stable_id: id.into(),
+                operation: op.into(),
+                revision: cursor as u64,
+                logical_clock: cursor as u64,
+                base_hash: None,
+                content_hash: sync_payload_hash(&payload),
+                payload,
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_synced_session_tombstone_drops_its_index_rows() {
+        let store = Store::open_in_memory().unwrap();
+        let session = serde_json::json!({
+            "id": "remote-s", "title": null, "archived": false, "view_snapshot": null
+        });
+        let message = serde_json::json!({
+            "id": "remote-m", "session_id": "remote-s", "seq": 0, "role": "user",
+            "content": "the secret is xylophonequartz", "model": null,
+            "tool_calls": [], "tool_call_id": null, "visibility": "llm"
+        });
+        stage(
+            &store,
+            1,
+            "session",
+            "remote-s",
+            "upsert",
+            serde_json::to_vec(&session).unwrap(),
+        );
+        stage(
+            &store,
+            2,
+            "message",
+            "remote-m",
+            "upsert",
+            serde_json::to_vec(&message).unwrap(),
+        );
+        assert_eq!(
+            store
+                .apply_staged_history_records([0x80; 16], 10)
+                .unwrap()
+                .applied,
+            2
+        );
+        assert_eq!(
+            store
+                .search_session_history("remote-s", "xylophonequartz", 5)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(index_rows(&store, "remote-s"), 1);
+
+        stage(&store, 3, "session", "remote-s", "tombstone", Vec::new());
+        assert_eq!(
+            store
+                .apply_staged_history_records([0x80; 16], 10)
+                .unwrap()
+                .applied,
+            1
+        );
+        assert!(store.load_messages("remote-s").unwrap().is_empty());
+        assert_eq!(
+            index_rows(&store, "remote-s"),
+            0,
+            "deleted text stayed in message_fts"
+        );
+    }
+
+    #[test]
+    fn retention_prunes_drop_index_rows() {
+        let (store, stale) = seeded();
+        store.search_session_history(&stale, "backoff", 5).unwrap();
+        let empty = store.create_session("/x", "default").unwrap();
+        store
+            .add_message(&empty, 0, Role::Assistant, "unprompted greeting", None)
+            .unwrap();
+        store.search_session_history(&empty, "greeting", 5).unwrap();
+        assert!(index_rows(&store, &stale) > 0);
+        assert_eq!(index_rows(&store, &empty), 1);
+
+        assert_eq!(store.prune_empty(-1, 10).unwrap(), 1);
+        assert_eq!(index_rows(&store, &empty), 0, "prune_empty left index rows");
+        assert_eq!(store.prune(-1, 10).unwrap(), 1);
+        assert_eq!(index_rows(&store, &stale), 0, "prune left index rows");
+    }
 }

@@ -42,6 +42,8 @@ impl Store {
             };
             for id in &ids {
                 // ON DELETE CASCADE clears the dependent rows (messages → usage/routing/tool_call).
+                // The search index has no foreign key; it resolves rowids through `message`.
+                Store::drop_recall_index(&conn, id)?;
                 conn.execute("DELETE FROM session WHERE id = ?1", [id])?;
             }
             Ok(ids.len())
@@ -106,6 +108,8 @@ impl Store {
             };
             for id in &ids {
                 // ON DELETE CASCADE clears the dependent rows (messages → usage/routing/tool_call).
+                // The search index has no foreign key; it resolves rowids through `message`.
+                Store::drop_recall_index(&conn, id)?;
                 conn.execute("DELETE FROM session WHERE id = ?1", [id])?;
             }
             Ok(ids.len())

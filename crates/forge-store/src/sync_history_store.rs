@@ -164,6 +164,7 @@ impl Store {
                         )?;
                     }
                 } else if exists {
+                    Store::drop_recall_index(&transaction, &record.stable_id)?;
                     transaction
                         .execute("DELETE FROM session WHERE id = ?1", [&record.stable_id])?;
                 }
