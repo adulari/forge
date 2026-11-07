@@ -6,6 +6,7 @@ import {
   Archive,
   BellDot,
   Clock,
+  ListChecks,
   Eye,
   Flame,
   FolderCog,
@@ -34,6 +35,7 @@ import { haptics } from "../../lib/haptics";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
 import { openClaudePicker } from "../../lib/claudeHandoff";
+import { openCi } from "../../lib/ciRequest";
 import { openShip } from "../../lib/shipRequest";
 import { usePrAvailable } from "../../lib/queriesPr";
 import { useContinueInClaudeCode } from "../../lib/claudeHandoffQueries";
@@ -261,6 +263,19 @@ export function usePaletteSources(options: PaletteSourceOptions) {
           },
         });
       }
+      items.push({
+        id: "action:local-ci",
+        section: "commands",
+        title: "Local CI",
+        subtitle: "the workflows' steps Forge runs before a push, and their last result",
+        keywords: "ci local continuous integration checks workflows github actions clippy tests lint run plan gate",
+        leading: <ListChecks size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+        onSelect: () => {
+          const id = activeSessionId;
+          close();
+          openCi(id);
+        },
+      });
       items.push({
         id: "action:archive-current",
         section: "commands",

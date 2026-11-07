@@ -380,6 +380,20 @@ export interface Snapshot {
   /** Additive: set while the turn waits out a provider outage (`mesh.outage_wait_secs`). Times are
    * unix seconds. Absent from an older host and whenever the provider is answering. */
   outage?: SnapshotOutage | null;
+  /** Additive: the local CI plan for the session's repository (plan size, the run in flight, the
+   * last run per step, the step holding a goal or push back). Absent from an older host and until
+   * the repository has had a run. The plan itself is `GET /api/sessions/{id}/ci`. */
+  ci?: SnapshotCi | null;
+}
+
+export interface SnapshotCi {
+  runnable: number;
+  skipped: number;
+  running?: { name: string; index: number; total: number } | null;
+  steps: { key: string; name: string; status: "pass" | "fail" | "skip" | "not_run"; secs: number }[];
+  finished_unix?: number | null;
+  ok?: boolean | null;
+  blocked?: { key: string; name: string; via: "goal" | "push" } | null;
 }
 
 export interface SnapshotOutage {

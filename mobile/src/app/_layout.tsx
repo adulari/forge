@@ -58,6 +58,7 @@ import { activeWorkbenchSurface } from "../components/workbench/model";
 import { useWorkbenchCommands } from "../components/workbench/useWorkbenchCommands";
 import { FindHotkey } from "../components/find/FindHotkey";
 import { ClaudePickerHost } from "../components/claude/ClaudePickerHost";
+import { CiHost } from "../components/ci/CiHost";
 import { ShipHost } from "../components/ship/ShipHost";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
@@ -459,6 +460,7 @@ export default function RootLayout() {
                         <NoticesWatcher />
                         <ClaudePickerHost />
                         <ShipHost />
+                        <CiHost />
                         {/* Inside the query provider because it reads the daemon's changelog, and above
                             the navigator so it is not tied to whichever tab happens to be open. */}
                         <UpdateNotice />

@@ -289,6 +289,8 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/pr/watch", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/sessions/s1/ship", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/sessions/s1/done", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/ci");
+    await transport.fetch("fany://host-1/api/sessions/s1/ci/run", { method: "POST", body: "{}" });
 
     expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
       ["workspace_entries", "?session=s1&path=src"],
@@ -326,6 +328,8 @@ describe("AnywhereTransport", () => {
       ["pr_watch_set", ""],
       ["session_ship", "s1"],
       ["session_done", "s1"],
+      ["session_ci", "s1"],
+      ["session_ci_run", "s1"],
     ]);
     // Only the methods the host serves: a GET on ship, a PUT on the watch and the create/merge/
     // comment writes stay unreachable over the relay.
@@ -339,6 +343,10 @@ describe("AnywhereTransport", () => {
       ["/api/pr/comment", "POST"],
       ["/api/sessions/..%2Fx/ship", "POST"],
       ["/api/sessions/a%2Fb/ship", "POST"],
+      ["/api/sessions/s1/ci", "POST"],
+      ["/api/sessions/s1/ci/run", "GET"],
+      ["/api/sessions/s1/ci/run", "PUT"],
+      ["/api/sessions/..%2Fx/ci/run", "POST"],
     ] as const) {
       await expect(transport.fetch(`fany://host-1${path}`, { method })).rejects.toThrow();
     }

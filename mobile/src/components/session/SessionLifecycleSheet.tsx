@@ -4,6 +4,7 @@ import {
   CircleCheck,
   ExternalLink,
   GitBranch,
+  ListChecks,
   Pencil,
   Play,
   Rocket,
@@ -15,6 +16,7 @@ import React, { useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { ApiError } from "../../lib/api";
+import { openCi } from "../../lib/ciRequest";
 import { openShip } from "../../lib/shipRequest";
 import {
   useArchiveSession,
@@ -309,6 +311,16 @@ export function SessionLifecycleSheet({
                     }}
                   />
                 ) : null}
+                <ListRow
+                  title="Local CI"
+                  subtitle="Run the repository's workflows here, before a push"
+                  leading={<ListChecks size={19} color={tokens.ink2} />}
+                  onPress={() => {
+                    const id = current.id;
+                    close();
+                    openCi(id);
+                  }}
+                />
                 <ListRow
                   title="Rename session"
                   leading={<Pencil size={19} color={tokens.ink2} />}

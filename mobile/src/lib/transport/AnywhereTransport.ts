@@ -97,7 +97,10 @@ export type BridgeRoute =
   | "pr_watches"
   | "pr_watch_set"
   | "session_ship"
-  | "session_done";
+  | "session_done"
+  // Local CI (docs/features/ci-parity.md): the plan with its last run, and a run of it.
+  | "session_ci"
+  | "session_ci_run";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -390,6 +393,10 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
   const sessionAgents = path.match(/^\/api\/sessions\/([^/]+)\/agents$/);
   if (sessionAgents && method === "GET") {
     return { route: "session_agents", parameters: [sessionPathParameter(sessionAgents[1])] };
+  }
+  const sessionCi = path.match(/^\/api\/sessions\/([^/]+)\/ci(\/run)?$/);
+  if (sessionCi && method === (sessionCi[2] ? "POST" : "GET")) {
+    return { route: sessionCi[2] ? "session_ci_run" : "session_ci", parameters: [sessionPathParameter(sessionCi[1])] };
   }
   const sessionTurns = path.match(/^\/api\/sessions\/([^/]+)\/turns$/);
   if (sessionTurns && method === "GET") {

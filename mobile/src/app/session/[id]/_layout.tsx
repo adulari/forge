@@ -66,6 +66,8 @@ import { MemorySheet } from "../../../components/session/MemorySheet";
 
 import { HistorySearchSheet } from "../../../components/session/HistorySearchSheet";
 import { JobsSheet } from "../../../components/session/JobsSheet";
+import { ciBanner } from "../../../lib/ciModel";
+import { openCi } from "../../../lib/ciRequest";
 import { LatticeSheet } from "../../../components/session/LatticeSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { useAnywhere } from "../../../lib/anywhere/store";
@@ -362,6 +364,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const setupState = snapshot?.worktree_setup?.state;
   const baseBanner = worktreeBaseBanner(snapshot?.worktree_base);
   const outageBanner = providerOutageBanner(snapshot?.outage);
+  const ciBannerModel = ciBanner(snapshot?.ci);
   useEffect(() => {
     setSetupExpanded(false);
   }, [setupState]);
@@ -667,6 +670,14 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             />
           ) : null}
           {outageBanner ? <Banner tone={outageBanner.tone} message={outageBanner.message} /> : null}
+          {ciBannerModel ? (
+            <Banner
+              tone={ciBannerModel.tone}
+              message={ciBannerModel.message}
+              actionLabel="Open"
+              onAction={() => openCi(sessionId)}
+            />
+          ) : null}
           {projectNeedsInitialization ? (
             <Banner
               tone="warn"
