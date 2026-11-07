@@ -475,6 +475,11 @@ pub trait Presenter: Send {
     fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
         None
     }
+    /// The stored end reason of the turn about to finish (`final_answer`,
+    /// `final_answer_mid_intent`, `stalled`, `provider_error`, ...), delivered just before
+    /// [`PresenterEvent::Done`] (or before the turn's error returns). Machine-readable surfaces
+    /// include it; the rest ignore it.
+    fn turn_end_reason(&mut self, _reason: &str) {}
     /// Whether this surface renders [`PresenterEvent::Recap`]. When `false` the session skips the
     /// recap side call instead of paying its latency and tokens for an event nobody shows.
     fn consumes_recap(&self) -> bool {

@@ -109,6 +109,10 @@ impl Presenter for JsonResultPresenter {
         false
     }
 
+    fn turn_end_reason(&mut self, reason: &str) {
+        self.totals.set_end_reason(reason);
+    }
+
     fn consumes_recap(&self) -> bool {
         false
     }
@@ -156,6 +160,32 @@ mod tests {
             context_tokens: 100,
             context_limit: None,
         }
+    }
+
+    #[test]
+    fn the_result_carries_the_stored_end_reason_next_to_the_stop_reason() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut p = JsonResultPresenter::with_writer(Box::new(Buf(buf.clone())));
+        p.turn_end_reason("final_answer_open_tasks");
+        p.emit(PresenterEvent::Done {
+            final_text: "Next I will run the tests".into(),
+            stop_reason: StopReason::FinalAnswer,
+        });
+        p.emit(PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: StopReason::Stalled,
+        });
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let out: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(out[0]["stop_reason"], "final_answer");
+        assert_eq!(out[0]["end_reason"], "final_answer_open_tasks");
+        assert_eq!(
+            out[1]["end_reason"], "stalled",
+            "falls back to the stop reason"
+        );
     }
 
     #[test]
