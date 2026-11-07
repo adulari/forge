@@ -245,8 +245,7 @@ fn read(store: &Store, session_id: &str, args: &Value) -> Result<String, String>
 impl Session {
     /// Whether `recall` is advertised now: the session has folded history.
     pub(crate) fn recall_on(&self) -> bool {
-        self.store.has_folded_history(&self.id).unwrap_or(false)
-            || !predecessors(&self.store, &self.id).is_empty()
+        self.store.has_recallable_history(&self.id)
     }
 
     pub(crate) fn recall(

@@ -205,6 +205,16 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Whether `recall` has anything to offer this session: it folded history, or it descends
+    /// from a session that handed it a goal.
+    pub fn has_recallable_history(&self, session_id: &str) -> bool {
+        self.has_folded_history(session_id).unwrap_or(false)
+            || !self
+                .relay_predecessors(session_id)
+                .unwrap_or_default()
+                .is_empty()
+    }
+
     /// Search what the predecessors of `session_id` said, nearest predecessor first, at most
     /// `limit` hits in all. Never reaches a session that is not an ancestor.
     pub fn search_predecessors(

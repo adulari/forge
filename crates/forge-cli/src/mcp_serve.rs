@@ -731,14 +731,7 @@ impl ForgeMcp {
 
     /// Whether the parent session has folded history to recall.
     fn recall_available(&self, session_id: Option<&str>) -> bool {
-        session_id.is_some_and(|id| {
-            self.tasks_store.has_folded_history(id).unwrap_or(false)
-                || !self
-                    .tasks_store
-                    .relay_predecessors(id)
-                    .unwrap_or_default()
-                    .is_empty()
-        })
+        session_id.is_some_and(|id| self.tasks_store.has_recallable_history(id))
     }
 
     fn handle_recall(&self, session_id: Option<&str>, args: &Value) -> CallToolResult {
