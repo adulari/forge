@@ -1359,6 +1359,8 @@ pub(crate) enum GitCmd {
 #[derive(Subcommand)]
 pub(crate) enum PrsOp {
     /// The merge queue per repository: position, state and reason for every PR in `merge` mode.
+    /// `hold`, `release`, `front` and `retry` act on one PR in it.
+    #[command(args_conflicts_with_subcommands = true)]
     Queue {
         /// Print the daemon's JSON instead of the table.
         #[arg(long)]
@@ -1369,7 +1371,33 @@ pub(crate) enum PrsOp {
         /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
         #[arg(long)]
         token: Option<String>,
+        #[command(subcommand)]
+        action: Option<QueueAction>,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum QueueAction {
+    /// Take a PR out of the line without dropping its watch; the PRs behind it carry on.
+    Hold(QueueTarget),
+    /// Put a held PR back at its place.
+    Release(QueueTarget),
+    /// Move a PR to the front: it is the next to land.
+    Front(QueueTarget),
+    /// Re-enter a PR the queue handed back to its session, without waiting for a new push.
+    Retry(QueueTarget),
+}
+
+#[derive(clap::Args)]
+pub(crate) struct QueueTarget {
+    /// The PR number, or the session id when the same number is queued in two repositories.
+    pub(crate) pr: String,
+    /// Daemon base URL. Defaults to the local daemon's loopback origin.
+    #[arg(long)]
+    pub(crate) url: Option<String>,
+    /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
+    #[arg(long)]
+    pub(crate) token: Option<String>,
 }
 
 #[derive(Subcommand)]

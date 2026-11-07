@@ -3,12 +3,18 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::cli::args::PrsOp;
+use crate::cli::args::{PrsOp, QueueAction, QueueTarget};
 use crate::cli::commands::issues::Daemon;
 
 pub(crate) async fn prs_cmd(op: PrsOp) -> Result<()> {
     match op {
-        PrsOp::Queue { json, url, token } => {
+        PrsOp::Queue {
+            action: Some(action),
+            ..
+        } => queue_action_cmd(action).await,
+        PrsOp::Queue {
+            json, url, token, ..
+        } => {
             let answer = Daemon::resolve(url, token)?.merge_queue().await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&answer)?);
@@ -20,6 +26,61 @@ pub(crate) async fn prs_cmd(op: PrsOp) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// The body `POST /api/pr/queue/action` takes: a PR number, or a session id when it is not one.
+pub(crate) fn action_body(target: &str, action: &str) -> Value {
+    match target.trim_start_matches('#').parse::<u64>() {
+        Ok(pr) => serde_json::json!({"pr": pr, "action": action}),
+        Err(_) => serde_json::json!({"session": target, "action": action}),
+    }
+}
+
+async fn queue_action_cmd(action: QueueAction) -> Result<()> {
+    let (name, QueueTarget { pr, url, token }) = match action {
+        QueueAction::Hold(t) => ("hold", t),
+        QueueAction::Release(t) => ("release", t),
+        QueueAction::Front(t) => ("front", t),
+        QueueAction::Retry(t) => ("retry", t),
+    };
+    let answer = Daemon::resolve(url, token)?
+        .queue_action(&action_body(&pr, name))
+        .await?;
+    println!("{}", answer["message"].as_str().unwrap_or("done"));
+    for line in queue_lines(&answer) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// The rows of `GET /api/pr/queue` (or an action's answer), repository by repository.
+pub(crate) fn queue_rows(answer: &Value) -> Vec<forge_tui::queue_menu::QueueRow> {
+    let text = |v: &Value, k: &str| {
+        v.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut out = Vec::new();
+    for queue in answer["queues"].as_array().into_iter().flatten() {
+        for row in queue["rows"].as_array().into_iter().flatten() {
+            out.push(forge_tui::queue_menu::QueueRow {
+                session_id: text(row, "session_id"),
+                repo: text(queue, "repo"),
+                pr: row["pr_number"].as_u64(),
+                position: row["position"]
+                    .as_u64()
+                    .and_then(|p| usize::try_from(p).ok()),
+                state: text(row, "state"),
+                reason: text(row, "reason"),
+                pushes: row["pushes"]
+                    .as_u64()
+                    .and_then(|p| u32::try_from(p).ok())
+                    .unwrap_or(0),
+            });
+        }
+    }
+    out
 }
 
 fn text<'a>(row: &'a Value, key: &str) -> &'a str {
@@ -85,6 +146,41 @@ mod tests {
         );
         assert!(lines[2].contains("queued") && lines[2].contains("behind PR #7"));
         assert!(lines[3].starts_with("  -   PR #8") && lines[3].contains("conflicts in src/a.rs"));
+    }
+
+    #[test]
+    fn the_daemons_queue_becomes_rows_in_order_with_their_repository() {
+        let rows = queue_rows(&json!({"queues": [
+            {"repo": "r1 @ main", "rows": [
+                {"session_id": "a", "pr_number": 7, "position": 1, "state": "head", "reason": null, "pushes": 2},
+                {"session_id": "b", "pr_number": null, "position": null, "state": "skipped", "reason": "conflicts in x", "pushes": 0}]},
+            {"repo": "r2 @ main", "rows": [
+                {"session_id": "c", "pr_number": 7, "position": 1, "state": "queued", "reason": "x", "pushes": 0}]}]}));
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            (rows[0].pr, rows[0].position, rows[0].pushes),
+            (Some(7), Some(1), 2)
+        );
+        assert_eq!(rows[0].reason, "");
+        assert_eq!((rows[1].pr, rows[1].position), (None, None));
+        assert_eq!(rows[2].repo, "r2 @ main");
+        assert!(queue_rows(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn actions_name_a_pr_number_or_a_session() {
+        assert_eq!(
+            action_body("12", "hold"),
+            json!({"pr": 12, "action": "hold"})
+        );
+        assert_eq!(
+            action_body("#12", "front"),
+            json!({"pr": 12, "action": "front"})
+        );
+        assert_eq!(
+            action_body("s_ab12", "retry"),
+            json!({"session": "s_ab12", "action": "retry"})
+        );
     }
 
     #[test]
