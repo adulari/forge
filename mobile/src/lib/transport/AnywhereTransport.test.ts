@@ -274,6 +274,7 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/issues?session=s1&state=open");
     await transport.fetch("fany://host-1/api/issues/detail?session=s1&number=4");
     await transport.fetch("fany://host-1/api/issues/start", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/history/search?q=backoff");
     await transport.fetch("fany://host-1/api/issues/drain", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/issues/drains");
     await transport.fetch("fany://host-1/api/issues/drain/cancel", { method: "POST", body: "{}" });
@@ -299,6 +300,7 @@ describe("AnywhereTransport", () => {
       ["list_issues", "?session=s1&state=open"],
       ["issue_detail", "?session=s1&number=4"],
       ["start_issue", ""],
+      ["session_history_search", "s1"],
       ["drain_issues", ""],
       ["list_issue_drains", ""],
       ["cancel_issue_drain", ""],

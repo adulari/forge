@@ -74,6 +74,7 @@ export interface SessionHeaderProps {
   onMemory: () => void;
   onLattice: () => void;
   onJobs: () => void;
+  onHistorySearch: () => void;
   onManageLifecycle: () => void;
   /** Hands the conversation to Claude Code in a terminal (daemon: POST /api/sessions/{id}/claude). */
   onContinueClaude?: () => void;
@@ -258,7 +259,8 @@ function SessionHeaderImpl(props: SessionHeaderProps) {
           <ListRow title="Ports and project actions" leading={<Plug size={20} color={tokens.ink2} />} onPress={() => run(props.onPorts)} />
           <ListRow title="Manage project memory" leading={<Brain size={20} color={tokens.ink2} />} onPress={() => run(props.onMemory)} />
           <ListRow title="Inspect code symbol" leading={<Network size={20} color={tokens.ink2} />} onPress={() => run(props.onLattice)} />
-          <ListRow title="Background jobs" leading={<ListTree size={20} color={tokens.ink2} />} onPress={() => run(props.onJobs)} showSeparator={false} />
+          <ListRow title="Background jobs" leading={<ListTree size={20} color={tokens.ink2} />} onPress={() => run(props.onJobs)} />
+          <ListRow title="Search history" leading={<Search size={20} color={tokens.ink2} />} onPress={() => run(props.onHistorySearch)} showSeparator={false} />
         </ScrollView>
       </Sheet>
     </View>

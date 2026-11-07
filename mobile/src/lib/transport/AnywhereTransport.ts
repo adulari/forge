@@ -52,6 +52,7 @@ export type BridgeRoute =
   | "session_turns"
   | "blame"
   | "session_jobs"
+  | "session_history_search"
   | "session_job_tail"
   | "project_changes"
   | "git_hunk"
@@ -369,6 +370,10 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
   const sessionTurns = path.match(/^\/api\/sessions\/([^/]+)\/turns$/);
   if (sessionTurns && method === "GET") {
     return { route: "session_turns", parameters: [sessionPathParameter(sessionTurns[1])] };
+  }
+  const historySearch = path.match(/^\/api\/sessions\/([^/]+)\/history\/search$/);
+  if (historySearch && method === "GET") {
+    return { route: "session_history_search", parameters: [sessionPathParameter(historySearch[1])] };
   }
   const sessionJobs = path.match(/^\/api\/sessions\/([^/]+)\/jobs$/);
   if (sessionJobs && method === "GET") {

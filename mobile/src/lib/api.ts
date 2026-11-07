@@ -1881,6 +1881,27 @@ export interface JobTailResponse { id: number; running: boolean; status: string;
 export function getSessionJobs(baseUrl: string, session: string): Promise<SessionJobsResponse> {
   return request(baseUrl, `/api/sessions/${encodeURIComponent(session)}/jobs`);
 }
+export interface HistorySearchHit {
+  seq: number;
+  role: string;
+  /** The match in context; matched words are wrapped in `[` `]`. */
+  snippet: string;
+  /** Folded out of the model's context by a compaction (still stored, still readable). */
+  folded: boolean;
+}
+export interface HistorySearchResponse { hits: HistorySearchHit[]; }
+/** Ranked word search over a session's whole history, folded rows included. */
+export function searchSessionHistory(
+  baseUrl: string,
+  session: string,
+  query: string,
+  limit = 30,
+): Promise<HistorySearchResponse> {
+  return request(
+    baseUrl,
+    `/api/sessions/${encodeURIComponent(session)}/history/search${qs({ q: query, limit })}`,
+  );
+}
 export function getJobTail(
   baseUrl: string,
   session: string,

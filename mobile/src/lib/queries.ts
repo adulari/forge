@@ -91,6 +91,8 @@ import {
   getJobTail,
   getProjectChanges,
   getSessionJobs,
+  searchSessionHistory,
+  type HistorySearchResponse,
   getGitDiff,
   type GitPathsRequest,
   type GitCommitRequest,
@@ -1579,6 +1581,24 @@ export function useSessionJobs(sessionId: string | null, enabled = true, pollMs:
     queryFn: () => getSessionJobs(baseUrl as string, sessionId as string),
     enabled: enabled && baseUrl != null && sessionId != null,
     refetchInterval: enabled ? pollMs : false,
+    retry: false,
+  });
+}
+
+/** Ranked word search over one session's whole history; waits for a settled query of 2+ chars. */
+export function useHistorySearch(sessionId: string | null, query: string, enabled = true) {
+  const { baseUrl } = useAuth();
+  const normalized = query.trim();
+  const [settled, setSettled] = useState(normalized);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(normalized), 200);
+    return () => clearTimeout(timer);
+  }, [normalized]);
+  return useQuery<HistorySearchResponse>({
+    queryKey: ["history-search", baseUrl, sessionId ?? "", settled],
+    queryFn: () => searchSessionHistory(baseUrl as string, sessionId as string, settled),
+    enabled: enabled && baseUrl != null && sessionId != null && settled.length >= 2,
+    staleTime: 15_000,
     retry: false,
   });
 }
