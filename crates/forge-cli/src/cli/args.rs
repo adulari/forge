@@ -1079,90 +1079,6 @@ pub(crate) enum Command {
     },
 }
 
-/// `forge dispatch` subcommands. Every dispatch id accepts a unique prefix.
-#[derive(Subcommand)]
-pub(crate) enum DispatchCmd {
-    /// Start a dispatch: a coordinator session reads the project and proposes how to split the
-    /// request. Review it with `forge dispatch show` or on `forge board`.
-    Start {
-        /// The request, as one quoted argument.
-        prompt: String,
-        /// Project directory. Defaults to the current directory.
-        #[arg(long)]
-        cwd: Option<std::path::PathBuf>,
-        /// Run every item in the project directory itself instead of a git worktree of its own
-        /// (items must then not edit the same files). Needed outside a git repository.
-        #[arg(long)]
-        no_worktree: bool,
-        /// Permission mode of the item sessions (default: accept-edits).
-        #[arg(long, value_enum)]
-        mode: Option<DispatchModeArg>,
-        /// How many item sessions may run at once (1-8, default 4).
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=8))]
-        parallel: Option<u32>,
-        /// The most items the coordinator may propose (1-12, default 8).
-        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=12))]
-        max_items: Option<u32>,
-        /// Model for the coordinator session only; item sessions route as usual.
-        #[arg(long)]
-        model: Option<String>,
-    },
-    /// List dispatches, newest first: status, finished/total items, age, and the request.
-    List,
-    /// Show a dispatch: the request, the proposed split, and each item's state and session.
-    Show {
-        /// Dispatch id (a unique prefix is accepted).
-        id: String,
-    },
-    /// Approve the proposed split and start it.
-    Approve {
-        /// Dispatch id (a unique prefix is accepted).
-        id: String,
-        /// Approve only these item numbers, e.g. `1,3`. An item that depends on one left out
-        /// does not start either.
-        #[arg(long)]
-        only: Option<String>,
-    },
-    /// Ask the coordinator for a different split before anything starts.
-    Revise {
-        /// Dispatch id (a unique prefix is accepted).
-        id: String,
-        /// What should change, in one quoted argument.
-        feedback: String,
-    },
-    /// Cancel a dispatch: nothing new starts; sessions already running keep running.
-    Cancel {
-        /// Dispatch id (a unique prefix is accepted).
-        id: String,
-    },
-    /// Merge every finished item back into the project, in item order, one commit each on the
-    /// current branch. Stops at the first conflict; earlier merges stay committed.
-    Merge {
-        /// Dispatch id (a unique prefix is accepted).
-        id: String,
-    },
-}
-
-/// Permission mode of a dispatch's item sessions — `forge_types::PermissionMode` minus plan, which
-/// would leave every item unable to do its work.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub(crate) enum DispatchModeArg {
-    Default,
-    AcceptEdits,
-    Bypass,
-}
-
-impl DispatchModeArg {
-    /// The `mode` value `POST /api/dispatch` accepts.
-    pub(crate) fn wire(self) -> &'static str {
-        match self {
-            DispatchModeArg::Default => "default",
-            DispatchModeArg::AcceptEdits => "accept-edits",
-            DispatchModeArg::Bypass => "bypass",
-        }
-    }
-}
-
 #[derive(Subcommand)]
 pub(crate) enum VoiceOp {
     /// Transcribe an audio file (wav/m4a/aac/mp4) to text on stdout. Downloads the model on
@@ -1240,266 +1156,6 @@ pub(crate) enum SelfMcpAction {
 }
 
 #[derive(Subcommand)]
-pub(crate) enum SkillCmd {
-    /// Install a skill pack from a GitHub repository (owner/repo[@ref]) or HTTPS URL.
-    ///
-    /// Fetches every `.md` file from the repo root (or a `skills/` subdir if one exists) and
-    /// writes them into the user skills directory (`~/.config/forge/skills/`).
-    ///
-    /// See also: `forge plugin install` is the canonical, marketplace-aware pack installer
-    /// (`forge plugin install owner/repo [--marketplace <name>]`); this `skill install` is the
-    /// simpler GitHub/URL fetcher. Both land packs in the same skills directory.
-    ///
-    /// Examples:
-    ///   forge skill install anthropics/forge-skills
-    ///   forge skill install anthropics/forge-skills@main
-    Install {
-        /// GitHub `owner/repo[@ref]` shorthand or a full HTTPS URL.
-        url: String,
-    },
-    /// Distil a past session's transcript into a reusable Forge skill.
-    ///
-    /// Reads the persisted transcript of SESSION_ID, calls a cheap model to synthesise a
-    /// SKILL.md (a generalised, reusable methodology), and writes it where Forge discovers skills.
-    /// The new skill is immediately invokable in future sessions.
-    ///
-    /// Examples:
-    ///   forge skill from-session abc123
-    ///   forge skill from-session abc123 --name refactor-workflow --scope project
-    FromSession {
-        /// Session id (or unambiguous prefix) — see `forge sessions`.
-        session_id: String,
-        /// Override the skill slug (kebab-case, e.g. `refactor-workflow`).
-        /// Derived from the session's first user prompt when absent.
-        #[arg(long)]
-        name: Option<String>,
-        /// Where to write the skill: `user` (default), `project`, or `local` (`.forge/skills/`).
-        #[arg(long, default_value = "user")]
-        scope: Scope,
-    },
-    /// Export this machine's Forge skills, commands, and agents to a portable directory — the
-    /// inverse of `forge import`. Writes `<dest>/commands`, `<dest>/skills`, `<dest>/agents` in the
-    /// same layout import reads, so the bundle can be copied to another machine or shared. Existing
-    /// files in the destination are kept (never overwritten).
-    ///
-    /// Examples:
-    ///   forge skill export ./my-forge-skills
-    ///   forge skill export /tmp/bundle --scope project
-    Export {
-        /// Destination directory (created if absent).
-        dest: std::path::PathBuf,
-        /// Which scope to export: `user`, `project`, or `all` (default — the effective merged set).
-        #[arg(long, default_value = "all")]
-        scope: ExportScope,
-    },
-    /// Load a Forge bundle (a directory produced by `forge skill export`) into your skills —
-    /// the inverse of export, closing the round-trip. Alias: `load`.
-    ///
-    /// NOT to be confused with `forge import` (which pulls commands/skills from ANOTHER AI CLI —
-    /// Claude Code, Codex, Cursor, Aider); `forge skill import` loads a Forge-native bundle.
-    /// Reads `<src>/{commands,skills,agents}` and merges them via the real catalog readers
-    /// (malformed files skipped + warned); anything already present is kept, never overwritten.
-    ///
-    /// Examples:
-    ///   forge skill import ./my-forge-skills
-    ///   forge skill load /tmp/bundle --scope project
-    #[command(alias = "load")]
-    Import {
-        /// Source bundle directory (as written by `forge skill export`).
-        src: std::path::PathBuf,
-        /// Where to import: `user` (default), `project`, or `local` (`.forge/`).
-        #[arg(long, default_value = "user")]
-        scope: Scope,
-    },
-    /// Re-run path and binary normalization on all installed skills and commands in-place:
-    /// replaces legacy `~/.claude/` paths and `claude`/`codex` command references with their
-    /// Forge equivalents. Safe to run multiple times — only writes files that actually changed.
-    ///
-    /// Examples:
-    ///   forge skill normalize
-    ///   forge skill normalize --scope project
-    Normalize {
-        /// Which skills to normalize: `user` (default) or `project`/`local` (`.forge/`).
-        #[arg(long, value_enum)]
-        scope: Option<Scope>,
-        /// Legacy alias for `--scope project` (hidden; kept for back-compat).
-        #[arg(long, hide = true, conflicts_with = "scope")]
-        project: bool,
-    },
-    /// Re-fetch installed skill packs and update them in place, using the source recorded in the
-    /// lockfile (`~/.config/forge/installed-skills.toml`). With NAME, update only that pack;
-    /// without, update every recorded pack. Honors the pinned `@ref`/tag from install time.
-    ///
-    /// Examples:
-    ///   forge skill update
-    ///   forge skill update my-pack
-    Update {
-        /// Installed pack name to update (omit to update all).
-        name: Option<String>,
-    },
-}
-
-#[derive(Clone, Copy, ValueEnum, PartialEq, Eq)]
-pub(crate) enum ExportScope {
-    User,
-    Project,
-    All,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum GitCmd {
-    /// Install the `prepare-commit-msg` git hook that strips Claude/Codex co-author lines and
-    /// adds `Co-Authored-By: Forge <forge@adulari.dev>`. Works in linked worktrees and submodules,
-    /// keeps (and chains) an existing hook, and reports `core.hooksPath` instead of ignoring it. Requires `[git] coauthor = true` in
-    /// `.forge/config.toml` (or pass `--force` to install regardless).
-    Setup {
-        /// Install the hook even if `[git] coauthor` is not set in config.
-        #[arg(long)]
-        force: bool,
-    },
-    /// Print the hook script, for calling from your own hook when `core.hooksPath` is set.
-    Hook,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum PrsOp {
-    /// The merge queue per repository: position, state and reason for every PR in `merge` mode.
-    /// `hold`, `release`, `front` and `retry` act on one PR in it.
-    #[command(args_conflicts_with_subcommands = true)]
-    Queue {
-        /// Print the daemon's JSON instead of the table.
-        #[arg(long)]
-        json: bool,
-        /// Daemon base URL. Defaults to the local daemon's loopback origin.
-        #[arg(long)]
-        url: Option<String>,
-        /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
-        #[arg(long)]
-        token: Option<String>,
-        #[command(subcommand)]
-        action: Option<QueueAction>,
-    },
-    /// The independent review of a watched PR: verdict, model and every finding with file:line.
-    /// Needs the daemon (docs/features/pr-review-gate.md).
-    Review(QueueTarget),
-}
-
-#[derive(Subcommand)]
-pub(crate) enum QueueAction {
-    /// Take a PR out of the line without dropping its watch; the PRs behind it carry on.
-    Hold(QueueTarget),
-    /// Put a held PR back at its place.
-    Release(QueueTarget),
-    /// Move a PR to the front: it is the next to land.
-    Front(QueueTarget),
-    /// Re-enter a PR the queue handed back to its session, without waiting for a new push.
-    Retry(QueueTarget),
-}
-
-#[derive(clap::Args)]
-pub(crate) struct QueueTarget {
-    /// The PR number, or the session id when the same number is queued in two repositories.
-    pub(crate) pr: String,
-    /// Daemon base URL. Defaults to the local daemon's loopback origin.
-    #[arg(long)]
-    pub(crate) url: Option<String>,
-    /// Daemon token. Defaults to the persisted `serve-token` in the config dir.
-    #[arg(long)]
-    pub(crate) token: Option<String>,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum WorktreeOp {
-    /// Every worktree with source and build-artifact sizes reported separately, age, branch, and
-    /// merged/dirty/live state — worst offender first.
-    List,
-    /// Remove the worktrees that are provably safe: a stale registration, or a branch merged into
-    /// the default branch with a clean tree, no unpushed commits, and no live session. Everything
-    /// else is listed with the reason it was kept. Dry run unless `--yes`.
-    Reclaim {
-        /// Actually delete. Without this nothing is removed.
-        #[arg(long)]
-        yes: bool,
-        /// Also prune stale Cargo `target/` directories, including from worktrees being kept.
-        #[arg(long)]
-        artifacts: bool,
-        /// Require this many quiet hours since the newest artifact modification.
-        #[arg(long, default_value_t = 24)]
-        artifact_min_age_hours: u64,
-    },
-}
-
-#[derive(Subcommand)]
-pub(crate) enum LatticeOp {
-    /// (Re)index the working directory into the graph — incremental by file content hash.
-    Update {
-        /// Root to index (default: current directory).
-        path: Option<String>,
-        /// Index the root even though it exceeds the indexable-file ceiling. Does not unlock the
-        /// home/system directory — that root is never indexable.
-        #[arg(long)]
-        force: bool,
-    },
-    /// List every repository root that has rows in the index, flagging roots whose directory is
-    /// gone. The store is shared across projects, so a mistaken root (a home directory, a deleted
-    /// scratch clone) lingers here until pruned.
-    Roots,
-    /// Delete an indexed root — its files, symbols, edges and references — and optionally reclaim
-    /// the freed disk with VACUUM.
-    Prune {
-        /// Root to remove (as printed by `forge lattice roots`).
-        root: Option<String>,
-        /// Remove every root whose directory no longer exists on disk.
-        #[arg(long)]
-        stale: bool,
-        /// Rebuild the database file afterwards to actually return the space to the filesystem.
-        /// Requires exclusive access and temporarily needs free space of the database's own size.
-        #[arg(long)]
-        vacuum: bool,
-    },
-    /// Find symbols by name (case-insensitive); prints kind, location, and signature.
-    Query {
-        /// Symbol name or fragment.
-        query: String,
-    },
-    /// Blast radius: everything that references a symbol (transitively) — "what breaks if I change X".
-    Impact {
-        /// Symbol name.
-        symbol: String,
-        /// Confine the blast radius to a repo-relative path prefix (e.g. `crates/forge-core`), so a
-        /// symbol that exists in several crates doesn't mix their references together.
-        #[arg(long)]
-        scope: Option<String>,
-    },
-    /// Shortest call/reference chain of symbol names from A to B.
-    Path {
-        /// Source symbol name.
-        from: String,
-        /// Target symbol name.
-        to: String,
-    },
-    /// Decision provenance: who last changed a symbol's definition, when, and in which commit.
-    Why {
-        /// Symbol name.
-        symbol: String,
-    },
-    /// Compute + store embeddings for nodes lacking them (semantic retrieval). Uses the
-    /// `[lattice.embeddings]` backend (ollama by default). Runs automatically on startup when
-    /// embeddings are enabled — this is the manual trigger / one-off.
-    Embed,
-    /// Show index counts (files, symbols, edges, refs).
-    Status,
-    /// Print a compact, importance-ranked overview of the repo's key definitions, grouped by file
-    /// (aider-style repo-map). Selection is by PageRank so high-centrality symbols appear first;
-    /// within each file symbols are shown in source order. Output is token-budgeted.
-    Map {
-        /// Token budget for the map (default: 2000). Larger = more symbols shown.
-        #[arg(long, short = 'b')]
-        budget: Option<usize>,
-    },
-}
-
-#[derive(Subcommand)]
 pub(crate) enum MemoryCmd {
     /// Add a memory by hand.
     Add {
@@ -1569,58 +1225,6 @@ pub(crate) enum ServiceCmd {
     /// Emit the daemon-failure notification. Invoked by the unit's `OnFailure=`, not by hand.
     #[command(hide = true)]
     Alert,
-}
-
-#[derive(Subcommand)]
-pub(crate) enum QueueCmd {
-    /// Queue a task for the next drain.
-    ///
-    /// Examples:
-    ///   forge queue add "migrate the auth module to the new API" --budget 2.50
-    ///   forge queue add "add integration tests for billing" --mode bypass
-    Add {
-        /// The task each drained run works on (quote it).
-        task: Vec<String>,
-        /// Kill the run when its session cost crosses this USD cap (partial work is kept on the
-        /// branch, marked `over-budget`).
-        #[arg(long, value_name = "USD")]
-        budget: Option<f64>,
-        /// Permission mode for the run (default `accept-edits` — the worktree is the sandbox).
-        #[arg(long)]
-        mode: Option<String>,
-        /// Pin a specific model for the run.
-        #[arg(long)]
-        model: Option<String>,
-    },
-    /// List queued and drained tasks.
-    List,
-    /// Remove a task (id or unambiguous prefix). A running task refuses.
-    Remove {
-        /// Queue task id, or a prefix of one (see `forge queue list`).
-        id: String,
-    },
-    /// Drain this project's pending tasks now — one isolated worktree + result branch per task.
-    /// Point a `forge schedule` timer at this for the overnight autopilot.
-    Run {
-        /// Run the assay gate on each result diff; tasks with findings at or above this
-        /// severity are marked `gated` (their branch is still kept). Values: low|medium|high.
-        #[arg(long, value_name = "SEVERITY")]
-        gate: Option<FailOnSeverity>,
-        /// Drain at most this many tasks.
-        #[arg(long)]
-        max: Option<usize>,
-        /// Forward --mock to each run (offline deterministic provider; for tests/demos).
-        #[arg(long)]
-        mock: bool,
-        /// After each task that finishes `done`, re-run it on a free/subscription model
-        /// (credit-mode strict — a shadow never spends paid credit) in a throwaway worktree,
-        /// and record whether it kept up into the per-repo routing boosts `/duel` feeds.
-        /// See `forge scoreboard`.
-        #[arg(long)]
-        shadow: bool,
-    },
-    /// The morning digest: outcomes, branches, costs, and replay pointers, most recent first.
-    Report,
 }
 
 #[path = "args/import.rs"]
@@ -1697,3 +1301,26 @@ pub(crate) enum GoalCmd {
         json: bool,
     },
 }
+
+#[path = "args/dispatch.rs"]
+pub(crate) mod dispatch;
+#[allow(unused_imports)] // used by the binary, not the completions facade
+pub(crate) use dispatch::{DispatchCmd, DispatchModeArg};
+
+#[path = "args/skill.rs"]
+pub(crate) mod skill;
+#[allow(unused_imports)] // used by the binary, not the completions facade
+pub(crate) use skill::{ExportScope, SkillCmd};
+
+#[path = "args/vcs.rs"]
+pub(crate) mod vcs;
+#[allow(unused_imports)] // used by the binary, not the completions facade
+pub(crate) use vcs::{GitCmd, PrsOp, QueueAction, QueueTarget, WorktreeOp};
+
+#[path = "args/lattice.rs"]
+pub(crate) mod lattice;
+pub(crate) use lattice::LatticeOp;
+
+#[path = "args/queue.rs"]
+pub(crate) mod queue;
+pub(crate) use queue::QueueCmd;
