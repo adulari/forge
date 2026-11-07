@@ -49,6 +49,22 @@ indentation, duplicate keys and explicit block indentation are errors.
 | `forge ci run [--keep-going] [--fresh] [--step <text>]` | Run it. Fail-fast by default; a step that passed on this exact tree (HEAD + uncommitted state) last time is not run again unless `--fresh`. |
 | `forge ci status` | The last run in this worktree. |
 | `/ci` (TUI) | The same plan as a list: pass / fail / skip with the reason, last run, `r` to run. |
+| Local CI (desktop, web, phone) | Session menu or the command palette: the plan with each step's job, command and environment, the skips with their reasons, the last result with the output tail of what failed, and a Run button. |
+
+The phone and desktop read `GET /api/sessions/{id}/ci` and run `POST /api/sessions/{id}/ci/run`. Both
+are bridged for Anywhere (`session_ci`, `session_ci_run`) and need no ship opt-in: the run is a
+session action under the same `prompt` scope as a message, since it executes the repository's own
+workflow commands the way a turn does. A view-only device sees the snapshot summary below and can
+read the plan, but cannot run it.
+
+### On the session screen
+
+The remote snapshot carries an additive `ci` object once the repository has had a run in the
+daemon (or has a saved one): `runnable` / `skipped` counts, the `running` step while a run is going,
+`steps` with `pass` / `fail` / `skip` / `not_run` per step, `finished_unix`, `ok`, and `blocked`,
+the step that is holding a goal (`via: "goal"`) or a push (`via: "push"`, ship and the merge queue)
+back. The session screen shows `blocked` as a banner with an Open button, and a run in flight as a
+progress line. A later passing run clears the block.
 
 A step whose command is not installed here (exit 127, a missing cargo subcommand) is reported as
 `skipped (not installed)`, not as a failure.
@@ -63,8 +79,14 @@ A step whose command is not installed here (exit 127, a missing cargo subcommand
   refuses the `push` step with the same text.
 - **Merge queue.** After merging the base in and running the project's `verify` actions, the plan
   runs before the queue pushes; a failure hands the failing step to the session.
-- **PR Watch fix turns** only get a line in the prompt asking the session to run `forge ci run`
-  before pushing; the session pushes on its own, so Forge cannot intercept that push.
+- **PR Watch fix turns.** The prompt asks the session to run `forge ci run` before pushing, but the
+  session pushes on its own, so Forge cannot intercept that push. What the watch does instead:
+  once a fix turn has left a new commit and the session is idle, it runs the plan on that head
+  (`serve_pr_watch/local_ci.rs`), holds the poll and the merge while it runs, and sends a failing
+  step back to the session as the next prompt instead of waiting for the remote CI to fail the
+  same way. Two failed attempts in a row block the watch with the reason. A passing plan, a repo
+  without runnable steps, `[ci] gate = "off"` and `FORGE_CI_GATE=off` leave the watch as it was.
+  The check state is in memory: a daemon restart drops it and the watch polls as before.
 
 ## 5. Configuration (`.forge/ci.toml`, or a `[ci]` table in `.forge/config.toml`)
 

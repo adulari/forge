@@ -33,6 +33,8 @@ use crate::serve_pr::{
     merge_in, parse_summary, Gh, GhError, MergeRequest, PrSummary, SUMMARY_FIELDS,
 };
 
+mod local_ci;
+
 const TICK: Duration = Duration::from_secs(2);
 const POLL_SECS: i64 = 30;
 const MAX_FIX_TURNS: u32 = 4;
@@ -451,6 +453,9 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
             continue;
         };
         let free = !snapshot.busy && snapshot.question.is_none();
+        if local_ci::gate(state, &watch, &root, free, &handle.input_tx).await {
+            continue;
+        }
         let mut next = watch.clone();
         let all = registry().all();
         let outcome = advance(gh, &root, &mut next, all, free, now, None).await;
@@ -458,6 +463,7 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
         registry().store(&watch.session_id, next.clone());
         announce(state, &watch.session_id, announcement).await;
         if let Some(text) = outcome.prompt {
+            local_ci::note_prompt(&watch.session_id, &root);
             let _ = handle
                 .input_tx
                 .send(crate::remote::RemoteInput::Prompt {
