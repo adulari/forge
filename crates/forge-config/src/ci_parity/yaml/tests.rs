@@ -189,3 +189,25 @@ fn ci_yml_shapes_survive() {
     let script = guard[0].get("run").and_then(Yaml::as_str).unwrap();
     assert!(script.contains("for entry in") && script.contains("${{ needs.fmt.result }}"));
 }
+
+#[test]
+fn deep_nesting_is_an_error_not_a_stack_overflow() {
+    let n = 100_000;
+    let flow = format!("jobs: {}{}", "[".repeat(n), "]".repeat(n));
+    let flow_map = format!("jobs: {}{}", "{a: ".repeat(n), "}".repeat(n));
+    let block = format!("{}x", "- ".repeat(n));
+    let handle = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(move || {
+            [flow, flow_map, block]
+                .iter()
+                .map(|src| parse(src).map(|_| ()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    for result in handle.join().unwrap() {
+        assert!(result.unwrap_err().msg.contains("nesting too deep"));
+    }
+    let nested = format!("a: {}1{}", "[".repeat(32), "]".repeat(32));
+    assert!(parse(&nested).is_ok());
+}

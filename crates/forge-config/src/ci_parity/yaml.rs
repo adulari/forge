@@ -64,6 +64,9 @@ impl fmt::Display for YamlError {
 
 type Res<T> = Result<T, YamlError>;
 
+/// Real workflows nest a handful of levels; the cap keeps hostile input from overflowing the stack.
+const MAX_DEPTH: usize = 64;
+
 struct Line {
     no: usize,
     indent: usize,
@@ -73,6 +76,7 @@ struct Line {
 struct Parser {
     lines: Vec<Line>,
     pos: usize,
+    depth: usize,
 }
 
 pub fn parse(src: &str) -> Res<Yaml> {
@@ -102,7 +106,11 @@ pub fn parse(src: &str) -> Res<Yaml> {
             text: trimmed.trim_end().to_string(),
         });
     }
-    let mut p = Parser { lines, pos: 0 };
+    let mut p = Parser {
+        lines,
+        pos: 0,
+        depth: 0,
+    };
     p.skip_insignificant();
     if p.pos >= p.lines.len() {
         return Ok(Yaml::Null);
@@ -140,10 +148,20 @@ impl Parser {
     }
 
     fn parse_block(&mut self, indent: usize) -> Res<Yaml> {
+        self.depth += 1;
+        let value = self.parse_block_inner(indent);
+        self.depth -= 1;
+        value
+    }
+
+    fn parse_block_inner(&mut self, indent: usize) -> Res<Yaml> {
         let (no, text) = {
             let l = &self.lines[self.pos];
             (l.no, l.text.clone())
         };
+        if self.depth > MAX_DEPTH {
+            return fail(no, "nesting too deep");
+        }
         if is_dash(&text) {
             self.parse_seq(indent)
         } else if split_key(&text, no)?.is_some() {
@@ -273,6 +291,7 @@ impl Parser {
                     chars: joined.chars().collect(),
                     i: 0,
                     no,
+                    depth: self.depth,
                 };
                 let value = f.value()?;
                 f.ws();
@@ -537,6 +556,7 @@ struct Flow {
     chars: Vec<char>,
     i: usize,
     no: usize,
+    depth: usize,
 }
 
 impl Flow {
@@ -551,6 +571,16 @@ impl Flow {
     }
 
     fn value(&mut self) -> Res<Yaml> {
+        self.depth += 1;
+        let value = self.value_inner();
+        self.depth -= 1;
+        value
+    }
+
+    fn value_inner(&mut self) -> Res<Yaml> {
+        if self.depth > MAX_DEPTH {
+            return fail(self.no, "nesting too deep");
+        }
         self.ws();
         match self.chars.get(self.i) {
             Some('[') => {
