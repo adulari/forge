@@ -65,7 +65,7 @@ pub(super) fn decide(watch: &Watch, pr: &PrSummary, comments: &[String], free: b
         return Decision::Wait(Some("the PR is a draft".into()));
     }
     let conflicting = pr.mergeable == "conflicting" || pr.merge_state == "dirty";
-    if watch.mode == Mode::Merge && watch.method == "auto" && !watch.auto_armed && !conflicting {
+    if super::auto_merge::arms_now(watch, pr, comments, conflicting) {
         if let Some(reason) = &watch.hold {
             return Decision::Wait(Some(reason.clone()));
         }

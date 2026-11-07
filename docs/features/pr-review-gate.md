@@ -10,7 +10,9 @@ the review runs again on the head the session pushes; a clean review lets the me
 1. PR Watch reaches its merge decision (checks green, no unresolved comments, not held, no
    conflicts). Before it merges, `serve_pr_review::gate` runs. The gate sits after that decision
    for every method, so GitHub auto-merge (`method = auto`) is gated too: `gh pr merge --auto`
-   is not called until the head is clean.
+   is not called until the head is clean. Once armed, PR Watch turns GitHub auto-merge off again
+   (`gh pr merge --disable-auto`) when the head moves, the merge queue holds the PR, or a fix
+   turn or a block follows, and arms it again only after the new head is reviewed.
 2. The reviewer gets `gh pr diff` for the PR (capped at 150 KB), once per head SHA. A review
    that already exists for the current head is reused, never repeated. The review runs as a
    background job (at most two at a time); the watch shows `review running` and every other

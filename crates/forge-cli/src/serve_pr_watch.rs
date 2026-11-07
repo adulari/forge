@@ -33,6 +33,7 @@ use crate::serve_pr::{
     merge_in, parse_summary, Gh, GhError, MergeRequest, PrSummary, SUMMARY_FIELDS,
 };
 
+mod auto_merge;
 mod decide;
 mod local_ci;
 use decide::{comment_ids, decide, Decision};
@@ -72,6 +73,8 @@ pub(crate) struct Watch {
     seen_comments: Vec<String>,
     pub(crate) fix_turns: u32,
     auto_armed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    armed_head: Option<String>,
     pub(crate) last_checked: Option<i64>,
     pub(crate) last_action: Option<String>,
     pub(crate) created_at: i64,
@@ -108,6 +111,7 @@ impl Watch {
             seen_comments: Vec::new(),
             fix_turns: 0,
             auto_armed: false,
+            armed_head: None,
             last_checked: None,
             last_action: None,
             created_at: now,
@@ -237,6 +241,7 @@ impl Registry {
                     w.fix_turns = 0;
                     w.last_key = None;
                     w.auto_armed = false;
+                    w.armed_head = None;
                     w.pushed = None;
                     w.queue = None;
                     w.hold = None;
@@ -616,7 +621,7 @@ pub(crate) async fn poll_once(
 ) -> Outcome {
     let before = watch.clone();
     watch.last_checked = Some(now);
-    let fields = format!("{SUMMARY_FIELDS},comments,reviews");
+    let fields = format!("{SUMMARY_FIELDS},comments,reviews,autoMergeRequest");
     let raw = match gh.run(root, &["pr", "view", "--json", &fields], None).await {
         Ok(raw) => raw,
         Err(GhError::NoPr) => {
@@ -647,6 +652,9 @@ pub(crate) async fn poll_once(
     if pr.checks.failing == 0 && pr.checks.pending == 0 {
         watch.fix_turns = 0;
     }
+    if !auto_merge::disarm_if_stale(gh, root, watch, &pr, &value).await {
+        return finish(&before, watch, Outcome::default());
+    }
     let mut outcome = Outcome::default();
     let mut decision = decide(watch, &pr, &comments, free);
     if decision == Decision::Merge && watch.mode == Mode::Merge {
@@ -660,6 +668,7 @@ pub(crate) async fn poll_once(
             }
         };
     }
+    auto_merge::disarm_before_acting(gh, root, watch, &pr, &value, &mut decision).await;
     match decision {
         Decision::Wait(reason) => watch.blocked_reason = reason,
         Decision::Green => {
@@ -693,6 +702,7 @@ pub(crate) async fn poll_once(
             }
             Ok(false) => {
                 watch.auto_armed = true;
+                watch.armed_head = Some(pr.head_sha.clone());
                 watch.blocked_reason = None;
                 watch.last_action = Some("auto-merge enabled".into());
             }

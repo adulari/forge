@@ -362,3 +362,133 @@ async fn giving_up_pushes_the_reason_and_the_pushed_state_survives_a_restart() {
         "restart must not re-push"
     );
 }
+
+fn view_at(dir: &Path, sha: &str, checks: &str, merge_state: &str, extra: &str) {
+    view(dir, "OPEN", checks, merge_state, extra);
+    let path = dir.join("view.json");
+    let body = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(path, body.replace("abcdef1234567", sha)).unwrap();
+}
+
+const ARMED: &str = r#","autoMergeRequest":{"enabledAt":"2026-11-06T00:00:00Z"}"#;
+
+#[tokio::test]
+async fn auto_merge_is_turned_off_before_a_fix_turn_and_rearmed_only_on_the_next_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
+    view_at(dir.path(), "h1", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    assert!(watch.auto_armed);
+
+    view_at(dir.path(), "h1", FAILING, "BLOCKED", ARMED);
+    let fix = poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    assert!(
+        fix.prompt.is_some(),
+        "the failing check goes to the session"
+    );
+    assert!(
+        calls(dir.path()).contains("pr merge 7 --disable-auto"),
+        "GitHub must not merge whatever the fix turn pushes: {}",
+        calls(dir.path())
+    );
+    assert!(!watch.auto_armed);
+
+    poll_once(&gh, dir.path(), &mut watch, true, 90).await;
+    assert_eq!(
+        calls(dir.path()).matches("--auto --squash").count(),
+        1,
+        "no re-arm while the fix is owed"
+    );
+
+    view_at(dir.path(), "h2", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 130).await;
+    assert!(calls(dir.path()).contains("--auto --squash --match-head-commit h2"));
+    assert_eq!(watch.armed_head.as_deref(), Some("h2"));
+}
+
+#[tokio::test]
+async fn auto_merge_is_turned_off_when_the_head_moves_or_the_queue_holds_the_pr() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
+    view_at(dir.path(), "h1", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+
+    view_at(dir.path(), "h2", PENDING, "BLOCKED", ARMED);
+    poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    let log = calls(dir.path());
+    let off = log
+        .find("--disable-auto")
+        .expect("an owner push is not vouched for");
+    let rearm = log
+        .find("--match-head-commit h2")
+        .expect("h2 is gated and armed");
+    assert!(off < rearm, "{log}");
+
+    watch.hold = Some("out of the merge queue: verify failed".into());
+    poll_once(&gh, dir.path(), &mut watch, true, 90).await;
+    assert_eq!(calls(dir.path()).matches("--disable-auto").count(), 2);
+    assert!(!watch.auto_armed);
+    assert!(watch
+        .blocked_reason
+        .as_deref()
+        .unwrap()
+        .contains("verify failed"));
+}
+
+#[tokio::test]
+async fn auto_merge_github_already_dropped_is_cleared_without_a_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
+    view_at(dir.path(), "h1", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    watch.hold = Some("held by the owner".into());
+    view_at(
+        dir.path(),
+        "h1",
+        PENDING,
+        "BLOCKED",
+        r#","autoMergeRequest":null"#,
+    );
+    poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    assert!(!watch.auto_armed);
+    assert!(!calls(dir.path()).contains("--disable-auto"));
+}
+
+#[tokio::test]
+async fn a_fix_turn_waits_while_auto_merge_cannot_be_turned_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gh");
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2\" in\n  view) cat {view} ;;\n  merge) [ \"$4\" = --disable-auto ] && [ -e {deny} ] && exit 1; exit 0 ;;\nesac\n",
+        log = dir.path().join("calls.log").display(),
+        view = dir.path().join("view.json").display(),
+        deny = dir.path().join("deny").display(),
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gh = Gh::with_program(path);
+    let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
+    view_at(dir.path(), "h1", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+
+    std::fs::write(dir.path().join("deny"), "").unwrap();
+    view_at(dir.path(), "h1", FAILING, "BLOCKED", ARMED);
+    let held = poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    assert!(
+        held.prompt.is_none(),
+        "no new code while GitHub may merge it"
+    );
+    assert!(watch.auto_armed && watch.fix_turns == 0);
+    assert!(watch
+        .blocked_reason
+        .as_deref()
+        .unwrap()
+        .contains("could not turn off GitHub auto-merge"));
+
+    std::fs::remove_file(dir.path().join("deny")).unwrap();
+    let fix = poll_once(&gh, dir.path(), &mut watch, true, 90).await;
+    assert!(fix.prompt.is_some() && !watch.auto_armed);
+}
