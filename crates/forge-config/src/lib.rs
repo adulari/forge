@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 mod adaptive_effort;
 pub mod advisor;
+pub mod ci_parity;
 pub mod expert;
 mod statusline_toggle;
 pub use statusline_toggle::WidgetToggle;
