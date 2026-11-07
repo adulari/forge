@@ -13,6 +13,8 @@ import {
   goalMeta,
   goalStartCommand,
   liveElapsedSecs,
+  missionGroups,
+  missionLine,
   relayLine,
   resumeLine,
   resolveGoal,
@@ -187,6 +189,68 @@ describe("goalStartCommand", () => {
   it("asks for a contract only when the switch is on", () => {
     expect(goalStartCommand("  ship it ", false)).toBe("/goal ship it");
     expect(goalStartCommand("ship it", true)).toBe("/goal --contract ship it");
+  });
+
+  it("asks for a mission, which includes its contracts, when the mission switch is on", () => {
+    expect(goalStartCommand(" ship it ", false, true)).toBe("/goal --mission ship it");
+    expect(goalStartCommand("ship it", true, true)).toBe("/goal --mission ship it");
+  });
+});
+
+describe("mission", () => {
+  const assertion = (id: number, state: "pass" | "fail" | "pending") => ({
+    id,
+    text: `fact ${id}`,
+    command: `test -f f${id}`,
+    expect: "",
+    state,
+    reason: state === "fail" ? "exit 1" : "",
+    proof: "",
+  });
+  const mission = {
+    headline: "milestone 2/3: 1/2 pass",
+    approved: true,
+    rounds: 3,
+    passed: 3,
+    total: 6,
+    checked_at: 1_700_000_000,
+    assertions: [
+      assertion(1, "pass"),
+      assertion(2, "pass"),
+      assertion(3, "pass"),
+      assertion(4, "fail"),
+      assertion(5, "pending"),
+      assertion(6, "pending"),
+    ],
+    mission: {
+      current: 2,
+      total: 3,
+      progress: "milestone 2/3: 1/2 pass",
+      milestones: [
+        { index: 1, title: "lexer", state: "done" as const, passed: 2, total: 2, assertion_ids: [1, 2] },
+        { index: 2, title: "parser", state: "active" as const, passed: 1, total: 2, assertion_ids: [3, 4] },
+        { index: 3, title: "cli", state: "upcoming" as const, passed: 0, total: 2, assertion_ids: [5, 6] },
+      ],
+    },
+  };
+
+  it("groups the contract rows under their milestone with a progress line", () => {
+    const goal = resolveGoal({ goal: wire({ contract: mission }), notes: [] });
+    expect(goal && missionLine(goal)).toBe("Mission · milestone 2/3: 1/2 pass");
+    const groups = goal && missionGroups(goal);
+    expect(groups?.map((g) => g.tally)).toEqual(["done 2/2", "current 1/2 pass", "upcoming, 2 assertions"]);
+    expect(groups?.[1].rows.map((r) => r.id)).toEqual([3, 4]);
+    expect(groups?.[1].rows[1].mark).toBe("✗");
+    expect(goal && contractHeadline(goal)).toBe("Contract · milestone 2/3: 1/2 pass");
+  });
+
+  it("is absent for a flat contract, no contract, or a host that predates missions", () => {
+    const { mission: _gone, ...flat } = mission;
+    const goal = resolveGoal({ goal: wire({ contract: flat }), notes: [] });
+    expect(goal && missionGroups(goal)).toBeNull();
+    expect(goal && missionLine(goal)).toBeNull();
+    const bare = resolveGoal({ goal: wire(), notes: [] });
+    expect(bare && missionGroups(bare)).toBeNull();
   });
 });
 

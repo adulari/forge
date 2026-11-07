@@ -135,6 +135,44 @@ describe("GoalBanner", () => {
     expect(html).toContain("✗");
   });
 
+  it("groups a mission's assertions under their milestone with the progress line", () => {
+    const row = (id: number, state: "pass" | "fail" | "pending") => ({
+      id,
+      text: `fact ${id}`,
+      command: `test -f f${id}`,
+      expect: "",
+      state,
+      reason: state === "fail" ? "exit 1" : "",
+      proof: "",
+    });
+    const contract = {
+      headline: "milestone 2/3: 1/2 pass",
+      approved: true,
+      rounds: 2,
+      passed: 3,
+      total: 6,
+      checked_at: 1_700_000_000,
+      assertions: [row(1, "pass"), row(2, "pass"), row(3, "pass"), row(4, "fail"), row(5, "pending"), row(6, "pending")],
+      mission: {
+        current: 2,
+        total: 3,
+        progress: "milestone 2/3: 1/2 pass",
+        milestones: [
+          { index: 1, title: "lexer", state: "done" as const, passed: 2, total: 2, assertion_ids: [1, 2] },
+          { index: 2, title: "parser", state: "active" as const, passed: 1, total: 2, assertion_ids: [3, 4] },
+          { index: 3, title: "cli", state: "upcoming" as const, passed: 0, total: 2, assertion_ids: [5, 6] },
+        ],
+      },
+    };
+    const { html } = render(snapshot({ goal: goal({ contract }) }));
+    expect(html).toContain("Mission · milestone 2/3: 1/2 pass");
+    expect(html).toContain("Milestone 1 · lexer · done 2/2");
+    expect(html).toContain("Milestone 2 · parser · current 1/2 pass");
+    expect(html).toContain("Milestone 3 · cli · upcoming, 2 assertions");
+    expect(html.indexOf("Milestone 2 ·")).toBeLessThan(html.indexOf("4. fact 4"));
+    expect(html.indexOf("4. fact 4")).toBeLessThan(html.indexOf("Milestone 3 ·"));
+  });
+
   it("omits the contract table for a goal without one", () => {
     expect(render(snapshot({ goal: goal() })).html).not.toContain("Contract");
   });

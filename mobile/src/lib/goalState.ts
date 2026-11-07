@@ -121,9 +121,11 @@ export function goalActions(goal: GoalView): GoalAction[] {
 }
 
 /** The prompt that starts a goal; `contract` asks for a validation contract to be drafted and
- * approved first (`/goal --contract`). */
-export function goalStartCommand(objective: string, contract: boolean): string {
-  return `/goal ${contract ? "--contract " : ""}${objective.trim()}`;
+ * approved first (`/goal --contract`), `mission` for milestones, each with its own contract
+ * (`/goal --mission`, which includes the contract). */
+export function goalStartCommand(objective: string, contract: boolean, mission = false): string {
+  const flag = mission ? "--mission " : contract ? "--contract " : "";
+  return `/goal ${flag}${objective.trim()}`;
 }
 
 export function goalInput(action: GoalAction, objective?: string): RemoteInput {
@@ -233,6 +235,40 @@ export function contractRows(goal: GoalView): ContractRow[] | null {
       detail,
     };
   });
+}
+
+export interface MissionGroup {
+  index: number;
+  title: string;
+  state: "done" | "active" | "upcoming";
+  /** `done`, `current 3/5 pass` or `upcoming, 4 assertions`. */
+  tally: string;
+  rows: ContractRow[];
+}
+
+/** The contract rows grouped under their milestone; `null` unless the goal is a mission. */
+export function missionGroups(goal: GoalView): MissionGroup[] | null {
+  const mission = goal.contract?.mission;
+  const rows = contractRows(goal);
+  if (!mission || !rows) return null;
+  return mission.milestones.map((m) => ({
+    index: m.index,
+    title: m.title,
+    state: m.state,
+    tally:
+      m.state === "done"
+        ? `done ${m.passed}/${m.total}`
+        : m.state === "active"
+          ? `current ${m.passed}/${m.total} pass`
+          : `upcoming, ${m.total} assertions`,
+    rows: rows.filter((r) => m.assertion_ids.includes(r.id)),
+  }));
+}
+
+/** `Mission · milestone 2/4: 3/5 pass`; `null` unless the goal is a mission. */
+export function missionLine(goal: GoalView): string | null {
+  const mission = goal.contract?.mission;
+  return mission ? `Mission · ${mission.progress}` : null;
 }
 
 /** `Contract · 2/3 pass`, or `Contract · 3 assertions` before the validator has run. */

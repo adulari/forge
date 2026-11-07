@@ -231,6 +231,28 @@ export interface SnapshotContract {
   /** Unix seconds of the last validator run. */
   checked_at: number | null;
   assertions: SnapshotAssertion[];
+  /** Present for a `/goal --mission` run: the milestones the assertions are grouped by. */
+  mission?: SnapshotMission | null;
+}
+
+export interface SnapshotMilestone {
+  /** 1-based. */
+  index: number;
+  title: string;
+  state: "done" | "active" | "upcoming";
+  passed: number;
+  total: number;
+  /** The contract assertions that prove this milestone, in order. */
+  assertion_ids: number[];
+}
+
+/** A mission: milestones done in order, each by a fresh worker. `progress` is the host's
+ * ready-to-show line, e.g. `milestone 2/4: 3/5 pass`. */
+export interface SnapshotMission {
+  current: number;
+  total: number;
+  progress: string;
+  milestones: SnapshotMilestone[];
 }
 
 /** How much of a goal's spend envelope is used. `unit` is `percent` of a subscription window or

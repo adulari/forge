@@ -35,13 +35,14 @@ export function GoalSheet({
   const editing = mode === "edit";
   const [goal, setGoal] = useState(initialValue);
   const [contract, setContract] = useState(false);
+  const [mission, setMission] = useState(false);
   useEffect(() => {
     if (visible) setGoal(initialValue);
   }, [visible, initialValue]);
   const submit = () => {
     const value = goal.trim();
     if (value) {
-      onSubmit(editing ? `/goal edit ${value}` : goalStartCommand(value, contract));
+      onSubmit(editing ? `/goal edit ${value}` : goalStartCommand(value, contract, mission));
       setGoal("");
       onClose();
     }
@@ -81,7 +82,18 @@ export function GoalSheet({
                 Forge drafts 3 to 12 checks first and asks you to approve them. The goal is done only when an independent validator passes every one.
               </Text>
             </View>
-            <Switch value={contract} onValueChange={setContract} accessibilityLabel="Validation contract" testID="goal-contract-switch" />
+            <Switch value={contract || mission} onValueChange={setContract} disabled={mission} accessibilityLabel="Validation contract" testID="goal-contract-switch" />
+          </View>
+        )}
+        {editing ? null : (
+          <View style={styles.contractRow}>
+            <View style={styles.contractText}>
+              <Text style={[type.bodyBold, { color: tokens.ink }]}>Mission</Text>
+              <Text style={[type.sub, { color: tokens.ink3 }]}>
+                For a big goal: Forge drafts 2 to 6 milestones, each with its own checks, and you approve them on one card. Each milestone runs in a fresh worker once the one before it passes.
+              </Text>
+            </View>
+            <Switch value={mission} onValueChange={setMission} accessibilityLabel="Mission" testID="goal-mission-switch" />
           </View>
         )}
         <Button label={editing ? "Save wording" : "Set goal and start"} onPress={submit} disabled={!goal.trim()} fullWidth />
