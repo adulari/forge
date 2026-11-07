@@ -456,4 +456,74 @@ mod tests {
         assert!(!has("MARK-17-END"), "the deleted session survived a vacuum");
         assert!(has("MARK-16-END") && has("MARK-18-END"));
     }
+
+    #[test]
+    fn a_searched_session_leaves_no_terms_in_the_search_index_after_delete_and_vacuum() {
+        searched_session_delete_leaves_no_index_terms(false);
+    }
+
+    #[test]
+    fn a_store_indexed_before_secure_delete_was_set_still_purges_index_terms() {
+        searched_session_delete_leaves_no_index_terms(true);
+    }
+
+    fn searched_session_delete_leaves_no_index_terms(legacy_v57: bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("forge.db");
+        let store = Store::open(&path).unwrap();
+        let victim = store.create_session("/proj", "Smith").unwrap();
+        store
+            .add_message(
+                &victim,
+                0,
+                Role::User,
+                "my password is xylophonequartz and apikey zqvbnmtoken",
+                None,
+            )
+            .unwrap();
+        let other = store.create_session("/other", "Smith").unwrap();
+        store
+            .add_message(&other, 0, Role::User, "keep the neighbour searchable", None)
+            .unwrap();
+        assert_eq!(
+            store
+                .search_session_history(&victim, "xylophonequartz", 5)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search_session_history(&other, "neighbour", 5)
+                .unwrap()
+                .len(),
+            1
+        );
+        if legacy_v57 {
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO message_fts(message_fts, rank) VALUES('secure-delete', 0)",
+                    [],
+                )
+                .unwrap();
+        }
+        store.delete_session_report(&victim).unwrap();
+        store.vacuum().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let has = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
+        assert!(
+            !has("phonequartz"),
+            "a deleted term survived in message_fts"
+        );
+        assert!(!has("vbnmtoken"), "a deleted term survived in message_fts");
+        assert_eq!(
+            store
+                .search_session_history(&other, "neighbour", 5)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
 }

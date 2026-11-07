@@ -383,8 +383,13 @@ impl Store {
         Ok(rows.collect::<std::result::Result<_, _>>()?)
     }
 
-    /// Drop a session's search index rows. Called when its messages go away.
+    /// Drop a session's search index rows. Called when its messages go away. The option is set
+    /// again here for stores that ran migration 57 before it set `secure-delete`.
     pub(crate) fn drop_recall_index(conn: &Connection, session_id: &str) -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO message_fts(message_fts, rank) VALUES('secure-delete', 1)",
+            [],
+        )?;
         conn.execute(
             "DELETE FROM message_fts WHERE rowid IN (SELECT rowid FROM message WHERE session_id = ?1)",
             [session_id],
