@@ -27,6 +27,7 @@ mod m0054_provider_verdict;
 mod m0055_report_indexes;
 mod m0056_turn;
 mod m0057_recall_index;
+mod m0058_relay;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
@@ -54,6 +55,7 @@ use m0054_provider_verdict::migration_0054;
 use m0055_report_indexes::migration_0055;
 use m0056_turn::migration_0056;
 use m0057_recall_index::migration_0057;
+use m0058_relay::migration_0058;
 mod usage;
 pub(super) use usage::migrate_subscription_usage;
 use usage::migration_0030;
@@ -718,6 +720,7 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0055,
     migration_0056,
     migration_0057,
+    migration_0058,
 ];
 
 /// Migration #31: give existing stores the `model_pricing.cache_read_per_1k` column.

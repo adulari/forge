@@ -48,6 +48,7 @@ mod provider_items_store;
 mod provider_verdict_store;
 mod queued_prompt_store;
 mod recall_store;
+mod relay_store;
 mod turn_store;
 pub use provider_verdict_store::{ProviderVerdict, VerdictChange};
 pub use queued_prompt_store::QueuedPrompt;
@@ -114,6 +115,7 @@ pub use memory::{Memory, MemoryAdded};
 pub use model_report_store::ModelReportRow;
 pub use project_notes_store::{project_key, ProjectNotes, ProjectTodo, ScratchpadSave};
 pub use recall_store::{FoldPreviewRow, FoldedHit, FoldedRead, FoldedRow};
+pub use relay_store::RelayLink;
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 pub use transcript_read_store::HistoryFilter;
 pub use usage_activity_store::{streaks, ActivityStreaks, DayUsage};
@@ -123,7 +125,7 @@ pub use usage_store::ModelUsageRow;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 57;
+const SCHEMA_VERSION: i64 = 58;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);

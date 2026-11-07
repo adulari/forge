@@ -408,6 +408,18 @@ CREATE TABLE IF NOT EXISTS turn (
 );
 CREATE INDEX IF NOT EXISTS idx_turn_session_started ON turn(session_id, started_at);
 
+-- Fresh-worker hand-offs: a goal that wedged or wore its session out continues in a new session
+-- on the same worktree. Also created in migration_0058.
+CREATE TABLE IF NOT EXISTS session_relay (
+    successor_id   TEXT PRIMARY KEY,
+    predecessor_id TEXT NOT NULL,
+    reason         TEXT NOT NULL,
+    detail         TEXT NOT NULL DEFAULT '',
+    brief          TEXT NOT NULL DEFAULT '',
+    created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_relay_predecessor ON session_relay(predecessor_id);
+
 -- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
 -- queued headless task; a drain executes them in isolated worktrees and records the outcome
 -- back onto the row. Local machine state only — deliberately not in PORTABLE_METADATA_TABLES

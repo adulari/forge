@@ -18,6 +18,13 @@ pub struct GoalConfig {
     pub contract: bool,
     /// Seconds one contract check may run before the validator kills it and fails the assertion.
     pub contract_check_timeout_secs: u64,
+    /// A goal that wedges, or whose session has been compacted this many times, is handed to a
+    /// fresh worker session on the same worktree (docs/features/goal-contract.md, "Fresh-worker
+    /// relay"). `0` turns the wear trigger off; a wedge still relays.
+    pub relay_after_compactions: u32,
+    /// Most fresh-worker hand-offs one goal may make before it stops for good. `0` turns the
+    /// relay off.
+    pub max_relays: u32,
 }
 
 impl Default for GoalConfig {
@@ -27,6 +34,8 @@ impl Default for GoalConfig {
             evaluator_model: None,
             contract: false,
             contract_check_timeout_secs: 60,
+            relay_after_compactions: 4,
+            max_relays: 3,
         }
     }
 }
@@ -55,5 +64,16 @@ mod tests {
             toml::from_str("contract = true\ncontract_check_timeout_secs = 5\n").unwrap();
         assert!(parsed.contract);
         assert_eq!(parsed.contract_check_timeout_secs, 5);
+    }
+
+    #[test]
+    fn relay_defaults_and_keys_parse() {
+        let parsed: GoalConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.relay_after_compactions, 4);
+        assert_eq!(parsed.max_relays, 3);
+        let parsed: GoalConfig =
+            toml::from_str("relay_after_compactions = 2\nmax_relays = 0\n").unwrap();
+        assert_eq!(parsed.relay_after_compactions, 2);
+        assert_eq!(parsed.max_relays, 0);
     }
 }
