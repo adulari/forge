@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use forge_config::ci_parity::plan::{build_plan, CiPlan, CiStep, PlanContext};
@@ -23,6 +25,9 @@ pub(crate) struct RunOptions {
     pub(crate) fresh: bool,
     /// Run only steps whose key contains this text.
     pub(crate) only: Option<String>,
+    /// Set from another thread to stop the run: the running step is killed and the rest are not
+    /// run.
+    pub(crate) cancel: Option<Arc<AtomicBool>>,
 }
 
 pub(crate) enum Event<'a> {
@@ -136,6 +141,7 @@ fn run_step(
     step: &CiStep,
     index: usize,
     limit: Duration,
+    cancel: Option<&AtomicBool>,
 ) -> (StepStatus, String) {
     let temp = PathBuf::from(&plan.runner_temp);
     if let Err(e) = std::fs::create_dir_all(&temp) {
@@ -189,6 +195,10 @@ fn run_step(
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break Some(s),
+            Ok(None) if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) => {
+                kill_tree(&mut child);
+                return (StepStatus::NotRun, "cancelled".to_string());
+            }
             Ok(None) if started.elapsed() >= limit => break None,
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => return (StepStatus::Fail, format!("waiting failed: {e}")),
@@ -287,6 +297,15 @@ pub(crate) fn run_plan(
             secs: 0,
             tail: String::new(),
         };
+        if !halted
+            && opts
+                .cancel
+                .as_ref()
+                .is_some_and(|c| c.load(Ordering::Relaxed))
+        {
+            report.stopped = Some("cancelled".to_string());
+            halted = true;
+        }
         if halted {
             on_event(Event::Done { result: &result });
             if tracked {
@@ -323,11 +342,14 @@ pub(crate) fn run_plan(
                 Duration::from_secs(step.timeout_secs.unwrap_or(settings.step_timeout_secs))
                     .min(budget.saturating_sub(begun.elapsed()));
             let at = Instant::now();
-            let (status, out) = run_step(root, plan, step, i, limit);
+            let (status, out) = run_step(root, plan, step, i, limit, opts.cancel.as_deref());
             result.secs = at.elapsed().as_secs();
             result.status = status;
             result.tail = out;
-            if status == StepStatus::Skipped {
+            if status == StepStatus::NotRun {
+                report.stopped = Some("cancelled".to_string());
+                halted = true;
+            } else if status == StepStatus::Skipped {
                 // Nothing ran: leave the status as Skipped, never as a pass or a failure.
             } else if status != StepStatus::Pass && step.allow_failure {
                 result.status = StepStatus::Pass;

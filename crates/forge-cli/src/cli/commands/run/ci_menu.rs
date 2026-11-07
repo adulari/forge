@@ -2,6 +2,8 @@
 //! to the overlay (`forge_tui::ci_menu`). The same engine as `forge ci` (`crate::ci_run`).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use forge_config::ci_parity::report::load_report;
 use forge_tui::ci_menu::{CiAction, CiRow, CiState};
@@ -17,6 +19,9 @@ pub(crate) struct CiMenuDriver {
     rx: mpsc::UnboundedReceiver<Loaded>,
     /// The repository of the run in flight, whose progress the overlay shows.
     running_in: Option<PathBuf>,
+    /// Stops the run in flight; set when the overlay closes and when the driver is dropped (the
+    /// chat exits), so a quit never waits on the rest of the plan.
+    cancel: Arc<AtomicBool>,
 }
 
 fn root() -> PathBuf {
@@ -55,16 +60,14 @@ fn tui_rows(view: &CiView) -> Vec<CiRow> {
         .collect()
 }
 
-fn load(root: &Path, run: bool) -> Loaded {
+fn load(root: &Path, run: Option<Arc<AtomicBool>>) -> Loaded {
     let (plan, settings) = make_plan(root);
-    let report = if run {
-        Some(run_plan(
-            root,
-            &plan,
-            &settings,
-            &RunOptions::default(),
-            &mut |_| {},
-        )?)
+    let report = if let Some(cancel) = run {
+        let opts = RunOptions {
+            cancel: Some(cancel),
+            ..RunOptions::default()
+        };
+        Some(run_plan(root, &plan, &settings, &opts, &mut |_| {})?)
     } else {
         load_report(root)
     };
@@ -79,11 +82,16 @@ impl CiMenuDriver {
             tx,
             rx,
             running_in: None,
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    fn spawn(&self, root: PathBuf, run: bool) {
+    fn spawn(&mut self, root: PathBuf, run: bool) {
         let tx = self.tx.clone();
+        let run = run.then(|| {
+            self.cancel = Arc::new(AtomicBool::new(false));
+            Arc::clone(&self.cancel)
+        });
         tokio::spawn(async move {
             let result = tokio::task::spawn_blocking(move || load(&root, run))
                 .await
@@ -139,10 +147,66 @@ impl CiMenuDriver {
     }
 
     pub(crate) fn key(&mut self, app: &mut App, key: KeyKind) {
-        if app.ci_menu.key(key) == CiAction::Run {
-            let root = root();
-            self.running_in = Some(root.clone());
-            self.spawn(root, true);
+        match app.ci_menu.key(key) {
+            CiAction::Run => {
+                let root = root();
+                self.running_in = Some(root.clone());
+                self.spawn(root, true);
+            }
+            CiAction::Close => self.cancel.store(true, Ordering::Relaxed),
+            CiAction::None => {}
         }
+    }
+}
+
+impl Drop for CiMenuDriver {
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    #[test]
+    fn quitting_mid_run_stops_the_plan_instead_of_waiting_for_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let wf = dir.path().join(".github/workflows");
+        std::fs::create_dir_all(&wf).unwrap();
+        let started = dir.path().join("started");
+        std::fs::write(
+            wf.join("ci.yml"),
+            format!(
+                "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: long\n        run: touch {} && sleep 60\n",
+                started.display()
+            ),
+        )
+        .unwrap();
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let begun = Instant::now();
+        rt.block_on(async {
+            let mut driver = CiMenuDriver::new();
+            driver.spawn(dir.path().to_path_buf(), true);
+            while !started.exists() {
+                assert!(
+                    begun.elapsed() < Duration::from_secs(20),
+                    "the step never started"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            drop(driver);
+        });
+        drop(rt);
+        assert!(
+            begun.elapsed() < Duration::from_secs(20),
+            "exit waited {:?} for the CI step",
+            begun.elapsed()
+        );
     }
 }

@@ -147,6 +147,7 @@ pub(crate) fn ci_cmd(cmd: Option<CiCmd>) -> Result<()> {
                 keep_going,
                 fresh,
                 only: step,
+                cancel: None,
             };
             let report = run_plan(&root, &plan, &settings, &opts, &mut |event| {
                 if json {
