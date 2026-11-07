@@ -70,9 +70,11 @@ pub(super) async fn request_provider_response(
     let mut throttles = throttle_recovery::TokenThrottles::default();
     // The whole chain is down: wait for the head model on the slow schedule, then start the chain
     // again from it. Dispatch does not consult the bench, so the head is always probed, and
-    // fallbacks rejoin as their short benches expire.
+    // fallbacks rejoin as their short benches expire. The model's reservation is released first:
+    // another session queues on it for at most five minutes, and these sleeps run far longer.
     macro_rules! wait_out_dead_chain {
-        ($e:expr, $d:expr) => {
+        ($e:expr, $d:expr, $reservation:ident) => {
+            drop($reservation);
             if !non_outage_failure
                 && session
                     .wait_out_outage(&$d.model, &$e, std::time::Duration::ZERO)
@@ -695,7 +697,7 @@ pub(super) async fn request_provider_response(
                                 continue;
                             }
                             None => {
-                                wait_out_dead_chain!(e, d);
+                                wait_out_dead_chain!(e, d, reservation);
                                 let reason = e.reason();
                                 session.presenter.emit(PresenterEvent::Warning(format!(
                                     "{active_model} {reason} — model chain exhausted: {e}"
@@ -733,7 +735,7 @@ pub(super) async fn request_provider_response(
                         // doesn't exist. Mirror `advance_fallback`'s terminal warning and
                         // carry the error into the returned CoreError.
                         None => {
-                            wait_out_dead_chain!(e, d);
+                            wait_out_dead_chain!(e, d, reservation);
                             let reason = e.reason();
                             session.presenter.emit(PresenterEvent::Warning(format!(
                                 "{active_model} {reason} — model chain exhausted: {e}"

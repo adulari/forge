@@ -662,3 +662,60 @@ async fn t4_the_recovery_line_comes_before_the_answer_it_unblocked() {
         .collect();
     assert_eq!(back.len(), 1, "one stored recovery note");
 }
+
+/// Records, at every long-wait probe announcement, whether the waiting model is still reserved.
+struct ReservationProbe {
+    store: Arc<Store>,
+    held_while_waiting: Arc<Mutex<Vec<bool>>>,
+}
+
+impl Presenter for ReservationProbe {
+    fn emit(&mut self, event: PresenterEvent) {
+        if let PresenterEvent::ProviderOutage { model, .. } = event {
+            self.held_while_waiting
+                .lock()
+                .unwrap()
+                .push(self.store.is_model_reserved(&model));
+        }
+    }
+    fn confirm(&mut self, _tool: &str, _side_effect: SideEffect) -> forge_types::ConfirmOutcome {
+        forge_types::ConfirmOutcome::Deny
+    }
+    fn ask(
+        &mut self,
+        _question: &str,
+        _options: &[forge_types::QChoice],
+        _allow_other: bool,
+    ) -> String {
+        String::new()
+    }
+    fn read_line(&mut self) -> Option<String> {
+        None
+    }
+}
+
+/// Another auto-routed session reaching the same model queues on its reservation for at most five
+/// minutes. Holding it through the outage sleeps made that session fail as "serving another
+/// session" instead of riding out the outage itself.
+#[tokio::test(start_paused = true)]
+async fn t5c_an_auto_routed_outage_wait_releases_its_model_reservation() {
+    let provider = Arc::new(OutageProvider::new(0, mins(30), Fault::Refused));
+    let router = Arc::new(FixedRouter {
+        model: "alpha::big".into(),
+        fallbacks: vec![],
+    });
+    let mut d = drill(provider, router, ALLOWANCE);
+    let held = Arc::new(Mutex::new(Vec::new()));
+    d.session.presenter = Box::new(ReservationProbe {
+        store: d.store.clone(),
+        held_while_waiting: held.clone(),
+    });
+    let out = d.session.run_turn("fix it").await.unwrap();
+    assert_eq!(out.text, "DRILL-OK");
+    let held = held.lock().unwrap().clone();
+    assert!(!held.is_empty(), "the long wait was entered");
+    assert!(
+        held.iter().all(|h| !h),
+        "the reservation was held through the outage sleep: {held:?}"
+    );
+}
