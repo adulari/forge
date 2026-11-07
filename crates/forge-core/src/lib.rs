@@ -12236,7 +12236,7 @@ mod tests {
                         id: new_id(),
                         name: "spawn_agents".into(),
                         args: serde_json::json!({
-                            "agents": [ { "agent": "scout", "task": "scan the auth module" } ]
+                            "agents": [ { "agent": "surveyor", "task": "scan the auth module" } ]
                         }),
                     }],
                 ),
@@ -12246,7 +12246,7 @@ mod tests {
                         id: new_id(),
                         name: "send_to_agent".into(),
                         args: serde_json::json!({
-                            "agent": "scout",
+                            "agent": "surveyor",
                             "message": "dig deeper on that finding"
                         }),
                     }],
@@ -12295,7 +12295,7 @@ mod tests {
         assert_eq!(children.len(), 1, "follow-up must not create a new child");
         let (child_id, title) = &children[0];
         // Named at spawn — the send_to_agent address book works by this title.
-        assert_eq!(title.as_deref(), Some("scout"));
+        assert_eq!(title.as_deref(), Some("surveyor"));
 
         // The child transcript holds BOTH exchanges: task + first answer, follow-up + deeper
         // answer (the provider itself asserts the follow-up turn saw the first finding).
@@ -12325,7 +12325,7 @@ mod tests {
         let child_id = store
             .create_child_session(".", "default", &parent_id)
             .unwrap();
-        store.set_session_title(&child_id, "scout").unwrap();
+        store.set_session_title(&child_id, "surveyor").unwrap();
         store
             .add_message(&child_id, 0, Role::User, "scan the auth module", None)
             .unwrap();
