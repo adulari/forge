@@ -468,3 +468,102 @@ async fn t6_esc_during_the_wait_cancels_it_and_nothing_probes_afterwards() {
     );
     assert!(d.notes().iter().all(|n| !n.starts_with('▶')));
 }
+
+/// Routes to its model, except that a benched model is reported unroutable, as the mesh does when
+/// its only candidate is benched and nothing else is usable.
+struct BenchAwareRouter(&'static str);
+
+#[async_trait::async_trait]
+impl Router for BenchAwareRouter {
+    async fn route(
+        &self,
+        _prompt: &str,
+        _has_images: bool,
+        _budget: BudgetState,
+        health: &forge_types::ModelHealth,
+        _quota: &forge_types::SubscriptionQuota,
+        _effort: Option<forge_types::EffortLevel>,
+        _project: &forge_types::ProjectContext,
+    ) -> forge_mesh::RoutingDecision {
+        forge_mesh::RoutingDecision {
+            effort: None,
+            tier: forge_types::TaskTier::Trivial,
+            model: self.0.into(),
+            rationale: "test".into(),
+            fallbacks: vec![],
+            pinned: false,
+            unroutable: health.is_benched(self.0),
+        }
+    }
+}
+
+// The bench clock is the wall clock (epoch seconds in the store), so these run in real time with
+// benches of a couple of seconds rather than on the virtual clock.
+
+#[tokio::test]
+async fn t7_a_transient_bench_at_turn_start_is_waited_out_not_refused() {
+    let provider = Arc::new(OutageProvider::new(0, Duration::ZERO, Fault::Refused));
+    let mut d = drill(
+        provider,
+        Arc::new(BenchAwareRouter("drill::flash")),
+        ALLOWANCE,
+    );
+    d.store
+        .bench_for(
+            "drill::flash",
+            Duration::from_secs(2),
+            "provider overloaded",
+        )
+        .unwrap();
+    let out = d.session.run_turn("continue").await.unwrap();
+    assert_eq!(out.text, "DRILL-OK");
+    assert_eq!(out.stop_reason, StopReason::FinalAnswer);
+    assert!(d.outage_events() >= 1);
+    let notes = d.notes();
+    assert_eq!(
+        notes.iter().filter(|n| n.starts_with('⏸')).count(),
+        1,
+        "{notes:?}"
+    );
+    assert!(notes.iter().any(|n| n.starts_with('▶')), "{notes:?}");
+}
+
+#[tokio::test]
+async fn t7b_a_permanent_exclusion_at_turn_start_is_refused_at_once() {
+    let provider = Arc::new(OutageProvider::new(0, Duration::ZERO, Fault::Refused));
+    let mut d = drill(
+        provider,
+        Arc::new(BenchAwareRouter("drill::flash")),
+        ALLOWANCE,
+    );
+    d.store
+        .exclude_model("drill::flash", "no tool support")
+        .unwrap();
+    let started = std::time::Instant::now();
+    let out = d.session.run_turn("continue").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::NoOutput);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(d.outage_events(), 0);
+}
+
+#[tokio::test]
+async fn t7c_the_horizon_bounds_the_turn_start_wait() {
+    let provider = Arc::new(OutageProvider::new(0, Duration::ZERO, Fault::Refused));
+    let mut d = drill(provider, Arc::new(BenchAwareRouter("drill::flash")), 2);
+    d.store
+        .bench_for(
+            "drill::flash",
+            Duration::from_secs(3600),
+            "provider overloaded",
+        )
+        .unwrap();
+    let started = std::time::Instant::now();
+    let out = d.session.run_turn("continue").await.unwrap();
+    assert_eq!(out.stop_reason, StopReason::NoOutput);
+    assert!(
+        started.elapsed() >= Duration::from_secs(2) && started.elapsed() < Duration::from_secs(6),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(d.outage_events() >= 1);
+}

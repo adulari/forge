@@ -2901,138 +2901,150 @@ impl Session {
 
         // Route around any currently-benched models (failover): the snapshot excludes models
         // whose cooldown hasn't elapsed, even across restarts (docs/features/mesh-routing.md).
-        let readiness = self.provider_readiness();
-        let health = readiness.health;
-        // Quota-aware routing (L3): demote/skip a subscription that the bridge reported is near or
-        // over its plan limit (recorded after earlier turns from the CLI's rate-limit events).
-        let quota = readiness.quota;
-        // A per-turn `tier_override` (command/skill `tier:` hint) wins; otherwise the in-session
-        // tier pin (set by the `tier_up`/`tier_down` keybinds) biases routing.
-        let effective_tier = tier_override.or(self.pinned_tier);
-        // Whether THIS turn has image attachments queued (vision input) — route around a
-        // text-only model so an image doesn't land on a provider that 404s on it.
-        let has_images = self.transcript_carries_images();
-        // Routing happens before the current user message is appended, so the transcript is
-        // exactly the bounded prior-turn context needed to interpret "continue", "fix that", etc.
-        let routing_context = RoutingContext::from_messages(&self.transcript)
-            .with_session_affinity(
-                self.route_affinity.clone(),
-                self.estimated_reusable_prefix_tokens(),
-            )
-            .with_prior_tier(self.inheritable_prior_tier(effective_tier));
-        let decision = match self.pinned_model.as_deref() {
-            // `/model <id>`/`/model a,b` override: route restricted to the pinned set. The mesh
-            // still classifies (for tier stats) but the actual call + failover chain stay within
-            // the set — a single pin is strict (no cross-model fallback), a set ranks within
-            // itself and fails over only to other set members.
-            Some(pin) => {
-                self.router
-                    .route_with_pin_set(
-                        pin,
-                        prompt,
-                        has_images,
-                        budget,
-                        &health,
-                        &quota,
-                        self.pinned_effort,
-                        &self.project,
-                    )
-                    .await
-            }
-            None => {
-                self.router
-                    .route_contextual(
-                        prompt,
-                        has_images,
-                        budget,
-                        &health,
-                        &quota,
-                        effective_tier,
-                        self.pinned_effort,
-                        &self.project,
-                        &routing_context,
-                    )
-                    .await
-            }
-        };
-        // `[mesh] min_tier`: a turn classified below the floor is routed as the floor tier. An
-        // explicit tier hint or in-session tier pin is the user's own choice and is left alone; a
-        // pinned model keeps its model and only takes the floor's tier (and so its tool surface).
-        let decision = match self.config.mesh.min_tier {
-            Some(floor) if tier_rank(decision.tier) < tier_rank(floor) => {
-                if self.pinned_model.is_none() && effective_tier.is_none() {
-                    let mut floored = self
-                        .router
+        // Routed again after a wait when the only reason nothing is routable is that every
+        // candidate was benched moments ago by an outage (`wait_out_benches`).
+        self.outage = None;
+        let (decision, routing_context) = loop {
+            let readiness = self.provider_readiness();
+            let health = readiness.health;
+            // Quota-aware routing (L3): demote/skip a subscription that the bridge reported is near or
+            // over its plan limit (recorded after earlier turns from the CLI's rate-limit events).
+            let quota = readiness.quota;
+            // A per-turn `tier_override` (command/skill `tier:` hint) wins; otherwise the in-session
+            // tier pin (set by the `tier_up`/`tier_down` keybinds) biases routing.
+            let effective_tier = tier_override.or(self.pinned_tier);
+            // Whether THIS turn has image attachments queued (vision input) — route around a
+            // text-only model so an image doesn't land on a provider that 404s on it.
+            let has_images = self.transcript_carries_images();
+            // Routing happens before the current user message is appended, so the transcript is
+            // exactly the bounded prior-turn context needed to interpret "continue", "fix that", etc.
+            let routing_context = RoutingContext::from_messages(&self.transcript)
+                .with_session_affinity(
+                    self.route_affinity.clone(),
+                    self.estimated_reusable_prefix_tokens(),
+                )
+                .with_prior_tier(self.inheritable_prior_tier(effective_tier));
+            let decision = match self.pinned_model.as_deref() {
+                // `/model <id>`/`/model a,b` override: route restricted to the pinned set. The mesh
+                // still classifies (for tier stats) but the actual call + failover chain stay within
+                // the set — a single pin is strict (no cross-model fallback), a set ranks within
+                // itself and fails over only to other set members.
+                Some(pin) => {
+                    self.router
+                        .route_with_pin_set(
+                            pin,
+                            prompt,
+                            has_images,
+                            budget,
+                            &health,
+                            &quota,
+                            self.pinned_effort,
+                            &self.project,
+                        )
+                        .await
+                }
+                None => {
+                    self.router
                         .route_contextual(
                             prompt,
                             has_images,
                             budget,
                             &health,
                             &quota,
-                            Some(floor),
+                            effective_tier,
                             self.pinned_effort,
                             &self.project,
                             &routing_context,
                         )
-                        .await;
-                    floored.tier = floor;
-                    floored
-                } else {
-                    let mut floored = decision;
-                    floored.tier = floor;
-                    floored
+                        .await
                 }
+            };
+            // `[mesh] min_tier`: a turn classified below the floor is routed as the floor tier. An
+            // explicit tier hint or in-session tier pin is the user's own choice and is left alone; a
+            // pinned model keeps its model and only takes the floor's tier (and so its tool surface).
+            let decision = match self.config.mesh.min_tier {
+                Some(floor) if tier_rank(decision.tier) < tier_rank(floor) => {
+                    if self.pinned_model.is_none() && effective_tier.is_none() {
+                        let mut floored = self
+                            .router
+                            .route_contextual(
+                                prompt,
+                                has_images,
+                                budget,
+                                &health,
+                                &quota,
+                                Some(floor),
+                                self.pinned_effort,
+                                &self.project,
+                                &routing_context,
+                            )
+                            .await;
+                        floored.tier = floor;
+                        floored
+                    } else {
+                        let mut floored = decision;
+                        floored.tier = floor;
+                        floored
+                    }
+                }
+                _ => decision,
+            };
+            // BACKSTOP: a pin is a contract, and it was being honoured per-call-site rather than in one
+            // place — so any routing path that forgot it (the architect plan phase builds its failover
+            // chain from an unpinned Complex-tier route; last-resort filtered on keys but not the pin)
+            // could dispatch a model the user never asked for. Reported live twice: a session pinned to
+            // a local model answered from `gpt-5.6-luna`, and another died on an OpenRouter model it was
+            // never pinned to. Clamp the decision here, after every routing path has produced it, so
+            // escaping the pin is structurally impossible rather than a property each site must
+            // remember. Fallbacks are confined to the pin set for the same reason.
+            let (decision, left_pin_for_vision) = self
+                .vision_switch(
+                    decision,
+                    prompt,
+                    budget,
+                    &health,
+                    &quota,
+                    effective_tier,
+                    &routing_context,
+                )
+                .await;
+            let mut decision = decision;
+            if let Some(pin) = self.effective_pin().filter(|_| !left_pin_for_vision) {
+                if !pin.iter().any(|m| m == &decision.model) {
+                    let forced = pin[0].clone();
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "routing tried {} while pinned to {forced} — honouring the pin",
+                        decision.model
+                    )));
+                    decision.model = forced;
+                    decision.pinned = true;
+                }
+                decision.fallbacks.retain(|m| pin.iter().any(|p| p == m));
             }
-            _ => decision,
+            self.apply_fallback_models(&mut decision);
+            // Same reasoning as the pin backstop above, for the same reason: `decision.effort` is read
+            // at six call sites, so honouring an exact rung at each one is a bug waiting to happen.
+            // Clamp it once, here, after every routing path has produced a decision.
+            //
+            // Resolved against the ROUTED model's provider ladder — the pin may have just changed which
+            // model this is — so an exact rung can never name something the provider does not offer.
+            // An invoked skill's `effort:` outranks the session rung for its one turn.
+            if let Some(exact) = self.turn_effort().or(self.exact_effort) {
+                decision.effort =
+                    forge_types::effort::resolve_id(&decision.model, Some(exact)).sent;
+            }
+            // After every pin backstop: a session pin the router never saw must not reach a retaining
+            // provider either.
+            forge_mesh::privacy::enforce_on_decision(&self.config, &mut decision);
+            let decision = decision;
+            if decision.unroutable && self.wait_out_benches(&decision.model).await {
+                continue;
+            }
+            break (decision, routing_context);
         };
-        // BACKSTOP: a pin is a contract, and it was being honoured per-call-site rather than in one
-        // place — so any routing path that forgot it (the architect plan phase builds its failover
-        // chain from an unpinned Complex-tier route; last-resort filtered on keys but not the pin)
-        // could dispatch a model the user never asked for. Reported live twice: a session pinned to
-        // a local model answered from `gpt-5.6-luna`, and another died on an OpenRouter model it was
-        // never pinned to. Clamp the decision here, after every routing path has produced it, so
-        // escaping the pin is structurally impossible rather than a property each site must
-        // remember. Fallbacks are confined to the pin set for the same reason.
-        let (decision, left_pin_for_vision) = self
-            .vision_switch(
-                decision,
-                prompt,
-                budget,
-                &health,
-                &quota,
-                effective_tier,
-                &routing_context,
-            )
-            .await;
-        let mut decision = decision;
-        if let Some(pin) = self.effective_pin().filter(|_| !left_pin_for_vision) {
-            if !pin.iter().any(|m| m == &decision.model) {
-                let forced = pin[0].clone();
-                self.presenter.emit(PresenterEvent::Warning(format!(
-                    "routing tried {} while pinned to {forced} — honouring the pin",
-                    decision.model
-                )));
-                decision.model = forced;
-                decision.pinned = true;
-            }
-            decision.fallbacks.retain(|m| pin.iter().any(|p| p == m));
-        }
-        self.apply_fallback_models(&mut decision);
-        // Same reasoning as the pin backstop above, for the same reason: `decision.effort` is read
-        // at six call sites, so honouring an exact rung at each one is a bug waiting to happen.
-        // Clamp it once, here, after every routing path has produced a decision.
-        //
-        // Resolved against the ROUTED model's provider ladder — the pin may have just changed which
-        // model this is — so an exact rung can never name something the provider does not offer.
-        // An invoked skill's `effort:` outranks the session rung for its one turn.
-        if let Some(exact) = self.turn_effort().or(self.exact_effort) {
-            decision.effort = forge_types::effort::resolve_id(&decision.model, Some(exact)).sent;
-        }
-        // After every pin backstop: a session pin the router never saw must not reach a retaining
-        // provider either.
-        forge_mesh::privacy::enforce_on_decision(&self.config, &mut decision);
-        let decision = decision;
         if decision.unroutable {
+            // Gave up waiting for the benches, or never waited: the episode ends with the turn.
+            self.outage = None;
             let has_credentials = forge_config::known_key_providers()
                 .any(forge_config::has_api_key)
                 || forge_provider::CliKind::all().iter().any(|k| k.available());
@@ -3196,7 +3208,6 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         *self.bridge_trace.lock().unwrap() = Default::default();
         self.turn_hard_guard_abort = false;
         self.turn_forced_stop = None;
-        self.outage = None;
         self.bridge_stall = None;
         self.empty_reply_nudged = false;
         self.empty_reply_retries = 0;

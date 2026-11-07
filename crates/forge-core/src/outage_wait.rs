@@ -121,24 +121,7 @@ impl Session {
         }
         let now = Instant::now();
         if self.outage.is_none() {
-            let since = now.checked_sub(already_down).unwrap_or(now);
-            let until = horizon(
-                now,
-                since,
-                allowance,
-                self.run_budget.and_then(|budget| budget.deadline),
-                self.turn_deadline,
-            );
-            self.outage = Some(OutageEpisode {
-                since,
-                since_wall: SystemTime::now()
-                    .checked_sub(already_down)
-                    .unwrap_or_else(SystemTime::now),
-                until,
-                attempts: 0,
-                reason: reason_of(err),
-            });
-            self.announce_outage(model);
+            self.open_episode(model, reason_of(err), already_down, allowance);
         }
         let Some(episode) = self.outage.as_mut() else {
             return false;
@@ -150,6 +133,100 @@ impl Session {
         }
         episode.attempts += 1;
         let wait = delay(episode.attempts, err.retry_after(), wall_clock_jitter()).min(remaining);
+        tracing::warn!(%model, attempt = episode.attempts, wait_secs = wait.as_secs(), error = %err, "provider outage: waiting to re-send the request");
+        self.sleep_probe(model, wait).await;
+        true
+    }
+
+    /// The turn-start router found nothing routable. When that is only because every candidate is
+    /// benched for a transient reason (an outage or overload failed it moments ago), sleep until
+    /// the soonest of those benches ends (at most five minutes at a time) under the same
+    /// `mesh.outage_wait_secs` horizon, so a `continue` sent while the provider is still down
+    /// waits for it instead of ending the turn at once. Returns true after a sleep, and the caller
+    /// routes again; false when waiting does not apply (disabled, the candidate is not benched, or
+    /// the benches are permanent exclusions or belong to providers without a key) or the horizon
+    /// has passed.
+    pub(crate) async fn wait_out_benches(&mut self, candidate: &str) -> bool {
+        let allowance = Duration::from_secs(self.config.mesh.outage_wait_secs);
+        if allowance.is_zero() {
+            return false;
+        }
+        let pin = self.effective_pin();
+        let rows = self.store.current_benched_report().unwrap_or_default();
+        let transient: Vec<_> = rows
+            .iter()
+            .filter(|(model, _, reason)| {
+                !reason.starts_with("excluded:")
+                    && forge_config::has_api_key(forge_config::provider_of(model))
+                    && !forge_config::is_model_disabled(model, &self.config.mesh.disabled)
+                    && pin.as_ref().is_none_or(|p| p.iter().any(|x| x == model))
+            })
+            .collect();
+        let Some((_, _, reason)) = transient.iter().find(|(model, _, _)| model == candidate) else {
+            return false;
+        };
+        let soonest = transient
+            .iter()
+            .map(|(_, until, _)| *until)
+            .min()
+            .unwrap_or(0);
+        let reason = format!(
+            "benched: {}",
+            reason.chars().take(50).collect::<String>().trim()
+        );
+        let now = Instant::now();
+        if self.outage.is_none() {
+            self.open_episode(candidate, reason, Duration::ZERO, allowance);
+        }
+        let Some(episode) = self.outage.as_mut() else {
+            return false;
+        };
+        let remaining = episode.until.saturating_duration_since(now);
+        if remaining.is_zero() {
+            return false;
+        }
+        episode.attempts += 1;
+        let until_bench = Duration::from_secs(
+            u64::try_from(soonest - chrono::Utc::now().timestamp()).unwrap_or(0) + 1,
+        );
+        let wait = until_bench.min(MAX_WAIT).min(remaining);
+        tracing::warn!(%candidate, wait_secs = wait.as_secs(), "every candidate is benched: waiting for the soonest bench to end");
+        self.sleep_probe(candidate, wait).await;
+        true
+    }
+
+    fn open_episode(
+        &mut self,
+        model: &str,
+        reason: String,
+        already_down: Duration,
+        allowance: Duration,
+    ) {
+        let now = Instant::now();
+        let since = now.checked_sub(already_down).unwrap_or(now);
+        let until = horizon(
+            now,
+            since,
+            allowance,
+            self.run_budget.and_then(|budget| budget.deadline),
+            self.turn_deadline,
+        );
+        self.outage = Some(OutageEpisode {
+            since,
+            since_wall: SystemTime::now()
+                .checked_sub(already_down)
+                .unwrap_or_else(SystemTime::now),
+            until,
+            attempts: 0,
+            reason,
+        });
+        self.announce_outage(model);
+    }
+
+    async fn sleep_probe(&mut self, model: &str, wait: Duration) {
+        let Some(episode) = self.outage.as_ref() else {
+            return;
+        };
         let next_try = SystemTime::now() + wait;
         let event = PresenterEvent::ProviderOutage {
             model: model.to_string(),
@@ -159,14 +236,12 @@ impl Session {
             until: unix_secs(episode.since_wall + (episode.until - episode.since)),
             reason: episode.reason.clone(),
         };
-        tracing::warn!(%model, attempt = episode.attempts, wait_secs = wait.as_secs(), error = %err, "provider outage: waiting to re-send the request");
         self.presenter.emit(event);
         self.presenter.emit(PresenterEvent::ModelSearch {
             model: model.to_string(),
             retrying: true,
         });
         tokio::time::sleep(wait).await;
-        true
     }
 
     fn announce_outage(&mut self, model: &str) {
