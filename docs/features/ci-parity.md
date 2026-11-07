@@ -48,7 +48,7 @@ indentation, duplicate keys and explicit block indentation are errors.
 | `forge ci plan [--json]` | Print the plan: steps with env, then every skip with its reason. |
 | `forge ci run [--keep-going] [--fresh] [--step <text>]` | Run it. Fail-fast by default; a step that passed on this exact tree (HEAD + uncommitted state) last time is not run again unless `--fresh`. |
 | `forge ci status` | The last run in this worktree. |
-| `/ci` (TUI) | The same plan as a list: pass / fail / skip with the reason, last run, `r` to run. |
+| `/ci` (TUI) | The same plan as a list: pass / fail / skip with the reason, last run, `r` to run, Enter to open the focused row (a step's command, env and output tail, a skip's reason). A failed run lands on the failing step with its output open. |
 | Local CI (desktop, web, phone) | Session menu or the command palette: the plan with each step's job, command and environment, the skips with their reasons, the last result with the output tail of what failed, and a Run button. |
 
 The phone and desktop read `GET /api/sessions/{id}/ci` and run `POST /api/sessions/{id}/ci/run`. Both
