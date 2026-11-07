@@ -81,6 +81,7 @@ pub(crate) fn goal_show_cmd(session: Option<&str>, json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use forge_types::goal_contract::mission::parse_mission;
     use forge_types::goal_contract::{parse_contract, AssertionResult, GoalContract};
 
     fn record_json(passed: bool) -> String {
@@ -131,5 +132,34 @@ mod tests {
         value["contract"] = serde_json::Value::Null;
         let text = render_record("s1", &value.to_string()).unwrap();
         assert!(text.contains("no validation contract"), "{text}");
+    }
+
+    #[test]
+    fn a_mission_prints_its_progress_line_and_milestone_groups() {
+        let reply = r#"{"milestones":[
+          {"title":"lexer","assertions":[{"assertion":"a","check":"true"},{"assertion":"b","check":"true"}]},
+          {"title":"parser","assertions":[{"assertion":"c","check":"true"},{"assertion":"d","check":"true"}]}]}"#;
+        let mut contract = parse_mission(reply, 6).unwrap().into_contract().unwrap();
+        contract.approved = true;
+        let pass = |id| AssertionResult {
+            id,
+            passed: true,
+            proof: String::new(),
+            reason: String::new(),
+        };
+        contract.record(vec![pass(1), pass(2)], 1);
+        contract.advance_milestone();
+        let mut value: serde_json::Value = serde_json::from_str(&record_json(false)).unwrap();
+        value["contract"] = serde_json::to_value(&contract).unwrap();
+        let text = render_record("s1", &value.to_string()).unwrap();
+        assert!(
+            text.contains("contract — milestone 2/2: 0/2 pass"),
+            "{text}"
+        );
+        assert!(text.contains("milestone 1/2 - lexer [done 2/2]"), "{text}");
+        assert!(
+            text.contains("milestone 2/2 - parser [current 0/2 pass]"),
+            "{text}"
+        );
     }
 }

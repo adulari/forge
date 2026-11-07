@@ -278,4 +278,61 @@ mod contract {
         app.goal_begin("something else", &[], None, None);
         assert!(app.goal.as_ref().unwrap().contract.is_none());
     }
+
+    fn mission() -> GoalContract {
+        let items = |t: &str| {
+            format!(
+                r#"{{"title":"{t}","assertions":[{{"assertion":"{t} a","check":"true"}},{{"assertion":"{t} b","check":"true"}}]}}"#
+            )
+        };
+        let reply = format!(
+            r#"{{"milestones":[{},{},{}]}}"#,
+            items("lexer"),
+            items("parser"),
+            items("cli")
+        );
+        let mut c = forge_types::goal_contract::mission::parse_mission(&reply, 6)
+            .unwrap()
+            .into_contract()
+            .unwrap();
+        c.approved = true;
+        c
+    }
+
+    #[test]
+    fn a_mission_status_groups_the_table_by_milestone_and_the_chip_shows_progress() {
+        let mut app = App::default();
+        app.goal_begin("ship", &[], None, None);
+        app.goal_set_contract(mission());
+        app.goal_contract_results(vec![result(1, true), result(2, true)]);
+        app.goal
+            .as_mut()
+            .unwrap()
+            .contract
+            .as_mut()
+            .unwrap()
+            .advance_milestone();
+        app.goal_contract_results(vec![result(3, true), result(4, false)]);
+        let goal = app.goal.as_ref().unwrap();
+        let chip = goal.chip(1, 3);
+        assert!(chip.contains("contract milestone 2/3: 1/2 pass"), "{chip}");
+        let summary = goal.summary();
+        assert!(
+            summary.contains("📜 contract — milestone 2/3: 1/2 pass"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("milestone 1/3 - lexer [done 2/2]"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("milestone 2/3 - parser [current 1/2 pass]"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("milestone 3/3 - cli [upcoming, 2 assertions]"),
+            "{summary}"
+        );
+        assert!(summary.contains("✗ 4. parser b [FAIL]"), "{summary}");
+    }
 }

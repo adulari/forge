@@ -34,9 +34,13 @@ pub(crate) fn rows(contract: &GoalContract) -> Vec<PickerRow> {
                 None => a.command.clone(),
             };
             let preview: String = detail.chars().take(PROOF_PREVIEW).collect();
+            let milestone = contract
+                .mission_ref()
+                .and_then(|m| m.milestone_of(a.id).map(|n| format!("M{n}/{} ", m.total())))
+                .unwrap_or_default();
             PickerRow {
                 id: format!("assertion:{}", a.id),
-                title: format!("{}. {} [{state}]", a.id, a.text),
+                title: format!("{milestone}{}. {} [{state}]", a.id, a.text),
                 subtitle: preview,
             }
         })
@@ -172,5 +176,24 @@ mod tests {
             "{text}"
         );
         assert!(detail(&contract(), 9).is_none());
+    }
+
+    #[test]
+    fn mission_rows_say_which_milestone_each_assertion_belongs_to() {
+        let reply = r#"{"milestones":[
+          {"title":"x","assertions":[{"assertion":"a","check":"true"},{"assertion":"b","check":"true"}]},
+          {"title":"y","assertions":[{"assertion":"c","check":"true"},{"assertion":"d","check":"true"}]}]}"#;
+        let contract = forge_types::goal_contract::mission::parse_mission(reply, 6)
+            .unwrap()
+            .into_contract()
+            .unwrap();
+        let rows = rows(&contract);
+        assert_eq!(rows[0].title, "M1/2 1. a [not run]");
+        assert_eq!(rows[3].title, "M2/2 4. d [not run]");
+        let mut app = forge_tui::App::default();
+        app.goal_begin("g", &[], None, None);
+        app.goal_set_contract(contract);
+        open(&mut app);
+        assert!(app.picker.open);
     }
 }

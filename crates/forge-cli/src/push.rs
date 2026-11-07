@@ -535,7 +535,7 @@ pub(crate) fn detect_trigger(
             kind: "done",
             session: cur.session_id.clone(),
             title,
-            body: format!("goal handed to a fresh worker ({why})"),
+            body: crate::remote::SnapGoal::handed_off_body(cur.goal.as_ref(), &why),
             seq: cur.prompt_seq,
             ttl: TTL_COMPLETION,
         });

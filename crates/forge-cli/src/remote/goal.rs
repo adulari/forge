@@ -44,6 +44,24 @@ pub struct SnapRelay {
     pub reason: Option<String>,
 }
 
+impl SnapGoal {
+    /// The push body for a goal that moved to a fresh worker. A mission's milestone boundary says
+    /// which milestone passed (the contract has already moved on to the next).
+    pub fn handed_off_body(goal: Option<&SnapGoal>, why: &str) -> String {
+        let mission = goal
+            .and_then(|g| g.contract.as_ref())
+            .and_then(|c| c.mission.as_ref());
+        match mission {
+            Some(m) if why == "milestone" => format!(
+                "mission: milestone {}/{} passed - the next one starts in a fresh worker",
+                m.current.saturating_sub(1),
+                m.total
+            ),
+            _ => format!("goal handed to a fresh worker ({why})"),
+        }
+    }
+}
+
 /// A goal contract as the clients draw it: a table, one row per assertion.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SnapContract {
@@ -56,6 +74,60 @@ pub struct SnapContract {
     pub total: usize,
     pub checked_at: Option<i64>,
     pub assertions: Vec<SnapAssertion>,
+    /// Present for a mission (`/goal --mission`): the milestones the assertions are grouped by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mission: Option<SnapMission>,
+}
+
+/// A mission as the clients draw it: a progress line and the milestones in order.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapMission {
+    /// 1-based number of the milestone being worked on.
+    pub current: u32,
+    pub total: usize,
+    /// The ready-to-show line, e.g. `milestone 2/4: 3/5 pass`.
+    pub progress: String,
+    pub milestones: Vec<SnapMilestone>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapMilestone {
+    pub index: u32,
+    pub title: String,
+    /// `done`, `active` or `upcoming`.
+    pub state: &'static str,
+    pub passed: usize,
+    pub total: usize,
+    /// The contract assertions that belong to this milestone, in order.
+    pub assertion_ids: Vec<u32>,
+}
+
+impl SnapMission {
+    fn of(contract: &forge_types::goal_contract::GoalContract) -> Option<Self> {
+        let mission = contract.mission_ref()?;
+        Some(Self {
+            current: mission.current,
+            total: mission.total(),
+            progress: contract.headline(),
+            milestones: mission
+                .milestones
+                .iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    let n = i as u32 + 1;
+                    let (passed, total) = contract.milestone_counts(n);
+                    SnapMilestone {
+                        index: n,
+                        title: m.title.clone(),
+                        state: contract.milestone_state(n).wire(),
+                        passed,
+                        total,
+                        assertion_ids: m.assertion_ids.clone(),
+                    }
+                })
+                .collect(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -80,6 +152,7 @@ impl From<&forge_types::goal_contract::GoalContract> for SnapContract {
             passed: contract.passed_count(),
             total: contract.assertions.len(),
             checked_at: contract.checked_at,
+            mission: SnapMission::of(contract),
             assertions: contract
                 .assertions
                 .iter()
@@ -255,5 +328,76 @@ mod tests {
         assert_eq!(c["assertions"][1]["reason"], "exit 1");
         assert_eq!(c["assertions"][1]["proof"], "no such file");
         assert_eq!(c["assertions"][2]["state"], "pending");
+    }
+
+    #[test]
+    fn a_mission_snapshot_names_the_milestones_and_a_flat_contract_has_none() {
+        let reply = r#"{"milestones":[
+          {"title":"lexer","assertions":[{"assertion":"a","check":"test -f a"},{"assertion":"b","check":"test -f b"}]},
+          {"title":"parser","assertions":[{"assertion":"c","check":"test -f c"},{"assertion":"d","check":"test -f d"}]}]}"#;
+        let mut contract = forge_types::goal_contract::mission::parse_mission(reply, 6)
+            .unwrap()
+            .into_contract()
+            .unwrap();
+        contract.approved = true;
+        let pass = |id| AssertionResult {
+            id,
+            passed: true,
+            proof: String::new(),
+            reason: String::new(),
+        };
+        contract.record(vec![pass(1), pass(2)], 1);
+        contract.advance_milestone();
+        let mut app = forge_tui::App::default();
+        app.goal_begin("ship it", &[], None, None);
+        app.goal_set_contract(contract);
+        let json = serde_json::to_value(SnapGoal::from(app.goal.as_ref().unwrap())).unwrap();
+        let mission = &json["contract"]["mission"];
+        assert_eq!(mission["current"], 2);
+        assert_eq!(mission["total"], 2);
+        assert_eq!(mission["progress"], "milestone 2/2: 0/2 pass");
+        assert_eq!(mission["milestones"][0]["state"], "done");
+        assert_eq!(mission["milestones"][0]["passed"], 2);
+        assert_eq!(mission["milestones"][1]["state"], "active");
+        assert_eq!(
+            mission["milestones"][1]["assertion_ids"],
+            serde_json::json!([3, 4])
+        );
+        assert_eq!(json["contract"]["assertions"][2]["state"], "pending");
+
+        let mut flat = forge_tui::App::default();
+        flat.goal_begin("ship it", &[], None, None);
+        let text = r#"{"assertions":[{"assertion":"a","check":"true"},{"assertion":"b","check":"true"},{"assertion":"c","check":"true"}]}"#;
+        flat.goal_set_contract(GoalContract::new(parse_contract(text).unwrap()));
+        let json = serde_json::to_value(SnapGoal::from(flat.goal.as_ref().unwrap())).unwrap();
+        assert!(json["contract"].get("mission").is_none());
+    }
+
+    #[test]
+    fn the_milestone_push_says_which_milestone_passed() {
+        let reply = r#"{"milestones":[
+          {"title":"x","assertions":[{"assertion":"a","check":"true"},{"assertion":"b","check":"true"}]},
+          {"title":"y","assertions":[{"assertion":"c","check":"true"},{"assertion":"d","check":"true"}]}]}"#;
+        let mut contract = forge_types::goal_contract::mission::parse_mission(reply, 6)
+            .unwrap()
+            .into_contract()
+            .unwrap();
+        contract.advance_milestone();
+        let mut app = forge_tui::App::default();
+        app.goal_begin("g", &[], None, None);
+        app.goal_set_contract(contract);
+        let snap = SnapGoal::from(app.goal.as_ref().unwrap());
+        assert_eq!(
+            SnapGoal::handed_off_body(Some(&snap), "milestone"),
+            "mission: milestone 1/2 passed - the next one starts in a fresh worker"
+        );
+        assert_eq!(
+            SnapGoal::handed_off_body(Some(&snap), "wedged"),
+            "goal handed to a fresh worker (wedged)"
+        );
+        assert_eq!(
+            SnapGoal::handed_off_body(None, "milestone"),
+            "goal handed to a fresh worker (milestone)"
+        );
     }
 }
