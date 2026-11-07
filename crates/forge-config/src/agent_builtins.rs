@@ -38,12 +38,16 @@ what you found or changed (files and `path:line` references), written for the pa
 /// back a short cited brief, because that brief is all the parent ever sees of the run.
 const SCOUT_AGENT: &str = "scout";
 
+/// A scout that cannot answer in this many model steps has stopped being cheap (the first A/B had
+/// one run 40 steps and 1M input tokens).
+const SCOUT_MAX_TURNS: usize = 12;
+
 const SCOUT_PROMPT: &str = "You are a scout: a throwaway, read-only codebase explorer. A parent \
 agent will see ONLY your final answer, never your reads, so everything it needs must be in it. \
 Answer the question you were given by locating the relevant files and reading just the parts that \
 matter: prefer `search`, `glob` and `lattice` over reading whole files, and read line ranges. \
-You cannot edit anything; shell is limited to read-only commands. Stop as soon as the question is \
-answered. Your final answer is a brief of at most 400 words (about 2k tokens) in this shape: \
+You cannot edit anything; shell is limited to read-only commands. Use at most 8 tool calls, batching independent reads and searches into one step, and stop as \
+soon as the question is answered. Your final answer is a brief of at most 400 words (about 2k tokens) in this shape: \
 one line stating the answer; then a bullet list of facts, each ending with a citation \
 `path:start-end`; then, if useful, `Not found:` listing what you looked for and did not find. \
 Never paste long code excerpts: cite the lines instead, and quote at most a line or two when the \
@@ -83,6 +87,7 @@ pub(crate) fn builtin_agents() -> HashMap<String, AgentDef> {
                 .map(|t| t.to_string())
                 .collect(),
             tier: Some(TaskTier::Trivial),
+            max_turns: Some(SCOUT_MAX_TURNS),
             system_prompt: SCOUT_PROMPT.into(),
             permission_mode: Some(PermissionMode::Plan),
             ..AgentDef::default()
@@ -122,6 +127,8 @@ mod tests {
         }
         assert_eq!(agents["explore"].tier, Some(TaskTier::Trivial));
         assert_eq!(agents["plan"].tier, None);
+        assert_eq!(agents["scout"].max_turns, Some(SCOUT_MAX_TURNS));
+        assert!(SCOUT_PROMPT.contains("at most 8 tool calls"));
     }
 
     #[test]
