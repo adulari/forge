@@ -12,6 +12,25 @@ pub(crate) fn is_goal_evaluation(messages: &[Message]) -> bool {
         .any(|m| m.role == Role::System && m.content.starts_with(MARKER))
 }
 
+/// Must match `forge_core::goal_contract::GOAL_CONTRACT_MARKER`.
+const CONTRACT_MARKER: &str = "You are the goal contract drafter";
+
+pub(crate) fn is_contract_draft(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .any(|m| m.role == Role::System && m.content.starts_with(CONTRACT_MARKER))
+}
+
+/// A contract every workspace satisfies, so an offline `--contract` goal can be approved and run.
+pub(crate) fn contract() -> String {
+    serde_json::json!({"assertions": [
+        {"assertion": "the workspace directory exists", "check": "test -d .", "expect": "exit 0"},
+        {"assertion": "the workspace can be listed", "check": "ls", "expect": "exit 0"},
+        {"assertion": "the working directory resolves", "check": "pwd", "expect": "prints a path"},
+    ]})
+    .to_string()
+}
+
 /// Achieved when the plan has tasks and all are done; otherwise the open tasks are what remains.
 pub(crate) fn verdict(messages: &[Message]) -> String {
     let input = messages
@@ -58,6 +77,14 @@ mod tests {
                 "GOAL:\nx\n\nTask plan:\n{plan}\n\nAgent's final message"
             )),
         ]
+    }
+
+    #[test]
+    fn the_offline_contract_parses_as_three_assertions() {
+        let drafter = vec![Message::system(format!("{CONTRACT_MARKER} for an agent."))];
+        assert!(is_contract_draft(&drafter));
+        assert!(!is_contract_draft(&input("")));
+        assert_eq!(contract().matches("\"check\"").count(), 3);
     }
 
     #[test]
