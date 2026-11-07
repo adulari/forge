@@ -8,6 +8,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod mission;
+
 pub const MIN_ASSERTIONS: usize = 3;
 pub const MAX_ASSERTIONS: usize = 12;
 const TEXT_CHARS: usize = 200;
@@ -57,6 +59,10 @@ pub struct GoalContract {
     /// Unix seconds of the last validator run.
     #[serde(default)]
     pub checked_at: Option<i64>,
+    /// Set when the goal is a mission: which assertions belong to which milestone and which
+    /// milestone is current (docs/features/goal-contract.md, "Missions (milestones)").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<mission::Mission>,
 }
 
 impl GoalContract {
@@ -67,6 +73,7 @@ impl GoalContract {
             results: Vec::new(),
             rounds: 0,
             checked_at: None,
+            mission: None,
         }
     }
 
@@ -90,9 +97,9 @@ impl GoalContract {
             .count()
     }
 
+    /// Active assertions without a passing result (all of them outside a mission).
     pub fn failing_ids(&self) -> Vec<u32> {
-        self.assertions
-            .iter()
+        self.active_assertions()
             .filter(|a| !self.result(a.id).is_some_and(|r| r.passed))
             .map(|a| a.id)
             .collect()
@@ -100,6 +107,9 @@ impl GoalContract {
 
     /// `3/6 pass`, or `6 assertions` before the validator has run.
     pub fn headline(&self) -> String {
+        if let Some(line) = self.mission_headline() {
+            return line;
+        }
         if self.results.is_empty() {
             format!("{} assertions", self.assertions.len())
         } else {
@@ -107,37 +117,52 @@ impl GoalContract {
         }
     }
 
-    /// Replace the results with a new validator run.
+    /// Fold in a new validator run. A mission validates only its active assertions, so the results
+    /// of the rest are kept.
     pub fn record(&mut self, results: Vec<AssertionResult>, now: i64) {
-        self.results = results;
+        if self.mission.is_some() {
+            self.results
+                .retain(|old| !results.iter().any(|new| new.id == old.id));
+            self.results.extend(results);
+        } else {
+            self.results = results;
+        }
         self.rounds += 1;
         self.checked_at = Some(now);
     }
 
-    /// The table every text surface prints: one block per assertion with its state and proof.
+    /// The table every text surface prints: one block per assertion with its state and proof,
+    /// grouped by milestone for a mission.
     pub fn table_lines(&self) -> Vec<String> {
+        if let Some(lines) = self.mission_table_lines() {
+            return lines;
+        }
         let mut out = Vec::new();
         for a in &self.assertions {
-            let (mark, state) = match self.result(a.id) {
-                Some(r) if r.passed => ("✓", "pass"),
-                Some(_) => ("✗", "FAIL"),
-                None => ("·", "not run"),
-            };
-            out.push(format!("{mark} {}. {} [{state}]", a.id, a.text));
-            out.push(format!("     check: {}", a.command));
-            if !a.expect.is_empty() {
-                out.push(format!("     expect: {}", a.expect));
-            }
-            if let Some(r) = self.result(a.id) {
-                if !r.passed && !r.reason.is_empty() {
-                    out.push(format!("     why: {}", r.reason));
-                }
-                if let Some(last) = r.proof.lines().rev().find(|l| !l.trim().is_empty()) {
-                    out.push(format!("     proof: {}", clip(last.trim(), 160)));
-                }
-            }
+            self.assertion_lines(a, &mut out);
         }
         out
+    }
+
+    fn assertion_lines(&self, a: &Assertion, out: &mut Vec<String>) {
+        let (mark, state) = match self.result(a.id) {
+            Some(r) if r.passed => ("✓", "pass"),
+            Some(_) => ("✗", "FAIL"),
+            None => ("·", "not run"),
+        };
+        out.push(format!("{mark} {}. {} [{state}]", a.id, a.text));
+        out.push(format!("     check: {}", a.command));
+        if !a.expect.is_empty() {
+            out.push(format!("     expect: {}", a.expect));
+        }
+        if let Some(r) = self.result(a.id) {
+            if !r.passed && !r.reason.is_empty() {
+                out.push(format!("     why: {}", r.reason));
+            }
+            if let Some(last) = r.proof.lines().rev().find(|l| !l.trim().is_empty()) {
+                out.push(format!("     proof: {}", clip(last.trim(), 160)));
+            }
+        }
     }
 }
 
@@ -277,6 +302,9 @@ pub fn card_steps(assertions: &[Assertion]) -> Vec<(String, String)> {
 
 /// What the worker is told once the contract is approved, so it builds toward the checks.
 pub fn worker_guidance(contract: &GoalContract) -> String {
+    if let Some(text) = mission::worker_guidance(contract) {
+        return text;
+    }
     let mut out = String::from(
         "This goal has an approved validation contract. An independent validator runs every \
          check itself after each turn; the goal is done only when all of them pass. Do not \
@@ -288,35 +316,42 @@ pub fn worker_guidance(contract: &GoalContract) -> String {
     out
 }
 
+/// One failing assertion as the worker is told: the command and the tail of its output.
+fn failure_line(contract: &GoalContract, id: u32) -> Option<String> {
+    let a = contract.assertions.iter().find(|a| a.id == id)?;
+    let (reason, proof) = match contract.result(id) {
+        Some(r) => (r.reason.as_str(), r.proof.as_str()),
+        None => ("not run", ""),
+    };
+    let detail = if proof.trim().is_empty() {
+        reason
+    } else {
+        proof
+    };
+    Some(format!(
+        "assertion {id} failed: {} -> {}\n  ({})\n",
+        a.command,
+        tail(detail, PROOF_CHARS).replace('\n', "\n    "),
+        a.text
+    ))
+}
+
 /// The next worker prompt after a validator run with failures: one line per failing assertion
 /// with the command and the tail of its output.
 pub fn failure_prompt(goal: &str, contract: &GoalContract) -> String {
-    let failing = contract.failing_ids();
+    if let Some(text) = mission::failure_prompt(goal, contract) {
+        return text;
+    }
     let mut out = format!(
         "Goal: {goal}\nThe independent validator ran the goal contract: {} of {} assertions \
          pass. Fix what fails, then stop; the validator re-runs every check.\n",
         contract.passed_count(),
         contract.assertions.len()
     );
-    for id in failing {
-        let Some(a) = contract.assertions.iter().find(|a| a.id == id) else {
-            continue;
-        };
-        let (reason, proof) = match contract.result(id) {
-            Some(r) => (r.reason.as_str(), r.proof.as_str()),
-            None => ("not run", ""),
-        };
-        let detail = if proof.trim().is_empty() {
-            reason
-        } else {
-            proof
-        };
-        out.push_str(&format!(
-            "assertion {id} failed: {} -> {}\n  ({})\n",
-            a.command,
-            tail(detail, PROOF_CHARS).replace('\n', "\n    "),
-            a.text
-        ));
+    for id in contract.failing_ids() {
+        if let Some(line) = failure_line(contract, id) {
+            out.push_str(&line);
+        }
     }
     out
 }

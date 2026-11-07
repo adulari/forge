@@ -25,6 +25,9 @@ pub struct GoalConfig {
     /// Most fresh-worker hand-offs one goal may make before it stops for good. `0` turns the
     /// relay off.
     pub max_relays: u32,
+    /// Most milestones a `/goal --mission` may have (2 to 12); the drafter is told this and a
+    /// longer draft is cut to it (docs/features/goal-contract.md, "Missions (milestones)").
+    pub mission_max_milestones: usize,
 }
 
 impl Default for GoalConfig {
@@ -36,6 +39,7 @@ impl Default for GoalConfig {
             contract_check_timeout_secs: 60,
             relay_after_compactions: 4,
             max_relays: 3,
+            mission_max_milestones: 6,
         }
     }
 }
@@ -64,6 +68,14 @@ mod tests {
             toml::from_str("contract = true\ncontract_check_timeout_secs = 5\n").unwrap();
         assert!(parsed.contract);
         assert_eq!(parsed.contract_check_timeout_secs, 5);
+    }
+
+    #[test]
+    fn mission_cap_defaults_to_six_and_parses() {
+        let parsed: GoalConfig = toml::from_str("").unwrap();
+        assert_eq!(parsed.mission_max_milestones, 6);
+        let parsed: GoalConfig = toml::from_str("mission_max_milestones = 3\n").unwrap();
+        assert_eq!(parsed.mission_max_milestones, 3);
     }
 
     #[test]
