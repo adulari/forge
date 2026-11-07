@@ -207,6 +207,10 @@ pub(super) async fn request_provider_response(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs() as i64);
         let attempt_started = std::time::Instant::now();
+        // The recovery line belongs before the answer it unblocked, so the first stream event
+        // announces it instead of the end of the response.
+        let mut live_recovery = session.outage_since();
+        let recovery_announced = std::sync::atomic::AtomicBool::new(false);
         let result = if !explicit_pin && reservation.is_none() {
             Err(forge_provider::ProviderError::Unavailable(format!(
                 "model '{active_model}' is serving another session"
@@ -254,6 +258,18 @@ pub(super) async fn request_provider_response(
             // A failed attempt's events belong to no response: each attempt starts a fresh trace.
             *session.bridge_trace.lock().unwrap() = Default::default();
             let mut sink = |ev: StreamEvent| {
+                if let Some(since) = live_recovery.take() {
+                    let down = tokio::time::Instant::now().saturating_duration_since(since);
+                    presenter.emit(PresenterEvent::Warning(crate::outage_wait::recovery_text(
+                        active_model,
+                        down,
+                    )));
+                    presenter.emit(PresenterEvent::ProviderRecovered {
+                        model: active_model.clone(),
+                        down_secs: down.as_secs(),
+                    });
+                    recovery_announced.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 handle_stream_event(
                     ev,
                     presenter.as_mut(),
@@ -350,7 +366,10 @@ pub(super) async fn request_provider_response(
                 // runtime re-probes, so before this a wrong exclusion outlived every observation
                 // that contradicted it.
                 let _ = session.store.clear_health_after_success(active_model);
-                session.outage_recovered(active_model);
+                session.outage_recovered(
+                    active_model,
+                    recovery_announced.load(std::sync::atomic::Ordering::SeqCst),
+                );
                 if !r.content.is_empty() && r.wants_tools() {
                     session.presenter.emit(PresenterEvent::AssistantDone);
                 }

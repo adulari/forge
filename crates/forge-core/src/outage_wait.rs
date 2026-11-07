@@ -76,6 +76,11 @@ fn clock(at: SystemTime) -> String {
         .to_string()
 }
 
+/// The note that closes an outage episode.
+pub(crate) fn recovery_text(model: &str, down: Duration) -> String {
+    format!("▶ {model} back after {}, turn resumed", span(down))
+}
+
 /// `4h09m`, `12m`, `45s`: a span for a status note.
 pub fn span(d: Duration) -> String {
     let secs = d.as_secs();
@@ -306,16 +311,27 @@ impl Session {
         self.transcript.push(Message::system(text).ui_only());
     }
 
-    /// The model answered: close the episode, if one is open.
-    pub(crate) fn outage_recovered(&mut self, model: &str) {
+    /// When the open outage episode began, for announcing the recovery on the first stream event.
+    pub(crate) fn outage_since(&self) -> Option<Instant> {
+        self.outage.as_ref().map(|episode| episode.since)
+    }
+
+    /// The model answered: close the episode, if one is open. `announced` is true when the first
+    /// stream event already put the recovery on screen, so the answer reads after it; the stored
+    /// note is written either way.
+    pub(crate) fn outage_recovered(&mut self, model: &str, announced: bool) {
         let Some(episode) = self.outage.take() else {
             return;
         };
         let down = Instant::now().saturating_duration_since(episode.since);
-        self.record_outage_note(&format!(
-            "▶ {model} back after {}, turn resumed",
-            span(down)
-        ));
+        let text = recovery_text(model, down);
+        if announced {
+            let seq = self.next_seq();
+            let _ = self.store.add_ui_note(&self.id, seq, Role::System, &text);
+            self.transcript.push(Message::system(&text).ui_only());
+            return;
+        }
+        self.record_outage_note(&text);
         self.presenter.emit(PresenterEvent::ProviderRecovered {
             model: model.to_string(),
             down_secs: down.as_secs(),
