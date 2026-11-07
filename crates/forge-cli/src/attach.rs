@@ -601,6 +601,10 @@ struct Renderer {
     printed_live: Vec<String>,
     held_live: Option<String>,
     shown_outage: Option<ClientOutage>,
+    /// The stored "provider down since" / "back after" notes already said so: the matching
+    /// status line would print the same fact twice.
+    enter_note_printed: bool,
+    back_note_printed: bool,
 }
 
 /// The line `forge attach` prints when the outage state changes: the same wording as the local
@@ -609,8 +613,12 @@ fn outage_notice(
     shown: &Option<ClientOutage>,
     now: &Option<ClientOutage>,
     now_unix: u64,
+    enter_noted: bool,
+    back_noted: bool,
 ) -> Option<String> {
     match (shown, now) {
+        (None, Some(_)) if enter_noted => None,
+        (Some(_), None) if back_noted => None,
         (_, Some(o)) if shown.as_ref() != Some(o) => Some(forge_tui::outage_line(
             &o.model,
             o.since_unix,
@@ -693,14 +701,33 @@ impl Renderer {
 
         for n in new_suffix(&self.printed_notes, &snap.notes) {
             println!("· {n}");
+            if n.contains(forge_store::OUTAGE_ENTER_MARK) && n.contains("provider down since") {
+                self.enter_note_printed = true;
+                self.back_note_printed = false;
+            }
+            if n.contains(forge_store::OUTAGE_BACK_MARK) && n.contains(" back after ") {
+                self.back_note_printed = true;
+            }
         }
         self.printed_notes = snap.notes.clone();
 
         let now_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        if let Some(line) = outage_notice(&self.shown_outage, &snap.outage, now_unix) {
+        if let Some(line) = outage_notice(
+            &self.shown_outage,
+            &snap.outage,
+            now_unix,
+            self.enter_note_printed,
+            self.back_note_printed,
+        ) {
             println!("{line}");
+        }
+        if snap.outage.is_none() {
+            self.enter_note_printed = false;
+            if self.shown_outage.is_some() {
+                self.back_note_printed = false;
+            }
         }
         self.shown_outage.clone_from(&snap.outage);
 
@@ -929,14 +956,69 @@ mod tests {
                 reason: "503 no_capacity".into(),
             })
         };
-        let line = outage_notice(&None, &down(1_300), 1_010).expect("a wait began");
+        let line = outage_notice(&None, &down(1_300), 1_010, false, false).expect("a wait began");
         assert!(line.contains("inferhub down since"), "{line}");
         assert!(line.contains("503 no_capacity"), "{line}");
-        assert_eq!(outage_notice(&down(1_300), &down(1_300), 1_020), None);
-        assert!(outage_notice(&down(1_300), &down(1_600), 1_310).is_some());
-        let back = outage_notice(&down(1_600), &None, 1_000 + 4 * 3600 + 9 * 60).unwrap();
+        assert_eq!(
+            outage_notice(&down(1_300), &down(1_300), 1_020, false, false),
+            None
+        );
+        assert!(outage_notice(&down(1_300), &down(1_600), 1_310, false, false).is_some());
+        let back =
+            outage_notice(&down(1_600), &None, 1_000 + 4 * 3600 + 9 * 60, false, false).unwrap();
         assert_eq!(back, "  · inferhub::flash back after 4h09m, turn resumed");
-        assert_eq!(outage_notice(&None, &None, 1_000), None);
+        assert_eq!(outage_notice(&None, &None, 1_000, false, false), None);
+    }
+
+    #[test]
+    fn attach_does_not_say_twice_what_a_stored_note_already_said() {
+        let down = |next| {
+            Some(ClientOutage {
+                model: "inferhub::flash".into(),
+                since_unix: 1_000,
+                next_try_unix: next,
+                until_unix: 40_000,
+                reason: "503 no_capacity".into(),
+            })
+        };
+        assert_eq!(outage_notice(&None, &down(1_300), 1_010, true, false), None);
+        assert!(outage_notice(&down(1_300), &down(1_600), 1_310, true, false).is_some());
+        assert_eq!(outage_notice(&down(1_600), &None, 5_000, false, true), None);
+    }
+
+    #[test]
+    fn the_renderer_remembers_the_notes_across_frames() {
+        let mut r = Renderer::default();
+        let mut pending = Pending::None;
+        let mut snap = ClientSnapshot {
+            notes: vec![
+                "⏸ drill::flash: provider down since 10:18 (503), retrying every <=5 min until 18:18. Esc to stop."
+                    .into(),
+            ],
+            outage: Some(ClientOutage {
+                model: "drill::flash".into(),
+                since_unix: 1_000,
+                next_try_unix: 1_300,
+                until_unix: 40_000,
+                reason: "503".into(),
+            }),
+            ..Default::default()
+        };
+        r.render(&snap, &mut pending);
+        assert!(
+            r.enter_note_printed,
+            "the down note is remembered while the outage stands"
+        );
+        snap.notes
+            .push("▶ drill::flash back after 3m, turn resumed".into());
+        r.render(&snap, &mut pending);
+        assert!(r.back_note_printed);
+        snap.outage = None;
+        r.render(&snap, &mut pending);
+        assert!(
+            !r.enter_note_printed && !r.back_note_printed,
+            "reset once the outage is over"
+        );
     }
 
     #[test]
