@@ -36,8 +36,10 @@ reviews (nothing is about to merge).
 
 A reviewer that errors, times out, has no model, or cannot read the diff is not a clean review.
 By default (`review_on_error = "block"`) the PR is not merged, the reason is shown, and the review
-is retried no sooner than 5 minutes later. `review_on_error = "merge"` lets the merge through and
-records `review failed (...); merging anyway` as the last action.
+is retried no sooner than 5 minutes after the failed attempt finished. After 3 failed reviews of
+the same head in a row the watch stops retrying and is blocked with `review failed 3 times on this
+head`, so a reviewer that keeps timing out never keeps spending; arm the watch again to try again. `review_on_error = "merge"` lets the
+merge through and records `review failed (...); merging anyway` as the last action.
 
 ## Config
 

@@ -36,6 +36,8 @@ pub(crate) use owner::{carry_owner_edits, Owner};
 const MAX_DIFF_BYTES: usize = 150_000;
 /// A failed review is not retried sooner than this.
 const RETRY_SECS: i64 = 300;
+/// Failed reviews of one head in a row before the watch stops spending and blocks.
+const MAX_ERRORS: u32 = 3;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -81,6 +83,9 @@ pub(crate) struct ReviewState {
     /// The owner let this head merge without waiting for the review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) merge_anyway: Option<Owner>,
+    /// Failed reviews of this head in a row.
+    #[serde(default)]
+    pub(crate) errors: u32,
 }
 
 impl ReviewState {
@@ -96,6 +101,7 @@ impl ReviewState {
             rounds,
             announced: false,
             merge_anyway: None,
+            errors: 0,
         }
     }
 
@@ -234,6 +240,7 @@ pub(crate) async fn gate(
         .as_ref()
         .filter(|r| r.head_sha == pr.head_sha)
         .cloned();
+    let errors = current.as_ref().map_or(0, |r| r.errors);
     if current.as_ref().is_some_and(|r| r.merge_anyway.is_some()) {
         return Gate::Pass;
     }
@@ -250,7 +257,9 @@ pub(crate) async fn gate(
             now,
         };
         let session = watch.session_id.clone();
-        watch.review = Some(ReviewState::started(&pr.head_sha, rounds, now));
+        let mut running = ReviewState::started(&pr.head_sha, rounds, now);
+        running.errors = errors;
+        watch.review = Some(running);
         jobs.start(&watch.session_id, &pr.head_sha, job.run(), move || {
             registry().poll_soon(&session)
         });
@@ -258,14 +267,29 @@ pub(crate) async fn gate(
     };
     let state = match current {
         None => return spawn(watch),
-        Some(r) if r.verdict == Verdict::Error && now - r.reviewed_at >= RETRY_SECS => {
+        Some(r)
+            if r.verdict == Verdict::Error
+                && r.errors < MAX_ERRORS
+                && now - r.reviewed_at >= RETRY_SECS =>
+        {
             return spawn(watch)
         }
         Some(r) if r.verdict == Verdict::Running => {
             match jobs.poll(&watch.session_id, &pr.head_sha) {
                 Poll::Running => return Gate::Wait("review running".into()),
                 Poll::Missing => return spawn(watch),
-                Poll::Done(done) => *done,
+                Poll::Done(done) => {
+                    // The back-off counts from when the result arrived: a review that ran into
+                    // its timeout is not retried at once.
+                    let mut done = *done;
+                    done.reviewed_at = now;
+                    done.errors = if done.verdict == Verdict::Error {
+                        errors + 1
+                    } else {
+                        0
+                    };
+                    done
+                }
             }
         }
         Some(r) => r,
@@ -283,6 +307,15 @@ pub(crate) async fn gate(
             if settings.merge_on_error {
                 watch.last_action = Some(format!("review failed ({why}); merging anyway"));
                 Gate::Pass
+            } else if watch
+                .review
+                .as_ref()
+                .is_some_and(|r| r.errors >= MAX_ERRORS)
+            {
+                Gate::Block(format!(
+                    "review failed {MAX_ERRORS} times on this head ({why}); not retrying. Set \
+                     review_model or review_budget, or arm the watch again to retry"
+                ))
             } else {
                 Gate::Wait(format!("review failed ({why}); not merging, will retry"))
             }

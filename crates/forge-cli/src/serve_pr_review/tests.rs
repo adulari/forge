@@ -245,6 +245,57 @@ async fn a_failing_reviewer_blocks_and_retries_later_by_default() {
 }
 
 #[tokio::test]
+async fn a_review_that_ran_into_its_timeout_is_not_restarted_when_its_result_arrives() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let reviewer = install_hook(vec![Err("review timed out after 600s".into())], |_| {});
+    let mut watch = Watch::new("s1", Mode::Merge, "squash", 0);
+    view(dir.path(), "aaaa1111");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    settle().await;
+    poll_once(&gh, dir.path(), &mut watch, true, 700).await;
+    poll_once(&gh, dir.path(), &mut watch, true, 730).await;
+    settle().await;
+    assert_eq!(
+        reviewer.calls.load(Ordering::SeqCst),
+        1,
+        "the back-off counts from the failure, not from the start"
+    );
+    poll(&gh, dir.path(), &mut watch, true, 1000).await;
+    assert_eq!(reviewer.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_reviewer_that_keeps_failing_stops_spending_and_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let reviewer = install_hook(vec![Err("model timed out".into())], |_| {});
+    let mut watch = Watch::new("s1", Mode::Merge, "squash", 0);
+    view(dir.path(), "aaaa1111");
+    for now in [10, 400, 800, 1200, 1600] {
+        poll(&gh, dir.path(), &mut watch, true, now).await;
+    }
+    assert_eq!(reviewer.calls.load(Ordering::SeqCst), MAX_ERRORS as usize);
+    assert_eq!(watch.state, Phase::Blocked);
+    let why = watch.blocked_reason.clone().unwrap();
+    assert!(
+        why.contains("review failed 3 times") && why.contains("model timed out"),
+        "{why}"
+    );
+    assert!(!calls(dir.path()).contains("pr merge"));
+
+    view(dir.path(), "bbbb2222");
+    let mut rearmed = Watch::new("s1", Mode::Merge, "squash", 0);
+    rearmed.review = watch.review.clone();
+    poll(&gh, dir.path(), &mut rearmed, true, 2000).await;
+    assert_eq!(
+        reviewer.calls.load(Ordering::SeqCst),
+        MAX_ERRORS as usize + 1,
+        "a new head gets a fresh set of tries"
+    );
+}
+
+#[tokio::test]
 async fn the_error_policy_can_let_the_merge_through() {
     let dir = tempfile::tempdir().unwrap();
     let gh = fake_gh(dir.path());
@@ -334,6 +385,7 @@ fn the_row_text_names_the_state() {
         rounds: 0,
         announced: false,
         merge_anyway: None,
+        errors: 0,
     };
     assert_eq!(state.summary(), "review: 2 confirmed");
     state.fix_sent = true;
