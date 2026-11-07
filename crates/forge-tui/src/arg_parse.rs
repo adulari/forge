@@ -71,6 +71,7 @@ pub(crate) fn goal_action(arg: &str) -> CommandAction {
             return CommandAction::Unknown(format!("/goal {arg} ({why}; nothing was started)"))
         }
     };
+    let (arg, contract) = take_flag(&arg, "--contract");
     let Ok((objective, gates, max_tokens, max_minutes)) = parse_autonomy_options(&arg) else {
         return bad_budget("/goal", &arg);
     };
@@ -80,7 +81,63 @@ pub(crate) fn goal_action(arg: &str) -> CommandAction {
         max_tokens,
         max_minutes,
         budget,
+        contract,
     }
+}
+
+/// Remove a bare whole-word `flag` from a goal's arguments. A plain whitespace scan, like
+/// [`take_budget`]: a quoted gate command that happens to contain the word is not a flag, because
+/// only an unquoted token equal to the flag counts.
+fn take_flag(arg: &str, flag: &str) -> (String, bool) {
+    if !arg.contains(flag) {
+        return (arg.to_string(), false);
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut found = false;
+    let mut quote: Option<char> = None;
+    let mut word_start: Option<usize> = None;
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (i, c) in arg.char_indices() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None if c == '"' => {
+                quote = Some(c);
+                word_start.get_or_insert(i);
+            }
+            None if c.is_whitespace() => {
+                if let Some(st) = word_start.take() {
+                    spans.push((st, i));
+                }
+            }
+            None => {
+                word_start.get_or_insert(i);
+            }
+        }
+    }
+    if let Some(st) = word_start {
+        spans.push((st, arg.len()));
+    }
+    let mut cursor = 0;
+    for (st, en) in spans {
+        if &arg[st..en] == flag {
+            kept.push(&arg[cursor..st]);
+            cursor = en;
+            found = true;
+        }
+    }
+    kept.push(&arg[cursor..]);
+    if !found {
+        return (arg.to_string(), false);
+    }
+    let joined: String = kept.concat();
+    (
+        joined.split_whitespace().collect::<Vec<_>>().join(" "),
+        true,
+    )
 }
 
 /// Pull `--budget <spec>` out of a goal's arguments, validating the spec. Without the flag the

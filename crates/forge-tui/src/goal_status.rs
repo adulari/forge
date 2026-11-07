@@ -7,6 +7,7 @@
 //! still running cannot block them.
 
 use crate::app::App;
+use forge_types::goal_contract::{AssertionResult, GoalContract};
 use forge_types::goal_envelope::{EnvelopeSpec, EnvelopeState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +80,9 @@ pub struct GoalStatus {
     pub envelope: Option<EnvelopeState>,
     /// A new envelope a `/goal budget` typed mid-run left for the loop to apply.
     pub envelope_edit: Option<EnvelopeSpec>,
+    /// The approved validation contract and the validator's latest results
+    /// (docs/features/goal-contract.md); `None` for a goal without one.
+    pub contract: Option<GoalContract>,
     /// Wall clock of the last sync, Unix ms, so a client can keep the elapsed time ticking.
     pub synced_at_ms: u64,
     carry: bool,
@@ -116,6 +120,10 @@ impl GoalStatus {
         let budget = budget.unwrap_or_default();
         let budget = match &self.envelope {
             Some(envelope) => format!("{budget} · {}", envelope.meter()),
+            None => budget,
+        };
+        let budget = match self.contract.as_ref().filter(|c| !c.results.is_empty()) {
+            Some(contract) => format!("{budget} · contract {}", contract.headline()),
             None => budget,
         };
         match self.phase {
@@ -170,6 +178,12 @@ impl GoalStatus {
         if let Some(reason) = &self.reason {
             out.push_str(&format!("\n   {reason}"));
         }
+        if let Some(contract) = &self.contract {
+            out.push_str(&format!("\n   📜 contract — {}", contract.headline()));
+            for line in contract.table_lines() {
+                out.push_str(&format!("\n   {line}"));
+            }
+        }
         out
     }
 }
@@ -198,6 +212,11 @@ impl App {
             .filter(|g| g.carry && g.objective == objective)
             .and_then(|g| g.envelope.clone());
         let envelope = self.pending_envelope.take().or(kept_envelope);
+        let kept_contract = self
+            .goal
+            .as_ref()
+            .filter(|g| g.carry && g.objective == objective)
+            .and_then(|g| g.contract.clone());
         let carry = self
             .goal
             .as_ref()
@@ -226,10 +245,28 @@ impl App {
             edit: None,
             envelope,
             envelope_edit: None,
+            contract: kept_contract,
             synced_at_ms: now_ms(),
             carry: false,
         });
         carry
+    }
+
+    /// The approved contract for the running goal.
+    pub fn goal_set_contract(&mut self, contract: GoalContract) {
+        if let Some(goal) = self.goal.as_mut() {
+            goal.contract = Some(contract);
+        }
+    }
+
+    /// Record a validator run on the goal's contract.
+    pub fn goal_contract_results(&mut self, results: Vec<AssertionResult>) {
+        if let Some(contract) = self.goal.as_mut().and_then(|g| g.contract.as_mut()) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs() as i64);
+            contract.record(results, now);
+        }
     }
 
     /// Record the envelope's latest accounting so every surface shows the same meter.
@@ -263,7 +300,8 @@ impl App {
         }
     }
 
-    /// Bring back a goal a restart interrupted, as a paused goal that `/goal resume` continues.
+    /// Bring back a goal a restart interrupted, as a paused goal that `/goal resume` continues
+    /// (`phase` Paused), or a goal that had ended, kept for its contract table.
     #[allow(clippy::too_many_arguments)]
     pub fn goal_restore(
         &mut self,
@@ -273,11 +311,13 @@ impl App {
         max_minutes: Option<u64>,
         carry: GoalCarry,
         reason: Option<String>,
-        envelope: EnvelopeState,
+        envelope: Option<EnvelopeState>,
+        contract: Option<GoalContract>,
+        phase: GoalPhase,
     ) {
         self.goal = Some(GoalStatus {
             objective: objective.to_string(),
-            phase: GoalPhase::Paused,
+            phase,
             iteration: carry.iteration,
             tokens_used: carry.tokens_used,
             max_tokens,
@@ -287,8 +327,9 @@ impl App {
             reason,
             request: None,
             edit: None,
-            envelope: Some(envelope),
+            envelope,
             envelope_edit: None,
+            contract,
             synced_at_ms: now_ms(),
             carry: false,
         });

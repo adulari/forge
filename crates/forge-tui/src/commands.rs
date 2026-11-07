@@ -126,6 +126,9 @@ pub enum CommandAction {
         /// The validated `--budget` envelope text (`claude:20%w`, `$5`); see
         /// `forge_types::goal_envelope`.
         budget: Option<String>,
+        /// `--contract`: first draft a validation contract and ask for approval
+        /// (docs/features/goal-contract.md).
+        contract: bool,
     },
     /// Steer the goal that is running or paused (`/goal pause|resume|clear|status|edit <text>`).
     GoalControl(GoalControl),
@@ -731,6 +734,7 @@ mod tests {
                 max_tokens: None,
                 max_minutes: None,
                 budget: None,
+                contract: false,
             }
         );
         assert_eq!(
@@ -741,6 +745,7 @@ mod tests {
                 max_tokens: None,
                 max_minutes: None,
                 budget: None,
+                contract: false,
             }
         );
         assert_eq!(
@@ -799,6 +804,7 @@ mod tests {
             max_tokens: None,
             max_minutes: None,
             budget: None,
+            contract: false,
         };
         assert_eq!(
             parse_command("/goal pause"),
@@ -832,6 +838,34 @@ mod tests {
     }
 
     #[test]
+    fn goal_contract_flag_is_taken_anywhere_but_not_from_inside_a_gate() {
+        let parsed = |input: &str| match parse_command(input) {
+            CommandAction::Goal {
+                objective,
+                gates,
+                contract,
+                ..
+            } => (objective, gates, contract),
+            other => panic!("not a goal: {other:?}"),
+        };
+        assert_eq!(
+            parsed("/goal --contract ship the parser"),
+            ("ship the parser".into(), Vec::new(), true)
+        );
+        assert_eq!(
+            parsed("/goal ship the parser --contract --max-minutes 5"),
+            ("ship the parser".into(), Vec::new(), true)
+        );
+        assert_eq!(
+            parsed("/goal ship the parser"),
+            ("ship the parser".into(), Vec::new(), false)
+        );
+        let (_, gates, contract) = parsed("/goal ship it --gate \"echo --contract\"");
+        assert!(!contract);
+        assert_eq!(gates, vec!["echo --contract".to_string()]);
+    }
+
+    #[test]
     fn goal_budget_flag_is_validated_and_the_verb_needs_a_real_spec() {
         let goal = |objective: &str, budget: &str| CommandAction::Goal {
             objective: objective.into(),
@@ -839,6 +873,7 @@ mod tests {
             max_tokens: None,
             max_minutes: None,
             budget: Some(budget.into()),
+            contract: false,
         };
         assert_eq!(
             parse_command("/goal harden the importer --budget claude:20%w"),
@@ -856,6 +891,7 @@ mod tests {
                 max_tokens: None,
                 max_minutes: Some(30),
                 budget: Some("codex:15%w".into()),
+                contract: false,
             }
         );
         assert_eq!(
@@ -885,6 +921,7 @@ mod tests {
                 max_tokens: None,
                 max_minutes: None,
                 budget: None,
+                contract: false,
             }
         );
     }
@@ -921,6 +958,7 @@ mod tests {
                 max_tokens: None,
                 max_minutes: None,
                 budget: None,
+                contract: false,
             }
         );
         // Bare form (no options) must be untouched — exact prior behavior, whitespace and all.

@@ -219,3 +219,63 @@ fn a_goal_waiting_for_its_window_says_when_it_resumes() {
     assert!(!held.chip(0, 0).contains("resumes at"));
     assert!(!held.summary().contains("resumes at"));
 }
+
+mod contract {
+    use super::*;
+    use forge_types::goal_contract::{parse_contract, AssertionResult, GoalContract};
+
+    fn contract() -> GoalContract {
+        let text = r#"{"assertions":[
+          {"assertion":"a exists","check":"test -f a"},
+          {"assertion":"b exists","check":"test -f b"},
+          {"assertion":"c exists","check":"test -f c"}]}"#;
+        let mut c = GoalContract::new(parse_contract(text).unwrap());
+        c.approved = true;
+        c
+    }
+
+    fn result(id: u32, passed: bool) -> AssertionResult {
+        AssertionResult {
+            id,
+            passed,
+            proof: "out".into(),
+            reason: if passed {
+                String::new()
+            } else {
+                "exit 1".into()
+            },
+        }
+    }
+
+    #[test]
+    fn status_shows_the_contract_table_and_the_chip_the_count() {
+        let mut app = App::default();
+        app.goal_begin("ship", &[], None, None);
+        app.goal_set_contract(contract());
+        assert!(!app.goal.as_ref().unwrap().chip(0, 0).contains("contract"));
+        app.goal_contract_results(vec![result(1, true), result(2, false), result(3, true)]);
+        let goal = app.goal.as_ref().unwrap();
+        assert!(
+            goal.chip(1, 3).contains("contract 2/3 pass"),
+            "{}",
+            goal.chip(1, 3)
+        );
+        let summary = goal.summary();
+        assert!(summary.contains("📜 contract — 2/3 pass"), "{summary}");
+        assert!(summary.contains("✗ 2. b exists [FAIL]"), "{summary}");
+        assert!(summary.contains("why: exit 1"), "{summary}");
+    }
+
+    #[test]
+    fn a_resumed_goal_keeps_its_contract() {
+        let mut app = App::default();
+        app.goal_begin("ship", &[], None, None);
+        app.goal_set_contract(contract());
+        app.goal_paused();
+        app.goal_prepare_resume();
+        app.goal_begin("ship", &[], None, None);
+        assert!(app.goal.as_ref().unwrap().contract.is_some());
+        app.goal_begin("something else", &[], None, None);
+        assert!(app.goal.as_ref().unwrap().contract.is_none());
+    }
+}

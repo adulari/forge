@@ -310,7 +310,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "goal",
         desc: "set a goal and track it as a plan, or steer it: pause, resume, edit, clear",
-        usage: "/goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] [--budget claude:20%w|$5] | budget <spec> | pause | resume | clear | status | edit <objective>",
+        usage: "/goal <objective> [--contract] [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] [--budget claude:20%w|$5] | budget <spec> | pause | resume | clear | status | edit <objective>",
     },
     Command {
         name: "pr",
