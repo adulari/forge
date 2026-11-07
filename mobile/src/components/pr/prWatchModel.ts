@@ -29,6 +29,24 @@ export function watchStatus(watch: PrWatch | null): WatchStatus {
     return { label: "Blocked", tone: "danger", detail: watch.blocked_reason ?? "The watcher stopped." };
   }
   const detail = watch.blocked_reason ?? watch.last_action;
+  const queue = watch.mode === "merge" ? watch.queue : null;
+  if (queue) {
+    const detailed = queue.reason ?? watch.hold ?? detail;
+    switch (queue.state) {
+      case "queued":
+        return { label: "Queued to merge", tone: "neutral", detail: detailed };
+      case "head":
+        return { label: "Landing next", tone: "accent", detail: detailed };
+      case "checks":
+        return {
+          label: "Updated, in checks",
+          tone: "accent",
+          detail: queue.last_update ? `${queue.last_update}. ${detailed ?? ""}`.trim() : detailed,
+        };
+      case "skipped":
+        return { label: "Handed back", tone: "warn", detail: detailed };
+    }
+  }
   return { label: watch.mode === "merge" ? "Watching to merge" : "Watching", tone: watch.blocked_reason ? "warn" : "accent", detail };
 }
 

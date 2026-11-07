@@ -46,6 +46,33 @@ describe("watchStatus", () => {
   });
 });
 
+describe("watchStatus in the merge queue", () => {
+  const queue = { repo: "/r/.git", state: "queued" as const, reason: null, pushes: 0, last_update: null };
+
+  it("shows the place in line, and that the head is landing", () => {
+    expect(
+      watchStatus({ ...base, queue: { ...queue, reason: "#2 in the merge queue, behind PR #7" } }),
+    ).toMatchObject({ label: "Queued to merge", detail: "#2 in the merge queue, behind PR #7" });
+    expect(watchStatus({ ...base, queue: { ...queue, state: "head" } }).label).toBe("Landing next");
+  });
+
+  it("says what the queue did to an updated branch and when it handed one back", () => {
+    const checks = watchStatus({
+      ...base,
+      queue: { ...queue, state: "checks", pushes: 1, last_update: "merged the base; resolved CHANGELOG.md; pushed", reason: "waiting for checks on the updated branch" },
+    });
+    expect(checks.label).toBe("Updated, in checks");
+    expect(checks.detail).toContain("resolved CHANGELOG.md");
+    expect(
+      watchStatus({ ...base, queue: { ...queue, state: "skipped", reason: "conflicts in src/a.rs" } }),
+    ).toMatchObject({ label: "Handed back", tone: "warn", detail: "conflicts in src/a.rs" });
+  });
+
+  it("ignores queue data on a fix-mode watch", () => {
+    expect(watchStatus({ ...base, mode: "fix", queue }).label).toBe("Watching");
+  });
+});
+
 describe("isWatching", () => {
   it("is true only for an armed, unfinished watch", () => {
     expect(isWatching(base)).toBe(true);

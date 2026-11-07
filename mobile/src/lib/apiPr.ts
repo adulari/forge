@@ -240,7 +240,38 @@ export interface PrWatch {
   last_checked: number | null;
   last_action: string | null;
   created_at: number;
+  /** Merge queue standing; only merge-mode watches carry it. */
+  queue?: PrQueueInfo | null;
+  hold?: string | null;
 }
+
+export type PrQueueState = "queued" | "head" | "checks" | "skipped";
+
+export interface PrQueueInfo {
+  repo: string;
+  state: PrQueueState;
+  reason: string | null;
+  pushes: number;
+  last_update: string | null;
+}
+
+export interface PrQueueRow {
+  session_id: string;
+  pr_number: number | null;
+  pr_url: string | null;
+  position: number | null;
+  state: PrQueueState | "merged" | "blocked";
+  reason: string | null;
+  pushes: number;
+  last_update: string | null;
+}
+
+export interface PrRepoQueue {
+  repo: string;
+  rows: PrQueueRow[];
+}
+
+export const getPrQueue = (baseUrl: string) => request<{ queues: PrRepoQueue[] }>(baseUrl, "/api/pr/queue");
 
 export const getPrWatch = (baseUrl: string, session: string) =>
   request<{ watch: PrWatch | null }>(baseUrl, `/api/pr/watch${query({ session })}`);
