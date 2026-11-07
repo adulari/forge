@@ -15,7 +15,7 @@ pub(crate) enum VerificationFamily {
 }
 
 impl VerificationFamily {
-    const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Typecheck => "typecheck",
             Self::Lint => "lint",

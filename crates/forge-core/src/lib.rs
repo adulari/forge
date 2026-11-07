@@ -81,6 +81,7 @@ pub mod codemode;
 mod commit_policy;
 mod compaction_budget;
 mod compaction_chain;
+mod compaction_checkpoint;
 mod compaction_episodes;
 mod compaction_headroom;
 mod compaction_input;
@@ -1808,6 +1809,8 @@ pub struct Session {
     /// Where the last compaction left the context, so auto-compaction waits for regrowth
     /// (compaction_budget.rs).
     compact_guard: compaction_budget::ThrashGuard,
+    /// Slices landed since the last checkpoint fold (`compaction_checkpoint.rs`).
+    checkpoint: compaction_checkpoint::CheckpointTracker,
     /// Pinned session context: recalled memories, goal, plan and the task list snapshot.
     pinned: pinned_context::PinnedState,
     /// Files this session read or edited most recently, newest first, for the restore after a
@@ -5154,6 +5157,9 @@ mod tests {
 
     #[path = "recall.rs"]
     mod recall_tests;
+
+    #[path = "checkpoint.rs"]
+    mod checkpoint_tests;
 
     #[path = "transcript_mark.rs"]
     mod transcript_mark_tests;

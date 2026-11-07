@@ -328,6 +328,7 @@ impl Session {
             // Set below, through `set_instructions`.
             instructions: Default::default(),
             compact_guard: Default::default(),
+            checkpoint: Default::default(),
             pinned: Default::default(),
             recent_files: Default::default(),
             project,

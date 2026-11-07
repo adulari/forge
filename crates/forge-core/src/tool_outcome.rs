@@ -56,6 +56,9 @@ impl Session {
         } else {
             result
         };
+        if !wrapper {
+            self.checkpoint.observe(call, failure.is_none());
+        }
         let verification = completion::classify_tool(&call.name, &call.args.to_string());
         let flipped = ledgers.verification_ledger.lock().unwrap().observe_result(
             verification,
