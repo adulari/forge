@@ -484,6 +484,9 @@ impl BridgeExpert {
     }
 }
 
+/// Consults allowed in a session while the subscription window has no fresh reading.
+const UNVERIFIED_CONSULTS_MAX: u32 = 3;
+
 /// Per-session and per-turn expert bookkeeping.
 #[derive(Debug, Default)]
 pub(crate) struct ExpertState {
@@ -492,6 +495,8 @@ pub(crate) struct ExpertState {
     pub turn_model: Option<String>,
     pub stop_deferred: bool,
     pub session_consults: u32,
+    /// Consults made while the subscription window had no fresh reading.
+    pub unverified_consults: u32,
     pub usd_spent: f64,
     pub envelope: Option<EnvelopeState>,
     pub status: Option<String>,
@@ -621,9 +626,20 @@ impl Session {
                     self.config.harness.expert.budget.trim()
                 ))
             }
-            // Without a fresh reading the slice cannot be verified. The per-turn cap still
-            // bounds the cost, and the status line says the usage is unread.
-            EnvelopeCheck::Within | EnvelopeCheck::Unverified => None,
+            EnvelopeCheck::Within => None,
+            // Without a fresh reading the slice cannot be verified. A consult usually refreshes
+            // the reading itself, so a few are allowed; a meter that never comes back must not
+            // let an overnight run draw on the plan unchecked.
+            EnvelopeCheck::Unverified
+                if self.expert.unverified_consults < UNVERIFIED_CONSULTS_MAX =>
+            {
+                self.expert.unverified_consults += 1;
+                None
+            }
+            EnvelopeCheck::Unverified => Some(format!(
+                "the expert budget cannot be checked (no fresh usage reading after \
+                 {UNVERIFIED_CONSULTS_MAX} consults)"
+            )),
         }
     }
 

@@ -645,3 +645,36 @@ fn a_stored_turn_detail_reads_back_as_the_consults_it_recorded() {
     );
     assert_eq!(crate::expert_of_detail(None), (None, None));
 }
+
+#[tokio::test]
+async fn an_unreadable_window_allows_only_a_few_consults_per_session() {
+    let plan: Plan = Box::new(|n| {
+        (n < 5).then(|| {
+            (
+                "Asking again.".into(),
+                vec![call(
+                    CONSULT_EXPERT_TOOL,
+                    serde_json::json!({"question": format!("attempt {n}")}),
+                )],
+            )
+        })
+    });
+    let mut r = run(plan, vec![ADVICE], None, |c| {
+        with_expert(c);
+        c.harness.expert.budget = "codex:5%w".into();
+        c.harness.expert.max_consults_per_turn = 10;
+    });
+    r.session.run_turn("find the parser").await.unwrap();
+    assert_eq!(
+        r.expert_models().len(),
+        3,
+        "no reading: three consults, then refused"
+    );
+    assert!(
+        r.session
+            .transcript
+            .iter()
+            .any(|m| m.role == Role::Tool
+                && m.content.contains("the expert budget cannot be checked"))
+    );
+}
