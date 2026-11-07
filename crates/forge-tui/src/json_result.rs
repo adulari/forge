@@ -20,7 +20,13 @@ pub struct JsonResultPresenter {
 /// a machine consumer must see `is_error: true`, not an empty stdout it cannot tell from a crash.
 /// It carries the same fields as a finished run's result, zeroed, as Claude Code's does.
 pub fn error_result_line(message: &str) -> String {
-    let value = serde_json::json!({
+    error_result_line_with(message, None)
+}
+
+/// [`error_result_line`] plus the stored end reason of the turn that failed, so a script can tell
+/// "the provider stayed down" from any other failure without parsing the message.
+pub fn error_result_line_with(message: &str, end_reason: Option<&str>) -> String {
+    let mut value = serde_json::json!({
         "type": "result",
         "subtype": "error_during_execution",
         "is_error": true,
@@ -40,6 +46,9 @@ pub fn error_result_line(message: &str) -> String {
         "modelUsage": {},
         "permission_denials": [],
     });
+    if let Some(reason) = end_reason {
+        value["end_reason"] = reason.into();
+    }
     value.to_string()
 }
 
@@ -161,6 +170,16 @@ mod tests {
             context_tokens: 100,
             context_limit: None,
         }
+    }
+
+    #[test]
+    fn a_failed_run_result_names_the_stored_end_reason() {
+        let with: serde_json::Value =
+            serde_json::from_str(&error_result_line_with("down", Some("provider_down"))).unwrap();
+        assert_eq!(with["stop_reason"], "error");
+        assert_eq!(with["end_reason"], "provider_down");
+        let without: serde_json::Value = serde_json::from_str(&error_result_line("boom")).unwrap();
+        assert!(without.get("end_reason").is_none());
     }
 
     #[test]

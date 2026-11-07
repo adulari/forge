@@ -73,7 +73,7 @@ mod stream_json;
 mod stream_json_message;
 pub mod throughput;
 mod usage_source;
-pub use json_result::{error_result_line, JsonResultPresenter};
+pub use json_result::{error_result_line, error_result_line_with, JsonResultPresenter};
 pub use print_presenter::PrintPresenter;
 mod shell_mode;
 pub use shell_mode::bang_command;

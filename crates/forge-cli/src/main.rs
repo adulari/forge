@@ -434,6 +434,12 @@ fn error_next_step(e: &anyhow::Error) -> &'static str {
     }) {
         return "this store was written by a newer Forge — install a build at least that new (`forge update`); `forge doctor` reports the store path and both schema versions";
     }
+    if e.chain().any(|c| {
+        c.downcast_ref::<forge_core::CoreError>()
+            .is_some_and(|core| matches!(core, forge_core::CoreError::ProviderDown { .. }))
+    }) {
+        return "the provider is down, not misconfigured: send `continue` in this session once it is back, or raise mesh.outage_wait_secs to wait longer";
+    }
     let text = e
         .chain()
         .map(|c| c.to_string().to_lowercase())
@@ -496,6 +502,21 @@ mod error_hint_tests {
         let hint = error_next_step(&schema_too_new());
         assert!(!hint.contains("PRAGMA"), "got: {hint}");
         assert!(!hint.contains("user_version"), "got: {hint}");
+    }
+
+    #[test]
+    fn a_provider_that_stayed_down_gets_the_wait_advice_not_the_key_check() {
+        let down = anyhow::Error::new(forge_core::CoreError::ProviderDown {
+            model: "drill::flash".into(),
+            message: "drill::flash: provider still down after 15s".into(),
+        })
+        .context("running agent turn");
+        let hint = error_next_step(&down);
+        assert!(
+            hint.contains("continue") && hint.contains("outage_wait_secs"),
+            "{hint}"
+        );
+        assert!(!hint.contains("provider keys"), "{hint}");
     }
 
     /// The pre-existing branches must be untouched by the early return.

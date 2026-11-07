@@ -411,12 +411,7 @@ async fn drive_turn(
                     finished = Some(outcome);
                     Ok(false)
                 }
-                Err(e) => {
-                    if machine {
-                        println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
-                    }
-                    Err(e)
-                }
+                Err(e) => Err(e),
             },
             _ = interrupt_signal() => {
                 if machine {
@@ -432,7 +427,18 @@ async fn drive_turn(
         Some(outcome) => {
             fail_if_incomplete(outcome, session.last_end_reason().as_deref()).map(|()| false)
         }
-        None => result,
+        None => {
+            if let (true, Err(e)) = (machine, &result) {
+                println!(
+                    "{}",
+                    forge_tui::error_result_line_with(
+                        &format!("{e:#}"),
+                        session.last_end_reason().as_deref()
+                    )
+                );
+            }
+            result
+        }
     }
 }
 
@@ -486,6 +492,13 @@ fn fail_if_incomplete(outcome: forge_types::LoopOutcome, end_reason: Option<&str
     );
     // The stored end reason also catches a "final answer" that left a step undone or tasks open.
     if stopped_short || end_reason.is_some_and(forge_core::end_fails_run) {
+        // A final answer that left a step undone or tasks open is the model's own words, not an
+        // error: the stop line already said what happened, so the failure only names the end.
+        if !stopped_short {
+            if let Some(reason) = end_reason {
+                anyhow::bail!("the run did not finish: {}", forge_core::end_label(reason));
+            }
+        }
         if outcome.text.trim().is_empty() {
             anyhow::bail!(
                 "{}",
@@ -768,6 +781,13 @@ mod tests {
                 "{end}"
             );
         }
+        let said = fail_if_incomplete(
+            outcome(S::FinalAnswer, "Next I will run the tests."),
+            Some("final_answer_mid_intent"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(said, "the run did not finish: answer left a step undone");
         let blank = fail_if_incomplete(outcome(S::ProviderDown, " "), Some("provider_down"))
             .unwrap_err()
             .to_string();
