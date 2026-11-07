@@ -1020,7 +1020,7 @@ export interface ModelReportEntry {
   benchmark_intelligence: number | null;
   benchmark_coding: number | null;
 }
-export interface ModelReportResponse { days: number; repo: string | null; generated_at: number; models: ModelReportEntry[] }
+export interface ModelReportResponse { days: number; repo: string | null; generated_at: number; models: ModelReportEntry[]; /** How the window's turns ended, most common first; absent from an older host. */ turn_endings?: { reason: string; count: number }[] }
 
 /** How each model did for this user over the last `days` days, from the host's local counts. */
 export function getModelReport(baseUrl: string, days = 30, repo?: string): Promise<ModelReportResponse> {

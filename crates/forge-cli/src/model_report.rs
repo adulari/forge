@@ -71,6 +71,15 @@ pub(crate) struct ModelReport {
     pub(crate) repo: Option<String>,
     pub(crate) generated_at: i64,
     pub(crate) models: Vec<ReportEntry>,
+    /// How the window's turns ended, most common first (`turn.end_reason`).
+    #[serde(default)]
+    pub(crate) turn_endings: Vec<TurnEnding>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct TurnEnding {
+    pub(crate) reason: String,
+    pub(crate) count: i64,
 }
 
 pub(crate) fn build(
@@ -101,6 +110,11 @@ pub(crate) fn build(
         repo: repo.map(str::to_string),
         generated_at: now,
         models,
+        turn_endings: store
+            .turn_end_counts(since, None)?
+            .into_iter()
+            .map(|(reason, count)| TurnEnding { reason, count })
+            .collect(),
     })
 }
 
@@ -135,6 +149,7 @@ pub(crate) fn render(report: &ModelReport) -> String {
     let mut out = format!("model report card — last {} days, {scope}\n", report.days);
     if report.models.is_empty() {
         out.push_str("no model activity recorded in this window\n");
+        out.push_str(&turn_endings_section(report));
         return out;
     }
     out.push_str(&format!(
@@ -149,6 +164,18 @@ pub(crate) fn render(report: &ModelReport) -> String {
         "done = answered; f/over = failed, then the mesh moved to another hop; cost and latency \
          are medians per call; bench = intelligence score\n",
     );
+    out.push_str(&turn_endings_section(report));
+    out
+}
+
+fn turn_endings_section(report: &ModelReport) -> String {
+    if report.turn_endings.is_empty() {
+        return String::new();
+    }
+    let mut out = "\nturn endings\n".to_string();
+    for e in &report.turn_endings {
+        out.push_str(&format!("  {:<28} {:>6}\n", e.reason, e.count));
+    }
     out
 }
 
@@ -284,6 +311,23 @@ mod tests {
         assert_eq!(loads.get(), 2, "another window is a different report");
         cached_by(&slot, t0 + BROWSER_CACHE_TTL * 2, 7, load);
         assert_eq!(loads.get(), 3, "an expired report is rebuilt");
+    }
+
+    #[test]
+    fn the_report_card_ends_with_the_turn_endings_table() {
+        let store = Store::open_in_memory().unwrap();
+        let sid = store.create_session("/repo", "default").unwrap();
+        for (seq, reason) in [(0, "final_answer"), (1, "final_answer"), (2, "stalled")] {
+            let id = store.open_turn(&sid, seq).unwrap();
+            store.close_turn(id, reason, None).unwrap();
+        }
+        let now = chrono::Utc::now().timestamp();
+        let report = build(&store, &|_| None, 30, None, now).unwrap();
+        assert_eq!(report.turn_endings[0].reason, "final_answer");
+        assert_eq!(report.turn_endings[0].count, 2);
+        let text = render(&report);
+        assert!(text.contains("turn endings"), "{text}");
+        assert!(text.contains("stalled"), "{text}");
     }
 
     #[test]

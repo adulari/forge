@@ -1,4 +1,4 @@
-//! One row per prompt-started turn and the reason it ended (docs/features/sessions.md, "Turn
+//! One row per prompt-started turn and the reason it ended (docs/features/session-replay.md, "Turn
 //! endings"). The reason strings are chosen by the session core; the store keeps them opaque and
 //! only derives `last_role_shape` from the transcript tail when a turn closes.
 

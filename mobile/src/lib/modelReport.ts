@@ -57,3 +57,10 @@ export function sortByReport<T>(items: readonly T[], idOf: (item: T) => string, 
     return ka - kb || (report.get(idOf(b))?.calls ?? 0) - (report.get(idOf(a))?.calls ?? 0) || idOf(a).localeCompare(idOf(b));
   });
 }
+
+/** One line for the models page: how the window's turns ended, e.g. `Turn endings: final answer 120 · stalled 3`. */
+export function turnEndingsLine(endings: { reason: string; count: number }[] | undefined): string | null {
+  if (!endings || endings.length === 0) return null;
+  const parts = endings.slice(0, 6).map((e) => `${e.reason.replace(/_/g, " ")} ${e.count}`);
+  return `Turn endings: ${parts.join(" · ")}`;
+}

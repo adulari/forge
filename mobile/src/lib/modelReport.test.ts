@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ModelReportEntry } from "./api";
-import { costLabel, latencyLabel, pct, reportById, reportLine, sortByReport } from "./modelReport";
+import { costLabel, latencyLabel, pct, reportById, reportLine, sortByReport, turnEndingsLine } from "./modelReport";
 
 const entry = (model: string, over: Partial<ModelReportEntry> = {}): ModelReportEntry => ({
   model,
@@ -55,5 +55,16 @@ describe("sortByReport", () => {
 
   it("puts the cheapest first and models with no data last", () => {
     expect(sortByReport(ids, (id) => id, report, "cost")).toEqual(["free", "flaky", "solid", "none"]);
+  });
+});
+
+describe("turnEndingsLine", () => {
+  it("lists the most common endings with readable names", () => {
+    expect(turnEndingsLine([{ reason: "final_answer", count: 120 }, { reason: "stalled", count: 3 }])).toBe("Turn endings: final answer 120 · stalled 3");
+  });
+
+  it("is empty for an older host or an empty window", () => {
+    expect(turnEndingsLine(undefined)).toBeNull();
+    expect(turnEndingsLine([])).toBeNull();
   });
 });

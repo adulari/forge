@@ -1,5 +1,5 @@
 //! Every turn leaves a `turn` row with the reason it ended, and a turn that did not end in an
-//! answer leaves a note saying why (docs/features/sessions.md, "Turn endings").
+//! answer leaves a note saying why (docs/features/session-replay.md, "Turn endings").
 
 use super::*;
 

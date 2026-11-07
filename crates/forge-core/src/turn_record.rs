@@ -1,4 +1,4 @@
-//! The stored end reason of every turn (docs/features/sessions.md, "Turn endings"). A `turn` row
+//! The stored end reason of every turn (docs/features/session-replay.md, "Turn endings"). A `turn` row
 //! opens right after the prompt is persisted and closes in `Session::run_turn_with`; the drop
 //! guard covers cancellation, and the daemon's start-up sweep covers a killed process.
 

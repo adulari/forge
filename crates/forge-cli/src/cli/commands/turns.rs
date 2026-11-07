@@ -1,4 +1,4 @@
-//! `forge turns`: how turns ended (docs/features/sessions.md, "Turn endings"). Counts by end
+//! `forge turns`: how turns ended (docs/features/session-replay.md, "Turn endings"). Counts by end
 //! reason, the last turns that did not finish, and `--backfill` for history recorded before the
 //! `turn` table existed.
 
