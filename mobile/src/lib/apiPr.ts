@@ -326,7 +326,7 @@ export const postPrQueueAction = (baseUrl: string, body: { session: string; acti
 
 export type PrReviewAction = { action: "merge_anyway" } | { action: "dismiss"; finding: number };
 
-export const postPrReviewAction = (baseUrl: string, body: { session: string; by?: string } & PrReviewAction) =>
+export const postPrReviewAction = (baseUrl: string, body: { session: string; pr?: number; by?: string } & PrReviewAction) =>
   post<PrQueueActionResponse>(baseUrl, "/api/pr/review/action", body);
 
 export const getPrWatch = (baseUrl: string, session: string) =>

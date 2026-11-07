@@ -93,7 +93,7 @@ function SummaryTab({ sessionId, detail }: { sessionId: string; detail: PrDetail
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>No description.</Text>
       )}
 
-      {pr.state === "open" ? <PrWatchPanel sessionId={sessionId} /> : null}
+      {pr.state === "open" ? <PrWatchPanel sessionId={sessionId} prNumber={pr.number} /> : null}
 
       {pr.state === "open" && !writable ? (
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>

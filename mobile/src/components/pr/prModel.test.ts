@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PrChecks, PrSummary } from "../../lib/apiPr";
-import { checksLabel, mergeGate, orderWorkflows, parsePinned, prChip, projectReps, runTone, shouldPoll, togglePinned } from "./prModel";
+import { checksLabel, mergeGate, orderWorkflows, owningSession, parsePinned, prChip, projectReps, runTone, shouldPoll, togglePinned } from "./prModel";
 
 const checks = (passing: number, failing: number, pending: number): PrChecks => ({
   total: passing + failing + pending, passing, failing, pending, items: [],
@@ -77,5 +77,17 @@ describe("projectReps", () => {
       { id: "d", cwd: "", last_activity: 9 },
     ]);
     expect(reps).toEqual([{ cwd: "/p/x", sessionId: "b" }, { cwd: "/p/y", sessionId: "c" }]);
+  });
+});
+
+describe("owningSession", () => {
+  const watches = [
+    { session_id: "a", pr_url: "https://gh/o/r/pull/10" },
+    { session_id: "b", pr_url: "https://gh/o/r/pull/11" },
+  ];
+
+  it("opens a PR under the session that watches it, not the project's newest session", () => {
+    expect(owningSession("https://gh/o/r/pull/10", "b", watches)).toBe("a");
+    expect(owningSession("https://gh/o/r/pull/12", "b", watches)).toBe("b");
   });
 });

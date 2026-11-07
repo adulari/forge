@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PrWatch } from "../../lib/apiPr";
-import { isWatching, watchStatus } from "./prWatchModel";
+import { isWatching, watchStatus, watchesAnotherPr } from "./prWatchModel";
 
 const base: PrWatch = {
   session_id: "s",
@@ -83,5 +83,17 @@ describe("isWatching", () => {
     expect(isWatching({ ...base, state: "merged" })).toBe(false);
     expect(isWatching({ ...base, mode: "off" })).toBe(false);
     expect(isWatching(null)).toBe(false);
+  });
+});
+
+describe("watchesAnotherPr", () => {
+  it("keeps another PR's watch, and its overrides, off this PR's page", () => {
+    expect(watchesAnotherPr({ ...base, pr_number: 11 }, 10)).toBe(true);
+    expect(watchesAnotherPr({ ...base, pr_number: 10 }, 10)).toBe(false);
+  });
+
+  it("still shows the panel when the session has no watch or it has not found its PR yet", () => {
+    expect(watchesAnotherPr(null, 10)).toBe(false);
+    expect(watchesAnotherPr({ ...base, pr_number: null }, 10)).toBe(false);
   });
 });

@@ -12,9 +12,9 @@ import { Button } from "../ds/Button";
 import { Segmented } from "../ds/Segmented";
 import { useToast } from "../ds/ToastHost";
 import { canMergeAnyway, findingPlace, numberedBlocking } from "./prReviewModel";
-import { WATCH_METHODS, WATCH_MODES, watchStatus } from "./prWatchModel";
+import { WATCH_METHODS, WATCH_MODES, watchStatus, watchesAnotherPr } from "./prWatchModel";
 
-export function PrWatchPanel({ sessionId }: { sessionId: string }) {
+export function PrWatchPanel({ sessionId, prNumber }: { sessionId: string; prNumber: number }) {
   const tokens = useTokens();
   const toast = useToast();
   const query = usePrWatch(sessionId);
@@ -37,10 +37,12 @@ export function PrWatchPanel({ sessionId }: { sessionId: string }) {
 
   const owner = (body: PrReviewAction) => {
     review.mutate(
-      { session: sessionId, by: "app", ...body },
+      { session: sessionId, pr: prNumber, by: "app", ...body },
       { onError: (e) => toast.show(e.message, { tone: "danger" }), onSettled: () => setConfirming(false) },
     );
   };
+
+  if (watchesAnotherPr(watch, prNumber)) return null;
 
   return (
     <View style={[styles.panel, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>

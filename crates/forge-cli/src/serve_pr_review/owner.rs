@@ -46,6 +46,7 @@ fn conflict<T>(text: String) -> Result<T, ActionError> {
 pub(crate) fn apply(
     all: &mut HashMap<String, Watch>,
     session: &str,
+    pr: Option<u64>,
     action: ReviewAction,
     by: &str,
     now: i64,
@@ -54,6 +55,12 @@ pub(crate) fn apply(
         .get_mut(session)
         .ok_or_else(|| ActionError::NotFound(format!("no PR watch for session {session}")))?;
     let name = label(w);
+    // A caller that names both acts on the PR it showed; the session's watch may follow another.
+    if let Some(number) = pr.filter(|n| w.pr_number != Some(*n)) {
+        return conflict(format!(
+            "session {session} watches {name}, not PR #{number}"
+        ));
+    }
     if w.mode != Mode::Merge || w.state != Phase::Watching {
         return conflict(format!("{name} is not waiting to merge"));
     }
@@ -163,7 +170,7 @@ impl Registry {
     ) -> Result<String, ActionError> {
         let mut guard = self.lock();
         let id = crate::serve_merge_queue::resolve(&guard, session, pr)?;
-        let result = apply(&mut guard, &id, action, by, now);
+        let result = apply(&mut guard, &id, pr, action, by, now);
         self.persist(&guard);
         result
     }

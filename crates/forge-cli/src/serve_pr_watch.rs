@@ -134,7 +134,7 @@ pub(crate) struct Registry {
 }
 
 impl Registry {
-    fn new(path: Option<PathBuf>) -> Self {
+    pub(crate) fn new(path: Option<PathBuf>) -> Self {
         let watches = path
             .as_deref()
             .and_then(|p| std::fs::read(p).ok())

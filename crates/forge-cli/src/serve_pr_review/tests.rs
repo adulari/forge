@@ -586,7 +586,14 @@ fn act(
     now: i64,
 ) -> Result<String, crate::serve_merge_queue::ActionError> {
     let mut all = std::collections::HashMap::from([(watch.session_id.clone(), watch.clone())]);
-    let result = owner::apply(&mut all, &watch.session_id, action, "floris (cli)", now);
+    let result = owner::apply(
+        &mut all,
+        &watch.session_id,
+        None,
+        action,
+        "floris (cli)",
+        now,
+    );
     *watch = all.remove(&watch.session_id).unwrap();
     result
 }
@@ -664,6 +671,55 @@ async fn merge_anyway_merges_the_current_head_once_and_is_recorded() {
     assert!(poll(&gh, dir.path(), &mut watch, true, 30).await.merged);
     assert_eq!(reviewer.calls.load(Ordering::SeqCst), 1);
     assert!(calls(dir.path()).contains("pr merge 7 --squash --match-head-commit aaaa1111"));
+}
+
+#[tokio::test]
+async fn a_review_action_naming_another_pr_than_the_sessions_watch_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    install_hook(vec![Ok(vec![finding("critical", 2)])], |_| {});
+    let mut watch = Watch::new("s_b", Mode::Merge, "squash", 0);
+    view(dir.path(), "aaaa1111");
+    poll(&gh, dir.path(), &mut watch, false, 10).await;
+    assert_eq!(watch.pr_number, Some(7));
+    let reg = crate::serve_pr_watch::Registry::new(None);
+    reg.lock().insert(watch.session_id.clone(), watch);
+
+    let wrong = reg
+        .review_action(
+            Some("s_b"),
+            Some(10),
+            owner::ReviewAction::MergeAnyway,
+            "app",
+            20,
+        )
+        .unwrap_err();
+    assert!(format!("{wrong:?}").contains("not PR #10"), "{wrong:?}");
+    reg.review_action(
+        Some("s_b"),
+        Some(10),
+        owner::ReviewAction::Dismiss(Some(1)),
+        "app",
+        21,
+    )
+    .unwrap_err();
+    let held = reg.lock()["s_b"].review.clone().unwrap();
+    assert!(held.merge_anyway.is_none() && held.findings[0].blocking);
+
+    reg.review_action(
+        Some("s_b"),
+        Some(7),
+        owner::ReviewAction::MergeAnyway,
+        "app",
+        22,
+    )
+    .unwrap();
+    assert!(reg.lock()["s_b"]
+        .review
+        .as_ref()
+        .unwrap()
+        .merge_anyway
+        .is_some());
 }
 
 #[tokio::test]

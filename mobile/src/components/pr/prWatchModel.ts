@@ -64,3 +64,8 @@ function baseStatus(watch: PrWatch | null): WatchStatus {
 export function isWatching(watch: PrWatch | null | undefined): boolean {
   return watch != null && watch.mode !== "off" && watch.state === "watching";
 }
+
+/** The session's watch follows a PR other than `number`, so its controls do not belong on that PR's page. */
+export function watchesAnotherPr(watch: PrWatch | null, number: number): boolean {
+  return watch?.pr_number != null && watch.pr_number !== number;
+}

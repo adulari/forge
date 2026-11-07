@@ -7,7 +7,7 @@ import React, { useMemo, useState } from "react";
 import { ActivityIndicator, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { PrDetailView } from "../components/pr/PrDetailView";
-import { checksLabel, checksTone, projectReps } from "../components/pr/prModel";
+import { checksLabel, checksTone, owningSession, projectReps } from "../components/pr/prModel";
 import { toneColor } from "../components/pr/PrChip";
 import { PageHeader } from "../components/ds/PageHeader";
 import { Badge } from "../components/ds/Badge";
@@ -22,7 +22,7 @@ import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import type { PrListRow, PrState } from "../lib/apiPr";
 import { useSessions } from "../lib/queries";
 import { UPDATE_HOST_MESSAGE, prReadable, usePrAccess } from "../lib/prAccess";
-import { useAllPrs, usePrQueue } from "../lib/queriesPr";
+import { useAllPrs, usePrQueue, usePrWatches } from "../lib/queriesPr";
 import { queueSummary, summaryLabel } from "../components/pr/mergeQueueModel";
 import { router } from "expo-router";
 import { usePullRefresh } from "../lib/usePullRefresh";
@@ -66,6 +66,7 @@ function PrsBody() {
   );
   const queryClient = useQueryClient();
   const queue = usePrQueue();
+  const watches = usePrWatches();
   const pull = usePullRefresh(async () => {
     await Promise.all([...results.map((r) => r.refetch()), queryClient.invalidateQueries({ queryKey: ["issues"] })]);
   });
@@ -77,11 +78,11 @@ function PrsBody() {
       for (const pr of result.data?.prs ?? []) {
         if (seen.has(pr.url)) continue;
         seen.add(pr.url);
-        out.push({ ...pr, sessionId: reps[i].sessionId });
+        out.push({ ...pr, sessionId: owningSession(pr.url, reps[i].sessionId, watches.data?.watches ?? []) });
       }
     });
     return out.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  }, [results, reps]);
+  }, [results, reps, watches.data]);
 
   const loading = results.some((r) => r.isPending) || sessions.isPending;
   const unavailable = results.find((r) => r.data && !r.data.available)?.data?.error ?? null;
