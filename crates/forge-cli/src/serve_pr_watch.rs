@@ -84,6 +84,9 @@ pub(crate) struct Watch {
     /// The PR's base branch as of the last poll.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) base_branch: Option<String>,
+    /// The independent review of the PR's current head (`serve_pr_review`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) review: Option<crate::serve_pr_review::ReviewState>,
 }
 
 impl Watch {
@@ -108,6 +111,7 @@ impl Watch {
             queue: None,
             hold: None,
             base_branch: None,
+            review: None,
         }
     }
 
@@ -226,6 +230,7 @@ impl Registry {
                     w.pushed = None;
                     w.queue = None;
                     w.hold = None;
+                    w.review = None;
                 })
                 .or_insert_with(|| Watch::new(session, mode, method, now));
             Some(watch.clone())
@@ -271,6 +276,7 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(&format!("{base}/api/pr/watches"), get(watches_list))
         .route(&format!("{base}/api/pr/queue"), get(queue_list))
         .route(&format!("{base}/api/pr/queue/action"), post(queue_action))
+        .merge(crate::serve_pr_review::routes(base))
 }
 
 #[derive(Deserialize)]
@@ -386,6 +392,7 @@ pub(crate) fn start(state: &Arc<DaemonState>) {
     if let Some(path) = forge_config::data_dir().map(|d| d.join("pr-watch.json")) {
         let _ = REGISTRY.set(Arc::new(Registry::new(Some(path))));
     }
+    crate::serve_pr_review::install(state);
     let state = state.clone();
     tokio::spawn(async move {
         let gh = Gh::system();
@@ -522,6 +529,12 @@ pub(crate) struct Announcement {
     pub(crate) high: bool,
 }
 
+impl Announcement {
+    pub(crate) fn new(key: &'static str, message: String, high: bool) -> Self {
+        Self { key, message, high }
+    }
+}
+
 /// The push owed for `watch`'s current state, or `None` when it was already sent (or nothing
 /// push-worthy happened). Records the key in `watch.pushed` so the caller persists it with the
 /// rest of the update: the push is at-most-once across a restart rather than at-least-once.
@@ -544,7 +557,7 @@ pub(crate) fn settle_push(watch: &mut Watch, green: bool) -> Option<Announcement
             format!("{pr} is green \u{2014} waiting for your merge"),
             false,
         ),
-        Phase::Watching => return None,
+        Phase::Watching => return crate::serve_pr_review::review_push(watch),
     };
     if watch.pushed.as_deref() == Some(key) {
         return None;
@@ -749,7 +762,19 @@ pub(crate) async fn poll_once(
         watch.fix_turns = 0;
     }
     let mut outcome = Outcome::default();
-    match decide(watch, &pr, &comments, free) {
+    let mut decision = decide(watch, &pr, &comments, free);
+    if decision == Decision::Merge && watch.mode == Mode::Merge {
+        decision = match crate::serve_pr_review::gate(gh, root, watch, &pr, free, now).await {
+            crate::serve_pr_review::Gate::Pass => Decision::Merge,
+            crate::serve_pr_review::Gate::Wait(reason) => Decision::Wait(Some(reason)),
+            crate::serve_pr_review::Gate::Block(reason) => Decision::Block(reason),
+            crate::serve_pr_review::Gate::Fix(prompt) => {
+                outcome.prompt = Some(prompt);
+                Decision::Wait(None)
+            }
+        };
+    }
+    match decision {
         Decision::Wait(reason) => watch.blocked_reason = reason,
         Decision::Green => {
             watch.blocked_reason = None;

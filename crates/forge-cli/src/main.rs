@@ -153,6 +153,7 @@ mod serve_onboarding;
 mod serve_pairing;
 mod serve_ports;
 mod serve_pr;
+mod serve_pr_review;
 mod serve_pr_watch;
 mod serve_project_actions;
 mod serve_project_ops;

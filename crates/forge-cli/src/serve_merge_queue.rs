@@ -350,6 +350,9 @@ pub(crate) struct QueueRow {
     pub(crate) reason: Option<String>,
     pub(crate) pushes: u32,
     pub(crate) last_update: Option<String>,
+    /// `review clean` / `review: 2 confirmed, fixing` (docs/features/pr-review-gate.md).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) review: Option<String>,
 }
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
@@ -420,6 +423,7 @@ pub(crate) fn snapshot(all: &[Watch]) -> Vec<RepoQueue> {
                     reason: q.reason.clone().or_else(|| w.blocked_reason.clone()),
                     pushes: q.pushes,
                     last_update: q.last_update.clone(),
+                    review: w.review.as_ref().map(|r| r.summary()),
                 }
             };
             let live = members(all, &repo);

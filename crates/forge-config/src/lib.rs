@@ -16,6 +16,7 @@ mod adaptive_effort;
 pub mod advisor;
 pub mod ci_parity;
 pub mod expert;
+pub mod pr_watch;
 mod statusline_toggle;
 pub use statusline_toggle::WidgetToggle;
 mod agent_builtins;
@@ -189,6 +190,9 @@ pub struct Config {
     /// Assay-gated auto-review of write turns before they finish (assay-gate.md). Off = inert.
     #[serde(default)]
     pub assay: AssayConfig,
+    /// PR Watch: the independent review gate in front of every merge (pr-review-gate.md).
+    #[serde(default)]
+    pub pr_watch: pr_watch::PrWatchConfig,
     /// Per-turn recap: a one-line AI-generated summary after each completed turn. On by default;
     /// disable in /config if you find it noisy.
     #[serde(default)]
@@ -2988,6 +2992,7 @@ impl Default for Config {
             lsp: LspConfig::default(),
             autofix: AutofixConfig::default(),
             assay: AssayConfig::default(),
+            pr_watch: pr_watch::PrWatchConfig::default(),
             recap: RecapConfig::default(),
             suggest: SuggestConfig::default(),
             project: ProjectConfig::default(),
