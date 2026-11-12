@@ -205,7 +205,7 @@ pub fn setting_options(path: &str) -> Option<Vec<&'static str>> {
         "tui.cursor" => vec!["auto", "block", "bar", "underline"],
         "reporting.mode" => vec!["auto", "ask", "off"],
         "worktree.root" => vec!["project", "global"],
-        _ => return None,
+        _ => return crate::editor_harness::options(path),
     })
 }
 
