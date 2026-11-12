@@ -444,7 +444,8 @@ impl crate::Session {
         } else {
             MAX_FOLLOWUP_INTENT_NUDGES
         };
-        if *sent >= max
+        if !self.config.harness.mid_intent_redrive
+            || *sent >= max
             || !(ends_mid_intent(content) || (content.trim().is_empty() && bridge_tool_progress))
             || self.task_gate_owns_stop()
         {

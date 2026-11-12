@@ -126,9 +126,14 @@ pub struct HarnessConfig {
     #[serde(default, deserialize_with = "lenient_opt_bool")]
     pub task_nudges: Option<bool>,
     /// The `scout` tool: a throwaway read-only orientation run that returns a cited brief
-    /// (docs/features/scouts.md).
+    /// (docs/features/scouts.md). Experimental, default `off`.
     #[serde(default)]
     pub scouts: crate::scouts::ScoutsMode,
+    /// Re-drive a turn whose reply announced its next step ("Now let me check...") but made no
+    /// tool call, up to a few times, before accepting it as the answer. `false` takes such a reply
+    /// as final. Default on.
+    #[serde(default = "default_true")]
+    pub mid_intent_redrive: bool,
 }
 
 impl Default for HarnessConfig {
@@ -164,6 +169,7 @@ impl Default for HarnessConfig {
             task_tool: true,
             task_nudges: None,
             scouts: crate::scouts::ScoutsMode::default(),
+            mid_intent_redrive: true,
         }
     }
 }
