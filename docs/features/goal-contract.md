@@ -237,6 +237,9 @@ a running mission's milestones. The relay settings are config only.
 
 ## 10. Behaviour assertions (QA)
 
+> **Experimental.** The QA step is new and has had one scripted drill and no field use. Its
+> contract and defaults may change.
+
 A second assertion kind for goals about something that runs ("the server answers /health", "the
 CLI prints X"). The read-only validator cannot check those, and the worker must not grade itself,
 so a QA runner does it.

@@ -6,6 +6,26 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Breaking
+
+- **`forge run` exits non-zero when the turn did not finish**, and its JSON result carries `end_reason` (for example `provider_down`, `budget_exhausted`, `interrupted`, `stalled`) so a script can tell why. A run that used to exit 0 after a stopped turn now fails.
+- **The database schema moves from 50 to 58, one way.** The first start of this version migrates `forge.db` in place; an older binary refuses a database it did not write. Back up `~/.local/share/forge/forge.db` (`sqlite3 forge.db ".backup forge.db.bak"` while idle) before installing.
+
+### Changed defaults and new switches
+
+- `[pr_watch] queue` (default `true`) turns the merge queue on or off. Off, each merge-mode PR is polled and merged on its own.
+- `[pr_watch] review_on_error` now defaults to `allow`: a reviewer that fails does not hold up the merge (`block` restores the old behaviour, `merge` is still accepted). An unpinned reviewer now goes through the same subscription budget check as a pinned one: a subscription model is dropped unless `review_budget` covers it.
+- A headless `forge run` fails fast when the provider is down (`end_reason = "provider_down"`) instead of waiting up to 8 hours. Chat, the daemon and `/goal` keep the 8-hour wait. `forge run --wait-for-outage`, or `[mesh] headless_outage_wait = true`, opts a run back in.
+- `[harness] scouts` now defaults to `off`; `tool` and `auto` are opt-in and experimental.
+- The local CI gate (`[ci] gate`) now defaults to `off`; a project opts in with `gate = "auto"` in `.forge/ci.toml`.
+- A session worktree still branches from a freshly fetched `origin/<default>`, but Forge never fast-forwards your own checkout any more. Merging a session back into a checkout that is behind says so (pull, then merge) and leaves it where it was.
+- Scheduled runs have no default 12-hour limit; `forge schedule --max-runtime` is opt-in.
+- `[harness] mid_intent_redrive` (default `true`) switches the re-drive of a reply that announces its next step without doing it.
+
+### Experimental
+
+- The QA step for goals (behaviour assertions run against the live app, docs/features/goal-contract.md section 10) and scouts (docs/features/scouts.md) are experimental. Both can change or go away; scouts are off by default.
+
 ### Added
 
 - Merge queue: PRs Forge watches in merge mode land one at a time per repository. The head is brought up to date by merging the base into the session's worktree as its own git identity (never `gh pr update-branch`), changelog-only conflicts are resolved keeping both sides' entries, the project's `verify`/`check` actions run on the merged result before the push, and a real conflict or a failing check hands the PR back to its session while the queue carries on. `forge prs queue`, `GET /api/pr/queue`, a line in the away brief and the PR Watch rows show it. See docs/features/merge-queue.md.
