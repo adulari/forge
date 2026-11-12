@@ -18,10 +18,6 @@ use crate::cli::commands::replay::open_store;
 pub(crate) const STOP_MARKER: &str = "[[schedule:done]]";
 const MAX_RETRIES: i64 = 5;
 const SUMMARY_CHARS: usize = 800;
-/// Cap for a tick with no `--max-runtime`. Long enough that a legitimate overnight run is never cut
-/// off (Forge does not hard-cap productive work); short enough that a truly hung run cannot stall
-/// its schedule for days.
-const DEFAULT_MAX_RUNTIME_SECS: i64 = 12 * 3600;
 /// Time a capped run gets to stop on SIGTERM (flush its transcript, end the turn) before SIGKILL.
 const TERM_GRACE: Duration = Duration::from_secs(10);
 const CAPTURE_BYTES: usize = 4 << 20;
@@ -105,13 +101,14 @@ fn drain<R: Read + Send + 'static>(mut reader: R) -> Capture {
     Capture { buf, done }
 }
 
-fn runtime_cap(schedule: &Schedule) -> Duration {
-    let secs = schedule
+/// A tick is capped only when the schedule asks for it (`--max-runtime`): Forge does not hard-cap
+/// productive work by default.
+fn runtime_cap(schedule: &Schedule) -> Option<Duration> {
+    schedule
         .policy
         .max_runtime_secs
         .filter(|secs| *secs > 0)
-        .unwrap_or(DEFAULT_MAX_RUNTIME_SECS);
-    Duration::from_secs(secs as u64)
+        .map(|secs| Duration::from_secs(secs as u64))
 }
 
 fn kill_tree(child: &mut std::process::Child) {
@@ -163,7 +160,7 @@ fn run_once(schedule: &Schedule, session_id: &str) -> Outcome {
     execute(command, runtime_cap(schedule))
 }
 
-fn execute(mut command: std::process::Command, cap: Duration) -> Outcome {
+fn execute(mut command: std::process::Command, cap: Option<Duration>) -> Outcome {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -177,7 +174,7 @@ fn execute(mut command: std::process::Command, cap: Duration) -> Outcome {
     };
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
-    let deadline = Instant::now() + cap;
+    let deadline = cap.map(|cap| Instant::now() + cap);
     let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
@@ -185,7 +182,7 @@ fn execute(mut command: std::process::Command, cap: Duration) -> Outcome {
             Ok(None) => {}
             Err(_) => break None,
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
             kill_tree(&mut child);
             let _ = child.wait();
             timed_out = true;
@@ -202,7 +199,7 @@ fn execute(mut command: std::process::Command, cap: Duration) -> Outcome {
             summary: None,
             error: Some(format!(
                 "stopped after hitting the {}s runtime limit",
-                cap.as_secs()
+                cap.map_or(0, |c| c.as_secs())
             )),
             stop_requested: false,
         };
@@ -377,19 +374,13 @@ mod tests {
     }
 
     #[test]
-    fn unset_runtime_cap_falls_back_to_the_default() {
+    fn a_tick_has_no_runtime_cap_unless_the_schedule_sets_one() {
         let mut s = schedule(None);
-        assert_eq!(
-            runtime_cap(&s),
-            Duration::from_secs(DEFAULT_MAX_RUNTIME_SECS as u64)
-        );
+        assert_eq!(runtime_cap(&s), None);
         s.policy.max_runtime_secs = Some(0);
-        assert_eq!(
-            runtime_cap(&s),
-            Duration::from_secs(DEFAULT_MAX_RUNTIME_SECS as u64)
-        );
+        assert_eq!(runtime_cap(&s), None);
         s.policy.max_runtime_secs = Some(90);
-        assert_eq!(runtime_cap(&s), Duration::from_secs(90));
+        assert_eq!(runtime_cap(&s), Some(Duration::from_secs(90)));
     }
 
     #[cfg(unix)]
@@ -403,7 +394,7 @@ mod tests {
             .stderr(std::process::Stdio::piped());
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let started = Instant::now();
-        let outcome = execute(command, Duration::from_secs(1));
+        let outcome = execute(command, Some(Duration::from_secs(1)));
         assert!(started.elapsed() < Duration::from_secs(30));
         assert_eq!(outcome.status, "failed");
         assert!(outcome.error.unwrap().contains("runtime limit"));
