@@ -1198,6 +1198,11 @@ turn ends when the hot backoff does. A run's `--max-minutes` / `/goal` deadline 
 turn deadline cut the wait short, so bounded runs never wait the full eight hours
 (`crates/forge-core/src/outage_wait.rs`).
 
+The wait applies to chat, the daemon and `/goal` runs. A headless `forge run` (text, `-p`, json or
+stream-json) fails fast instead: the turn ends with the provider's real error and
+`end_reason = "provider_down"`, so a script or CI job never sits for hours. `forge run
+--wait-for-outage` opts one run in, and `[mesh] headless_outage_wait = true` makes it the default.
+
 A connection refused, a DNS failure or a reset is an outage too. It used to end a pinned turn after
 one 5 s backoff as "its provider rejected it twice", because it answers instantly with the same
 text every time; only a provider that actually answered can reject a model now
@@ -1502,6 +1507,7 @@ All in `crates/forge-config/src/lib.rs` (`MeshConfig`, line 1213):
 | `pin_failover` | `false` | Escape hatch: allow cross-model failover off a pin (§9) (`lib.rs:1292`) |
 | `pin_outage_wait_secs` | 600 | Pinned transient-outage wait budget; 0 disables (§9) (`lib.rs:1301`) |
 | `outage_wait_secs` | 28800 | How long a turn keeps re-sending its request after the hot backoff while the provider is down (8 h); 0 disables (§9) |
+| `headless_outage_wait` | `false` | A headless `forge run` waits out an outage like chat does; off, it fails fast with `provider_down`. `--wait-for-outage` for one run |
 | `subagents.inherit_pin` | `true` | When a pin is active, subagents inherit it strictly (§9) (`crates/forge-config/src/lib.rs` `SubagentsConfig`) |
 | `subagents.inherit_pin` (per session) | — | `/subagents free\|pinned` overrides the default for one session; persisted (§9.1) |
 | `adaptive_effort` | `true` | Low reasoning effort for the step after a successful read-only tool round (adaptive-effort.md) |

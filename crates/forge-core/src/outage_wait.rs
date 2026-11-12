@@ -149,6 +149,13 @@ impl Session {
         .min()
     }
 
+    /// Stop waiting out provider outages beyond the hot backoff: the turn ends with the provider's
+    /// real error. A headless `forge run` does this unless it opted in
+    /// (`mesh.headless_outage_wait`, `--wait-for-outage`).
+    pub fn fail_fast_on_outage(&mut self) {
+        self.config.mesh.outage_wait_secs = 0;
+    }
+
     /// Called when a model request failed as an outage and the hot backoff has nothing left.
     /// `already_down` is how long the outage has already run (the hot phase). Sleeps until the
     /// next probe and returns true, or returns false when waiting is disabled, not applicable,

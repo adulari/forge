@@ -305,6 +305,11 @@ pub(crate) enum Command {
         /// publish_local_runs` is on by default, so this is how a single run opts out.
         #[arg(long = "no-publish-to-fleet", conflicts_with = "publish_to_fleet")]
         no_publish_to_fleet: bool,
+        /// Wait out a provider outage (up to `[mesh] outage_wait_secs`, 8h by default) instead of
+        /// failing fast with `end_reason = "provider_down"`. `[mesh] headless_outage_wait = true`
+        /// makes this the default. A `/goal` run always waits.
+        #[arg(long = "wait-for-outage")]
+        wait_for_outage: bool,
         /// After the turn, write what the session consumed (tokens incl. cache splits, calls,
         /// cost, notional cost, wall time) as one JSON object to this path. Implies a local run.
         #[arg(long, value_name = "PATH", conflicts_with = "publish_to_fleet")]

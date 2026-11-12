@@ -1976,6 +1976,12 @@ pub struct MeshConfig {
     /// Default 8h. `0` disables it: the turn ends when the hot backoff does, as before.
     #[serde(default = "default_outage_wait_secs")]
     pub outage_wait_secs: u64,
+    /// Let a headless `forge run` wait out a provider outage for `outage_wait_secs` like chat, the
+    /// daemon and `/goal` do. Off by default: a script or CI job that cannot reach its provider
+    /// should fail fast with `end_reason = "provider_down"`, not sit for hours. `forge run
+    /// --wait-for-outage` opts a single run in.
+    #[serde(default)]
+    pub headless_outage_wait: bool,
     /// Default bench duration (seconds) when a transient failure (rate-limit / 5xx) gives no
     /// server `Retry-After`. Kept short because free-tier rate limits typically reset per MINUTE
     /// (NVIDIA NIM, Groq, Gemini RPM) — a long bench would strand the best free models and push
@@ -2931,6 +2937,7 @@ impl Default for Config {
                 pin_failover: false,
                 pin_outage_wait_secs: default_pin_outage_wait_secs(),
                 outage_wait_secs: default_outage_wait_secs(),
+                headless_outage_wait: false,
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),

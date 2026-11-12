@@ -22,6 +22,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             output_format,
             publish_to_fleet,
             no_publish_to_fleet,
+            wait_for_outage,
             usage_json,
             claude,
             session,
@@ -87,6 +88,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                     || claude.needs_local_session()
                     || session.needs_local_session(),
                 usage_json,
+                wait_for_outage,
                 print: claude.print,
                 verbose: claude.verbose,
                 quiet: claude.quiet,

@@ -33,6 +33,8 @@ pub(crate) struct RunRequest {
     /// Keep the run in this process: `--no-publish-to-fleet`, or a flag a daemon cannot honour.
     pub(crate) local_only: bool,
     pub(crate) usage_json: Option<std::path::PathBuf>,
+    /// `--wait-for-outage`: keep waiting out a provider outage as chat and the daemon do.
+    pub(crate) wait_for_outage: bool,
     /// `-p`: stdout carries only the final answer.
     pub(crate) print: bool,
     pub(crate) verbose: bool,
@@ -59,6 +61,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         publish_to_fleet,
         local_only,
         usage_json,
+        wait_for_outage,
         print,
         verbose,
         quiet,
@@ -87,6 +90,9 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     // `forge run "/goal …"` is a loop, not a prompt: it is published to a running daemon as-is
     // and otherwise driven locally by `run_goal_headless` (docs/features/goal-evaluator.md).
     let goal_spec = parse_goal_prompt(&prompt);
+    let fail_fast_on_outage = goal_spec.is_none()
+        && !wait_for_outage
+        && !forge_config::load().is_ok_and(|c| c.mesh.headless_outage_wait);
     match prompt.split_whitespace().next() {
         Some("/goal") if goal_spec.is_none() => anyhow::bail!(
             "could not parse the /goal command: --max-tokens and --max-minutes need whole numbers"
@@ -204,6 +210,9 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         }
         session.attach_images(at_images);
         mark_one_shot(&mut session, true);
+        if fail_fast_on_outage {
+            session.fail_fast_on_outage();
+        }
         // A bridge pin's `claude` process starts now, beside the hooks and routing of the turn.
         session.prewarm_pinned_bridge();
         session.fire_session_start(None).await;
@@ -240,6 +249,9 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     }
     session.attach_images(at_images);
     mark_one_shot(&mut session, !tui);
+    if fail_fast_on_outage && !tui {
+        session.fail_fast_on_outage();
+    }
     session.prewarm_pinned_bridge();
     session.fire_session_start(None).await;
     let before = session.session_usage_detail();

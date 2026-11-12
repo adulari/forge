@@ -388,7 +388,7 @@ fn a_run_whose_provider_stays_down_fails_with_the_stored_end_reason() {
         cfg.join("config.toml"),
         format!(
             "[[providers.custom]]\nnamespace = \"drill\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\n\
-             free = true\nmodels = [\"flash\"]\n\n[mesh]\npin_outage_wait_secs = 1\noutage_wait_secs = 2\n"
+             free = true\nmodels = [\"flash\"]\n\n[mesh]\npin_outage_wait_secs = 1\noutage_wait_secs = 2\nheadless_outage_wait = true\n"
         ),
     )
     .unwrap();
