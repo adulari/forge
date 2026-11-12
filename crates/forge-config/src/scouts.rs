@@ -10,9 +10,9 @@ pub enum ScoutsMode {
     /// task needs orientation in code it has not seen.
     Auto,
     /// Advertise `scout`; the model decides when it helps.
-    #[default]
     Tool,
-    /// No `scout` tool.
+    /// No `scout` tool. The default: scouts are experimental.
+    #[default]
     Off,
 }
 
@@ -21,7 +21,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_the_three_spellings_and_defaults_to_tool() {
+    fn parses_the_three_spellings_and_defaults_to_off() {
         for (text, want) in [
             ("auto", ScoutsMode::Auto),
             ("tool", ScoutsMode::Tool),
@@ -32,6 +32,6 @@ mod tests {
             assert_eq!(cfg.scouts, want);
         }
         let cfg: crate::HarnessConfig = toml::from_str("").unwrap();
-        assert_eq!(cfg.scouts, ScoutsMode::Tool);
+        assert_eq!(cfg.scouts, ScoutsMode::Off);
     }
 }

@@ -1,6 +1,7 @@
 # Feature: scouts — orientation in a throwaway context
 
-> Status: **SHIPPED, default `tool`**. Code: `crates/forge-core/src/scouts.rs`,
+> Status: **EXPERIMENTAL, default `off`** (opt in with `scouts = "tool"` or `"auto"`; the A/B was
+> inconclusive). Code: `crates/forge-core/src/scouts.rs`,
 > `crates/forge-config/src/scouts.rs` (the setting), the built-in `scout` agent in
 > `crates/forge-config/src/agent_builtins.rs`. Tests: `crates/forge-core/src/tests/scouts.rs`.
 
@@ -16,15 +17,16 @@ fresh small context starts at 15-20k. The explore agent was used 10 times in 33k
 
 ```toml
 [harness]
-scouts = "tool"   # "auto" | "tool" | "off"; /config has it under Behaviour
+scouts = "off"    # default. "tool" | "auto" to opt in; /config has it under Behaviour
 ```
 
-- `tool` (default): the model is offered `scout {question}`. A scout is the built-in `scout`
+- `tool`: the model is offered `scout {question}`. A scout is the built-in `scout`
   subagent: read-only (`read_file`, `list_dir`, `search`, `glob`, `lattice`, read-only `shell`),
   plan-mode permissions, cheap tier (`trivial`) unless a pin applies, fresh context, at most 12
   model steps. It returns a brief of at most about 400 words: the answer, then facts each ending in
   `path:start-end`, then what it looked for and did not find. The parent keeps only the brief,
   truncated at 12,000 characters.
+- `off` (default): no `scout` tool.
 - `auto`: the same tool, described as "call this first", and in addition Forge runs a scout itself
   before the model's first step when the opening prompt of a session reads like a coding task
   (60+ characters containing a coding word, not a slash command), the repository has at least 25
@@ -74,8 +76,8 @@ are parent plus scout. Median over attempts.
 - The kit's contexts are small (max prompt 16k-42k), so the case the feature is for, a main prompt
   of about 133k paying for every exploration step, is not reproduced; the mechanical tasks were
   controls. n is small and DeepSeek's step counts vary by 2x between seeds. The A/B is
-  inconclusive, so the shipped default is **`tool`**, not `auto`. Re-run on long-context tasks
-  before turning `auto` on.
+  inconclusive, so scouts are experimental and the default is **`off`** (it was `tool` while the
+  feature was on trial). Re-run on long-context tasks before turning `tool` or `auto` on by default.
 
 ## Limits, stated plainly
 
