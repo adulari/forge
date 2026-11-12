@@ -41,12 +41,28 @@ pub(super) fn reviewer_models(
         c.review_model.trim().to_string()
     };
     if pinned.is_empty() {
+        let mut dropped = Vec::new();
+        let mut usable = |candidates: Vec<String>| -> Vec<String> {
+            candidates
+                .into_iter()
+                .filter(|m| match window_spec(config, m) {
+                    Ok(_) => true,
+                    Err(_) if !is_subscription(m) => true,
+                    Err(why) => {
+                        dropped.push(why);
+                        false
+                    }
+                })
+                .collect()
+        };
         let tiers = forge_core::assay::TierModels {
-            trivial: config.candidates_for(forge_types::TaskTier::Trivial),
-            complex: config.candidates_for(forge_types::TaskTier::Complex),
+            trivial: usable(config.candidates_for(forge_types::TaskTier::Trivial)),
+            complex: usable(config.candidates_for(forge_types::TaskTier::Complex)),
         };
         if tiers.trivial.is_empty() && tiers.complex.is_empty() {
-            return Err("no reviewer model is configured; set [pr_watch] review_model".into());
+            return Err(dropped.into_iter().next().unwrap_or_else(|| {
+                "no reviewer model is configured; set [pr_watch] review_model".into()
+            }));
         }
         return Ok(tiers);
     }
@@ -63,11 +79,15 @@ pub(super) fn reviewer_models(
     })
 }
 
+fn is_subscription(model: &str) -> bool {
+    forge_provider::is_cli_bridge(model) || model.starts_with("codex-oauth::")
+}
+
 /// The window slice the budget names for `model`, or an explanation of why it cannot be used.
 /// `Ok(None)` is no budget, or a dollar cap (enforced against Assay's cost estimate).
 fn window_spec(config: &forge_config::Config, model: &str) -> Result<Option<EnvelopeSpec>, String> {
     let budget = budget_of(config);
-    let subscription = forge_provider::is_cli_bridge(model) || model.starts_with("codex-oauth::");
+    let subscription = is_subscription(model);
     if subscription && budget.is_empty() {
         return Err(format!(
             "{model} is a subscription model and needs [pr_watch] review_budget"

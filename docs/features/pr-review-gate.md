@@ -35,11 +35,11 @@ reviews (nothing is about to merge).
 ## Reviewer failure
 
 A reviewer that errors, times out, has no model, or cannot read the diff is not a clean review.
-By default (`review_on_error = "block"`) the PR is not merged, the reason is shown, and the review
-is retried no sooner than 5 minutes after the failed attempt finished. After 3 failed reviews of
+By default (`review_on_error = "allow"`) the merge goes ahead and `review failed (...); merging
+anyway` is recorded as the last action. With `review_on_error = "block"` the PR is not merged, the
+reason is shown, and the review is retried no sooner than 5 minutes after the failed attempt finished. After 3 failed reviews of
 the same head in a row the watch stops retrying and is blocked with `review failed 3 times on this
-head`, so a reviewer that keeps timing out never keeps spending; arm the watch again to try again. `review_on_error = "merge"` lets the
-merge through and records `review failed (...); merging anyway` as the last action.
+head`, so a reviewer that keeps timing out never keeps spending; arm the watch again to try again. `"merge"` is accepted as another spelling of `"allow"`.
 
 ## Config
 
@@ -50,10 +50,15 @@ review_model = ""          # empty: [harness.expert].model when set, else the me
 review_budget = ""         # "$2" caps one review's estimated cost; subscription models require it
 review_max_findings = 5
 review_severity = "high"   # low | medium | high | critical
-review_on_error = "block"  # or "merge"
+review_on_error = "allow"  # or "block": do not merge when the reviewer fails
 review_timeout_secs = 600
 review_max_rounds = 3
 ```
+
+An unpinned reviewer (no `review_model`, no expert) gets the same check as a pinned one: every
+subscription model among the mesh's tier candidates is dropped unless `review_budget` (or the
+expert's budget) is a matching window slice, and when nothing usable is left the review fails
+with that reason instead of spending an unmetered subscription.
 
 A subscription reviewer (`claude-cli::`, `codex-cli::`, `codex-oauth::`) is refused without a
 budget, and the budget must be a slice of that reviewer's own window (`codex:5%w` for a codex

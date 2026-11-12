@@ -4,7 +4,19 @@ use std::process::Command;
 
 use super::*;
 use crate::serve_pr::Gh;
-use crate::serve_pr_watch::advance;
+use crate::serve_pr_watch::advance as advance_queued;
+
+async fn advance(
+    gh: &Gh,
+    root: &std::path::Path,
+    watch: &mut crate::serve_pr_watch::Watch,
+    all: Vec<crate::serve_pr_watch::Watch>,
+    free: bool,
+    now: i64,
+    verify: Option<Vec<super::Verify>>,
+) -> crate::serve_pr_watch::Outcome {
+    advance_queued(true, gh, root, watch, all, free, now, verify).await
+}
 
 pub(super) fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -976,6 +988,7 @@ async fn a_failing_local_ci_plan_keeps_the_push_back_and_names_the_step() {
     let wt = &w.clones[1];
     let wf = wt.join(".github/workflows");
     std::fs::create_dir_all(&wf).unwrap();
+    crate::ci_run::opt_in_ci_gate(wt);
     std::fs::write(
         wf.join("ci.yml"),
         "on: pull_request\nenv:\n  STRICT: \"1\"\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Strict lint\n        run: echo lint-broke-in-merged-result >&2; test \"$STRICT\" = 0\n",

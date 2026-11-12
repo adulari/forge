@@ -308,3 +308,21 @@ fn a_window_slice_needs_a_matching_subscription_reviewer() {
     assert!(reviewer_models(&config("codex-cli::x", "codex:5%w")).is_ok());
     assert!(reviewer_models(&config("ollama::x", "$2")).is_ok());
 }
+
+#[test]
+fn an_unpinned_reviewer_gets_the_same_subscription_budget_check() {
+    let unpinned = |models: &[&str], budget: &str| {
+        let mut c = config("", budget);
+        let list = forge_config::OneOrMany::Many(models.iter().map(|m| m.to_string()).collect());
+        c.mesh.models.insert("standard".into(), list.clone());
+        c.mesh.models.insert("complex".into(), list.clone());
+        c.mesh.models.insert("trivial".into(), list);
+        reviewer_models(&c)
+    };
+    let err = unpinned(&["claude-cli::opus"], "").err().unwrap();
+    assert!(err.contains("needs [pr_watch] review_budget"), "{err}");
+    let kept = unpinned(&["claude-cli::opus", "ollama::x"], "").unwrap();
+    assert_eq!(kept.complex, vec!["ollama::x".to_string()]);
+    let kept = unpinned(&["claude-cli::opus", "ollama::x"], "claude:5%w").unwrap();
+    assert_eq!(kept.complex.len(), 2);
+}

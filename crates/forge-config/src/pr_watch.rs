@@ -16,7 +16,11 @@ fn default_review_max_findings() -> u32 {
 }
 
 fn default_review_on_error() -> String {
-    "block".to_string()
+    "allow".to_string()
+}
+
+fn default_queue() -> bool {
+    true
 }
 
 fn default_review_timeout_secs() -> u64 {
@@ -29,6 +33,10 @@ fn default_review_max_rounds() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrWatchConfig {
+    /// Merge-mode PRs land one at a time per repository through the merge queue
+    /// (docs/features/merge-queue.md). `false` polls and merges each PR on its own.
+    #[serde(default = "default_queue")]
+    pub queue: bool,
     /// `auto` reviews every PR PR Watch is about to merge; `off` merges as before.
     #[serde(default = "default_review")]
     pub review: String,
@@ -45,7 +53,8 @@ pub struct PrWatchConfig {
     /// Lowest severity that blocks the merge: `low` | `medium` | `high` | `critical`.
     #[serde(default = "default_review_severity")]
     pub review_severity: String,
-    /// What a reviewer failure does: `block` (do not merge, retry) or `merge`.
+    /// What a reviewer failure does: `allow` (merge anyway; `merge` is the same) or `block` (do
+    /// not merge, retry).
     #[serde(default = "default_review_on_error")]
     pub review_on_error: String,
     #[serde(default = "default_review_timeout_secs")]
@@ -58,6 +67,7 @@ pub struct PrWatchConfig {
 impl Default for PrWatchConfig {
     fn default() -> Self {
         Self {
+            queue: default_queue(),
             review: default_review(),
             review_model: String::new(),
             review_budget: String::new(),
@@ -76,7 +86,8 @@ impl PrWatchConfig {
     }
 
     pub fn merge_on_review_error(&self) -> bool {
-        self.review_on_error.trim().eq_ignore_ascii_case("merge")
+        let v = self.review_on_error.trim();
+        v.eq_ignore_ascii_case("allow") || v.eq_ignore_ascii_case("merge")
     }
 }
 
@@ -93,9 +104,14 @@ mod tests {
     }
 
     #[test]
-    fn review_is_on_by_default_and_blocks_on_error() {
+    fn review_is_on_by_default_and_allows_the_merge_on_error() {
         let c = PrWatchConfig::default();
-        assert!(c.review_enabled() && !c.merge_on_review_error());
+        assert!(c.review_enabled() && c.merge_on_review_error() && c.queue);
+        let strict = PrWatchConfig {
+            review_on_error: "block".into(),
+            ..PrWatchConfig::default()
+        };
+        assert!(!strict.merge_on_review_error());
         assert_eq!(
             (c.review_max_findings, c.review_severity.as_str()),
             (5, "high")
@@ -105,10 +121,11 @@ mod tests {
     #[test]
     fn the_table_parses() {
         let cfg = parse(
-            "[pr_watch]\nreview = \"off\"\nreview_model = \"bedrock::sonnet\"\nreview_on_error = \"merge\"\nreview_max_findings = 3\n",
+            "[pr_watch]\nreview = \"off\"\nreview_model = \"bedrock::sonnet\"\nreview_on_error = \"merge\"\nqueue = false\nreview_max_findings = 3\n",
         );
         assert!(!cfg.pr_watch.review_enabled());
         assert!(cfg.pr_watch.merge_on_review_error());
+        assert!(!cfg.pr_watch.queue);
         assert_eq!(cfg.pr_watch.review_max_findings, 3);
         assert_eq!(cfg.pr_watch.review_model, "bedrock::sonnet");
     }

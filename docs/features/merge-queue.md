@@ -4,6 +4,13 @@ The PRs Forge watches in `merge` mode land one at a time, each tested against th
 previous one produced. A backlog drain or a night of shipped sessions no longer ends with a
 pile of PRs that all conflict the moment the first one merges.
 
+## Switch
+
+```toml
+[pr_watch]
+queue = true   # false: each merge-mode PR is polled and merged on its own, no queue or update step
+```
+
 ## What it does
 
 PRs of one remote repository and base branch (`origin URL @ base`; checkouts and worktrees of the

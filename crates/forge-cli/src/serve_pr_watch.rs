@@ -35,6 +35,8 @@ use crate::serve_pr::{
 
 mod auto_merge;
 mod decide;
+mod force_push;
+use force_push::is_force_push;
 mod local_ci;
 use decide::{comment_ids, decide, Decision};
 
@@ -449,18 +451,6 @@ pub(crate) fn start(state: &Arc<DaemonState>) {
     });
 }
 
-fn is_force_push(prompt: &str) -> bool {
-    let lower = prompt.to_lowercase();
-    lower.contains("push")
-        && (lower.contains("--force")
-            || lower.contains("force-with-lease")
-            || lower.contains("force-push")
-            || lower.contains("force push")
-            || lower
-                .split_whitespace()
-                .any(|w| w == "-f" || w.starts_with('+')))
-}
-
 pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
     crate::serve_custody::settle(state);
     for watch in registry().all().into_iter().filter(Watch::active) {
@@ -506,7 +496,8 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
         }
         let mut next = watch.clone();
         let all = registry().all();
-        let outcome = advance(gh, &root, &mut next, all, free, now, None).await;
+        let queue = forge_config::load().map_or(true, |c| c.pr_watch.queue);
+        let outcome = advance(queue, gh, &root, &mut next, all, free, now, None).await;
         let announcement = settle_push(&mut next, outcome.green);
         registry().store(&watch.session_id, next.clone());
         announce(state, &watch.session_id, announcement).await;
@@ -533,7 +524,11 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
 
 /// One watch's turn: the merge queue's update step for a merge-mode watch, then PR Watch's poll.
 /// A hand-off or a push settles the tick on its own; the poll waits for the next one.
+/// With `[pr_watch] queue` off, a merge-mode watch is polled and merged on
+/// its own, with no queue standing, update step or hold.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn advance(
+    queue: bool,
     gh: &Gh,
     root: &Path,
     watch: &mut Watch,
@@ -542,7 +537,7 @@ pub(crate) async fn advance(
     now: i64,
     verify: Option<Vec<crate::serve_merge_queue::Verify>>,
 ) -> Outcome {
-    if watch.mode != Mode::Merge {
+    if watch.mode != Mode::Merge || !queue {
         watch.hold = None;
         watch.queue = None;
         return poll_once(gh, root, watch, free, now).await;
