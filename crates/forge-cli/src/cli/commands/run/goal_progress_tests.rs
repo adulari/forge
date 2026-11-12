@@ -379,6 +379,7 @@ fn scratch_repo_with_ci() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let wf = dir.path().join(".github/workflows");
     std::fs::create_dir_all(&wf).unwrap();
+    crate::ci_run::opt_in_ci_gate(dir.path());
     std::fs::write(
         wf.join("ci.yml"),
         "on: pull_request\nenv:\n  STRICT: \"1\"\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Strict check\n        run: test \"$STRICT\" = 1 && sh ./check.sh\n      - name: Needs a secret\n        env:\n          T: ${{ secrets.T }}\n        run: echo $T\n  win:\n    runs-on: windows-latest\n    steps:\n      - run: echo hi\n",

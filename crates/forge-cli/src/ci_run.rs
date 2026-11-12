@@ -600,6 +600,13 @@ pub(crate) fn push_blocker(root: &Path) -> Option<String> {
     }
 }
 
+/// Test fixtures opt a project in to the gate, which is off unless `.forge/ci.toml` says `auto`.
+#[cfg(test)]
+pub(crate) fn opt_in_ci_gate(root: &Path) {
+    std::fs::create_dir_all(root.join(".forge")).unwrap();
+    std::fs::write(root.join(".forge/ci.toml"), "[ci]\ngate = \"auto\"\n").unwrap();
+}
+
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

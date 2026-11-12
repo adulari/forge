@@ -97,6 +97,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wf = dir.path().join(".github/workflows");
         std::fs::create_dir_all(&wf).unwrap();
+        crate::ci_run::opt_in_ci_gate(dir.path());
         std::fs::write(
             wf.join("ci.yml"),
             "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: ok\n        run: echo fine\n  w:\n    runs-on: windows-latest\n    steps:\n      - run: dir\n",
@@ -118,6 +119,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let wf = dir.path().join(".github/workflows");
         std::fs::create_dir_all(&wf).unwrap();
+        crate::ci_run::opt_in_ci_gate(dir.path());
         std::fs::write(
             wf.join("ci.yml"),
             "on: push\njobs:\n  j:\n    runs-on: ubuntu-latest\n    steps:\n      - name: lint\n        run: echo fine\n",

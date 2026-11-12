@@ -5,6 +5,7 @@ fn repo(run: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let wf = dir.path().join(".github/workflows");
     std::fs::create_dir_all(&wf).unwrap();
+    crate::ci_run::opt_in_ci_gate(dir.path());
     write_workflow(dir.path(), run);
     dir
 }

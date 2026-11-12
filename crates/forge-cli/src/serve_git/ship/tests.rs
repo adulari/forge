@@ -589,6 +589,7 @@ async fn a_failing_local_ci_plan_refuses_the_push_and_names_the_step() {
     let fx = fixture("worktree", "WRITE", NO_PRS);
     let wf = fx.work.join(".github/workflows");
     std::fs::create_dir_all(&wf).unwrap();
+    crate::ci_run::opt_in_ci_gate(&fx.work);
     std::fs::write(
         wf.join("ci.yml"),
         "on: pull_request\nenv:\n  STRICT: \"1\"\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Strict lint\n        run: echo lint-broke >&2; test \"$STRICT\" = 0\n",

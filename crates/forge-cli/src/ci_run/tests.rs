@@ -4,6 +4,7 @@ fn repo(workflow: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let wf = dir.path().join(".github/workflows");
     std::fs::create_dir_all(&wf).unwrap();
+    crate::ci_run::opt_in_ci_gate(dir.path());
     std::fs::write(wf.join("ci.yml"), workflow).unwrap();
     std::fs::write(
         dir.path().join("check.sh"),
@@ -148,7 +149,7 @@ fn automatic_check_respects_settings_and_empty_plans() {
         automatic_check(empty.path(), "push"),
         Check::Skipped(_)
     ));
-    std::fs::remove_file(dir.path().join(".forge/ci.toml")).unwrap();
+    crate::ci_run::opt_in_ci_gate(dir.path());
     assert!(matches!(
         automatic_check(dir.path(), "push"),
         Check::Passed(_)

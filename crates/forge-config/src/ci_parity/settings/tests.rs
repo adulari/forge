@@ -31,12 +31,26 @@ fn defaults_and_parsing() {
 }
 
 #[test]
+fn the_gate_is_off_unless_the_project_opts_in() {
+    assert_eq!(CiSettings::default().gate, GateMode::Off);
+    assert_eq!(
+        parse_settings("[ci]\nexclude = [\"a\"]\n")
+            .unwrap()
+            .unwrap()
+            .gate,
+        GateMode::Off
+    );
+    let on = parse_settings("[ci]\ngate = \"auto\"\n").unwrap().unwrap();
+    assert_eq!(on.gate, GateMode::Auto);
+}
+
+#[test]
 fn a_bad_file_falls_back_to_defaults_with_a_warning() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join(".forge")).unwrap();
     std::fs::write(dir.path().join(".forge/ci.toml"), "[ci\n").unwrap();
     let s = load_settings(dir.path());
-    assert_eq!(s.gate, GateMode::Auto);
+    assert_eq!(s.gate, GateMode::Off);
     assert!(s.warning.is_some());
 }
 

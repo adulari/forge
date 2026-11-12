@@ -37,7 +37,7 @@ pub struct CiSettings {
 impl Default for CiSettings {
     fn default() -> Self {
         Self {
-            gate: GateMode::Auto,
+            gate: GateMode::Off,
             step_timeout_secs: DEFAULT_STEP_TIMEOUT_SECS,
             total_budget_secs: DEFAULT_TOTAL_BUDGET_SECS,
             include: Vec::new(),
@@ -75,8 +75,8 @@ pub fn parse_settings(text: &str) -> Result<Option<CiSettings>, String> {
     };
     let mut s = CiSettings::default();
     match ci.get("gate").and_then(toml::Value::as_str) {
-        None | Some("auto") => {}
-        Some("off") => s.gate = GateMode::Off,
+        None | Some("off") => {}
+        Some("auto") => s.gate = GateMode::Auto,
         Some(other) => {
             return Err(format!(
                 "[ci] gate must be \"auto\" or \"off\", not \"{other}\""

@@ -1,7 +1,7 @@
 # Feature: CI parity (Forge runs your CI before it pushes)
 
 > **Status: shipped.** `forge ci plan|run|status`, `/ci`, the `/goal` finish gate and the pre-push
-> check of ship and the merge queue. Opt out per repository with `[ci] gate = "off"`.
+> check of ship and the merge queue. The gate is off by default; opt a project in with `[ci] gate = "auto"` in `.forge/ci.toml`.
 
 ## 1. Problem
 
@@ -87,14 +87,15 @@ A step whose command is not installed here (exit 127, a missing cargo subcommand
   (`serve_pr_watch/local_ci.rs`), holds the poll and the merge while it runs, and sends a failing
   step back to the session as the next prompt instead of waiting for the remote CI to fail the
   same way. Two failed attempts in a row block the watch with the reason. A passing plan, a repo
-  without runnable steps, `[ci] gate = "off"` and `FORGE_CI_GATE=off` leave the watch as it was.
+  without runnable steps, a project that has not set `[ci] gate = "auto"` and `FORGE_CI_GATE=off`
+  leave the watch as it was.
   The check state is in memory: a daemon restart drops it and the watch polls as before.
 
 ## 5. Configuration (`.forge/ci.toml`, or a `[ci]` table in `.forge/config.toml`)
 
 ```toml
 [ci]
-gate = "auto"                 # "off": no finish gate, no pre-push check
+gate = "off"                  # default. "auto": finish gate and pre-push check (opt in per project)
 step_timeout_minutes = 30     # a step's own timeout-minutes wins
 total_budget_minutes = 120    # remaining steps are reported not-run when it is spent
 exclude = ["ci.yml::test::*"] # `*` globs over workflow::job::step name
