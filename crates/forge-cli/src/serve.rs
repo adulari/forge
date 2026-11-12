@@ -2508,7 +2508,7 @@ enum MergeOutcome {
     Conflicts(Vec<String>),
     /// A hard git error (not a conflict); state left intact.
     Error(String),
-    /// The checkout is behind where the session started and could not be fast-forwarded.
+    /// The checkout is behind where the session started; it is reported, never moved.
     BaseBehind(String),
 }
 
@@ -2565,7 +2565,7 @@ fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> Merge
     run_merge_noted(repo_root, worktree, branch).0
 }
 
-/// [`run_merge`] plus a line for the result when the checkout was fast-forwarded first.
+/// [`run_merge`] plus an optional line for the result.
 fn run_merge_noted(
     repo_root: &std::path::Path,
     worktree: &str,
@@ -2749,7 +2749,7 @@ pub(crate) enum SessionMerge {
     Clean {
         branch: String,
         base: String,
-        /// Set when the checkout was fast-forwarded to the session's start before merging.
+        /// A line about the merge's result, when there is one.
         note: Option<String>,
     },
     /// The checkout is behind where the session started; nothing merged, session left running.
@@ -5664,26 +5664,25 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_fresh_base_session_merges_into_a_stale_checkout_by_fast_forwarding_it() {
+    fn a_stale_checkout_on_the_default_branch_is_reported_behind_never_fast_forwarded() {
         let (_dir, mine, wt) = stale_checkout_with_fresh_session();
+        let before = git_stdout(&mine, &["rev-parse", "HEAD"]).unwrap();
         let (outcome, note) = run_merge_noted(&mine, wt.to_str().unwrap(), "forge/fresh");
+        let MergeOutcome::BaseBehind(msg) = outcome else {
+            panic!("expected a base-behind refusal");
+        };
         assert!(
-            matches!(outcome, MergeOutcome::Clean),
-            "got a non-clean outcome"
+            msg.contains("3 commit(s) behind") && msg.contains("pull, then merge"),
+            "{msg}"
         );
-        assert!(note.unwrap().contains("fast-forwarded"));
-        assert_eq!(
-            std::fs::read_to_string(mine.join("up.txt")).unwrap(),
-            "one\nmine\n"
-        );
-        assert!(
-            mine.join("a").exists(),
-            "upstream commits are in the checkout"
-        );
+        assert!(note.is_none());
+        assert_eq!(git_stdout(&mine, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert!(!mine.join("up.txt").exists());
+        assert!(!mine.join("a").exists());
     }
 
     #[test]
-    fn a_fresh_base_session_is_refused_when_the_stale_checkout_cannot_be_fast_forwarded() {
+    fn a_fresh_base_session_is_refused_when_the_stale_checkout_is_on_another_branch() {
         let (_dir, mine, wt) = stale_checkout_with_fresh_session();
         let git = |args: &[&str]| {
             let ok = std::process::Command::new("git")
