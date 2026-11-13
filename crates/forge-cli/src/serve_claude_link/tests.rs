@@ -309,3 +309,21 @@ async fn continuing_into_a_session_open_in_a_terminal_is_409() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn a_driver_that_went_busy_after_the_check_is_not_shut_down() {
+    use crate::cli::commands::run::driver::SessionDriverHandle;
+    let store = Store::open_in_memory().unwrap();
+    let registry = crate::serve::SessionRegistry::new();
+    registry
+        .insert(SessionDriverHandle::for_test("busy", true), &store)
+        .await;
+    registry
+        .insert(SessionDriverHandle::for_test("idle", false), &store)
+        .await;
+
+    assert!(registry.remove_if_idle("busy").await.is_err());
+    assert!(registry.get("busy").await.is_some());
+    assert!(registry.remove_if_idle("idle").await.unwrap().is_some());
+    assert!(registry.get("idle").await.is_none());
+}
