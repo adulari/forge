@@ -521,7 +521,7 @@ impl Store {
         let mut out = serde_json::Map::new();
         for table in PORTABLE_METADATA_TABLES {
             let mut stmt = conn.prepare(&format!("SELECT * FROM {table}"))?;
-            let cols: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+            let cols: Vec<String> = stmt.column_names().map(|s| s.to_string()).collect();
             let ncol = cols.len();
             let rows = stmt
                 .query_map([], |row| {

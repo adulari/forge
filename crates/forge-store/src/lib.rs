@@ -517,12 +517,12 @@ struct SqliteManager {
 /// pooled connection. A startup that touches tens of megabytes of a multi-gigabyte store has no
 /// other way to name the statement responsible — `strace` is not on most machines and SQLite's
 /// own page reads carry no query identity. Off (no callback installed) unless the variable is set.
-fn install_sql_profiler(conn: &Connection) {
+fn install_sql_profiler(conn: &mut Connection) {
     if sql_profile_path().is_none() {
         return;
     }
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
-    conn.trace_v2(
+    let _ = conn.trace_v2(
         TraceEventCodes::SQLITE_TRACE_PROFILE,
         Some(|event: TraceEvent<'_>| {
             use std::io::Write;
@@ -566,7 +566,7 @@ impl r2d2::ManageConnection for SqliteManager {
     type Error = rusqlite::Error;
 
     fn connect(&self) -> std::result::Result<Connection, rusqlite::Error> {
-        let conn = match &self.source {
+        let mut conn = match &self.source {
             ConnSource::File(p) => Connection::open(p)?,
             ConnSource::Memory => Connection::open_in_memory()?,
         };
@@ -589,7 +589,7 @@ impl r2d2::ManageConnection for SqliteManager {
         // and it never shrinks again; see [`WAL_SIZE_LIMIT_BYTES`]. Per-connection and not
         // persisted, hence set here rather than once during migration.
         conn.pragma_update(None, "journal_size_limit", WAL_SIZE_LIMIT_BYTES)?;
-        install_sql_profiler(&conn);
+        install_sql_profiler(&mut conn);
         Ok(conn)
     }
 
