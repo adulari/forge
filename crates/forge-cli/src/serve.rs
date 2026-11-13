@@ -5530,8 +5530,13 @@ pub(crate) mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(commit.status(), axum::http::StatusCode::OK);
-        let _ = json_body(commit).await;
+        let commit_status = commit.status();
+        let commit_body = json_body(commit).await;
+        assert_eq!(
+            commit_status,
+            axum::http::StatusCode::OK,
+            "commit of the merged change failed: {commit_body}"
+        );
         let staged_after = std::process::Command::new("git")
             .args([
                 "-C",
