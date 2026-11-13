@@ -267,7 +267,7 @@ jobs:
           targets: ${{ matrix.name == 'macos-x86_64' && 'x86_64-apple-darwin' || '' }}
 
       - if: matrix.name != 'linux-x86_64'
-        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31
         with:
           workspaces: "mobile/src-tauri -> target"
           key: ${{ matrix.os }}
