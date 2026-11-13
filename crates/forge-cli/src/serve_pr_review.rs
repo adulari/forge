@@ -14,6 +14,7 @@
 //! `POST /api/pr/review/action` `{session | pr, action: merge_anyway|dismiss, finding?, by?}`.
 
 mod assay_reviewer;
+mod dedupe;
 pub(crate) mod jobs;
 mod owner;
 
@@ -393,7 +394,7 @@ impl Job {
         match self.reviewer.review(&request).await {
             Err(e) => failed(state, e),
             Ok(reviewed) => {
-                let mut findings = reviewed.findings;
+                let mut findings = dedupe::dedupe(reviewed.findings);
                 findings.sort_by_key(|f| std::cmp::Reverse(rank(&f.severity)));
                 findings.truncate(self.settings.max_findings);
                 for f in &mut findings {

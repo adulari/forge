@@ -64,6 +64,11 @@ fn finding(severity: &str, line: u32) -> ReviewFinding {
     }
 }
 
+fn titled(mut f: ReviewFinding, title: &str) -> ReviewFinding {
+    f.title = title.into();
+    f
+}
+
 fn install_hook(
     replies: Vec<Result<Vec<ReviewFinding>, String>>,
     tune: impl FnOnce(&mut Settings),
@@ -116,7 +121,10 @@ async fn a_planted_defect_blocks_the_merge_goes_back_to_the_session_and_merges_o
     let gh = fake_gh(dir.path());
     let reviewer = install_hook(
         vec![
-            Ok(vec![finding("high", 12), finding("low", 40)]),
+            Ok(vec![
+                finding("high", 12),
+                titled(finding("low", 40), "stale comment above the helper"),
+            ]),
             Ok(vec![]),
         ],
         |_| {},
@@ -329,9 +337,12 @@ async fn a_busy_session_defers_the_fix_turn_and_the_cap_keeps_the_worst() {
     let gh = fake_gh(dir.path());
     install_hook(
         vec![Ok(vec![
-            finding("high", 1),
-            finding("critical", 2),
-            finding("high", 3),
+            titled(finding("high", 1), "unchecked unwrap on user input"),
+            titled(
+                finding("critical", 20),
+                "race between the watcher and the pusher",
+            ),
+            titled(finding("high", 40), "token leaked into the log line"),
         ])],
         |s| s.max_findings = 2,
     );
@@ -667,7 +678,10 @@ async fn dismissing_findings_one_by_one_lets_the_merge_through_and_records_who()
     let dir = tempfile::tempdir().unwrap();
     let gh = fake_gh(dir.path());
     install_hook(
-        vec![Ok(vec![finding("critical", 2), finding("high", 9)])],
+        vec![Ok(vec![
+            finding("critical", 2),
+            titled(finding("high", 9), "stale comment above the helper"),
+        ])],
         |_| {},
     );
     let mut watch = Watch::new("s1", Mode::Merge, "squash", 0);
@@ -858,4 +872,43 @@ fn an_override_made_while_a_poll_ran_survives_the_poll_being_stored() {
     let kept = next.review.unwrap();
     assert!(kept.merge_anyway.is_some() && kept.findings[0].dismissed.is_some());
     assert!(!kept.findings[0].blocking);
+}
+
+#[tokio::test]
+async fn a_duplicate_pair_takes_one_slot_and_keeps_the_higher_severity() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let twin = titled(
+        finding("critical", 12),
+        "unwrap on user input can panic the daemon",
+    );
+    install_hook(
+        vec![Ok(vec![
+            finding("high", 10),
+            twin,
+            titled(finding("high", 90), "token leaked into the log line"),
+        ])],
+        |s| s.max_findings = 2,
+    );
+    let mut watch = Watch::new("s1", Mode::Merge, "squash", 0);
+    view(dir.path(), "aaaa1111");
+    poll(&gh, dir.path(), &mut watch, false, 10).await;
+    let found = &watch.review.as_ref().unwrap().findings;
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[0].severity, "critical");
+    assert!(found.iter().any(|f| f.title.contains("token leaked")));
+}
+
+#[test]
+fn distinct_issues_in_one_file_are_not_merged() {
+    let a = titled(finding("high", 10), "missing bounds check on the index");
+    let b = titled(finding("high", 11), "token leaked into the log line");
+    let other_file = ReviewFinding {
+        file: "src/other.rs".into(),
+        ..finding("high", 10)
+    };
+    assert_eq!(
+        super::dedupe::dedupe(vec![a, b, finding("high", 10), other_file]).len(),
+        4
+    );
 }
