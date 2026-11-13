@@ -75,7 +75,7 @@ mod tests {
 
     /// Run a writer committing small transactions back to back for `for_how_long`, and meanwhile
     /// one critical write on a connection configured by `configure`. Returns whether it landed.
-    fn critical_write_survives(configure: impl FnOnce(&Connection)) -> bool {
+    fn critical_write_survives(configure: impl FnOnce(&mut Connection)) -> bool {
         let path = temp_db();
         connect(&path)
             .execute_batch("CREATE TABLE t (x INTEGER)")
@@ -105,7 +105,7 @@ mod tests {
         };
         started_rx.recv().unwrap();
         let mut conn = connect(&path);
-        configure(&conn);
+        configure(&mut conn);
         let landed = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .and_then(|tx| {
