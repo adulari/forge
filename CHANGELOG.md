@@ -6,13 +6,22 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
-### Breaking
+## [2.29.0] - 2026-11-13
 
-- **`forge run` exits non-zero when the turn did not finish**, and its JSON result carries `end_reason` (for example `provider_down`, `budget_exhausted`, `interrupted`, `stalled`) so a script can tell why. A run that used to exit 0 after a stopped turn now fails.
-- **The database schema moves from 50 to 58, one way.** The first start of this version migrates `forge.db` in place; an older binary refuses a database it did not write. Back up `~/.local/share/forge/forge.db` (`sqlite3 forge.db ".backup forge.db.bak"` while idle) before installing.
+### Security
 
-### Changed defaults and new switches
+- Dependency upgrades past current RUSTSEC advisories: rmcp 3.5.1 to 3.10.0 (RUSTSEC-2026-0461, -0457, -0462), SQLite via libsqlite3-sys 0.38.2 to 0.39.1 (RUSTSEC-2026-0459), and rustix 1.1.4 to 1.1.6 (RUSTSEC-2026-0486).
 
+### Added
+
+- Checkpoint compaction: when the agent commits a slice of work after a passing check and the live context is above `[compact] checkpoint_min_tokens` (default 60,000), Forge folds the slice into a summary it writes itself (commit subject and body, diffstat, files touched with their purpose, open tasks, the checks that passed, the episode index) with no model call, so the next slice starts lean. Old reads of files changed since are folded first, `recall` still reaches everything, and every surface shows `checkpoint: folded the slice behind <sha> (192k -> 41k)`. Off by default while it is measured: `[compact] checkpoint = true` turns it on. See docs/features/context-compaction.md.
+- Merge queue: PRs Forge watches in merge mode land one at a time per repository. The head is brought up to date by merging the base into the session's worktree as its own git identity (never `gh pr update-branch`), changelog-only conflicts are resolved keeping both sides' entries, the project's `verify`/`check` actions run on the merged result before the push, and a real conflict or a failing check hands the PR back to its session while the queue carries on. `forge prs queue`, `GET /api/pr/queue`, a line in the away brief and the PR Watch rows show it. See docs/features/merge-queue.md.
+- Merge queue controls on every surface: `/queue` in the terminal (position, state and reason per PR, with hold, release, move to front and retry), a Merge queue section on `forge board`, a Merge queue page on the phone and desktop (Pull requests, Settings, command palette), and `forge prs queue hold|release|front|retry <pr>` over `POST /api/pr/queue/action`, which Forge Anywhere bridges. A held PR neither lands nor blocks the PRs behind it; a PR whose verification fails now shows the failing output tail as its reason.
+
+### Changed
+
+- Upgrade: **`forge run` exits non-zero when the turn did not finish**, and its JSON result carries `end_reason` (for example `provider_down`, `budget_exhausted`, `interrupted`, `stalled`) so a script can tell why. A run that used to exit 0 after a stopped turn now fails.
+- Upgrade: **The database schema moves from 50 to 58, one way.** The first start of this version migrates `forge.db` in place; an older binary refuses a database it did not write. Back up `~/.local/share/forge/forge.db` (`sqlite3 forge.db ".backup forge.db.bak"` while idle) before installing.
 - `[pr_watch] queue` (default `true`) turns the merge queue on or off. Off, each merge-mode PR is polled and merged on its own.
 - `[pr_watch] review_on_error` now defaults to `allow`: a reviewer that fails does not hold up the merge (`block` restores the old behaviour, `merge` is still accepted). An unpinned reviewer now goes through the same subscription budget check as a pinned one: a subscription model is dropped unless `review_budget` covers it.
 - A headless `forge run` fails fast when the provider is down (`end_reason = "provider_down"`) instead of waiting up to 8 hours. Chat, the daemon and `/goal` keep the 8-hour wait. `forge run --wait-for-outage`, or `[mesh] headless_outage_wait = true`, opts a run back in.
@@ -21,16 +30,12 @@ All notable changes to Forge are documented here. The format follows
 - A session worktree still branches from a freshly fetched `origin/<default>`, but Forge never fast-forwards your own checkout any more. Merging a session back into a checkout that is behind says so (pull, then merge) and leaves it where it was.
 - Scheduled runs have no default 12-hour limit; `forge schedule --max-runtime` is opt-in.
 - `[harness] mid_intent_redrive` (default `true`) switches the re-drive of a reply that announces its next step without doing it.
+- Experimental: The QA step for goals (behaviour assertions run against the live app, docs/features/goal-contract.md section 10) and scouts (docs/features/scouts.md) are experimental. Both can change or go away; scouts are off by default.
 
-### Experimental
+### Fixed
 
-- The QA step for goals (behaviour assertions run against the live app, docs/features/goal-contract.md section 10) and scouts (docs/features/scouts.md) are experimental. Both can change or go away; scouts are off by default.
-
-### Added
-
-- Checkpoint compaction: when the agent commits a slice of work after a passing check and the live context is above `[compact] checkpoint_min_tokens` (default 60,000), Forge folds the slice into a summary it writes itself (commit subject and body, diffstat, files touched with their purpose, open tasks, the checks that passed, the episode index) with no model call, so the next slice starts lean. Old reads of files changed since are folded first, `recall` still reaches everything, and every surface shows `checkpoint: folded the slice behind <sha> (192k -> 41k)`. Off by default while it is measured: `[compact] checkpoint = true` turns it on. See docs/features/context-compaction.md.
-- Merge queue: PRs Forge watches in merge mode land one at a time per repository. The head is brought up to date by merging the base into the session's worktree as its own git identity (never `gh pr update-branch`), changelog-only conflicts are resolved keeping both sides' entries, the project's `verify`/`check` actions run on the merged result before the push, and a real conflict or a failing check hands the PR back to its session while the queue carries on. `forge prs queue`, `GET /api/pr/queue`, a line in the away brief and the PR Watch rows show it. See docs/features/merge-queue.md.
-- Merge queue controls on every surface: `/queue` in the terminal (position, state and reason per PR, with hold, release, move to front and retry), a Merge queue section on `forge board`, a Merge queue page on the phone and desktop (Pull requests, Settings, command palette), and `forge prs queue hold|release|front|retry <pr>` over `POST /api/pr/queue/action`, which Forge Anywhere bridges. A held PR neither lands nor blocks the PRs behind it; a PR whose verification fails now shows the failing output tail as its reason.
+- `max` effort is now sent as `max` to DeepSeek V4 and Kimi routes that publish no effort ladder, instead of being downgraded to `xhigh` and rejected by the provider.
+- IDE review fixes: a hunk revert is refused when the hunk changed since it was shown, a synced session's driver shuts down only if still idle, Esc runs the unsaved-edit check from every pane, and the external-editor copy is kept until saved and created privately with an unpredictable name.
 
 ## [2.28.1] - 2026-11-06
 
@@ -5597,7 +5602,8 @@ Initial public release: Model Mesh routing, multi-provider support, cost/budget 
 inline TUI, session persistence + checkpoints, permission broker, subagents, Assay analysis,
 Lattice code intelligence, MCP client, web tools, hooks, skills/commands, and more.
 
-[Unreleased]: https://github.com/Adulari/forge/compare/v2.28.1...HEAD
+[Unreleased]: https://github.com/Adulari/forge/compare/v2.29.0...HEAD
+[2.29.0]: https://github.com/Adulari/forge/compare/v2.28.1...v2.29.0
 [2.28.1]: https://github.com/Adulari/forge/compare/v2.28.0...v2.28.1
 [2.28.0]: https://github.com/Adulari/forge/compare/v2.27.0...v2.28.0
 [2.27.0]: https://github.com/Adulari/forge/compare/v2.26.4...v2.27.0
