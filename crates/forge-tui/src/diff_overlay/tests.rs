@@ -205,11 +205,27 @@ fn x_then_y_reverts_the_hunk_under_the_view_and_anything_else_cancels() {
     let mut o = opened();
     assert_eq!(o.key(KeyKind::Char('x')), DiffAction::None);
     assert!(o.confirm_prompt().unwrap().contains("@@ -1,3 +1,3 @@"));
+    let body: Vec<String> = o.current().unwrap().hunks[0]
+        .lines
+        .iter()
+        .map(|l| {
+            let sign = match l.kind {
+                LineKind::Context => ' ',
+                LineKind::Add => '+',
+                LineKind::Del => '-',
+            };
+            format!("{sign}{}", l.text)
+        })
+        .collect();
+    assert!(body
+        .iter()
+        .any(|l| l.starts_with('+') || l.starts_with('-')));
     assert_eq!(
         o.key(KeyKind::Char('y')),
         DiffAction::RevertHunk {
             path: "a.rs".to_string(),
-            header: "@@ -1,3 +1,3 @@".to_string()
+            header: "@@ -1,3 +1,3 @@".to_string(),
+            body: body.clone(),
         }
     );
     assert!(o.confirm_prompt().is_none());

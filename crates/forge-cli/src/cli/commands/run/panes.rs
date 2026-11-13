@@ -154,7 +154,9 @@ impl PaneHost {
         if app.diff_overlay.open {
             match app.diff_overlay.key(key) {
                 DiffAction::Refresh => self.tree_inflight = false,
-                DiffAction::RevertHunk { path, header } => self.spawn_revert(app, path, header),
+                DiffAction::RevertHunk { path, header, body } => {
+                    self.spawn_revert(app, path, header, body);
+                }
                 DiffAction::None => {}
             }
             return Ok(true);
@@ -189,11 +191,11 @@ impl PaneHost {
         }
     }
 
-    fn spawn_revert(&mut self, app: &App, path: String, header: String) {
+    fn spawn_revert(&mut self, app: &App, path: String, header: String, body: Vec<String>) {
         let workspace = Self::workspace(app);
         let tx = self.tx.clone();
         tokio::task::spawn_blocking(move || {
-            let result = super::hunk_revert::revert_hunk(&workspace, &path, &header);
+            let result = super::hunk_revert::revert_hunk(&workspace, &path, &header, &body);
             let _ = tx.send(Msg::Reverted(result));
         });
     }

@@ -220,6 +220,19 @@ fn a_save_conflict_offers_reload_or_overwrite() {
 }
 
 #[test]
+fn esc_with_unsaved_edits_asks_even_when_the_editor_is_not_focused() {
+    let mut app = app();
+    open_editor(&mut app, "one\n");
+    press(&mut app, 'x');
+    assert!(app.edit_dirty());
+    app.focus = Pane::Rail;
+    assert!(handle_key(&mut app, key(KeyCode::Esc)).is_empty());
+    assert!(app.confirm.is_some(), "Esc must not drop the edit");
+    assert!(app.edit_dirty());
+    assert_eq!(press(&mut app, 'y'), vec![IdeAction::Close]);
+}
+
+#[test]
 fn closing_with_unsaved_edits_asks_first() {
     let mut app = app();
     open_editor(&mut app, "one\n");

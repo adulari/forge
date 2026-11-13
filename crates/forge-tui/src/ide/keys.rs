@@ -105,6 +105,18 @@ pub const HELP: &[(&str, &str)] = &[
     ("F2 / Esc", "back to where you came from"),
 ];
 
+/// Every way out of IDE mode goes through here, so unsaved edits are always asked about first.
+fn request_close(app: &mut IdeApp) -> Vec<IdeAction> {
+    if app.edit_dirty() {
+        app.confirm = Some(super::state::Confirm {
+            kind: ConfirmKind::QuitDiscard,
+            text: "leave with unsaved edits?  y/n   (Ctrl+S saves)".to_string(),
+        });
+        return Vec::new();
+    }
+    vec![IdeAction::Close]
+}
+
 fn plain(key: &KeyEvent) -> bool {
     !key.modifiers
         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
@@ -112,14 +124,7 @@ fn plain(key: &KeyEvent) -> bool {
 
 pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
     if matches!(key.code, KeyCode::F(2)) {
-        if app.edit_dirty() {
-            app.confirm = Some(super::state::Confirm {
-                kind: ConfirmKind::QuitDiscard,
-                text: "leave with unsaved edits?  y/n   (Ctrl+S saves)".to_string(),
-            });
-            return Vec::new();
-        }
-        return vec![IdeAction::Close];
+        return request_close(app);
     }
     if app.help_open {
         app.help_open = false;
@@ -190,7 +195,7 @@ pub fn handle_key(app: &mut IdeApp, key: KeyEvent) -> Vec<IdeAction> {
         };
     }
     match key.code {
-        KeyCode::Esc if !esc_is_local(app) => return vec![IdeAction::Close],
+        KeyCode::Esc if !esc_is_local(app) => return request_close(app),
         KeyCode::Tab => {
             app.cycle_pane(false);
             return app.sync_watch();

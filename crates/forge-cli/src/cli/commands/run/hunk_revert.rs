@@ -1,6 +1,6 @@
 //! The TUI diff overlay's "revert hunk": the overlay holds parsed lines, not raw patch text, so
 //! the host re-reads the file's diff, cuts out the one hunk the person confirmed (matched by its
-//! `@@` header) and applies it in reverse through the same validated `git apply` the daemon's
+//! `@@` header AND its lines, so a hunk whose content changed under the same header is refused) and applies it in reverse through the same validated `git apply` the daemon's
 //! `POST /api/git/hunk` uses.
 
 use std::path::Path;
@@ -43,8 +43,25 @@ fn single_hunk_patch(diff: &str, header: &str) -> Option<String> {
     hunk.map(|hunk| format!("{preamble}{hunk}"))
 }
 
+/// The `' '`/`+`/`-` lines of a one-hunk patch, without the `@@` line and "no newline" markers.
+fn hunk_body(raw: &str) -> Vec<&str> {
+    raw.lines()
+        .skip_while(|l| !l.starts_with("@@"))
+        .skip(1)
+        .filter(|l| !l.starts_with('\\'))
+        .collect()
+}
+
+const STALE: &str = "the file changed since the diff was read; refreshed";
+
 /// Revert one hunk of `path` (repository-relative) in the working tree of `workspace`'s repo.
-pub(crate) fn revert_hunk(workspace: &Path, path: &str, header: &str) -> Result<String, String> {
+/// `body` is the hunk's lines as the person saw them.
+pub(crate) fn revert_hunk(
+    workspace: &Path,
+    path: &str,
+    header: &str,
+    body: &[String],
+) -> Result<String, String> {
     let root = git_text(workspace, &["rev-parse", "--show-toplevel"])
         .map(|root| root.trim().to_string())
         .filter(|root| !root.is_empty())
@@ -55,12 +72,14 @@ pub(crate) fn revert_hunk(workspace: &Path, path: &str, header: &str) -> Result<
         &["diff", "HEAD", "--no-color", "--no-ext-diff", "--", path],
     )
     .ok_or_else(|| "could not read the file's diff".to_string())?;
-    let raw = single_hunk_patch(&diff, header)
-        .ok_or_else(|| "the file changed since the diff was read; refreshed".to_string())?;
+    let raw = single_hunk_patch(&diff, header).ok_or_else(|| STALE.to_string())?;
+    if hunk_body(&raw) != body.iter().map(String::as_str).collect::<Vec<_>>() {
+        return Err(STALE.to_string());
+    }
     let patch = validate_hunk_patch(path, header, &raw)?;
     match apply_hunk(root, HunkAction::Revert, &patch) {
         Ok(()) => Ok(format!("reverted hunk {header} in {path}")),
-        Err((true, _)) => Err("the file changed since the diff was read; refreshed".to_string()),
+        Err((true, _)) => Err(STALE.to_string()),
         Err((false, message)) => Err(message),
     }
 }
@@ -103,11 +122,49 @@ mod tests {
             .find(|l| l.starts_with("@@"))
             .unwrap()
             .to_string();
-        revert_hunk(dir.path(), "f.txt", &header).unwrap();
+        let body: Vec<String> = hunk_body(&single_hunk_patch(&diff, &header).unwrap())
+            .into_iter()
+            .map(String::from)
+            .collect();
+        revert_hunk(dir.path(), "f.txt", &header, &body).unwrap();
         let now = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
         assert!(now.contains("line 2\n") && now.contains("TWENTY-EIGHT"));
 
-        let err = revert_hunk(dir.path(), "f.txt", &header).unwrap_err();
+        let err = revert_hunk(dir.path(), "f.txt", &header, &body).unwrap_err();
         assert!(err.contains("changed since"), "{err}");
+    }
+
+    #[test]
+    fn refuses_a_hunk_whose_content_changed_under_the_same_header() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q", "-b", "main"]);
+        let base: String = (1..=10).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.path().join("f.txt"), &base).unwrap();
+        git(dir.path(), &["add", "f.txt"]);
+        git(dir.path(), &["commit", "-qm", "init"]);
+        std::fs::write(
+            dir.path().join("f.txt"),
+            base.replace("line 5\n", "first\n"),
+        )
+        .unwrap();
+        let diff = git_text(dir.path(), &["diff", "HEAD", "--", "f.txt"]).unwrap();
+        let header = diff
+            .lines()
+            .find(|l| l.starts_with("@@"))
+            .unwrap()
+            .to_string();
+        let seen: Vec<String> = hunk_body(&single_hunk_patch(&diff, &header).unwrap())
+            .into_iter()
+            .map(String::from)
+            .collect();
+
+        let second = base.replace("line 5\n", "second\n");
+        std::fs::write(dir.path().join("f.txt"), &second).unwrap();
+        let err = revert_hunk(dir.path(), "f.txt", &header, &seen).unwrap_err();
+        assert!(err.contains("changed since"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            second
+        );
     }
 }

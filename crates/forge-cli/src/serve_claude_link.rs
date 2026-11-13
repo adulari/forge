@@ -269,8 +269,15 @@ async fn continue_session(
             // An idle driver holds the old history in memory; dropping it makes the next attach
             // load the turns that were just added.
             if body.mode == "synced" && body.appended > 0 {
-                if let Some(handle) = state.registry.remove(&body.session_id).await {
-                    handle.shutdown();
+                match state.registry.remove_if_idle(&body.session_id).await {
+                    Ok(Some(handle)) => handle.shutdown(),
+                    Ok(None) => {}
+                    Err(why) => {
+                        return json_response(&ContinueBody {
+                            warning: Some(why.to_string()),
+                            ..body
+                        })
+                    }
                 }
             }
             json_response(&body)
