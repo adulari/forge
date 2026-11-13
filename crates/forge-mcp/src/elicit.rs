@@ -729,6 +729,14 @@ mod tests {
         drop(scope_b);
     }
 
+    /// A wait that never ends would hold the test runner until the job times out, so every await
+    /// on the registry or the connection is bounded and names the step that stalled.
+    async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(30), fut)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting until {step}"))
+    }
+
     async fn form_arrives(rx: &mut mpsc::UnboundedReceiver<ElicitRequest>) -> ElicitRequest {
         tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
             .await
@@ -743,7 +751,9 @@ mod tests {
         let (_sb, _b_rx) = open_scope(b, "srv");
         assert!(!user_is_answering(a, "srv"));
         let task = tokio::spawn(route(Some(a), "srv", "hi".into(), url()));
-        let req = a_rx.recv().await.unwrap();
+        let req = within("the request reaches its scope", a_rx.recv())
+            .await
+            .unwrap();
         assert!(user_is_answering(a, "srv"));
         assert!(
             !user_is_answering(b, "srv"),
@@ -751,7 +761,7 @@ mod tests {
         );
         assert!(!user_is_answering(a, "other"));
         req.reply.send(ElicitReply::Decline).unwrap();
-        task.await.unwrap();
+        within("the route returns", task).await.unwrap();
     }
 
     #[tokio::test]
@@ -764,7 +774,9 @@ mod tests {
             let mgr = std::sync::Arc::clone(&mgr);
             tokio::spawn(async move { mgr.call("test__ask", &json!({})).await })
         };
-        let request = rx.recv().await.expect("the server asked");
+        let request = within("the server's question reaches the scope", rx.recv())
+            .await
+            .expect("the server asked");
         assert_eq!(request.message, "Need two things");
         let ElicitPrompt::Form(form) = &request.prompt else {
             panic!("expected a form");
@@ -791,7 +803,7 @@ mod tests {
             .collect();
         let values = form.resolve(&answers).expect("valid");
         request.reply.send(ElicitReply::Accept(values)).unwrap();
-        let outcome = call.await.unwrap();
+        let outcome = within("the answered call returns", call).await.unwrap();
         assert!(outcome.ok, "{}", outcome.text);
         assert!(
             outcome.text.contains("\"action\":\"accept\""),
@@ -807,7 +819,11 @@ mod tests {
 
         // The scope is shared process state, so the no-listener case runs in the same test.
         drop(_scope);
-        let outcome = mgr.call("test__ask", &json!({})).await;
+        let outcome = within(
+            "the call with no listener returns",
+            mgr.call("test__ask", &json!({})),
+        )
+        .await;
         assert!(
             outcome.text.contains("\"action\":\"decline\""),
             "{}",
