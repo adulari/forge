@@ -10,7 +10,8 @@ pub const DEFAULT_CHECKPOINT_MIN_TOKENS: u64 = 60_000;
 #[serde(default)]
 pub struct CompactConfig {
     /// Fold a finished slice of work (a commit the agent made, after a passing check) into a
-    /// summary the harness writes itself, so the next slice starts lean. `false` leaves
+    /// summary the harness writes itself, so the next slice starts lean. Off by default (opt in
+    /// with `true`); `false` leaves
     /// compaction to the size trigger alone.
     pub checkpoint: bool,
     /// Live context, in tokens, a landed slice must exceed before it is folded.
@@ -20,7 +21,7 @@ pub struct CompactConfig {
 impl Default for CompactConfig {
     fn default() -> Self {
         Self {
-            checkpoint: true,
+            checkpoint: false,
             checkpoint_min_tokens: DEFAULT_CHECKPOINT_MIN_TOKENS,
         }
     }
@@ -31,9 +32,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn on_by_default_and_both_keys_are_settable() {
+    fn off_by_default_and_both_keys_are_settable() {
         let config = CompactConfig::default();
-        assert!(config.checkpoint);
+        assert!(!config.checkpoint);
         assert_eq!(config.checkpoint_min_tokens, 60_000);
         let parsed: CompactConfig =
             toml::from_str("checkpoint = false\ncheckpoint_min_tokens = 90000").unwrap();

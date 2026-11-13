@@ -192,8 +192,8 @@ slice at the boundary instead of waiting.
   shell does not count. The decision runs at the next step boundary (`prepare_step_context`), which
   is also the first step of the next turn when the commit was the last thing a turn did.
 - **Threshold.** The live transcript must be above `[compact] checkpoint_min_tokens` (default
-  60,000); below it the landed slice is dropped without a fold. `[compact] checkpoint = false`
-  turns the whole thing off. Both are settable per project (`compact` is in the trusted-safe key
+  60,000); below it the landed slice is dropped without a fold. The checkpoint is off by default
+  (experimental): `[compact] checkpoint = true` turns it on. Both are settable per project (`compact` is in the trusted-safe key
   list).
 - **Superseded reads first.** Every `read_file` result of a path that a later call in the slice
   edited is replaced by `[superseded: <path> was read here and changed later in this slice; ...]`
