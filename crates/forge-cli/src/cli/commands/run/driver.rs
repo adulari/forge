@@ -105,6 +105,43 @@ pub(crate) struct SessionDriverHandle {
     setup_control: std::sync::Arc<forge_core::worktree_setup::SetupControl>,
 }
 
+#[cfg(test)]
+impl SessionDriverHandle {
+    /// A handle whose driver task never runs, with the given `busy` snapshot, for registry tests.
+    pub(crate) fn for_test(session_id: &str, busy: bool) -> Self {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let snapshot = remote::Snapshot {
+            busy,
+            ..Default::default()
+        };
+        let (snapshot_tx, snapshot_rx) =
+            tokio::sync::watch::channel(std::sync::Arc::new(remote::SnapshotFrame::new(snapshot)));
+        std::mem::forget(snapshot_tx);
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(1);
+        std::mem::forget(input_rx);
+        let (mode_tx, _) = tokio::sync::mpsc::channel(1);
+        Self {
+            session_id: session_id.into(),
+            title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
+            spawn_cwd: String::new(),
+            worktree: None,
+            created_at: 0,
+            snapshot_rx,
+            events: std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(1))),
+            input_tx,
+            mode_tx,
+            last_activity: std::sync::Arc::new(AtomicI64::new(0)),
+            ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            draining: std::sync::Arc::new(AtomicBool::new(false)),
+            daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
+            shutdown_tx,
+            task: std::sync::Mutex::new(None),
+            worktree_setup: Default::default(),
+            setup_control: Default::default(),
+        }
+    }
+}
+
 impl SessionDriverHandle {
     pub(crate) fn setup_control(&self) -> std::sync::Arc<forge_core::worktree_setup::SetupControl> {
         self.setup_control.clone()
@@ -138,6 +175,13 @@ impl SessionDriverHandle {
             }
         }
         self.spawn_cwd.clone()
+    }
+
+    /// No turn running, nothing awaiting an answer, and no input queued but not yet picked up.
+    pub(crate) fn is_idle(&self) -> bool {
+        let snap = self.snapshot_rx.borrow();
+        let waiting = snap.snapshot.permission_prompt.is_some() || snap.snapshot.question.is_some();
+        !snap.snapshot.busy && !waiting && self.input_tx.capacity() == self.input_tx.max_capacity()
     }
 
     pub(crate) fn title(&self) -> String {

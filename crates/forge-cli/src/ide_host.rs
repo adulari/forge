@@ -106,6 +106,7 @@ fn start_daemon() -> Result<()> {
     Ok(())
 }
 
+mod edit_copy;
 mod hunks;
 mod perform;
 mod streams;

@@ -402,3 +402,24 @@ fn a_five_thousand_line_diff_draws_quickly() {
         per < std::time::Duration::from_millis(16) * if cfg!(debug_assertions) { 6 } else { 1 }
     );
 }
+
+#[test]
+fn a_hunk_revert_confirmed_after_the_diff_changed_is_refused() {
+    let mut app = app();
+    let path = open_first(&mut app);
+    assert!(press(&mut app, 'x').is_empty());
+    assert!(app.confirm.is_some());
+
+    let mut changed = diff_file(&path, 3);
+    for hunk in &mut changed.hunks {
+        hunk.lines = vec![" ctx".into(), "-old".into(), "+different".into()];
+    }
+    app.apply(IdeEvent::Diff(DiffLoaded {
+        session_id: app.open.as_ref().unwrap().session_id.clone(),
+        path,
+        bucket: hunk::Bucket::Unstaged,
+        file: Ok(Some(changed)),
+    }));
+    let actions = press(&mut app, 'y');
+    assert!(actions.is_empty(), "same header, new content: {actions:?}");
+}

@@ -335,6 +335,8 @@ pub enum IdeAction {
 pub enum ConfirmKind {
     RevertHunk {
         header: String,
+        /// The hunk's lines when asked, so a diff refreshed before `y` cannot be reverted blind.
+        lines: Vec<String>,
     },
     RevertFile,
     /// Esc in the editor with unsaved edits.

@@ -332,9 +332,10 @@ impl IdeApp {
             return;
         }
         let header = parsed.wire.hunks[index].header.clone();
+        let lines = parsed.wire.hunks[index].lines.clone();
         self.confirm = Some(Confirm {
             text: format!("revert hunk {header}?  y/n"),
-            kind: ConfirmKind::RevertHunk { header },
+            kind: ConfirmKind::RevertHunk { header, lines },
         });
     }
 
@@ -367,13 +368,24 @@ impl IdeApp {
                 vec![IdeAction::Close]
             }
             ConfirmKind::SaveConflict => Vec::new(),
-            ConfirmKind::RevertHunk { header } => {
+            ConfirmKind::RevertHunk { header, lines } => {
                 let Some((parsed, _, _)) = self.current_hunk() else {
                     return Vec::new();
                 };
-                match parsed.wire.hunks.iter().position(|h| h.header == header) {
+                match parsed
+                    .wire
+                    .hunks
+                    .iter()
+                    .position(|h| h.header == header && h.lines == lines)
+                {
                     Some(index) => self.hunk_action(&parsed, index, HunkAction::Revert),
-                    None => Vec::new(),
+                    None => {
+                        self.say(
+                            ToastLevel::Error,
+                            "the file changed since you asked: hunk not reverted".to_string(),
+                        );
+                        Vec::new()
+                    }
                 }
             }
             ConfirmKind::RevertFile => {

@@ -212,35 +212,41 @@ pub(super) async fn external_edit(
     if loaded.read_only {
         return toast(ToastLevel::Info, "this file is read-only".to_string());
     }
-    let dir = std::env::temp_dir().join(format!("forge-ide-{}", std::process::id()));
     let name = std::path::Path::new(path)
         .file_name()
         .map_or_else(|| "file".into(), |n| n.to_os_string());
-    let temp = dir.join(name);
-    if std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(&temp, &loaded.content))
-        .is_err()
-    {
-        return toast(
-            ToastLevel::Error,
-            "could not write a temporary copy".to_string(),
-        );
-    }
+    let copy = match super::edit_copy::EditCopy::create(
+        &super::edit_copy::base_dir(),
+        &name,
+        &loaded.content,
+    ) {
+        Ok(copy) => copy,
+        Err(_) => {
+            return toast(
+                ToastLevel::Error,
+                "could not write a temporary copy".to_string(),
+            )
+        }
+    };
     let editor = forge_tui::external_editor_command();
-    let run_path = temp.clone();
+    let run_path = copy.path().to_path_buf();
     let ran = tokio::task::spawn_blocking(move || forge_tui::run_editor_on(&editor, &run_path))
         .await
         .map_err(|e| e.to_string())
         .and_then(|r| r);
-    let edited = std::fs::read_to_string(&temp);
-    let _ = std::fs::remove_dir_all(&dir);
+    let edited = std::fs::read_to_string(copy.path());
     if let Err(e) = ran {
-        return toast(ToastLevel::Error, e);
-    }
-    let Ok(edited) = edited else {
+        let kept = copy.keep();
         return toast(
             ToastLevel::Error,
-            "could not read the edited file".to_string(),
+            format!("{e} (the copy is kept at {})", kept.display()),
+        );
+    }
+    let Ok(edited) = edited else {
+        let kept = copy.keep();
+        return toast(
+            ToastLevel::Error,
+            format!("could not read the edited file ({})", kept.display()),
         );
     };
     if edited == loaded.content {
@@ -255,11 +261,32 @@ pub(super) async fn external_edit(
             api.file(session, path).await;
             let _ = refresh.send(());
         }
-        Err(SaveFailure::Conflict) => toast(
-            ToastLevel::Error,
-            "agent changed this file while you edited: your copy was not saved".to_string(),
-        ),
-        Err(SaveFailure::Other(message)) => toast(ToastLevel::Error, message),
-        Err(_) => toast(ToastLevel::Error, "could not save the file".to_string()),
+        Err(SaveFailure::Conflict) => {
+            let kept = copy.keep();
+            toast(
+                ToastLevel::Error,
+                format!(
+                    "agent changed this file while you edited: your copy was not saved, it is kept at {}",
+                    kept.display()
+                ),
+            )
+        }
+        Err(SaveFailure::Other(message)) => {
+            let kept = copy.keep();
+            toast(
+                ToastLevel::Error,
+                format!("{message} (your edit is kept at {})", kept.display()),
+            )
+        }
+        Err(_) => {
+            let kept = copy.keep();
+            toast(
+                ToastLevel::Error,
+                format!(
+                    "could not save the file (your edit is kept at {})",
+                    kept.display()
+                ),
+            )
+        }
     }
 }

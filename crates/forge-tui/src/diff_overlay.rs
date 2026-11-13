@@ -30,6 +30,9 @@ pub enum DiffAction {
     RevertHunk {
         path: String,
         header: String,
+        /// The hunk's lines as the overlay shows them (`' '`/`+`/`-` prefixed), so the host can
+        /// refuse when the file's hunk under the same header has different content now.
+        body: Vec<String>,
     },
 }
 
@@ -52,8 +55,8 @@ pub struct DiffOverlay {
     /// Why the working tree could not be read (not a repository, git missing).
     pub error: Option<String>,
     view_h: Cell<usize>,
-    /// A hunk revert waiting for `y`: `(path, hunk header)`.
-    confirm_revert: Option<(String, String)>,
+    /// A hunk revert waiting for `y`: `(path, hunk header, hunk body)`.
+    confirm_revert: Option<(String, String, Vec<String>)>,
     /// The outcome of the last revert, shown in the hint row until the next key.
     pub notice: Option<String>,
     /// Set by the renderer: the diff column is too narrow for split rows, so unified is drawn.
@@ -121,11 +124,11 @@ impl DiffOverlay {
     pub fn confirm_prompt(&self) -> Option<String> {
         self.confirm_revert
             .as_ref()
-            .map(|(path, header)| format!("revert hunk {header} in {path}? y/n"))
+            .map(|(path, header, _)| format!("revert hunk {header} in {path}? y/n"))
     }
 
     /// The hunk at the top of the view, when the working tree is shown and it can be reverted.
-    fn revertable_hunk(&self) -> Option<(String, String)> {
+    fn revertable_hunk(&self) -> Option<(String, String, Vec<String>)> {
         if self.source != TREE {
             return None;
         }
@@ -135,7 +138,20 @@ impl DiffOverlay {
         }
         let (_, starts) = self.rows();
         let index = starts.iter().rposition(|&start| start <= self.scroll)?;
-        Some((file.path.clone(), file.hunks.get(index)?.header.clone()))
+        let hunk = file.hunks.get(index)?;
+        let body = hunk
+            .lines
+            .iter()
+            .map(|l| {
+                let sign = match l.kind {
+                    LineKind::Context => ' ',
+                    LineKind::Add => '+',
+                    LineKind::Del => '-',
+                };
+                format!("{sign}{}", l.text)
+            })
+            .collect();
+        Some((file.path.clone(), hunk.header.clone(), body))
     }
 
     /// Read the working tree again (after the host changed it).
@@ -255,10 +271,10 @@ impl DiffOverlay {
     /// Handle one key while the overlay is open; it owns every key.
     pub fn key(&mut self, key: KeyKind) -> DiffAction {
         self.notice = None;
-        if let Some((path, header)) = self.confirm_revert.take() {
+        if let Some((path, header, body)) = self.confirm_revert.take() {
             // Any key other than `y` cancels, so a stray press never reverts.
             if key == KeyKind::Char('y') {
-                return DiffAction::RevertHunk { path, header };
+                return DiffAction::RevertHunk { path, header, body };
             }
             self.notice = Some("revert cancelled".to_string());
             return DiffAction::None;
