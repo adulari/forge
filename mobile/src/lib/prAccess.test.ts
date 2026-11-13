@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
+import { SHIP_OFF_MESSAGE, UPDATE_HOST_MESSAGE, prAccessFor, prReadable, shipGate } from "./prAccess";
+
 vi.mock("./api", () => ({ getIdentity: vi.fn() }));
 vi.mock("./auth", () => ({ useAuth: () => ({ baseUrl: null }) }));
 vi.mock("./transport", () => ({
   supportsDirectDaemonEndpoints: (url: string) => !/^fany(-ws)?:/.test(url),
 }));
 vi.mock("@tanstack/react-query", () => ({ useQuery: vi.fn() }));
-
-import { SHIP_OFF_MESSAGE, UPDATE_HOST_MESSAGE, prAccessFor, prReadable, shipGate } from "./prAccess";
 
 const DIRECT = "https://forge.test/tok";
 const RELAY = "fany://host-1";
