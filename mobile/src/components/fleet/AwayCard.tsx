@@ -48,7 +48,6 @@ function dotFor(outcome: BriefOutcome): StatusDotState {
 const nowSecs = () => Math.floor(Date.now() / 1000);
 
 export function AwayCard() {
-  const tokens = useTokens();
   const { baseUrl } = useAuth();
   const openSession = useOpenSession();
   const [since, setSince] = useState<number | null>(null);

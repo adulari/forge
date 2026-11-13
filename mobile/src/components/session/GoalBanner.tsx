@@ -33,6 +33,7 @@ import { GoalSheet } from "../chat/GoalSheet";
 import { ScreenshotThumb } from "../chat/ScreenshotThumb";
 import { MiniPressable } from "../chat/MiniPressable";
 import { Card } from "../ds/Card";
+import { useClockSeconds } from "../ds/relativeClock";
 import { StatusDot } from "../ds/StatusDot";
 
 export { deriveNoteGoal as deriveActiveGoal } from "../../lib/goalState";
@@ -93,6 +94,7 @@ function GoalBannerBody({ goal, send }: { goal: GoalView; send: GoalBannerProps[
   const [editing, setEditing] = useState(false);
   const live = goal.phase === "active";
   const now = useNow(live && goal.structured);
+  const resume = resumeLine(goal, useClockSeconds() * 1000);
   const fraction = budgetFraction(goal);
   const envelopeFill = envelopeFraction(goal);
   const actions = goalActions(goal);
@@ -137,9 +139,9 @@ function GoalBannerBody({ goal, send }: { goal: GoalView; send: GoalBannerProps[
           </Text>
         ) : null}
         {goal.reason && (ended || goal.phase === "paused") ? <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>{goal.reason}</Text> : null}
-        {resumeLine(goal, Date.now()) ? (
+        {resume ? (
           <Text style={[styles.meta, { color: tokens.accent }]} numberOfLines={1} testID="goal-resume">
-            {resumeLine(goal, Date.now())}
+            {resume}
           </Text>
         ) : null}
         <Text style={[styles.meta, { color: tokens.ink3 }]} numberOfLines={1} testID="goal-meta">

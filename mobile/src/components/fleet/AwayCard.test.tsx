@@ -4,6 +4,7 @@ import * as server from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 import type { Brief } from "../../lib/brief/core";
+import { AwayCardView } from "./AwayCard";
 
 type Props = Record<string, unknown> & { children?: React.ReactNode };
 
@@ -33,8 +34,6 @@ vi.mock("../../lib/useScopedFleet", () => ({ useOpenSession: () => () => undefin
 vi.mock("../../lib/brief/store", () => ({ readLastVisit: async () => null, stampVisit: async () => undefined }));
 vi.mock("../../lib/brief/api", () => ({ getBrief: async () => undefined }));
 vi.mock("../../lib/platform", () => ({ isWeb: false }));
-
-import { AwayCardView } from "./AwayCard";
 
 const renderToStaticMarkup = (server as { renderToStaticMarkup: (el: React.ReactElement) => string }).renderToStaticMarkup;
 

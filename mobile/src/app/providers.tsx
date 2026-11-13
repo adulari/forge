@@ -59,6 +59,7 @@ import { useTokens } from "../theme/ThemeProvider";
 import { radii, space, type ColorTokens } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
 import { keyVerdict, verdictDetail, verdictHeadline } from "../lib/providerVerdict";
+import { useClockSeconds } from "../components/ds/relativeClock";
 import { SettingsShell } from "./(tabs)/settings";
 import { usePullRefresh } from "../lib/usePullRefresh";
 
@@ -150,6 +151,8 @@ function ProviderItem({
   onRemoveAccount: (provider: ProviderRow, account: ProviderOAuthAccount) => void;
 }) {
   const tokens = useTokens();
+  const nowSeconds = useClockSeconds();
+  const verdict = verdictDetail(provider, nowSeconds);
   const source = provider.environment_key_present
     ? `environment · ${provider.env_var}`
     : provider.stored_key_fingerprints.length > 0
@@ -196,9 +199,9 @@ function ProviderItem({
       {provider.kind === "api_key" || provider.kind === "custom" || provider.kind === "azure" ? (
         <Text style={[type.monoMeta, { color: tokens.ink4 }]}>{source}</Text>
       ) : null}
-      {verdictDetail(provider, Math.floor(Date.now() / 1000)) ? (
+      {verdict ? (
         <Text style={[type.monoMeta, { color: tokens.danger }]} numberOfLines={3}>
-          {verdictDetail(provider, Math.floor(Date.now() / 1000))}
+          {verdict}
         </Text>
       ) : null}
       {provider.endpoint ? (

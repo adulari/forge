@@ -10,6 +10,7 @@ import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
 import { Button } from "../ds/Button";
+import { useClockSeconds } from "../ds/relativeClock";
 import { ListRow } from "../ds/ListRow";
 import { Sheet } from "../ds/Sheet";
 
@@ -30,7 +31,7 @@ export function TurnEndingsSheet({
   const tokens = useTokens();
   const session = useSessionTurns(sessionId, visible);
   const summary = useTurnsSummary(SUMMARY_DAYS, visible);
-  const now = Math.floor(Date.now() / 1000);
+  const now = useClockSeconds();
   const stopped = (session.data?.turns ?? []).filter((turn) => !turn.finished);
   const newest = stopped[0];
 
