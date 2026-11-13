@@ -5435,7 +5435,11 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("FORGE_DB", dir.join("merge.db"));
-        let _ = init_repo(&dir, &[("README.md", "hi\n")]);
+        let git = init_repo(&dir, &[("README.md", "hi\n")]);
+        // The commit route runs git as the daemon would, so the repo needs its own identity: a CI
+        // runner has no global one.
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
 
         let registry = Arc::new(SessionRegistry::new());
         let (handle, wt_path) = spawn_worktree_session(&registry, &dir).await;
