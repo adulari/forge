@@ -10,7 +10,7 @@ All notable changes to Forge are documented here. The format follows
 
 ### Security
 
-- Dependency upgrades past current RUSTSEC advisories: rmcp 3.5.1 to 3.10.0 (RUSTSEC-2026-0461, -0457, -0462), SQLite via libsqlite3-sys 0.38.2 to 0.39.1 (RUSTSEC-2026-0459), and rustix 1.1.4 to 1.1.6 (RUSTSEC-2026-0486).
+- Dependency upgrades past current RUSTSEC advisories: rmcp 3.5.1 to 3.10.0 (RUSTSEC-2026-0461, -0457, -0462), SQLite via libsqlite3-sys 0.38.2 to 0.39.1 (RUSTSEC-2026-0459), rustix 1.1.4 to 1.1.6 (RUSTSEC-2026-0486), and quinn-udp 0.5.14/0.5.15 to 0.5.16 (RUSTSEC-2026-0538, #1861).
 
 ### Added
 
