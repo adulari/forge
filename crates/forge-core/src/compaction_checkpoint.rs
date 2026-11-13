@@ -16,7 +16,9 @@ use forge_types::{Message, Role, ToolCall};
 use crate::compaction_budget::CompactionBudget;
 use crate::compaction_input::fold_inputs;
 use crate::compaction_summary::{head_tail, render_verbatim_block_within, SUMMARY_PREFIX};
-use crate::completion::{classify_tool, VerificationObservation};
+use crate::completion::{
+    classify_command, classify_tool, has_untrustworthy_control_flow, VerificationObservation,
+};
 use crate::Session;
 
 pub(crate) const CHECKPOINT_HEADING: &str = "## Checkpoint: slice landed";
@@ -79,6 +81,9 @@ impl CheckpointTracker {
         if is_git_commit(&command) {
             if !ok {
                 return;
+            }
+            for check in chained_checks(&command) {
+                self.pass(check);
             }
             let verified = !self.passed.is_empty() && self.failing.is_empty();
             self.landed = verified.then(|| Landed {
@@ -154,6 +159,35 @@ fn is_git_commit(command: &str) -> bool {
     command
         .split(['\n', ';', '|', '&'])
         .any(|segment| git_subcommand(segment) == Some("commit") && !segment.contains("--dry-run"))
+}
+
+/// Checks that run in the same command as the commit, ahead of it in an `&&` chain
+/// (`pytest && git add -A && git commit`). The command exiting 0 means each of them passed, but only
+/// when nothing in the line can hide a failure: a pipe, `;` or `||` leaves the status to a later
+/// part, and then none of it counts.
+fn chained_checks(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for segment in command.split("&&") {
+        if is_git_commit(segment) {
+            break;
+        }
+        if matches!(classify_command(segment), VerificationObservation::Check(_)) {
+            out.push(segment.trim().to_string());
+        }
+    }
+    if out.is_empty() || has_untrustworthy_control_flow(&command.to_ascii_lowercase()) {
+        return Vec::new();
+    }
+    out
+}
+
+/// Whether `inner` is `outer` or one of the calls a `run_code` script made for it (`<outer>.<n>`).
+pub(crate) fn owns_call(outer: &str, inner: &str) -> bool {
+    inner == outer
+        || inner
+            .strip_prefix(outer)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn git_subcommand(segment: &str) -> Option<&str> {
@@ -410,7 +444,10 @@ impl Session {
             return;
         };
         let Some(round) = self.transcript.iter().position(|m| {
-            m.role == Role::Assistant && m.tool_calls.iter().any(|c| c.id == landed.call_id)
+            m.role == Role::Assistant
+                && m.tool_calls
+                    .iter()
+                    .any(|c| owns_call(&c.id, &landed.call_id))
         }) else {
             return;
         };

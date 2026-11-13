@@ -75,6 +75,10 @@ struct Scenario {
     enabled: bool,
     min_tokens: u64,
     a_words: usize,
+    /// Run the check and the commit as `tools.shell` calls inside a `run_code` script.
+    via_run_code: bool,
+    /// Run the check and the commit in one `&&` chain instead of two steps.
+    chained: bool,
 }
 
 impl Default for Scenario {
@@ -85,6 +89,8 @@ impl Default for Scenario {
             enabled: true,
             min_tokens: 3_000,
             a_words: 1_500,
+            via_run_code: false,
+            chained: false,
         }
     }
 }
@@ -136,23 +142,35 @@ async fn run(scenario: Scenario) -> Outcome {
             serde_json::json!({"path": "a.txt", "content": "// the reworked file\n"}),
         )],
     ];
-    match scenario.check {
-        Check::Passes => script.push(vec![call(
-            "shell",
-            serde_json::json!({"command": "echo tests pass"}),
-        )]),
-        Check::Fails => script.push(vec![call(
-            "shell",
-            serde_json::json!({"command": "false # tests"}),
-        )]),
-        Check::Skipped => {}
-    }
-    if scenario.commit {
-        script.push(vec![call(
-            "shell",
-            serde_json::json!({"command":
-                "git add -A && git commit -q -m 'feat: rework a' -m 'because of the body line'"}),
-        )]);
+    let step = |command: &str| {
+        if scenario.via_run_code {
+            call(
+                "run_code",
+                serde_json::json!({"code": format!(
+                    "const r = await tools.shell({{command: {}}});\nreturn r;",
+                    serde_json::json!(command)
+                )}),
+            )
+        } else {
+            call("shell", serde_json::json!({ "command": command }))
+        }
+    };
+    let check = match scenario.check {
+        Check::Passes => Some("echo tests pass"),
+        Check::Fails => Some("false # tests"),
+        Check::Skipped => None,
+    };
+    let commit = "git add -A && git commit -q -m 'feat: rework a' -m 'because of the body line'";
+    match (scenario.chained, check, scenario.commit) {
+        (true, Some(check), true) => script.push(vec![step(&format!("{check} && {commit}"))]),
+        _ => {
+            if let Some(check) = check {
+                script.push(vec![step(check)]);
+            }
+            if scenario.commit {
+                script.push(vec![step(commit)]);
+            }
+        }
     }
     let store = Arc::new(Store::open_in_memory().unwrap());
     let provider = Arc::new(Scripted {
@@ -302,6 +320,52 @@ async fn a_landed_slice_is_folded_once_and_the_next_step_starts_lean() {
         "Rework a.txt and commit it",
     ] {
         assert!(summary.contains(needle), "missing {needle:?} in\n{summary}");
+    }
+}
+
+#[tokio::test]
+async fn a_slice_landed_through_run_code_or_one_chained_command_is_folded() {
+    for (label, via_run_code, chained) in [
+        ("run_code, two scripts", true, false),
+        ("one chained shell command", false, true),
+        ("run_code, one chained script", true, true),
+    ] {
+        let outcome = run(Scenario {
+            via_run_code,
+            chained,
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(
+            checkpoint_lines(&outcome).len(),
+            1,
+            "{label}: {:?}",
+            outcome.warnings
+        );
+        let summary = summary_of(&outcome).unwrap_or_default();
+        assert!(summary.contains("`echo tests pass`"), "{label}\n{summary}");
+    }
+}
+
+#[tokio::test]
+async fn a_failed_check_in_a_chain_or_a_script_lands_nothing() {
+    for (label, via_run_code, chained) in [
+        ("run_code", true, false),
+        ("chained", false, true),
+        ("run_code chained", true, true),
+    ] {
+        let outcome = run(Scenario {
+            check: Check::Fails,
+            via_run_code,
+            chained,
+            ..Default::default()
+        })
+        .await;
+        assert!(
+            checkpoint_lines(&outcome).is_empty() && summary_of(&outcome).is_none(),
+            "{label}: {:?}",
+            outcome.warnings
+        );
     }
 }
 
@@ -500,4 +564,43 @@ fn a_second_checkpoint_keeps_the_first_slice_and_the_model_written_summary_benea
     assert!(second.contains("### Landed earlier this session\n- aaa1111 feat: first"));
     assert!(second.contains("build the uploader"), "{second}");
     assert_eq!(second.matches(CHECKPOINT_HEADING).count(), 1);
+}
+
+#[test]
+fn a_check_chained_before_the_commit_counts_only_when_nothing_can_mask_it() {
+    let write = call(
+        "write_file",
+        serde_json::json!({"path": "a.py", "content": "x"}),
+    );
+    let landed = |command: &str, ok: bool| {
+        let mut t = CheckpointTracker::default();
+        t.observe(&write, true);
+        t.observe(&shell(command), ok);
+        t.take_landed().is_some()
+    };
+    assert!(landed("pytest && git commit -m x", true));
+    assert!(landed("cd w && python3 -m unittest tests.test_progress && git add -A && git commit -q -m 'slice done'", true));
+    assert!(!landed("pytest && git commit -m x", false));
+    assert!(!landed("git commit -m x", true), "no check at all");
+    assert!(
+        !landed("git commit -m x && pytest", true),
+        "the check came after the commit"
+    );
+    assert!(
+        !landed("pytest | tail -3 && git commit -m x", true),
+        "a pipe hides the status"
+    );
+    assert!(!landed("pytest || true && git commit -m x", true));
+    assert!(!landed("pytest; git commit -m x", true));
+    assert!(!landed("git commit -m 'run the tests' && echo x", true));
+}
+
+#[test]
+fn a_commit_made_inside_run_code_is_found_by_its_outer_call() {
+    use crate::compaction_checkpoint::owns_call;
+    assert!(owns_call("call_9", "call_9"));
+    assert!(owns_call("call_9", "call_9.3"));
+    assert!(!owns_call("call_9", "call_93"));
+    assert!(!owns_call("call_9", "call_9.x"));
+    assert!(!owns_call("call_9.1", "call_9"));
 }
