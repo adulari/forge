@@ -29,6 +29,46 @@ pub(super) fn not_logged_in_message(binary: &str) -> String {
     )
 }
 
+/// The command that logs this bridge in on the machine it runs on.
+pub(super) fn login_command(kind: super::CliKind) -> &'static str {
+    match kind {
+        super::CliKind::ClaudeCode => "claude setup-token",
+        super::CliKind::Codex => "codex login",
+        super::CliKind::Antigravity => "agy login",
+    }
+}
+
+fn host_name() -> String {
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: the buffer is valid for `buf.len()` bytes and gethostname NUL-terminates it on
+        // success.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+        if rc == 0 {
+            let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+            let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "the host".to_string())
+}
+
+/// The message every surface shows for a logged-out bridge. The login has to happen where the
+/// CLI runs, which from a phone is not the device in the user's hand, so it names the host.
+pub(super) fn logged_out_message(kind: super::CliKind) -> String {
+    let host = host_name();
+    format!(
+        "{} is logged out. Log in on {host}: run `{}`",
+        kind.prefix(),
+        login_command(kind)
+    )
+}
+
 /// Replace an interactive sign-in prompt with [`not_logged_in_message`]; pass anything else
 /// through unchanged. Applied wherever a bridge's own output reaches a warning or an error, so a
 /// consent URL never becomes the user-facing message.

@@ -36,9 +36,15 @@ mod gates;
 pub(crate) use gates::*;
 mod goal_control;
 pub(crate) use goal_control::*;
+pub(crate) mod goal_envelope;
+pub(crate) use goal_envelope::GoalRecord;
 mod goal_headless;
+pub(crate) mod goal_show;
 pub(crate) use goal_headless::*;
+mod contract_menu;
+mod goal_mission;
 mod goal_progress;
+pub(crate) mod goal_relay;
 pub(crate) use goal_progress::*;
 
 mod setup;
@@ -81,6 +87,7 @@ use local_presence::LocalPresenceGuard;
 
 mod atfiles;
 mod control_menu;
+mod turns_menu;
 pub(crate) use atfiles::*;
 pub(crate) mod copy;
 pub(crate) use copy::*;
@@ -92,17 +99,22 @@ mod rewind_menu;
 pub(crate) use rewind_menu::*;
 mod agents_menu;
 mod anywhere_menu;
+mod ci_menu;
 mod dispatch;
+mod dispatch_types;
 mod fork_cmd;
 mod heartbeat_cmd;
 mod host_menu;
 mod import_menu;
+mod issues_menu;
 mod mesh_overlay;
 mod model_switch;
 mod notes_menu;
 mod panes;
+mod queue_menu;
 mod refine_cmd;
 mod run_menu;
+mod ship_menu;
 mod slash_commands;
 mod workspace_menu;
 pub(crate) use dispatch::*;
@@ -261,26 +273,79 @@ pub(crate) fn emit_text(tui: Option<&mut forge_tui::Tui>, app: &mut forge_tui::A
     }
 }
 
+/// A freshly typed key voids the verdict about the old one; the next discovery re-sets it.
+pub(crate) fn clear_key_verdict(provider: &str) {
+    if let Ok(store) = crate::open_store() {
+        let _ = store.clear_provider_verdict(provider);
+    }
+}
+
+fn verdict_headline(v: &forge_store::ProviderVerdict) -> &'static str {
+    forge_provider::KeyFailure::from_word(&v.status)
+        .map_or("Key rejected", forge_provider::KeyFailure::headline)
+}
+
+fn verdict_sentence(v: &forge_store::ProviderVerdict) -> String {
+    format!(
+        "{}: {}.",
+        verdict_headline(v),
+        v.reason.trim_end_matches('.')
+    )
+}
+
 /// Every editable setting as `/config` editor rows.
+/// What the settings overlay says after saving `path`: the saved line, plus why the expert on
+/// call still cannot be used when the save left `[harness.expert]` unusable.
+pub(crate) fn config_saved_status(path: &str) -> String {
+    let problem = path
+        .starts_with("harness.expert")
+        .then(|| forge_config::load().ok())
+        .flatten()
+        .and_then(|config| forge_core::expert_config_problem(&config));
+    saved_status_with(path, problem.as_deref())
+}
+
+fn saved_status_with(path: &str, problem: Option<&str>) -> String {
+    match problem {
+        Some(why) => format!("⚠ saved {path}, expert still off: {why}"),
+        None => format!("✓ saved {path}"),
+    }
+}
+
 pub(crate) fn config_editor_rows() -> Vec<forge_tui::SettingRow> {
+    let verdicts: std::collections::HashMap<String, forge_store::ProviderVerdict> =
+        crate::open_store()
+            .ok()
+            .and_then(|store| store.provider_verdicts().ok())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|v| (v.provider.clone(), v))
+            .collect();
     let mut rows: Vec<forge_tui::SettingRow> = forge_config::known_key_providers()
-        .map(|provider| forge_tui::SettingRow {
-            path: format!("key.{provider}"),
-            group: "Providers & Keys".to_string(),
-            label: format!("{} API key", provider_label(provider)),
-            help: Some(format!(
+        .map(|provider| {
+            let has_key = forge_config::has_api_key(provider);
+            let verdict = verdicts.get(provider).filter(|_| has_key);
+            let base_help = format!(
                 "API key for {provider}, stored in the OS keyring. Enter to set; empty to remove."
-            )),
-            kind: forge_tui::RowKind::Secret,
-            value: if forge_config::has_api_key(provider) {
-                "● set"
-            } else {
-                "○ not set"
+            );
+            forge_tui::SettingRow {
+                path: format!("key.{provider}"),
+                group: "Providers & Keys".to_string(),
+                label: format!("{} API key", provider_label(provider)),
+                help: Some(match verdict {
+                    Some(v) => format!("{} Enter to replace the key.", verdict_sentence(v)),
+                    None => base_help,
+                }),
+                kind: forge_tui::RowKind::Secret,
+                value: match verdict {
+                    Some(v) => format!("✗ {}", verdict_headline(v)),
+                    None if has_key => "● set".to_string(),
+                    None => "○ not set".to_string(),
+                },
+                default: String::new(),
+                modified: has_key,
+                source: "keyring".to_string(),
             }
-            .to_string(),
-            default: String::new(),
-            modified: forge_config::has_api_key(provider),
-            source: "keyring".to_string(),
         })
         .collect();
     rows.extend(
@@ -802,6 +867,10 @@ pub(crate) async fn run_chat_tui(
     let mut ide_slot: Option<crate::ide_host::IdeHost> = None;
     let mut run_menu_driver = run_menu::RunMenuDriver::new();
     let mut import_driver = import_menu::ImportMenuDriver::new();
+    let mut issues_driver = issues_menu::IssuesMenuDriver::new();
+    let mut queue_driver = queue_menu::QueueMenuDriver::new();
+    let mut ship_driver = ship_menu::ShipMenuDriver::new();
+    let mut ci_driver = ci_menu::CiMenuDriver::new();
     let mut agents_driver = agents_menu::AgentsMenuDriver::new(mock);
     // `/voice`: the real system resources (recorder thread, download/transcribe channels) live
     // here, loop-local — NOT on `App`, which stays `Clone + Default` and only holds the
@@ -954,6 +1023,8 @@ pub(crate) async fn run_chat_tui(
     // spins every 16ms; without this compare every iteration pushed an identical frame to every
     // connected browser (~60 frames/s of JSON for nothing).
     let mut last_remote_snap: Option<remote::Snapshot> = None;
+    let mut remote_stream_pacer = remote::StreamPacer::default();
+    let mut remote_project_init = forge_config::ProjectInitCache::default();
     let mut remote_revision: u64 = 0;
     // Runtime failure from the loopback remote server, shown once after its URL was published.
     let mut remote_server_error_seen: Option<String> = None;
@@ -1123,6 +1194,43 @@ pub(crate) async fn run_chat_tui(
                 &mut app,
                 &mut last_heartbeat_error,
             ) {
+                dirty = true;
+            }
+        }
+
+        // A goal paused on a spent subscription window continues once the window has reset.
+        if turn_handle.is_none() && !busy {
+            let now = chrono::Utc::now().timestamp();
+            if let Some(DispatchOutcome::StartGoal {
+                prompt,
+                goal,
+                gates,
+                max_tokens,
+                max_minutes,
+            }) = goal_envelope::auto_resume(&session, &mut app, now).await
+            {
+                turn_gen += 1;
+                goal_state = Some(GoalState::begin(
+                    &mut app,
+                    turn_gen,
+                    goal,
+                    gates,
+                    max_tokens,
+                    max_minutes,
+                ));
+                app.note("🎯 goal started — Esc to stop");
+                arm_run_budget(&session, goal_state.as_ref().map(|s| &s.budget));
+                turn_handle = Some(spawn_turn_with(
+                    prompt,
+                    vec![GOAL_GUIDANCE.to_string()],
+                    Some(forge_types::TaskTier::Complex),
+                    &session,
+                    &done_tx,
+                    turn_gen,
+                    &mut app,
+                    &mut busy,
+                    &mut busy_since,
+                ));
                 dirty = true;
             }
         }
@@ -1690,6 +1798,26 @@ pub(crate) async fn run_chat_tui(
                 dirty = true;
                 continue;
             }
+            if app.issues_menu.open {
+                issues_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
+            if app.queue_menu.open {
+                queue_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
+            if app.ci_menu.open {
+                ci_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
+            if app.ship_menu.open {
+                ship_driver.key(&mut app, key);
+                dirty = true;
+                continue;
+            }
             if app.agents_menu.open {
                 agents_driver.key(&mut app, key);
                 dirty = true;
@@ -1734,6 +1862,7 @@ pub(crate) async fn run_chat_tui(
                                     .map_err(|e| e.to_string())
                             } else {
                                 forge_config::store_api_key(provider, value.trim())
+                                    .map(|()| clear_key_verdict(provider))
                                     .map_err(|e| e.to_string())
                             }
                         } else {
@@ -1752,7 +1881,7 @@ pub(crate) async fn run_chat_tui(
                                 }
                                 panes::apply_config(&mut app, &path, &value);
                                 app.config_editor.rows = config_editor_rows();
-                                app.config_editor.status = Some(format!("✓ saved {path}"));
+                                app.config_editor.status = Some(config_saved_status(&path));
                             }
                             Err(e) => app.config_editor.status = Some(format!("✗ {e}")),
                         }
@@ -1825,6 +1954,19 @@ pub(crate) async fn run_chat_tui(
                 }
             }
 
+            // A session in a non-repo directory that keeps cd-ing into one repository: Alt+G moves
+            // it there, Alt+D stops asking. Alt chords cannot start a message, so they work with
+            // a draft in the composer too.
+            if pending.is_none()
+                && pending_question.is_none()
+                && !update_flow::other_modal_open(&app)
+                && app.project_offer.captures_keys(busy)
+                && workspace_menu::project_offer_key(&session, &mut app, key)
+            {
+                dirty = true;
+                continue;
+            }
+
             // Effort slider is modal while open: ←/→ adjust level, Esc/Enter/Ctrl+R close.
             // `try_lock` on the writes below (not a blocking `.await`): same reasoning as
             // skip_model — a turn's task holds the session lock for its ENTIRE duration (every
@@ -1881,9 +2023,14 @@ pub(crate) async fn run_chat_tui(
                 || app.notes_overlay.open
                 || app.diff_overlay.open
                 || app.jobs_overlay.open
+                || app.history_overlay.open
                 || app.polish.qr.is_some()
                 || app.run_menu.open
                 || app.import_menu.open
+                || app.issues_menu.open
+                || app.queue_menu.open
+                || app.ship_menu.open
+                || app.ci_menu.open
                 || app.workspace_menu.open
                 || app.agents_menu.open
                 || app.status_open
@@ -2253,7 +2400,7 @@ pub(crate) async fn run_chat_tui(
                                     );
                                 }
                                 if let Err(e) = sess.run_turn_with(&p, &[], None).await {
-                                    sess.notify_error(&format!("turn failed: {e}"));
+                                    sess.notify_turn_error(&format!("turn failed: {e}"), &e);
                                 }
                             }));
                         } else {
@@ -3456,9 +3603,9 @@ pub(crate) async fn run_chat_tui(
                                 prompt_history.record(&line);
                                 queue_command(&mut queued_prompts, &mut app, &line);
                             }
-                            BusyRoute::Refuse => app.note(
+                            BusyRoute::Refuse => app.note(refuse_note(&line).unwrap_or(
                                 "⏳ that command can't run mid-turn and was not queued — finish or Esc, then retype it",
-                            ),
+                            )),
                             BusyRoute::RefuseAutonomous => app.note(REFUSE_AUTONOMOUS_NOTE),
                         }
                     } else {
@@ -4090,7 +4237,7 @@ pub(crate) async fn run_chat_tui(
             remote_inputs.extend(local_lines.drain(..).map(|(text, from_queue)| {
                 let input = remote::RemoteInput::Prompt {
                     text,
-                    attachments: Vec::new(),
+                    attachments: None,
                 };
                 (input, Some(from_queue))
             }));
@@ -4157,7 +4304,7 @@ pub(crate) async fn run_chat_tui(
                     remote::RemoteInput::Steer { text }
                     | remote::RemoteInput::FollowUp { text } => remote::RemoteInput::Prompt {
                         text,
-                        attachments: Vec::new(),
+                        attachments: None,
                     },
                     other => other,
                 };
@@ -4178,7 +4325,7 @@ pub(crate) async fn run_chat_tui(
                         // plain-prompt branch below, exactly where the old ambient
                         // `remote_attach_mentions` were — so a `//`-escape or `/command` typed
                         // alongside an attachment still parses the ORIGINAL text, unchanged.
-                        let has_explicit_attachments = !attachments.is_empty();
+                        let has_explicit_attachments = attachments.is_some();
                         if has_explicit_attachments {
                             remote_attach_mentions.clear();
                         }
@@ -4593,7 +4740,12 @@ pub(crate) async fn run_chat_tui(
                         )
                         .await;
                     }
-                    remote::RemoteInput::Allow { yes, seq, note } => {
+                    remote::RemoteInput::Allow {
+                        yes,
+                        seq,
+                        note,
+                        scope,
+                    } => {
                         // The seq must target the prompt pending NOW: a new prompt can be
                         // installed in the SAME loop iteration (UiMsg drain runs just above),
                         // so an un-gated Allow could approve a newer, more dangerous prompt
@@ -4604,7 +4756,11 @@ pub(crate) async fn run_chat_tui(
                                 "⚠ stale answer ignored — the prompt changed; review the current one",
                             );
                         } else if let Some((tool, reply)) = pending.take() {
-                            let _ = reply.send(remote::allow_reply(yes, note.as_deref()));
+                            let _ = reply.send(remote::allow_reply(
+                                yes,
+                                note.as_deref(),
+                                scope.as_deref(),
+                            ));
                             app.prompt = None;
                             if yes {
                                 app.note(&format!("✓ remote allowed {tool}"));
@@ -4747,6 +4903,22 @@ pub(crate) async fn run_chat_tui(
                     remote::RemoteInput::OverlayCancel => {
                         remote_keys.extend(apply_overlay_input(&mut app, RemoteOverlayOp::Cancel));
                     }
+                    remote::RemoteInput::ProjectMove { path } => {
+                        if !workspace_menu::project_offer_remote(&session, &mut app, &path, true) {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⚠ that project offer is no longer current",
+                            );
+                        }
+                    }
+                    remote::RemoteInput::ProjectDismiss { path } => {
+                        if !workspace_menu::project_offer_remote(&session, &mut app, &path, false) {
+                            push_remote_note(
+                                &mut remote_notes,
+                                "⚠ that project offer is no longer current",
+                            );
+                        }
+                    }
                     // Normalized away above (into a queue-front insert + `continue`, or a plain
                     // `Prompt`) before this match ever sees it.
                     remote::RemoteInput::Steer { .. }
@@ -4882,6 +5054,46 @@ pub(crate) async fn run_chat_tui(
                 if let Some(mut gs) = goal_state.take() {
                     if gs.gen == g {
                         let next = advance_goal(&mut gs, &session, &mut app, &project_cwd).await;
+                        if let GoalNext::Relay(plan) = &next {
+                            let started = goal_relay::switch_in_place(
+                                &session,
+                                Some(&mut tui),
+                                &mut app,
+                                plan,
+                            )
+                            .await;
+                            if let Some(DispatchOutcome::StartGoal {
+                                prompt,
+                                goal,
+                                gates,
+                                max_tokens,
+                                max_minutes,
+                            }) = started
+                            {
+                                turn_gen += 1;
+                                goal_state = Some(GoalState::begin(
+                                    &mut app,
+                                    turn_gen,
+                                    goal,
+                                    gates,
+                                    max_tokens,
+                                    max_minutes,
+                                ));
+                                arm_run_budget(&session, goal_state.as_ref().map(|s| &s.budget));
+                                last_prompt = Some(prompt.clone());
+                                turn_handle = Some(spawn_turn_with(
+                                    prompt,
+                                    vec![GOAL_GUIDANCE.to_string()],
+                                    Some(forge_types::TaskTier::Complex),
+                                    &session,
+                                    &done_tx,
+                                    turn_gen,
+                                    &mut app,
+                                    &mut busy,
+                                    &mut busy_since,
+                                ));
+                            }
+                        }
                         let steer =
                             |app: &mut forge_tui::App| dequeue_prompt(&mut queued_prompts, app);
                         if let Some(step) = launch_goal_step(
@@ -5150,6 +5362,18 @@ pub(crate) async fn run_chat_tui(
             dirty = true;
         }
         if import_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if issues_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if queue_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if ci_driver.tick(&mut app) {
+            dirty = true;
+        }
+        if ship_driver.tick(&mut app) {
             dirty = true;
         }
         if let Some(done) = import_driver.take_switch() {
@@ -5442,8 +5666,7 @@ pub(crate) async fn run_chat_tui(
                     .read()
                     .map(|cwd| cwd.display().to_string())
                     .unwrap_or_default();
-                let project =
-                    forge_config::project_initialization(std::path::Path::new(&remote_cwd));
+                let project = remote_project_init.get(std::path::Path::new(&remote_cwd));
                 let mut snap = build_snapshot_frame(
                     &app,
                     SnapshotIdentity {
@@ -5456,6 +5679,7 @@ pub(crate) async fn run_chat_tui(
                         exposure,
                         model_pinned: cached_model_pinned,
                         worktree_setup: None,
+                        worktree_base: None,
                     },
                     remote_copy_text.clone(),
                     prompt_seq,
@@ -5467,7 +5691,10 @@ pub(crate) async fn run_chat_tui(
                 // Change-only broadcast: while busy this branch runs every 16ms, and
                 // `watch::send` notifies every subscriber unconditionally — without this
                 // compare each client got ~60 identical JSON frames/s for a whole turn.
-                if last_remote_snap.as_ref() != Some(&snap) {
+                if last_remote_snap.as_ref() != Some(&snap)
+                    && !remote_stream_pacer.hold(last_remote_snap.as_ref(), &snap)
+                {
+                    remote_stream_pacer.sent();
                     remote_revision += 1;
                     snap.revision = remote_revision;
                     last_remote_snap = Some(snap.clone());
@@ -5554,6 +5781,25 @@ pub(crate) use support::*;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saving_an_expert_setting_that_leaves_it_unusable_says_so() {
+        assert_eq!(
+            saved_status_with("harness.expert.model", None),
+            "✓ saved harness.expert.model"
+        );
+        let warned = saved_status_with(
+            "harness.expert.model",
+            Some("codex-oauth::gpt-5.6-sol needs a budget: set harness.expert.budget"),
+        );
+        assert!(warned.starts_with("⚠ saved harness.expert.model, expert still off:"));
+        assert!(warned.contains("set harness.expert.budget"));
+        assert_eq!(
+            config_saved_status("tui.theme"),
+            "✓ saved tui.theme",
+            "other settings never load the expert"
+        );
+    }
 
     #[test]
     fn plan_step_status_follows_the_task_the_step_seeded() {
@@ -5780,6 +6026,7 @@ mod tests {
                 exposure: "loopback".into(),
                 model_pinned: false,
                 worktree_setup: None,
+                worktree_base: None,
             },
             None,
             0,
@@ -6168,10 +6415,19 @@ mod tests {
             image: true,
         }];
 
-        let mentions =
-            resolve_prompt_attachments(&session, &mut app, &mut remote_notes, &cwd, attachments)
-                .await;
-        assert!(mentions.is_empty(), "no non-image attachments in this list");
+        let mentions = resolve_prompt_attachments(
+            &session,
+            &mut app,
+            &mut remote_notes,
+            &cwd,
+            Some(attachments),
+        )
+        .await;
+        assert_eq!(
+            mentions,
+            vec![real_path.display().to_string()],
+            "the image's upload path is recorded as a mention so the stored user row keeps it"
+        );
 
         let images = session.lock().await.take_pending_images();
         assert_eq!(
@@ -6185,8 +6441,8 @@ mod tests {
             "the stale ambient image from the unrelated Attach must not leak in"
         );
 
-        // An empty attachments list (the fallback case) must leave ambient state untouched —
-        // it's a no-op, not a second discard.
+        // An absent list (older client / TUI) must leave ambient state untouched — it's a
+        // no-op, not a second discard.
         session
             .lock()
             .await
@@ -6195,16 +6451,56 @@ mod tests {
                 data_base64: "still-ambient".into(),
             }]);
         let mentions =
-            resolve_prompt_attachments(&session, &mut app, &mut remote_notes, &cwd, Vec::new())
-                .await;
+            resolve_prompt_attachments(&session, &mut app, &mut remote_notes, &cwd, None).await;
         assert!(mentions.is_empty());
         let images = session.lock().await.take_pending_images();
         assert_eq!(
             images.len(),
             1,
-            "empty list leaves ambient pending_images alone"
+            "absent list leaves ambient pending_images alone"
         );
         assert_eq!(images[0].data_base64, "still-ambient");
+
+        // An EMPTY list is authoritative: a tray item the user removed (already uploaded, so
+        // ambient on the host) must not ride this prompt.
+        session
+            .lock()
+            .await
+            .attach_images(vec![forge_types::ImageAttachment {
+                media_type: "image/gif".into(),
+                data_base64: "removed-from-tray".into(),
+            }]);
+        let mentions = resolve_prompt_attachments(
+            &session,
+            &mut app,
+            &mut remote_notes,
+            &cwd,
+            Some(Vec::new()),
+        )
+        .await;
+        assert!(mentions.is_empty());
+        assert!(
+            session.lock().await.take_pending_images().is_empty(),
+            "empty explicit list discards the ambient image"
+        );
+
+        // Loading for a busy (queued) prompt returns the image instead of attaching it, so it
+        // can travel with the queue entry.
+        let loaded = load_prompt_attachments(
+            &mut app,
+            &mut remote_notes,
+            &cwd,
+            vec![remote::PromptAttachment {
+                path: real_path.display().to_string(),
+                image: true,
+            }],
+        );
+        assert_eq!(loaded.images.len(), 1);
+        assert_eq!(loaded.mentions, vec![real_path.display().to_string()]);
+        assert!(
+            session.lock().await.take_pending_images().is_empty(),
+            "the session's ambient images stay untouched"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -6248,10 +6544,10 @@ mod tests {
             &mut app,
             &mut remote_notes,
             &cwd,
-            vec![remote::PromptAttachment {
+            Some(vec![remote::PromptAttachment {
                 path: outside.display().to_string(),
                 image: false,
-            }],
+            }]),
         )
         .await;
         assert!(mentions.is_empty(), "refused path never becomes a mention");

@@ -45,6 +45,7 @@ pub(crate) fn incident_for_turn(error: &CoreError) -> Option<Incident> {
         CoreError::Provider(_)
         | CoreError::NoHealthyModel { .. }
         | CoreError::ModelUnavailable { .. }
+        | CoreError::ProviderDown { .. }
         | CoreError::SessionNotFound(_)
         | CoreError::Workspace(_)
         | CoreError::Precondition(_)

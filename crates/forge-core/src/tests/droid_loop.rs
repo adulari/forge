@@ -65,6 +65,7 @@ fn silence_run(provider: Arc<dyn Provider>, on: bool, idle: u64, floor: u64) -> 
     config.mesh.stream_idle_timeout_secs = idle;
     config.mesh.first_event_timeout_secs = 0;
     config.mesh.pin_outage_wait_secs = 0;
+    config.mesh.outage_wait_secs = 0;
     Run::new(provider, config, test_workspace())
 }
 

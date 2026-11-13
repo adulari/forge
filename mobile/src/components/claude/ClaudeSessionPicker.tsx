@@ -34,12 +34,15 @@ export default function ClaudeSessionPicker({ visible, onClose }: { visible: boo
   const choose = (id: string) => {
     if (busyId) return;
     setBusyId(id);
-    continueFrom(id, () => {
-      setBusyId(null);
-      onClose();
-    });
-    // A failure leaves the picker open for another try; the toast says why.
-    setTimeout(() => setBusyId((current) => (current === id ? null : current)), 120_000);
+    continueFrom(
+      id,
+      () => {
+        setBusyId(null);
+        onClose();
+      },
+      // A failure leaves the picker open for another try; the toast says why.
+      () => setBusyId(null),
+    );
   };
 
   const body = (() => {

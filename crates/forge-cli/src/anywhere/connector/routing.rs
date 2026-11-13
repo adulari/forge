@@ -23,6 +23,8 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::VoiceTranscribe => exact(Method::POST, "/api/voice/transcribe"),
         RouteId::ListSkills => exact(Method::GET, "/api/skills"),
         RouteId::ListModels => exact(Method::GET, "/api/models"),
+        RouteId::ModelReport => exact(Method::GET, "/api/models/report"),
+        RouteId::TurnsSummary => exact(Method::GET, "/api/turns/summary"),
         RouteId::ReadConfig => exact(Method::GET, "/api/config"),
         RouteId::UpdateConfig => exact(Method::PUT, "/api/config"),
         RouteId::ListHooks => exact(Method::GET, "/api/hooks"),
@@ -59,11 +61,28 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         RouteId::ListSchedules => exact(Method::GET, "/api/schedules"),
         RouteId::Changelog => exact(Method::GET, "/api/changelog"),
         RouteId::ListNotices => exact(Method::GET, "/api/notices"),
+        RouteId::Brief => exact(Method::GET, "/api/brief"),
         RouteId::Identity => exact(Method::GET, "/api/identity"),
         RouteId::AccountSyncStatus => exact(Method::GET, "/api/anywhere/sync"),
         RouteId::AccountSyncUpdate => exact(Method::PUT, "/api/anywhere/sync"),
         RouteId::AccountSyncNow => exact(Method::POST, "/api/anywhere/sync/now"),
         RouteId::ImportScan => exact(Method::GET, "/api/import/scan"),
+        RouteId::ListIssues => exact(Method::GET, "/api/issues"),
+        RouteId::IssueDetail => exact(Method::GET, "/api/issues/detail"),
+        RouteId::StartIssue => exact(Method::POST, "/api/issues/start"),
+        RouteId::DrainIssues => exact(Method::POST, "/api/issues/drain"),
+        RouteId::ListIssueDrains => exact(Method::GET, "/api/issues/drains"),
+        RouteId::CancelIssueDrain => exact(Method::POST, "/api/issues/drain/cancel"),
+        RouteId::PrQueue => exact(Method::GET, "/api/pr/queue"),
+        RouteId::PrQueueAction => exact(Method::POST, "/api/pr/queue/action"),
+        RouteId::PrReviewAction => exact(Method::POST, "/api/pr/review/action"),
+        RouteId::PrStatus => exact(Method::GET, "/api/pr/status"),
+        RouteId::PrList => exact(Method::GET, "/api/pr/list"),
+        RouteId::PrDetail => exact(Method::GET, "/api/pr/detail"),
+        RouteId::PrDiff => exact(Method::GET, "/api/pr/diff"),
+        RouteId::PrWatchGet => exact(Method::GET, "/api/pr/watch"),
+        RouteId::PrWatches => exact(Method::GET, "/api/pr/watches"),
+        RouteId::PrWatchSet => exact(Method::POST, "/api/pr/watch"),
         RouteId::SessionClaude | RouteId::ExportSessionClaude | RouteId::ContinueClaudeSession => {
             let id = single_path_parameter(request)?;
             let (method, path) = match request.route {
@@ -93,11 +112,19 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
                 query: query_parameter(&request.parameters, 2)?,
             })
         }
-        RouteId::SessionDiff | RouteId::SessionAgents | RouteId::SessionJobs => {
+        RouteId::SessionDiff
+        | RouteId::SessionCi
+        | RouteId::SessionAgents
+        | RouteId::SessionJobs
+        | RouteId::SessionTurns
+        | RouteId::SessionHistorySearch => {
             let id = single_path_parameter(request)?;
             let leaf = match request.route {
                 RouteId::SessionDiff => "diff",
+                RouteId::SessionCi => "ci",
                 RouteId::SessionAgents => "agents",
+                RouteId::SessionTurns => "turns",
+                RouteId::SessionHistorySearch => "history/search",
                 _ => "jobs",
             };
             Ok(RouteTarget {
@@ -124,7 +151,10 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         | RouteId::MergeSession
         | RouteId::DiscardSession
         | RouteId::SetSessionMode
-        | RouteId::SessionMessage => {
+        | RouteId::SessionMessage
+        | RouteId::SessionShip
+        | RouteId::SessionDone
+        | RouteId::SessionCiRun => {
             if request.parameters.is_empty() || request.parameters.len() > 2 {
                 bail!("session route requires one path parameter and an optional query");
             }
@@ -136,6 +166,9 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
                 RouteId::DiscardSession => "discard",
                 RouteId::SetSessionMode => "mode",
                 RouteId::SessionMessage => "message",
+                RouteId::SessionShip => "ship",
+                RouteId::SessionDone => "done",
+                RouteId::SessionCiRun => "ci/run",
                 _ => unreachable!(),
             };
             Ok(RouteTarget {
@@ -164,6 +197,43 @@ pub(super) fn route_target(request: &BridgeRequest) -> Result<RouteTarget> {
         | RouteId::SessionInput
         | RouteId::WebSocket
         | RouteId::TerminalWebSocket => bail!("route is not an HTTP bridge route"),
+    }
+}
+
+/// How long the host waits on the local daemon for one bridged call. Ship and local CI run answer
+/// only once the repo's CI plan has finished (ship gates its push on it), so a minute would cut
+/// them off mid-plan, after ship has already committed. They get the plan's default budget plus
+/// room for the commit message, push and PR.
+pub(super) fn local_call_timeout(route: RouteId) -> Duration {
+    match route {
+        RouteId::SessionShip | RouteId::SessionCiRun => Duration::from_secs(
+            forge_config::ci_parity::settings::DEFAULT_TOTAL_BUDGET_SECS + 10 * 60,
+        ),
+        _ => Duration::from_secs(60),
+    }
+}
+
+/// The two routes that commit, push or hand a PR to the merge queue from away from the machine.
+/// The host refuses them unless `[anywhere] allow_ship_over_relay` is on.
+pub(super) fn needs_ship_opt_in(route: RouteId) -> bool {
+    matches!(route, RouteId::SessionShip | RouteId::PrWatchSet)
+}
+
+/// Why a gated route was refused, as the JSON body the apps key on (`code`) and show (`error`).
+pub(super) fn ship_opt_in_refusal(request_id: [u8; 16]) -> BridgeResponse {
+    BridgeResponse {
+        request_id,
+        status: 403,
+        headers: vec![("content-type".into(), "application/json".into())],
+        body: serde_json::json!({
+            "error": "Ship over Anywhere is off on this host: enable it in host settings \
+                      ([anywhere] allow_ship_over_relay = true)",
+            "code": "ship_over_relay_off",
+            "setting": "anywhere.allow_ship_over_relay",
+        })
+        .to_string()
+        .into_bytes(),
+        body_blob: None,
     }
 }
 
@@ -307,6 +377,7 @@ mod tests {
             (RouteId::Blame, &[][..]),
             (RouteId::ProjectChanges, &[][..]),
             (RouteId::SessionJobs, &["s"][..]),
+            (RouteId::SessionHistorySearch, &["s"][..]),
         ] {
             for method in ["POST", "PUT", "PATCH", "DELETE"] {
                 assert!(
@@ -314,6 +385,32 @@ mod tests {
                     "{route:?} must refuse {method}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn issue_routes_are_typed_and_only_start_writes() {
+        for (route, method, path) in [
+            (RouteId::ListIssues, "GET", "/api/issues"),
+            (RouteId::IssueDetail, "GET", "/api/issues/detail"),
+            (RouteId::StartIssue, "POST", "/api/issues/start"),
+            (RouteId::DrainIssues, "POST", "/api/issues/drain"),
+            (RouteId::ListIssueDrains, "GET", "/api/issues/drains"),
+            (
+                RouteId::CancelIssueDrain,
+                "POST",
+                "/api/issues/drain/cancel",
+            ),
+            (RouteId::PrQueue, "GET", "/api/pr/queue"),
+            (RouteId::PrQueueAction, "POST", "/api/pr/queue/action"),
+            (RouteId::PrReviewAction, "POST", "/api/pr/review/action"),
+        ] {
+            let target = route_target(&request(route, method, &[])).unwrap();
+            assert_eq!(target.path, path);
+            assert!(validate_command_request(&request(route, method, &[])).is_ok());
+            let wrong = if method == "GET" { "POST" } else { "GET" };
+            assert!(validate_command_request(&request(route, wrong, &[])).is_err());
+            assert!(validate_command_request(&request(route, "DELETE", &[])).is_err());
         }
     }
 
@@ -356,7 +453,7 @@ mod tests {
 
     #[test]
     fn files_diff_and_schedule_routes_map_to_their_daemon_endpoints() {
-        let cases: [(RouteId, &str, &[&str], Method, &str); 22] = [
+        let cases: [(RouteId, &str, &[&str], Method, &str); 27] = [
             (
                 RouteId::Blame,
                 "GET",
@@ -372,6 +469,13 @@ mod tests {
                 "/api/projects/changes",
             ),
             (RouteId::GitHunk, "POST", &[], Method::POST, "/api/git/hunk"),
+            (
+                RouteId::SessionHistorySearch,
+                "GET",
+                &["session_7", "?q=backoff"],
+                Method::GET,
+                "/api/sessions/session_7/history/search",
+            ),
             (
                 RouteId::SessionJobs,
                 "GET",
@@ -434,6 +538,34 @@ mod tests {
                 &["?limit=5"],
                 Method::GET,
                 "/api/changelog",
+            ),
+            (
+                RouteId::Brief,
+                "GET",
+                &["?since=100"],
+                Method::GET,
+                "/api/brief",
+            ),
+            (
+                RouteId::ModelReport,
+                "GET",
+                &["?days=7"],
+                Method::GET,
+                "/api/models/report",
+            ),
+            (
+                RouteId::SessionTurns,
+                "GET",
+                &["session_7", "?limit=5"],
+                Method::GET,
+                "/api/sessions/session_7/turns",
+            ),
+            (
+                RouteId::TurnsSummary,
+                "GET",
+                &["?days=7"],
+                Method::GET,
+                "/api/turns/summary",
             ),
             (RouteId::Identity, "GET", &[], Method::GET, "/api/identity"),
             (
@@ -543,6 +675,154 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every ship and PR route maps to exactly one method and path, and refuses the others.
+    #[test]
+    fn ship_and_pr_routes_map_to_exactly_one_method_and_path() {
+        let cases: [(RouteId, &str, &[&str], &str); 9] = [
+            (RouteId::PrStatus, "GET", &["?session=s1"], "/api/pr/status"),
+            (
+                RouteId::PrList,
+                "GET",
+                &["?session=s1&state=open"],
+                "/api/pr/list",
+            ),
+            (
+                RouteId::PrDetail,
+                "GET",
+                &["?session=s1&number=4"],
+                "/api/pr/detail",
+            ),
+            (
+                RouteId::PrDiff,
+                "GET",
+                &["?session=s1&number=4"],
+                "/api/pr/diff",
+            ),
+            (
+                RouteId::PrWatchGet,
+                "GET",
+                &["?session=s1"],
+                "/api/pr/watch",
+            ),
+            (RouteId::PrWatches, "GET", &[], "/api/pr/watches"),
+            (RouteId::PrWatchSet, "POST", &[], "/api/pr/watch"),
+            (
+                RouteId::SessionShip,
+                "POST",
+                &["session_7"],
+                "/api/sessions/session_7/ship",
+            ),
+            (
+                RouteId::SessionDone,
+                "POST",
+                &["session_7"],
+                "/api/sessions/session_7/done",
+            ),
+        ];
+        for (route, method, parameters, path) in cases {
+            let bridged = request(route, method, parameters);
+            let target = route_target(&bridged).unwrap();
+            assert_eq!(target.path, path, "{route:?}");
+            assert_eq!(target.method.as_str(), method, "{route:?}");
+            assert!(validate_command_request(&bridged).is_ok(), "{route:?}");
+            for other in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                if other != method {
+                    assert!(
+                        validate_command_request(&request(route, other, parameters)).is_err(),
+                        "{route:?} must refuse {other}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Local CI: the plan is a read, the run a POST, neither needs the ship opt-in, and each maps
+    /// to exactly one method and path.
+    #[test]
+    fn local_ci_routes_map_to_one_method_and_path_and_skip_the_ship_opt_in() {
+        let cases: [(RouteId, &str, &str); 2] = [
+            (RouteId::SessionCi, "GET", "/api/sessions/session_7/ci"),
+            (
+                RouteId::SessionCiRun,
+                "POST",
+                "/api/sessions/session_7/ci/run",
+            ),
+        ];
+        for (route, method, path) in cases {
+            let bridged = request(route, method, &["session_7"]);
+            let target = route_target(&bridged).unwrap();
+            assert_eq!(target.path, path, "{route:?}");
+            assert_eq!(target.method.as_str(), method, "{route:?}");
+            assert!(validate_command_request(&bridged).is_ok(), "{route:?}");
+            assert!(!needs_ship_opt_in(route), "{route:?}");
+            for other in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+                if other != method {
+                    assert!(
+                        validate_command_request(&request(route, other, &["session_7"])).is_err(),
+                        "{route:?} must refuse {other}"
+                    );
+                }
+            }
+            for bad in ["../x", "a/b", "", "s 1", "s%2f", "..", "s?x=1"] {
+                assert!(
+                    route_target(&request(route, method, &[bad])).is_err(),
+                    "{route:?} must reject session id {bad:?}"
+                );
+            }
+            assert!(route_target(&request(route, method, &[])).is_err());
+        }
+    }
+
+    #[test]
+    fn ship_routes_reject_path_traversal_and_stray_parameters() {
+        for route in [RouteId::SessionShip, RouteId::SessionDone] {
+            for bad in ["../x", "a/b", "", "s 1", "s%2f", "..", "s?x=1"] {
+                assert!(
+                    route_target(&request(route, "POST", &[bad])).is_err(),
+                    "{route:?} must reject session id {bad:?}"
+                );
+            }
+            assert!(route_target(&request(route, "POST", &[])).is_err());
+            assert!(route_target(&request(route, "POST", &["s", "?a=1", "extra"])).is_err());
+        }
+        for route in [RouteId::PrStatus, RouteId::PrWatchGet] {
+            assert!(route_target(&request(route, "GET", &["session=s1"])).is_err());
+            assert!(route_target(&request(route, "GET", &["?session=s1#frag"])).is_err());
+        }
+        assert!(route_target(&request(RouteId::PrWatchSet, "POST", &["?a=1", "x"])).is_err());
+    }
+
+    #[test]
+    fn only_ship_and_watch_write_need_the_relay_opt_in() {
+        for route in [RouteId::SessionShip, RouteId::PrWatchSet] {
+            assert!(needs_ship_opt_in(route), "{route:?}");
+        }
+        for route in [
+            RouteId::PrStatus,
+            RouteId::PrList,
+            RouteId::PrDetail,
+            RouteId::PrDiff,
+            RouteId::PrWatchGet,
+            RouteId::PrWatches,
+            RouteId::SessionDone,
+            RouteId::PrQueue,
+            RouteId::PrQueueAction,
+            RouteId::PrReviewAction,
+            RouteId::GitHunk,
+        ] {
+            assert!(!needs_ship_opt_in(route), "{route:?}");
+        }
+        let refusal = ship_opt_in_refusal([3; 16]);
+        assert_eq!(refusal.status, 403);
+        let body: serde_json::Value = serde_json::from_slice(&refusal.body).unwrap();
+        assert_eq!(body["code"], "ship_over_relay_off");
+        assert_eq!(body["setting"], "anywhere.allow_ship_over_relay");
+        assert!(body["error"]
+            .as_str()
+            .unwrap()
+            .contains("allow_ship_over_relay"));
     }
 
     #[test]

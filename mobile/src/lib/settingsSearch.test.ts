@@ -25,6 +25,11 @@ describe("settings search", () => {
     expect(searchSettings("  ", fields)).toEqual([]);
   });
 
+  it("finds the merge queue page by its own name and by its actions", () => {
+    expect(searchSettings("merge queue", fields)[0]).toMatchObject({ kind: "page", href: "/merge-queue" });
+    expect(searchSettings("handed back", fields).some((hit) => hit.href === "/merge-queue")).toBe(true);
+  });
+
   it("groups fields into the named sections", () => {
     expect(configSection(fields[1])).toBe("Git");
     expect(configSection(fields[2])).toBe("Terminal");

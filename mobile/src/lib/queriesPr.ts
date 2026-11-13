@@ -1,5 +1,6 @@
-// react-query hooks over apiPr.ts. The PR and Actions routes need a direct daemon connection
-// (the Anywhere bridge carries no `gh` routes), so every query is disabled without one.
+// react-query hooks over apiPr.ts. The PR reads, PR Watch and Ship are bridged over Anywhere (Ship
+// and the PR Watch write only when the host opted in, see prAccess.ts); create/comment/merge and
+// GitHub Actions still need a direct daemon connection, so those are disabled without one.
 import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
@@ -10,6 +11,7 @@ import {
   getPrDetail,
   getPrDiff,
   getPrList,
+  getPrQueue,
   getPrStatus,
   getPrWatch,
   getPrWatches,
@@ -17,13 +19,19 @@ import {
   getWorkflowRuns,
   getWorkflows,
   mergePr,
+  postPrQueueAction,
+  postPrReviewAction,
   runAction,
   setPrWatch,
   type PrState,
 } from "./apiPr";
+import { shipSession } from "./apiShip";
 import { useAuth } from "./auth";
 import { shouldPoll } from "../components/pr/prModel";
 import { supportsDirectDaemonEndpoints } from "./transport";
+import { usePrReadBase, useShipBase } from "./prAccess";
+
+export { usePrAvailable } from "./prAccess";
 
 const CHECKS_POLL_MS = 15_000;
 const RUNS_POLL_MS = 10_000;
@@ -34,7 +42,7 @@ function useDirectBase(): string | null {
 }
 
 export function usePrStatus(sessionId: string | null) {
-  const baseUrl = useDirectBase();
+  const baseUrl = usePrReadBase();
   return useQuery({
     queryKey: ["pr", "status", baseUrl, sessionId],
     queryFn: () => getPrStatus(baseUrl as string, sessionId as string),
@@ -46,7 +54,7 @@ export function usePrStatus(sessionId: string | null) {
 }
 
 export function usePrList(sessionId: string | null, state: PrState) {
-  const baseUrl = useDirectBase();
+  const baseUrl = usePrReadBase();
   return useQuery({
     queryKey: ["pr", "list", baseUrl, sessionId, state],
     queryFn: () => getPrList(baseUrl as string, sessionId as string, state),
@@ -57,7 +65,7 @@ export function usePrList(sessionId: string | null, state: PrState) {
 }
 
 export function usePrDetail(sessionId: string | null, number: number | null) {
-  const baseUrl = useDirectBase();
+  const baseUrl = usePrReadBase();
   return useQuery({
     queryKey: ["pr", "detail", baseUrl, sessionId, number],
     queryFn: () => getPrDetail(baseUrl as string, sessionId as string, number as number),
@@ -73,7 +81,7 @@ export function usePrDiff(
   ignoreWhitespace: boolean,
   enabled: boolean,
 ) {
-  const baseUrl = useDirectBase();
+  const baseUrl = usePrReadBase();
   return useQuery({
     queryKey: ["pr", "diff", baseUrl, sessionId, number, commit, ignoreWhitespace],
     queryFn: () =>
@@ -183,13 +191,9 @@ export function useRunAction(verb: "rerun" | "cancel" | "delete") {
   });
 }
 
-export function usePrAvailable(): boolean {
-  return useDirectBase() != null;
-}
-
 /** Open pull requests across every project the host knows, one `gh` call per distinct directory. */
 export function useAllPrs(sessionIds: readonly string[], state: PrState) {
-  const baseUrl = useDirectBase();
+  const baseUrl = usePrReadBase();
   return useQueries({
     queries: sessionIds.map((sessionId) => ({
       queryKey: ["pr", "list", baseUrl, sessionId, state],
@@ -203,7 +207,7 @@ export function useAllPrs(sessionIds: readonly string[], state: PrState) {
 const WATCH_POLL_MS = 10_000;
 
 export function usePrWatch(sessionId: string | null) {
-  const baseUrl = useDirectBase();
+  const baseUrl = usePrReadBase();
   return useQuery({
     queryKey: ["pr", "watch", baseUrl, sessionId],
     queryFn: () => getPrWatch(baseUrl as string, sessionId as string),
@@ -213,7 +217,7 @@ export function usePrWatch(sessionId: string | null) {
 }
 
 export function usePrWatches() {
-  const baseUrl = useDirectBase();
+  const baseUrl = usePrReadBase();
   return useQuery({
     queryKey: ["pr", "watches", baseUrl],
     queryFn: () => getPrWatches(baseUrl as string),
@@ -223,11 +227,67 @@ export function usePrWatches() {
 }
 
 export function useSetPrWatch() {
-  const baseUrl = useDirectBase();
+  const baseUrl = useShipBase();
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (body: Parameters<typeof setPrWatch>[1]) => setPrWatch(baseUrl as string, body),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watch"] });
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });
+    },
+  });
+}
+
+export function useShipSession() {
+  const baseUrl = useShipBase();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { sessionId: string; request: Parameters<typeof shipSession>[2] }) =>
+      shipSession(baseUrl as string, args.sessionId, args.request),
+    // A refusal can still have committed, so the working tree and branch lists refresh either way.
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: ["pr"] });
+      void queryClient.invalidateQueries({ queryKey: ["git"] });
+    },
+  });
+}
+
+const QUEUE_POLL_MS = 5_000;
+
+/** Merge queue standing per repo. Bridged, so any signed-in connection works; polls while mounted. */
+export function usePrQueue() {
+  const { baseUrl } = useAuth();
+  return useQuery({
+    queryKey: ["pr", "queue", baseUrl],
+    queryFn: () => getPrQueue(baseUrl as string).then((r) => r.queues),
+    enabled: baseUrl != null,
+    refetchInterval: QUEUE_POLL_MS,
+  });
+}
+
+export function useQueueAction() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof postPrQueueAction>[1]) => postPrQueueAction(baseUrl as string, body),
+    onSuccess: (result) => {
+      // The reply already carries the fresh queues; show them before the refetch lands.
+      queryClient.setQueryData(["pr", "queue", baseUrl], result.queues);
+      void queryClient.invalidateQueries({ queryKey: ["pr", "queue"] });
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watch"] });
+      void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });
+    },
+  });
+}
+
+/** The owner's say over a held merge: dismiss a finding or merge anyway. Refetches the watch. */
+export function useReviewAction() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof postPrReviewAction>[1]) => postPrReviewAction(baseUrl as string, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["pr", "queue"] });
       void queryClient.invalidateQueries({ queryKey: ["pr", "watch"] });
       void queryClient.invalidateQueries({ queryKey: ["pr", "watches"] });
     },

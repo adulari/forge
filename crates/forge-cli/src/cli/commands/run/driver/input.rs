@@ -3,6 +3,30 @@
 use super::*;
 
 impl DriverState {
+    /// A goal was handed to a fresh worker: put the successor in the fleet flag first, so a
+    /// daemon that dies before hosting it brings it back, then ask the daemon to host it now.
+    async fn launch_successor(&mut self, plan: &goal_relay::RelayPlan) {
+        let store = self.session.lock().await.store.clone();
+        if let Err(error) = store.set_session_daemon_live(&plan.successor_id, true) {
+            tracing::warn!(session = %plan.successor_id, %error, "could not flag the fresh worker as live");
+        }
+        tracing::info!(
+            session = %plan.successor_id,
+            reason = plan.reason.as_str(),
+            "goal handed to a fresh worker"
+        );
+        let launched = self
+            .registry
+            .as_ref()
+            .is_some_and(|registry| registry.launch_relay(plan.successor_id.clone()));
+        if !launched {
+            self.app.note(&format!(
+                "the fresh worker {} starts when this session is hosted by forge serve or resumed",
+                &plan.successor_id[..plan.successor_id.len().min(8)]
+            ));
+        }
+    }
+
     /// The headless key router: modal surfaces first (same precedence as the TUI key loop),
     /// then plain input editing. Only surfaces a remote client can actually drive are handled;
     /// host-terminal-only hotkeys have no headless meaning and are ignored.
@@ -42,6 +66,7 @@ impl DriverState {
                                 .map_err(|e| e.to_string())
                         } else {
                             forge_config::store_api_key(provider, value.trim())
+                                .map(|()| clear_key_verdict(provider))
                                 .map_err(|e| e.to_string())
                         }
                     } else {
@@ -56,7 +81,7 @@ impl DriverState {
                     match result {
                         Ok(()) => {
                             self.app.config_editor.rows = config_editor_rows();
-                            self.app.config_editor.status = Some(format!("✓ saved {path}"));
+                            self.app.config_editor.status = Some(config_saved_status(&path));
                         }
                         Err(e) => self.app.config_editor.status = Some(format!("✗ {e}")),
                     }
@@ -470,7 +495,10 @@ impl DriverState {
             return;
         }
         self.busy = false;
-        self.turn_handle = None;
+        self.turn_panic = match self.turn_handle.take() {
+            Some(handle) => join_panic_message(handle).await,
+            None => None,
+        };
         self.steer_tracker
             .turn_finished(&mut self.queued_prompts, &self.steer, &mut self.app);
         crate::alloc_policy::release_free_memory();
@@ -545,6 +573,9 @@ impl DriverState {
             if gs.gen == g {
                 let cwd = std::path::Path::new(&self.cwd);
                 let next = advance_goal(&mut gs, &self.session, &mut self.app, cwd).await;
+                if let GoalNext::Relay(plan) = &next {
+                    self.launch_successor(plan).await;
+                }
                 let queue = &mut self.queued_prompts;
                 let steer = |app: &mut forge_tui::App| dequeue_prompt(queue, app);
                 if let Some(step) = launch_goal_step(
@@ -673,4 +704,24 @@ impl DriverState {
         }
         changed
     }
+}
+
+/// The turn's `DoneGuard` fires while the task is still unwinding, so give the task a moment to
+/// finish and report a panic. Aborts (interrupts) and normal returns yield `None`.
+async fn join_panic_message(handle: tokio::task::JoinHandle<()>) -> Option<String> {
+    let joined = if handle.is_finished() {
+        handle.await
+    } else {
+        tokio::time::timeout(std::time::Duration::from_millis(500), handle)
+            .await
+            .ok()?
+    };
+    let payload = joined.err()?.try_into_panic().ok()?;
+    Some(
+        payload
+            .downcast_ref::<&str>()
+            .map(|m| (*m).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string()),
+    )
 }

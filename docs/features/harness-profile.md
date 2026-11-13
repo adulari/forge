@@ -47,12 +47,17 @@ turn.
 | Stall / stagnation nudge | `loop_progress.rs` (`STALL_NUDGE`, `STAGNATION_NUDGE`) | No message. The tracker keeps counting, so the relapse **halt** fires on the same schedule. |
 | Commit / push reminders | `git_hygiene.rs` | Neither the turn-start nor the mid-turn `[git]` line is sent. |
 | Auto-orchestrate prompt | `lib.rs` (`mesh.auto_orchestrate`) | Not injected. |
-| Mid-intent nudge | `mid_intent.rs` | A reply that ends on an announced action stands as the answer. |
-| Continue nudge (direct path) | `nudge_policy.rs` via `model_loop.rs` | With tasks still open, the text reply is accepted rather than re-driven. |
+
+The mid-intent re-drive and the task-list continue re-drive are **not** in this table any more.
+They used to be switched off by `minimal`, which let a reply such as "Let me check X:" or a
+sign-off with tasks open end the turn as a success. Both are stop-integrity gates now and run on
+every profile, with the same bounds as before: 2 mid-intent re-drives (3 with `stop_retries`) and
+the existing continue budgets (3 idle answers, 8 tool-only nudges, no ceiling while tasks keep
+closing). A turn that ends with tasks open is reported as `tasks_unfinished` in every profile.
 
 ### `minimal` keeps the safety and integrity guards
 
-The permission broker, the progress ledger's stops (the nudge that comes before each is dropped,
+The mid-intent and open-task re-drives, the permission broker, the progress ledger's stops (the nudge that comes before each is dropped,
 the stop schedule is the same; see [progress supervision](progress-supervision.md)), the
 phantom-edit gate (it now also runs when tasks are open and the continue nudge is off), the
 tool-call-as-text repair, the completion-verification gate, an explicit step limit, the turn and
@@ -122,6 +127,29 @@ eval_kernel = true
 ```
 
 Already covered without a flag: the progress ledger nudges at the third identical call-and-result and stops at the fifth (`repeat_interrupt` moves the stop to the seventh); `stop_retries` is the three-empty-turns stop.
+## Task-list switches (A/B, defaults set by the A/B)
+
+Two switches decide whether the model keeps a task list at all and whether open tasks push it
+onward. They exist so a three-arm test can run on one profile: (a) tool on, nudges on; (b) tool on,
+nudges off; (c) tool off. **The defaults below keep today's behaviour and will be set by the A/B.**
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `task_tool` | `true` | `false` removes `update_tasks`: not advertised, a call is refused with a plain message, the task bullet leaves the system prompt, and the `run_code` description stops mentioning it. With no tasks every task gate is inert. CLI bridges are out of scope (they get their tools from `forge mcp-serve`). |
+| `task_nudges` | unset (on) | `false` turns off everything that pushes on open tasks: the continue re-drive when the model signs off with tasks open, the stale-task escalation and Keep/Done/Remove question, and the turn-start "[task list]" note. The pinned task list stays (it is state). With it off, the mid-intent nudge no longer stands aside for the task gate. A turn that ends with tasks open is still reported as `tasks_unfinished`. |
+
+```toml
+[harness]
+task_tool = true
+task_nudges = false   # empty or unset keeps the built-in behaviour
+```
+
+Both can be set per run with `FORGE_HARNESS__TASK_TOOL=false` and `FORGE_HARNESS__TASK_NUDGES=false`,
+and appear in `/config` under Behaviour. Continue nudges are stored with the `continue` message
+kind, so their count per session is readable from the store. A prompt that joins a running turn
+(a steer, or a finished background job's wake message) is followed by a UI-only note saying so,
+so it is not mistaken for a new turn.
+
 ## Family profiles (A/B, default off)
 
 `[harness] family_profiles = true` turns on one more layer: a table keyed by model family

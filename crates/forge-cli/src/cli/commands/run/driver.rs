@@ -77,7 +77,9 @@ pub(crate) struct DriverSpec {
 pub(crate) struct SessionDriverHandle {
     pub session_id: String,
     title: std::sync::Arc<std::sync::RwLock<String>>,
-    pub cwd: String,
+    /// The workspace the session was spawned in; read it through [`Self::cwd`], which follows a
+    /// session moved to another project afterwards.
+    spawn_cwd: String,
     pub worktree: Option<String>,
     pub created_at: i64,
     /// Latest broadcast snapshot (busy/cost/model ride in it — the session list reads these).
@@ -121,7 +123,7 @@ impl SessionDriverHandle {
         Self {
             session_id: session_id.into(),
             title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
-            cwd: String::new(),
+            spawn_cwd: String::new(),
             worktree: None,
             created_at: 0,
             snapshot_rx,
@@ -159,6 +161,20 @@ impl SessionDriverHandle {
             .await
             .context("session driver stopped")?;
         result.await.context("session driver stopped")
+    }
+
+    /// The session's current workspace. A session moved with `/project` (or the "Move it
+    /// there" offer) reports its new folder in the snapshot; without this, the git, changes,
+    /// terminal and ports routes kept working in the folder it was spawned in. A worktree session
+    /// keeps its spawn cwd: its snapshot cwd is the worktree, which callers read from `worktree`.
+    pub(crate) fn cwd(&self) -> String {
+        if self.worktree.is_none() {
+            let snap = self.snapshot_rx.borrow();
+            if !snap.snapshot.cwd.is_empty() {
+                return snap.snapshot.cwd.clone();
+            }
+        }
+        self.spawn_cwd.clone()
     }
 
     /// No turn running, nothing awaiting an answer, and no input queued but not yet picked up.
@@ -241,11 +257,15 @@ impl Drop for SessionDriverHandle {
 /// the driver keeps running until [`SessionDriverHandle::shutdown`].
 pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriverHandle> {
     let (ui_tx, ui_rx) = std::sync::mpsc::channel::<UiMsg>();
+    // Shared with the WS route (one guard per connection) and the push debounce. The session's
+    // presenter reads it too: with no client attached nobody can answer a prompt or read a
+    // warning, and the turn must not stop on the assumption that someone will type `continue`.
+    let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mcp_off = super::session_mcp_off::inherited(spec.resume.as_deref());
     let session = super::session_mcp_off::scoped(
         mcp_off.clone(),
         build_session_with_self_mcp(
-            Box::new(ChannelPresenter::new(ui_tx)),
+            Box::new(ChannelPresenter::with_attached(ui_tx, ws_clients.clone())),
             spec.mock,
             None,
             spec.resume.clone(),
@@ -340,7 +360,6 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
     let draining = std::sync::Arc::new(AtomicBool::new(false));
     let daemon_shutdown = std::sync::Arc::new(AtomicBool::new(false));
     let last_activity = std::sync::Arc::new(AtomicI64::new(last_active_at));
-    let ws_clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let title = std::sync::Arc::new(std::sync::RwLock::new(spec.title));
     let worktree_setup = crate::serve_worktree_start::SetupCell::default();
 
@@ -363,12 +382,13 @@ pub(crate) async fn spawn_session_driver(spec: DriverSpec) -> Result<SessionDriv
         spec.apns,
         ws_clients.clone(),
         worktree_setup.clone(),
+        spec.registry.clone(),
     ));
 
     Ok(SessionDriverHandle {
         session_id,
         title,
-        cwd: spec.cwd,
+        spawn_cwd: spec.cwd,
         worktree: spec.worktree,
         created_at,
         snapshot_rx,
@@ -403,6 +423,8 @@ fn now_secs() -> i64 {
 /// 2000-line loop body.
 struct DriverState {
     session: std::sync::Arc<tokio::sync::Mutex<Session>>,
+    /// The daemon's fleet, where a goal relay asks for its successor session to be hosted.
+    registry: Option<std::sync::Arc<crate::serve::SessionRegistry>>,
     app: App,
     catalog: std::sync::Arc<forge_skills::Catalog>,
     armed_project: std::collections::HashSet<String>,
@@ -413,6 +435,9 @@ struct DriverState {
     turn_gen: u64,
     last_auto_compact_gen: u64,
     turn_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Panic message of the turn that just ended, if it crashed; the driver loop turns it into a
+    /// turn error so the snapshot and push say "failed" instead of "done".
+    turn_panic: Option<String>,
     loop_state: Option<LoopState>,
     goal_state: Option<GoalState>,
     pending: Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmReply>)>,
@@ -452,11 +477,18 @@ struct DriverState {
     /// Progress of the worktree's background copy + `setup`, and the state the agent was last told.
     worktree_setup: crate::serve_worktree_start::SetupCell,
     setup_told: Option<String>,
+    /// Where a user interrupt records itself, so a restart can tell it from a crash.
+    interrupt_record: Option<(std::sync::Arc<forge_store::Store>, String)>,
+    /// The newest non-clean turn end, read from the store when a turn finishes.
+    last_turn_end: Option<remote::LastTurnEnd>,
+    /// A prompt that never ran, waiting for the loop to push it as a failure.
+    pending_unrun: Option<String>,
 }
 
 /// How often the driver loop checks for a due session heartbeat while idle. Turn-end already
 /// checks immediately (`on_turn_done`); this coarse tick is only for a session that sits fully
 /// idle for a while, no new activity, with nothing else waking the loop up.
+const IMAGES_LOST_NOTE: &str = "[This prompt was queued with images that were lost when the daemon restarted; none are attached.]";
 const HEARTBEAT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Drop for DriverState {
@@ -464,6 +496,47 @@ impl Drop for DriverState {
         if let Some(turn) = self.turn_handle.take() {
             turn.abort();
         }
+    }
+}
+
+/// Fire-and-forget delivery of one actionable notification across every configured channel
+/// (Web Push + native APNs), plus the Live Activity nudge at the same discrete moment.
+fn dispatch_push(
+    apns: &Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
+    push: &Option<std::sync::Arc<crate::push::PushNotifier>>,
+    session_id: &str,
+    snap: &remote::Snapshot,
+    msg: crate::push::PushMessage,
+) {
+    tracing::info!(
+        session = session_id,
+        kind = msg.kind,
+        seq = msg.seq,
+        "push dispatched"
+    );
+    if let Some(notifier) = apns {
+        notifier.dispatch_live_activity(
+            session_id.to_string(),
+            crate::apns::LiveActivityContentState {
+                busy: snap.busy,
+                waiting: snap.permission_prompt.is_some() || snap.question.is_some(),
+                cost_usd: snap.cost_usd,
+                context_tokens: snap.context_tokens,
+                context_limit: snap.context_limit.unwrap_or(200_000) as u64,
+                question: snap
+                    .permission_prompt
+                    .clone()
+                    .or_else(|| snap.question.clone()),
+                prompt_seq: Some(snap.prompt_seq),
+                tasks_done: Some(snap.tasks.iter().filter(|t| t.status == "done").count() as u64),
+                tasks_total: Some(snap.tasks.len() as u64),
+                state_since: Some(now_secs().max(0) as u64),
+            },
+        );
+        notifier.dispatch_alert(msg.clone());
+    }
+    if let Some(notifier) = push {
+        notifier.dispatch(msg);
     }
 }
 
@@ -487,10 +560,19 @@ async fn drive_session(
     apns: Option<std::sync::Arc<crate::apns::ApnsNotifier>>,
     ws_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     worktree_setup: crate::serve_worktree_start::SetupCell,
+    registry: Option<std::sync::Arc<crate::serve::SessionRegistry>>,
 ) {
     let (done_tx, done_rx) = std::sync::mpsc::channel::<u64>();
+    let worktree_base = worktree
+        .as_deref()
+        .and_then(|w| forge_core::worktree_base::stored_note(std::path::Path::new(w)));
     let mut app = App::default();
     app.transcript_follow = true;
+    let workspace_binding = {
+        let s = session.lock().await;
+        app.watch_git_location(s.workspace_root().to_path_buf());
+        s.workspace_binding()
+    };
     {
         let s = session.lock().await;
         app.temper = s.temper().label().to_string();
@@ -537,6 +619,11 @@ async fn drive_session(
         .as_ref()
         .map(|config| config.chat.follow_up)
         .unwrap_or_default();
+    let push_escalate = std::time::Duration::from_secs(
+        loaded_config
+            .as_ref()
+            .map_or(180, |config| config.remote.push_escalate_secs),
+    );
     let auto_setup = loaded_config
         .as_ref()
         .map(|config| config.project.auto_initialize)
@@ -545,8 +632,10 @@ async fn drive_session(
         && !forge_config::project_auto_setup_attempted(std::path::Path::new(&cwd));
 
     let steer = session.lock().await.steer_handle();
+    let interrupt_store = session.lock().await.store.clone();
     let mut st = DriverState {
         session,
+        registry,
         steer,
         app,
         catalog,
@@ -558,6 +647,9 @@ async fn drive_session(
         turn_gen: 0,
         last_auto_compact_gen: 0,
         turn_handle: None,
+        turn_panic: None,
+        last_turn_end: None,
+        pending_unrun: None,
         loop_state: None,
         goal_state: None,
         pending: None,
@@ -586,19 +678,27 @@ async fn drive_session(
         daemon_shutdown,
         worktree_setup: worktree_setup.clone(),
         setup_told: None,
+        interrupt_record: Some((interrupt_store, session_id.clone())),
     };
 
+    st.refresh_last_turn_end();
     let mut last_snap: Option<remote::Snapshot> = None;
+    let mut stream_pacer = remote::StreamPacer::default();
+    let mut pending_mode: Option<forge_types::PermissionMode> = None;
+    let mut project_init = forge_config::ProjectInitCache::default();
     let mut revision: u64 = 0;
     let mut child_links = crate::serve_agents::ChildLinks::default();
     let mut model_pinned = false;
     let mut dirty = true;
+    let mut ci_watch = crate::ci_run::live::Watch::default();
     // The most recent genuine turn failure (PresenterEvent::Error), latched so the busy falling
     // edge pushes "failed" instead of "done". Cleared when the next turn starts.
     let mut turn_error: Option<String> = None;
+    let mut deferred_push = crate::push::DeferredPush::default();
+    let mut outage_pusher = crate::push::OutagePusher::default();
 
     let queue_store = st.session.lock().await.store.clone();
-    let mut persisted_queue: Vec<String> = Vec::new();
+    let mut persisted_queue: Vec<forge_store::QueuedPrompt> = Vec::new();
     match queue_store.session_queued_prompts(&session_id) {
         Ok(restored) if !restored.is_empty() => {
             st.app.note(&format!(
@@ -606,7 +706,22 @@ async fn drive_session(
                 restored.len()
             ));
             persisted_queue.clone_from(&restored);
-            st.queued_prompts = restored;
+            let lost_images = restored.iter().filter(|q| q.had_images).count();
+            if lost_images > 0 {
+                st.app.note(&format!(
+                    "⚠ {lost_images} restored prompt(s) were queued with images, which did not survive the restart"
+                ));
+            }
+            st.queued_prompts = restored
+                .into_iter()
+                .map(|q| {
+                    if q.had_images {
+                        format!("{IMAGES_LOST_NOTE}\n\n{}", q.text)
+                    } else {
+                        q.text
+                    }
+                })
+                .collect();
             st.app.set_queued(&st.queued_prompts);
             st.drain_queue().await;
         }
@@ -615,6 +730,14 @@ async fn drive_session(
             tracing::warn!(session = %session_id, %error, "could not restore queued prompts")
         }
     }
+
+    goal_envelope::restore(&mut st.app, &queue_store, &session_id);
+    // A fresh worker a goal relay created starts the goal from its brief; a restart between the
+    // hand-off and this point finds it here again, because it has not run a turn yet.
+    if let Some(outcome) = goal_relay::successor_outcome(&st.session, &mut st.app).await {
+        st.handle_outcome(outcome);
+    }
+    let mut persisted_goal: Option<String> = GoalRecord::of(&st.app);
 
     if auto_setup {
         let _ = forge_config::mark_project_auto_setup_attempted(std::path::Path::new(&cwd));
@@ -632,6 +755,13 @@ async fn drive_session(
             st.app.set_queued(&st.queued_prompts);
             if !st.busy {
                 break;
+            }
+        }
+        // The workspace moves under a session (a worktree switch, the project move below); the
+        // "working in another repo" detector reads it from the App.
+        if let Ok(workspace) = workspace_binding.read() {
+            if st.app.follow_git_workspace(&workspace) {
+                dirty = true;
             }
         }
         let current_title = title
@@ -663,8 +793,51 @@ async fn drive_session(
                 UiMsg::Event(e) => {
                     st.steer_tracker
                         .observe(&e, &mut st.queued_prompts, &mut st.app);
+                    // A long provider outage pushes once when it passes two minutes and once on
+                    // recovery, through the same hold-while-attached path as `goal_resumed`.
+                    let outage_msg = match (&e, &last_snap) {
+                        (
+                            forge_tui::PresenterEvent::ProviderOutage {
+                                model,
+                                since,
+                                until,
+                                ..
+                            },
+                            Some(snap),
+                        ) if outage_pusher.outage_probe(now_secs().max(0) as u64, *since) => {
+                            Some(crate::push::PushMessage::provider_outage(
+                                snap,
+                                forge_config::provider_of(model),
+                                &crate::push::clock_label(*since),
+                                &crate::push::clock_label(*until),
+                            ))
+                        }
+                        (
+                            forge_tui::PresenterEvent::ProviderRecovered { model, down_secs },
+                            Some(snap),
+                        ) if outage_pusher.recovered() => {
+                            Some(crate::push::PushMessage::provider_recovered(
+                                snap,
+                                forge_config::provider_of(model),
+                                &forge_core::outage_wait::span(std::time::Duration::from_secs(
+                                    *down_secs,
+                                )),
+                            ))
+                        }
+                        _ => None,
+                    };
+                    if let (Some(msg), Some(snap)) = (outage_msg, &last_snap) {
+                        if crate::push::should_push(
+                            ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+                        ) {
+                            dispatch_push(&apns, &push, &session_id, snap, msg);
+                        } else {
+                            deferred_push.hold(msg);
+                        }
+                    }
                     if let forge_tui::PresenterEvent::Error(m) = &e {
                         turn_error = Some(m.clone());
+                        // The turn-end note is written by the session core (turn_record.rs).
                         // A turn-ending error only reached `view.transcript` (scrollback) before
                         // this — never `Snapshot::notes`, the remote toast/banner mechanism the
                         // mobile app renders (see the doc comment on `mobile/src/app/session/
@@ -679,7 +852,9 @@ async fn drive_session(
                     tool,
                     side_effect,
                     reply,
+                    suggestion,
                 } => {
+                    st.app.set_permission_suggestion(suggestion);
                     st.app.prompt = Some(
                         st.app
                             .wire_permission_prompt(&tool, &format!("{side_effect:?}")),
@@ -700,15 +875,28 @@ async fn drive_session(
             dirty = true;
             active = true;
             if let Err(e) = st.handle_input(input).await {
-                st.app.note(&format!("⚠ {e}"));
+                st.record_unrun(&format!("⚠ Input not handled: {e}"), true);
             }
         }
+        // A running turn holds the session for its whole length; awaiting the lock here froze this
+        // loop (no input, no approvals, no snapshots) until the turn ended, and a turn parked on a
+        // permission prompt never ends without one. A change is accepted at once (the caller is
+        // answered; an HTTP request or PR-watch arming must not wait out a turn), held here, and
+        // applied as soon as the session is free; the snapshot shows it when it lands. A newer
+        // change replaces an older one.
         while let Ok(change) = mode_rx.try_recv() {
-            let label = st.session.lock().await.set_temper(change.mode).label();
-            st.app.set_temper(label);
-            dirty = true;
-            active = true;
             let _ = change.reply.send(());
+            pending_mode = Some(change.mode);
+        }
+        if let Some(mode) = pending_mode {
+            if let Ok(mut session) = st.session.try_lock() {
+                let label = session.set_temper(mode).label();
+                drop(session);
+                pending_mode = None;
+                st.app.set_temper(label);
+                dirty = true;
+                active = true;
+            }
         }
         // 3. Keys queued by the drain (named keys + synthesized overlay commits) through the
         //    headless modal router — same precedence as the TUI key loop.
@@ -724,6 +912,14 @@ async fn drive_session(
             dirty = true;
             active = true;
             st.on_turn_done(g).await;
+            st.refresh_last_turn_end();
+            if let Some(panic) = st.turn_panic.take() {
+                let m = format!("the turn crashed: {panic}");
+                turn_error = Some(m.clone());
+                st.record_turn_failure(&m);
+                push_remote_note(&mut st.notes, &format!("⚠ {m}"));
+                st.app.apply(forge_tui::PresenterEvent::Error(m));
+            }
         }
         // 5. Background overlay loads (/mesh, /usage) and slash-command results (/doctor, /diff).
         if st.poll_overlay_loads() {
@@ -745,6 +941,26 @@ async fn drive_session(
                 active = true;
             }
         }
+        // 5c. A goal paused on a spent window continues once the window has reset (also after a
+        // restart: the envelope and its reset time come back with the goal).
+        if st.turn_handle.is_none() && !st.busy {
+            let now = chrono::Utc::now().timestamp();
+            if let Some(outcome) = goal_envelope::auto_resume(&st.session, &mut st.app, now).await {
+                st.handle_outcome(outcome);
+                if let Some(snap) = &last_snap {
+                    let msg = crate::push::PushMessage::goal_resumed(snap);
+                    if crate::push::should_push(
+                        ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+                    ) {
+                        dispatch_push(&apns, &push, &session_id, snap, msg);
+                    } else {
+                        deferred_push.hold(msg);
+                    }
+                }
+                dirty = true;
+                active = true;
+            }
+        }
         if active {
             last_activity.store(now_secs(), Ordering::Relaxed);
         }
@@ -754,20 +970,38 @@ async fn drive_session(
         // Mirror the queue to the store whenever it changes so a restart can restore it. Not while
         // draining: that path empties the in-memory queue on purpose, and the saved copy is what
         // the next daemon generation restores.
-        if !st.draining.load(Ordering::Acquire) && st.queued_prompts != persisted_queue {
-            match queue_store.set_session_queued_prompts(&session_id, &st.queued_prompts) {
-                Ok(()) => persisted_queue.clone_from(&st.queued_prompts),
+        let queue_now: Vec<forge_store::QueuedPrompt> = st
+            .queued_prompts
+            .iter()
+            .map(|text| forge_store::QueuedPrompt {
+                text: text.clone(),
+                had_images: st.app.has_queued_images(text),
+            })
+            .collect();
+        if !st.draining.load(Ordering::Acquire) && queue_now != persisted_queue {
+            match queue_store.set_session_queued_prompts(&session_id, &queue_now) {
+                Ok(()) => persisted_queue = queue_now,
                 Err(error) => {
                     tracing::warn!(session = %session_id, %error, "could not persist queued prompts");
                 }
             }
         }
+        let goal_now = GoalRecord::of(&st.app);
+        if goal_now != persisted_goal {
+            match queue_store.set_session_goal_state(&session_id, goal_now.as_deref()) {
+                Ok(()) => persisted_goal = goal_now,
+                Err(error) => {
+                    tracing::warn!(session = %session_id, %error, "could not persist the goal envelope");
+                }
+            }
+        }
+        dirty |= ci_watch.changed();
         if dirty || st.busy {
             st.app.busy = st.busy;
             if st.busy {
                 st.app.turn_elapsed_secs = st.busy_since.elapsed().as_secs();
             }
-            let project = forge_config::project_initialization(std::path::Path::new(&cwd));
+            let project = project_init.get(std::path::Path::new(&st.cwd));
             // A running turn holds the session; keep the last known pin state until it's free.
             if let Ok(s) = st.session.try_lock() {
                 model_pinned = s.pinned_model().is_some();
@@ -777,13 +1011,14 @@ async fn drive_session(
                 SnapshotIdentity {
                     session_id: &session_id,
                     title: &current_title,
-                    cwd: &cwd,
+                    cwd: &st.cwd,
                     worktree: worktree.as_deref(),
                     project_initialized: project.initialized,
                     project_init_hint: project.hint,
                     exposure: "daemon".to_string(),
                     model_pinned,
                     worktree_setup: setup_now.clone(),
+                    worktree_base: worktree_base.clone(),
                 },
                 st.copy_text.clone(),
                 st.prompt_seq,
@@ -795,55 +1030,37 @@ async fn drive_session(
                 .as_deref()
                 .filter(|_| !snap.busy)
                 .map(remote::ThreadError::from_message);
-            if last_snap.as_ref() != Some(&snap) {
+            snap.last_turn_end = st.last_turn_end.clone().filter(|_| !snap.busy);
+            if last_snap.as_ref() != Some(&snap) && !stream_pacer.hold(last_snap.as_ref(), &snap) {
+                stream_pacer.sent();
                 revision += 1;
                 snap.revision = revision;
                 // A fresh turn starting clears the previous turn's failure latch.
                 if snap.busy && last_snap.as_ref().is_none_or(|p| !p.busy) {
                     turn_error = None;
+                    outage_pusher.new_turn();
                 }
                 // Actionable notifications: needs-a-decision / turn-done / turn-failed
                 // transitions, debounced to zero-connected-clients, dispatched fire-and-forget
                 // across every configured channel (Web Push + native APNs) — the broadcast below
                 // never waits on delivery. Computed once regardless of which channels are
                 // configured, so native-only (no Web Push) deployments still notify.
-                if crate::push::should_push(ws_clients.load(std::sync::atomic::Ordering::Relaxed)) {
-                    if let Some(msg) = crate::push::detect_trigger(
-                        last_snap.as_ref(),
-                        &snap,
-                        turn_error.as_deref(),
-                    ) {
-                        if let Some(notifier) = &apns {
-                            // Also nudge this session's Live Activity (if any) at the same
-                            // discrete moments rather than on every streaming-token snapshot
-                            // tick — Apple throttles overly-frequent remote updates.
-                            notifier.dispatch_live_activity(
-                                session_id.clone(),
-                                crate::apns::LiveActivityContentState {
-                                    busy: snap.busy,
-                                    waiting: snap.permission_prompt.is_some()
-                                        || snap.question.is_some(),
-                                    cost_usd: snap.cost_usd,
-                                    context_tokens: snap.context_tokens,
-                                    context_limit: snap.context_limit.unwrap_or(200_000) as u64,
-                                    question: snap
-                                        .permission_prompt
-                                        .clone()
-                                        .or_else(|| snap.question.clone()),
-                                    prompt_seq: Some(snap.prompt_seq),
-                                    tasks_done: Some(
-                                        snap.tasks.iter().filter(|t| t.status == "done").count()
-                                            as u64,
-                                    ),
-                                    tasks_total: Some(snap.tasks.len() as u64),
-                                    state_since: Some(now_secs().max(0) as u64),
-                                },
-                            );
-                            notifier.dispatch_alert(msg.clone());
-                        }
-                        if let Some(notifier) = &push {
-                            notifier.dispatch(msg);
-                        }
+                let stopped = st.unfinished_stop_text();
+                if let Some(msg) = crate::push::detect_trigger(
+                    last_snap.as_ref(),
+                    &snap,
+                    turn_error.as_deref().or(stopped.as_deref()),
+                ) {
+                    // A client that is attached but unattended (phone just locked, tab left open)
+                    // would swallow this for good, so hold it for when the last client drops.
+                    let sent = crate::push::should_push(
+                        ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+                    );
+                    deferred_push.track(&msg, sent, Instant::now());
+                    if sent {
+                        dispatch_push(&apns, &push, &session_id, &snap, msg);
+                    } else {
+                        deferred_push.hold(msg);
                     }
                 }
                 last_snap = Some(snap.clone());
@@ -854,6 +1071,27 @@ async fn drive_session(
                 let _ = snapshot_tx.send(frame);
             }
             dirty = false;
+        }
+        if let (Some(text), Some(snap)) = (st.pending_unrun.take(), &last_snap) {
+            let msg = crate::push::unrun_message(snap, &text);
+            let sent =
+                crate::push::should_push(ws_clients.load(std::sync::atomic::Ordering::Relaxed));
+            deferred_push.track(&msg, sent, Instant::now());
+            if sent {
+                dispatch_push(&apns, &push, &session_id, snap, msg);
+            } else {
+                deferred_push.hold(msg);
+            }
+        }
+        if let Some(msg) = deferred_push.tick(
+            ws_clients.load(std::sync::atomic::Ordering::Relaxed),
+            last_snap.as_ref(),
+            Instant::now(),
+            push_escalate,
+        ) {
+            if let Some(snap) = &last_snap {
+                dispatch_push(&apns, &push, &session_id, snap, msg);
+            }
         }
         // Headless pacing: ~30ms keeps streaming snappy at a fraction of the TUI's frame work.
         tokio::select! {
@@ -945,10 +1183,65 @@ impl DriverState {
         ));
     }
 
+    /// A prompt or command that never became a turn: leave it in the stored history, show it to
+    /// remote clients and, when `push`, announce it as a failed turn so it is not silent.
+    fn record_unrun(&mut self, text: &str, push: bool) {
+        if let Some((store, id)) = &self.interrupt_record {
+            let stored = store
+                .next_message_seq(id)
+                .and_then(|seq| store.add_ui_note(id, seq, forge_types::Role::System, text));
+            if let Err(error) = stored {
+                tracing::warn!(session = %id, %error, "could not record a prompt that did not run");
+            }
+        }
+        push_remote_note(&mut self.notes, text);
+        self.app.note(text);
+        if push {
+            self.pending_unrun = Some(text.to_string());
+        }
+    }
+
+    /// The plain reason the last turn stopped short without an Error event (a stall, an unfinished
+    /// task list, a step limit), so its push says "failed" instead of "done".
+    fn unfinished_stop_text(&self) -> Option<String> {
+        use forge_types::StopReason as S;
+        let reason = self.app.last_stop_reason?;
+        if matches!(reason, S::FinalAnswer | S::Interrupted | S::DaemonShutdown) {
+            return None;
+        }
+        let (label, advice) = forge_core::describe_end(reason.as_str());
+        Some(format!("Turn stopped ({label}): {advice}"))
+    }
+
+    /// Re-read how the newest turn ended; a clean answer clears the banner.
+    fn refresh_last_turn_end(&mut self) {
+        let Some((store, id)) = &self.interrupt_record else {
+            return;
+        };
+        self.last_turn_end = store
+            .last_closed_turn(id)
+            .ok()
+            .flatten()
+            .and_then(|row| remote::LastTurnEnd::from_row(&row));
+    }
+
+    fn record_turn_failure(&self, error: &str) {
+        if let Some((store, id)) = &self.interrupt_record {
+            if let Err(err) = store.note_turn_failure(id, error) {
+                tracing::warn!(session = %id, error = %err, "could not record the turn failure");
+            }
+        }
+    }
+
     /// Abort the running turn; returns whether a queued prompt was started in its place.
     fn interrupt_turn(&mut self) -> bool {
         if let Some(h) = self.turn_handle.take() {
             h.abort();
+        }
+        if let Some((store, id)) = &self.interrupt_record {
+            if let Err(error) = store.note_user_interrupt(id) {
+                tracing::warn!(session = %id, %error, "could not record the interrupt");
+            }
         }
         self.turn_gen += 1;
         self.busy = false;
@@ -1232,6 +1525,52 @@ pub(super) mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn a_panicked_turn_is_reported_as_a_crash_not_a_clean_finish() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        let done_tx = state.done_tx.clone();
+        let gen = state.turn_gen;
+        state.turn_handle = Some(tokio::spawn(async move {
+            let _done = DoneGuard(done_tx, gen);
+            panic!("kaboom");
+        }));
+        while !state.turn_handle.as_ref().unwrap().is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        state.on_turn_done(gen).await;
+
+        assert_eq!(state.turn_panic.as_deref(), Some("kaboom"));
+        assert!(!state.busy);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_turn_is_not_reported_as_a_crash() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        let gen = state.turn_gen;
+        let handle = tokio::spawn(std::future::pending());
+        handle.abort();
+        state.turn_handle = Some(handle);
+
+        state.on_turn_done(gen).await;
+
+        assert_eq!(state.turn_panic, None);
+    }
+
+    #[tokio::test]
+    async fn a_clean_turn_is_not_reported_as_a_crash() {
+        let mut state = test_driver_state().await;
+        state.busy = true;
+        let gen = state.turn_gen;
+        state.turn_handle = Some(tokio::spawn(async {}));
+
+        state.on_turn_done(gen).await;
+
+        assert_eq!(state.turn_panic, None);
+    }
+
     async fn test_driver_state() -> DriverState {
         isolate_store();
         let session = super::build_session_with(
@@ -1250,6 +1589,7 @@ pub(super) mod tests {
         let steer = session.steer_handle();
         DriverState {
             steer,
+            registry: None,
             session: std::sync::Arc::new(tokio::sync::Mutex::new(session)),
             app: App::default(),
             catalog,
@@ -1261,6 +1601,9 @@ pub(super) mod tests {
             turn_gen: 10,
             last_auto_compact_gen: 0,
             turn_handle: None,
+            turn_panic: None,
+            last_turn_end: None,
+            pending_unrun: None,
             loop_state: None,
             goal_state: None,
             pending: None,
@@ -1289,6 +1632,7 @@ pub(super) mod tests {
             daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
             worktree_setup: Default::default(),
             setup_told: None,
+            interrupt_record: None,
         }
     }
 
@@ -1319,7 +1663,7 @@ pub(super) mod tests {
         drop(SessionDriverHandle {
             session_id: "test".into(),
             title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
-            cwd: String::new(),
+            spawn_cwd: String::new(),
             worktree: None,
             created_at: 0,
             snapshot_rx,
@@ -1342,6 +1686,50 @@ pub(super) mod tests {
     }
 
     #[tokio::test]
+    async fn the_handle_cwd_follows_a_session_moved_to_another_project() {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
+            remote::SnapshotFrame::new(remote::Snapshot::default()),
+        ));
+        let (input_tx, _) = tokio::sync::mpsc::channel(1);
+        let (mode_tx, _) = tokio::sync::mpsc::channel(1);
+        let mut handle = SessionDriverHandle {
+            session_id: "test".into(),
+            title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
+            spawn_cwd: "/home/me".into(),
+            worktree: None,
+            created_at: 0,
+            snapshot_rx,
+            events: std::sync::Arc::new(std::sync::Mutex::new(remote::EventLog::new(1))),
+            input_tx,
+            mode_tx,
+            last_activity: std::sync::Arc::new(AtomicI64::new(0)),
+            ws_clients: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            draining: std::sync::Arc::new(AtomicBool::new(false)),
+            daemon_shutdown: std::sync::Arc::new(AtomicBool::new(false)),
+            shutdown_tx,
+            task: std::sync::Mutex::new(None),
+            worktree_setup: Default::default(),
+            setup_control: Default::default(),
+        };
+        assert_eq!(handle.cwd(), "/home/me", "no snapshot cwd yet");
+        let moved = remote::Snapshot {
+            cwd: "/home/me/code/forge".into(),
+            ..Default::default()
+        };
+        snapshot_tx
+            .send(std::sync::Arc::new(remote::SnapshotFrame::new(moved)))
+            .unwrap();
+        assert_eq!(handle.cwd(), "/home/me/code/forge");
+        handle.worktree = Some("/repo/.forge/worktrees/w".into());
+        assert_eq!(
+            handle.cwd(),
+            "/home/me",
+            "a worktree session keeps its spawn cwd"
+        );
+    }
+
+    #[tokio::test]
     async fn timed_out_join_aborts_the_retained_driver_task() {
         let (shutdown_tx, _) = tokio::sync::watch::channel(false);
         let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(std::sync::Arc::new(
@@ -1353,7 +1741,7 @@ pub(super) mod tests {
         let handle = SessionDriverHandle {
             session_id: "test".into(),
             title: std::sync::Arc::new(std::sync::RwLock::new(String::new())),
-            cwd: String::new(),
+            spawn_cwd: String::new(),
             worktree: None,
             created_at: 0,
             snapshot_rx,
@@ -1375,6 +1763,78 @@ pub(super) mod tests {
             .lock()
             .expect("driver task lock poisoned")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_prompt_sent_while_draining_is_kept_for_the_next_daemon() {
+        let mut state = test_driver_state().await;
+        let store = state.session.lock().await.store.clone();
+        let id = state.session.lock().await.session_id().to_string();
+        state.interrupt_record = Some((store.clone(), id.clone()));
+        state.draining.store(true, Ordering::Release);
+
+        state
+            .handle_input(remote::RemoteInput::Prompt {
+                text: "fix the flaky test".into(),
+                attachments: None,
+            })
+            .await
+            .unwrap();
+
+        let stored = store.session_queued_prompts(&id).unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].text, "fix the flaky test");
+        assert!(!state.busy, "nothing ran in the dying daemon");
+        let newest = store.load_messages(&id).unwrap().pop().unwrap();
+        assert_eq!(newest.content, "⏳ queued: runs after the restart.");
+        assert!(state.pending_unrun.is_none(), "queued is not a failure");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_that_never_runs_leaves_a_stored_note_and_a_failed_push() {
+        let mut state = test_driver_state().await;
+        let store = state.session.lock().await.store.clone();
+        let id = state.session.lock().await.session_id().to_string();
+        state.interrupt_record = Some((store.clone(), id.clone()));
+
+        state.record_unrun("⚠ Prompt not run: blocked by a hook (no).", true);
+
+        let newest = store.load_messages(&id).unwrap().pop().unwrap();
+        assert!(newest.content.starts_with("⚠ Prompt not run"));
+        assert!(state.pending_unrun.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_unfinished_stop_reaches_the_push_trigger_as_a_reason() {
+        use forge_types::StopReason;
+        let mut state = test_driver_state().await;
+        state.app.last_stop_reason = Some(StopReason::FinalAnswer);
+        assert_eq!(state.unfinished_stop_text(), None);
+        state.app.last_stop_reason = Some(StopReason::Interrupted);
+        assert_eq!(state.unfinished_stop_text(), None);
+        state.app.last_stop_reason = Some(StopReason::Stalled);
+        let text = state.unfinished_stop_text().expect("a stall is not done");
+        assert!(text.starts_with("Turn stopped (no progress)"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn user_interrupt_is_recorded_so_a_restart_does_not_re_drive_it() {
+        let mut state = test_driver_state().await;
+        let store = state.session.lock().await.store.clone();
+        let id = state.session.lock().await.session_id().to_string();
+        store
+            .add_message(&id, 0, forge_types::Role::User, "go", None)
+            .unwrap();
+        state.interrupt_record = Some((store.clone(), id.clone()));
+        state.busy = true;
+        state.turn_handle = Some(tokio::spawn(std::future::pending()));
+
+        state.interrupt_turn();
+
+        assert_eq!(
+            store.session_tail_state(&id).unwrap(),
+            forge_store::TailState::UserInterrupted
+        );
     }
 
     #[tokio::test]
@@ -1431,7 +1891,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "/btw what does the lock do".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1452,7 +1912,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "/compact".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1463,7 +1923,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "then fix the test".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1496,7 +1956,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "/undo".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1516,7 +1976,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "also cover the edge case".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1535,7 +1995,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "switch to the v2 endpoint".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1604,7 +2064,7 @@ pub(super) mod tests {
             state
                 .handle_input(remote::RemoteInput::Queue {
                     text: text.into(),
-                    attachments: Vec::new(),
+                    attachments: None,
                 })
                 .await
                 .unwrap();
@@ -1667,7 +2127,7 @@ pub(super) mod tests {
         state
             .handle_input(remote::RemoteInput::Prompt {
                 text: "typed later".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -1886,6 +2346,46 @@ pub(super) mod tests {
             })
         ));
         state.turn_handle.take().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn a_contract_goal_is_validated_after_its_turn_and_completes_when_every_check_passes() {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        state
+            .submit_line("/goal --contract ship it".into(), None)
+            .await
+            .unwrap();
+        let gen = state.turn_gen;
+
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen).await;
+        let contract = state
+            .app
+            .goal
+            .as_ref()
+            .and_then(|g| g.contract.clone())
+            .expect("the approved contract is on the goal after its first turn");
+        assert_eq!(contract.assertions.len(), 3);
+        assert!(
+            state.turn_handle.is_some(),
+            "the validator runs as its own step, not the evaluator"
+        );
+
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen + 1).await;
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::Complete);
+        let contract = goal.contract.as_ref().unwrap();
+        assert!(contract.all_passed(), "{:?}", contract.results);
+        assert_eq!(contract.rounds, 1);
+        assert!(state.goal_state.is_none());
+        let snap = crate::remote::SnapGoal::from(goal);
+        assert_eq!(snap.contract.as_ref().unwrap().headline, "3/3 pass");
+        assert!(
+            GoalRecord::of(&state.app).is_some(),
+            "a finished contract goal stays on record"
+        );
     }
 
     #[tokio::test]
@@ -2132,6 +2632,183 @@ pub(super) mod tests {
         state.turn_handle.take().unwrap().abort();
     }
 
+    /// A Home-scope state that has seen three `cd <repo> &&` shell calls: returns the repo root.
+    async fn state_offering_a_project() -> (DriverState, std::path::PathBuf, tempfile::TempDir) {
+        let mut state = test_driver_state().await;
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().canonicalize().unwrap();
+        let repo = home.join("code").join("forge");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        for _ in 0..3 {
+            state.app.project_offer.observe_shell_args(
+                r#"{"command":"cd code/forge && ls"}"#,
+                &home,
+                &home,
+                &forge_tui::project_offer::find_git_root,
+            );
+        }
+        assert_eq!(
+            state.app.remote_snapshot().project_suggestion.unwrap().path,
+            repo
+        );
+        (state, repo, dir)
+    }
+
+    #[tokio::test]
+    async fn accepting_the_project_offer_reroots_the_session() {
+        let (mut state, repo, _dir) = state_offering_a_project().await;
+
+        state
+            .handle_input(remote::RemoteInput::ProjectMove {
+                path: repo.display().to_string(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(state.cwd, repo.display().to_string());
+        assert_eq!(
+            state.session.lock().await.workspace_root(),
+            repo.as_path(),
+            "the session itself moved, not just the label"
+        );
+        assert!(state.app.remote_snapshot().project_suggestion.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_stale_or_busy_project_answer_changes_nothing() {
+        let (mut state, repo, _dir) = state_offering_a_project().await;
+        let before = state.cwd.clone();
+
+        state
+            .handle_input(remote::RemoteInput::ProjectMove {
+                path: "/somewhere/else".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(state.cwd, before);
+        assert!(state.app.remote_snapshot().project_suggestion.is_some());
+
+        let turn = state.session.clone().lock_owned().await;
+        state
+            .handle_input(remote::RemoteInput::ProjectMove {
+                path: repo.display().to_string(),
+            })
+            .await
+            .unwrap();
+        drop(turn);
+        assert_eq!(
+            state.cwd, before,
+            "a running turn holds the session; no move"
+        );
+        assert!(state.app.remote_snapshot().project_suggestion.is_some());
+    }
+
+    #[tokio::test]
+    async fn plain_m_and_d_never_answer_the_project_offer() {
+        use super::super::workspace_menu::project_offer_key;
+        let (mut state, _repo, _dir) = state_offering_a_project().await;
+        for ch in ['m', 'M', 'd', 'D'] {
+            assert!(
+                !project_offer_key(&state.session, &mut state.app, KeyKind::Char(ch)),
+                "{ch} is typing, not an answer"
+            );
+        }
+        assert!(state.app.remote_snapshot().project_suggestion.is_some());
+        assert!(project_offer_key(
+            &state.session,
+            &mut state.app,
+            KeyKind::ProjectDismiss
+        ));
+        assert!(state.app.remote_snapshot().project_suggestion.is_none());
+    }
+
+    #[tokio::test]
+    async fn dismissing_the_project_offer_hides_it_for_good() {
+        let (mut state, repo, dir) = state_offering_a_project().await;
+
+        state
+            .handle_input(remote::RemoteInput::ProjectDismiss {
+                path: repo.display().to_string(),
+            })
+            .await
+            .unwrap();
+        assert!(state.app.remote_snapshot().project_suggestion.is_none());
+
+        let home = dir.path().canonicalize().unwrap();
+        for _ in 0..4 {
+            state.app.project_offer.observe_shell_args(
+                r#"{"command":"cd code/forge && ls"}"#,
+                &home,
+                &home,
+                &forge_tui::project_offer::find_git_root,
+            );
+        }
+        assert!(state.app.remote_snapshot().project_suggestion.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_busy_prompt_carries_its_image_and_file_with_the_queue_entry() {
+        let mut state = busy_state().await;
+        let dir = tempfile::tempdir().unwrap();
+        let uploads = dir.path().join(".forge").join("uploads");
+        std::fs::create_dir_all(&uploads).unwrap();
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::new(2, 2))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let image = uploads.join("shot.png");
+        std::fs::write(&image, png.into_inner()).unwrap();
+        let notes = uploads.join("notes.txt");
+        std::fs::write(&notes, "hello").unwrap();
+        state.cwd = dir.path().display().to_string();
+        let turn = state.session.clone().lock_owned().await;
+
+        within(state.handle_input(remote::RemoteInput::Prompt {
+            text: "look".into(),
+            attachments: Some(vec![
+                remote::PromptAttachment {
+                    path: image.display().to_string(),
+                    image: true,
+                },
+                remote::PromptAttachment {
+                    path: notes.display().to_string(),
+                    image: false,
+                },
+            ]),
+        }))
+        .await
+        .unwrap();
+        within(state.handle_input(remote::RemoteInput::Prompt {
+            text: "unrelated".into(),
+            attachments: Some(Vec::new()),
+        }))
+        .await
+        .unwrap();
+
+        let expected = format!("@{} @{}\nlook", image.display(), notes.display());
+        assert_eq!(
+            state.queued_prompts,
+            [expected.clone(), "unrelated".to_string()]
+        );
+        assert!(
+            state.app.has_queued_images(&expected),
+            "image waits with its prompt"
+        );
+        assert!(state.pending_mentions.is_empty());
+        drop(turn);
+        let session = state.session.clone();
+        assert!(
+            session.lock().await.take_pending_images().is_empty(),
+            "the image did not leak onto whichever turn starts next"
+        );
+        let first =
+            crate::cli::commands::run::dequeue_prompt(&mut state.queued_prompts, &mut state.app)
+                .unwrap();
+        assert_eq!(first, expected);
+        assert_eq!(state.app.take_ready_images().len(), 1);
+        state.turn_handle.take().unwrap().abort();
+    }
+
     #[tokio::test]
     async fn an_image_sent_during_a_turn_attaches_once_it_ends_without_stalling_the_driver() {
         let mut state = busy_state().await;
@@ -2167,5 +2844,352 @@ pub(super) mod tests {
         })
         .await;
         state.turn_handle.take().unwrap().abort();
+    }
+
+    /// Step a goal run the way the driver loop does until it ends or hands its goal on.
+    async fn run_goal_out(state: &mut DriverState) {
+        for _ in 0..12 {
+            let Some(gen) = state.goal_state.as_ref().map(|g| g.gen) else {
+                return;
+            };
+            state.busy = true;
+            state.on_turn_done(gen).await;
+            if let Some(handle) = state.turn_handle.take() {
+                handle.await.unwrap();
+            }
+        }
+        panic!("the goal neither ended nor was handed on");
+    }
+
+    async fn start_wedging_goal(
+        state: &mut DriverState,
+    ) -> (String, std::sync::Arc<forge_store::Store>) {
+        state.goal_state = Some(GoalState::begin(
+            &mut state.app,
+            10,
+            "finish the goal".into(),
+            Vec::new(),
+            None,
+            None,
+        ));
+        let session = state.session.lock().await;
+        (session.id().to_string(), session.store.clone())
+    }
+
+    #[tokio::test]
+    async fn a_wedged_goal_is_handed_to_a_fresh_worker_with_a_brief_it_can_search_back_from() {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        let (pred, store) = start_wedging_goal(&mut state).await;
+        for seq in 0..8 {
+            store
+                .add_message(
+                    &pred,
+                    seq,
+                    forge_types::Role::User,
+                    &format!("zebra decision {seq}"),
+                    None,
+                )
+                .unwrap();
+        }
+        store
+            .compact_session_store(
+                &pred,
+                "summary\n\n## Earlier episodes (message seq ranges)\nintro\n- seq 0-3: the zebra parser",
+                2,
+            )
+            .unwrap();
+        let expert = store.open_turn(&pred, 0).unwrap();
+        store
+            .close_turn(
+                expert,
+                "final_answer",
+                Some(r#"{"expert_consults":1,"expert_model":"codex::sol","expert_diagnosis":"the lexer loops on EOF"}"#),
+            )
+            .unwrap();
+
+        run_goal_out(&mut state).await;
+
+        let link = store
+            .relay_successor(&pred)
+            .unwrap()
+            .expect("a successor was created");
+        assert_eq!(link.reason, "wedged");
+        assert_eq!(
+            store.session_cwd(&link.successor_id).unwrap(),
+            store.session_cwd(&pred).unwrap()
+        );
+        assert_eq!(
+            store
+                .last_closed_turn(&pred)
+                .unwrap()
+                .unwrap()
+                .end_reason
+                .as_deref(),
+            Some("handed_off"),
+            "the predecessor's last turn ends handed_off"
+        );
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::HandedOff);
+        assert!(goal
+            .relay_line()
+            .unwrap()
+            .starts_with("S1 handed off (wedged) -> S2"));
+        let brief = store.relay_brief(&link.successor_id).unwrap().unwrap();
+        for needle in [
+            "Goal: finish the goal",
+            "Commits since the goal started",
+            "Open tasks",
+            "- seq 0-3: the zebra parser",
+            "The expert on call said: (codex::sol) the lexer loops on EOF",
+        ] {
+            assert!(brief.contains(needle), "{needle}\n{brief}");
+        }
+        assert!(
+            store
+                .session_goal_state(&link.successor_id)
+                .unwrap()
+                .is_some_and(|j| j.contains("finish the goal")),
+            "the successor holds the goal record"
+        );
+
+        let (found, ok) = forge_core::recall::run(
+            &store,
+            &link.successor_id,
+            &serde_json::json!({"action": "search", "query": "zebra decision"}),
+        );
+        assert!(
+            ok && found.contains("earlier session"),
+            "the successor recalls its predecessor: {found}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_relay_cap_stops_the_chain() {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        let (pred, store) = start_wedging_goal(&mut state).await;
+        let mut parent = pred.clone();
+        let mut ancestors = Vec::new();
+        for _ in 0..3 {
+            let older = store.create_session("/x", "default").unwrap();
+            ancestors.push((older.clone(), parent.clone()));
+            parent = older;
+        }
+        for (older, child) in &ancestors {
+            store.record_relay(older, child, "wedged", "", "").unwrap();
+        }
+
+        run_goal_out(&mut state).await;
+
+        assert!(
+            store.relay_successor(&pred).unwrap().is_none(),
+            "three relays already made"
+        );
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::Failed);
+        assert!(goal.reason.as_deref().unwrap_or("").contains("wedged"));
+    }
+
+    #[tokio::test]
+    async fn a_session_compacted_often_enough_hands_its_goal_on_without_wedging() {
+        let mut state = test_driver_state().await;
+        let (pred, store) = start_wedging_goal(&mut state).await;
+        for round in 0..4 {
+            for i in 0..4 {
+                let seq = store.next_message_seq(&pred).unwrap();
+                store
+                    .add_message(
+                        &pred,
+                        seq,
+                        forge_types::Role::User,
+                        &format!("r{round} m{i}"),
+                        None,
+                    )
+                    .unwrap();
+            }
+            store
+                .compact_session_store(&pred, &format!("summary {round}"), 1)
+                .unwrap();
+        }
+        assert_eq!(store.compaction_count(&pred).unwrap(), 4);
+
+        run_goal_out(&mut state).await;
+
+        let link = store
+            .relay_successor(&pred)
+            .unwrap()
+            .expect("worn out, so handed on");
+        assert_eq!(link.reason, "worn");
+        assert!(link.detail.contains("4"), "{}", link.detail);
+    }
+
+    #[tokio::test]
+    async fn a_restart_between_the_hand_off_and_the_first_turn_starts_the_goal_from_the_brief() {
+        let mut state = test_driver_state().await;
+        let (pred, store) = start_wedging_goal(&mut state).await;
+        run_goal_out(&mut state).await;
+        let link = store.relay_successor(&pred).unwrap().unwrap();
+        let brief = store.relay_brief(&link.successor_id).unwrap().unwrap();
+
+        // The next daemon generation hosts the successor: a fresh session on its id, a fresh app.
+        state
+            .session
+            .lock()
+            .await
+            .reset_resumed(&link.successor_id)
+            .unwrap();
+        let mut app = App::default();
+        goal_envelope::restore(&mut app, &store, &link.successor_id);
+        let outcome = goal_relay::successor_outcome(&state.session, &mut app).await;
+        let Some(DispatchOutcome::StartGoal { prompt, goal, .. }) = outcome else {
+            panic!("the successor starts its goal");
+        };
+        assert_eq!(prompt, brief);
+        assert_eq!(goal, "finish the goal");
+        assert!(app
+            .goal
+            .as_ref()
+            .unwrap()
+            .relay_line()
+            .unwrap()
+            .starts_with("S1 handed off (wedged)"));
+
+        // Once it has run a turn it is an ordinary session again: a restart must not replay it.
+        store
+            .add_message(&link.successor_id, 0, forge_types::Role::User, &brief, None)
+            .unwrap();
+        let mut again = App::default();
+        goal_envelope::restore(&mut again, &store, &link.successor_id);
+        assert!(goal_relay::successor_outcome(&state.session, &mut again)
+            .await
+            .is_none());
+
+        // And the predecessor, restored, still says it handed the goal on (the driver loop
+        // persists its goal record; a record that predates the hand-off says the same).
+        let record = GoalRecord::of(&state.app).expect("a handed-off goal keeps its record");
+        store.set_session_goal_state(&pred, Some(&record)).unwrap();
+        let mut old = App::default();
+        goal_envelope::restore(&mut old, &store, &pred);
+        assert_eq!(
+            old.goal.as_ref().unwrap().phase,
+            forge_tui::goal_status::GoalPhase::HandedOff
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mission_hands_each_passed_milestone_to_a_fresh_worker_and_finishes_after_a_restart()
+    {
+        use forge_tui::goal_status::GoalPhase;
+        let mut state = test_driver_state().await;
+        state
+            .submit_line("/goal --mission ship it".into(), None)
+            .await
+            .unwrap();
+        let gen = state.turn_gen;
+        let (pred, store) = {
+            let s = state.session.lock().await;
+            (s.id().to_string(), s.store.clone())
+        };
+
+        // The first turn ends, the approved mission is adopted and milestone 1 is validated.
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen).await;
+        let contract = state
+            .app
+            .goal
+            .as_ref()
+            .and_then(|g| g.contract.clone())
+            .expect("the approved mission is on the goal");
+        let mission = contract
+            .mission_ref()
+            .expect("a mission, not a flat contract");
+        assert_eq!((mission.current, mission.total()), (1, 2));
+        assert_eq!(contract.headline(), "milestone 1/2: 2 assertions");
+        assert!(state.turn_handle.is_some(), "the validator runs");
+
+        // Milestone 1 passes: the goal moves to a fresh worker on milestone 2.
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen + 1).await;
+        let link = store
+            .relay_successor(&pred)
+            .unwrap()
+            .expect("a successor took milestone 2");
+        assert_eq!(link.reason, "milestone");
+        assert_eq!(link.detail, "milestone 1 passed");
+        assert!(state.goal_state.is_none(), "this worker's run is over");
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::HandedOff);
+        let snap = crate::remote::SnapGoal::from(goal);
+        let snap_mission = snap.contract.as_ref().unwrap().mission.as_ref().unwrap();
+        assert_eq!(snap_mission.current, 2);
+        assert_eq!(snap_mission.progress, "milestone 2/2: 0/2 pass");
+        assert_eq!(snap_mission.milestones[0].state, "done");
+        assert_eq!(snap_mission.milestones[1].state, "active");
+        assert_eq!(
+            crate::remote::SnapGoal::handed_off_body(Some(&snap), "milestone"),
+            "mission: milestone 1/2 passed - the next one starts in a fresh worker"
+        );
+        let brief = store.relay_brief(&link.successor_id).unwrap().unwrap();
+        for needle in [
+            "Mission: you are on milestone 2/2 - the workspace is usable",
+            "finished its milestone (milestone 1 passed)",
+            "PASS 1. the workspace directory exists",
+            "NOT RUN 3. the working directory resolves",
+        ] {
+            assert!(brief.contains(needle), "{needle}\n{brief}");
+        }
+        assert_eq!(
+            store
+                .session_goal_state(&link.successor_id)
+                .unwrap()
+                .map(|j| {
+                    serde_json::from_str::<serde_json::Value>(&j).unwrap()["contract"]["mission"]
+                        ["current"]
+                        .clone()
+                }),
+            Some(serde_json::json!(2)),
+            "the successor's goal record is on milestone 2"
+        );
+
+        // The daemon restarts before the worker's first turn: it comes back on milestone 2 and
+        // runs the goal from the brief.
+        state
+            .session
+            .lock()
+            .await
+            .reset_resumed(&link.successor_id)
+            .unwrap();
+        let mut app = App::default();
+        goal_envelope::restore(&mut app, &store, &link.successor_id);
+        assert_eq!(
+            app.goal
+                .as_ref()
+                .unwrap()
+                .contract
+                .as_ref()
+                .unwrap()
+                .headline(),
+            "milestone 2/2: 0/2 pass"
+        );
+        state.app = app;
+        state.goal_state = None;
+        let outcome = goal_relay::successor_outcome(&state.session, &mut state.app)
+            .await
+            .expect("the successor starts its goal");
+        state.handle_outcome(outcome);
+        let gen = state.turn_gen;
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen).await;
+        state.turn_handle.take().unwrap().await.unwrap();
+        state.on_turn_done(gen + 1).await;
+
+        // The last milestone passes with the first still passing: the mission is achieved.
+        let goal = state.app.goal.as_ref().unwrap();
+        assert_eq!(goal.phase, GoalPhase::Complete, "{:?}", goal.reason);
+        let contract = goal.contract.as_ref().unwrap();
+        assert!(contract.all_passed(), "{:?}", contract.results);
+        assert_eq!(contract.results.len(), 4);
+        assert!(store.relay_successor(&link.successor_id).unwrap().is_none());
     }
 }

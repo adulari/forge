@@ -178,7 +178,7 @@ fn rm_reason(
                 .iter()
                 .any(|p| matches!(*p, "." | "./" | "*" | "./*" | ".*" | "./.*")))
         || (via_xargs
-            && paths.is_empty()
+            && paths.iter().all(|p| p.contains("{}"))
             && all_words
                 .iter()
                 .flatten()
@@ -370,6 +370,9 @@ mod tests {
             "command rm -rf ~",
             "env rm -rf ~",
             "timeout 5 rm -rf ~",
+            "timeout -s KILL 5 rm -rf ~",
+            "echo ~ | xargs -n 1 rm -rf",
+            "echo ~ | xargs -I {} rm -rf {}",
             "nice rm -rf ~",
             "cd ~ && rm -rf .",
             "cd; rm -rf *",
@@ -449,6 +452,9 @@ mod tests {
             ("run0 true", "run0"),
             ("passwd", "passwd"),
             ("timeout 5 sudo true", "sudo"),
+            ("timeout -s KILL 5 sudo true", "sudo"),
+            ("echo x | xargs -n 1 sudo rm", "sudo"),
+            ("echo x | xargs -I {} sudo rm {}", "sudo"),
             ("echo x | xargs sudo rm", "sudo"),
         ] {
             assert_eq!(privilege_escalation(cmd).as_deref(), Some(bin), "{cmd}");

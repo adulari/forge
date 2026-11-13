@@ -103,6 +103,11 @@ fn measure(cwd: &str) -> Option<GitFigures> {
     })
 }
 
+/// Lines added and removed against HEAD, measured now (not from the cache), for one-shot digests.
+pub(crate) fn unlanded_lines(cwd: &str) -> Option<(u32, u32)> {
+    measure(cwd).map(|f| (f.added, f.removed))
+}
+
 fn figures_for(cwd: &str) -> Option<GitFigures> {
     let mut cache = CACHE.lock().ok()?;
     if cache.len() > MAX_ENTRIES {

@@ -1,12 +1,13 @@
 // T3.3 contract with T3.2: the slot Chat mounts ABOVE the composer. Reads the
 // session snapshot itself (no props) and shows PermissionCard (`permission_prompt`)
-// or QuestionCard (`question`) pinned above the composer; renders nothing when
-// neither is present. Permission takes priority — the daemon does not surface
+// or QuestionCard (`question`) pinned above the composer, then the idle project
+// suggestion; renders nothing when none is present. Permission takes priority — the daemon does not surface
 // both at once, but if it ever did, an unresolved permission is the more
 // urgent decision.
 import React from "react";
 
 import { PermissionCard } from "../cards/PermissionCard";
+import { ProjectOfferCard } from "../cards/ProjectOfferCard";
 import { QuestionCard } from "../cards/QuestionCard";
 import { PlanCard } from "../review/PlanCard";
 import { resolvePlanDecision } from "../../lib/planDecision";
@@ -23,6 +24,7 @@ export default function CardSlot() {
         prompt={snapshot.permission_prompt}
         diff={snapshot.diff}
         promptSeq={snapshot.prompt_seq}
+        suggestion={snapshot.permission_suggestion ?? null}
         send={send}
         onQueueAnswer={setPendingAnswer}
       />
@@ -60,6 +62,11 @@ export default function CardSlot() {
         onQueueAnswer={setPendingAnswer}
       />
     );
+  }
+
+  // Last, so a decision the turn is blocked on always outranks a suggestion.
+  if (snapshot.project_suggestion != null) {
+    return <ProjectOfferCard suggestion={snapshot.project_suggestion} send={send} />;
   }
 
   return null;

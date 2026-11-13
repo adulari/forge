@@ -9,6 +9,7 @@
 use forge_mesh::ModelCatalog;
 
 mod recovery;
+mod verdict;
 use super::CATALOG_CACHE_MAX_AGE_SECS;
 use crate::*;
 use recovery::{
@@ -16,6 +17,7 @@ use recovery::{
     warn_unreachable, DISCOVERY_RETRY_BACKOFF, DISCOVERY_RETRY_STEADY,
     DISCOVERY_RETRY_STEADY_ROUNDS,
 };
+pub(crate) use verdict::rejection as key_rejection;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DiscoveryStatusKind {
@@ -354,6 +356,14 @@ async fn discover_provider_models(
 }
 
 pub(crate) async fn discover_catalog_with_status(
+    config: &forge_config::Config,
+) -> (forge_mesh::ModelCatalog, Vec<ProviderDiscoveryStatus>) {
+    let (catalog, statuses) = discover_catalog_with_status_inner(config).await;
+    verdict::record(&statuses);
+    (catalog, statuses)
+}
+
+async fn discover_catalog_with_status_inner(
     config: &forge_config::Config,
 ) -> (forge_mesh::ModelCatalog, Vec<ProviderDiscoveryStatus>) {
     use std::time::Duration;

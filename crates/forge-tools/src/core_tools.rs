@@ -146,6 +146,18 @@ pub(crate) fn confine(path_str: &str) -> Result<PathBuf, ToolError> {
 /// Read the previous text for a write preview. A missing path is a legitimate create, but any
 /// other read failure must suppress the preview rather than masquerading as an empty file.
 async fn read_preview_source(path: &str) -> Result<Option<String>, std::io::Error> {
+    // Checked before reading: a preview is drawn before the permission prompt, and a FIFO would
+    // block it forever while a huge log or generated file would be loaded whole just for a diff.
+    match tokio::fs::metadata(path).await {
+        Ok(meta) if !meta.is_file() || meta.len() > MAX_READABLE_FILE_BYTES => {
+            return Err(std::io::Error::other(
+                "not a regular file within the read limit",
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+        Ok(_) => {}
+    }
     match tokio::fs::read_to_string(path).await {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1166,6 +1178,30 @@ impl Tool for DeleteFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn write_preview_never_reads_a_fifo() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            read_preview_source(fifo.to_str().unwrap()),
+        )
+        .await
+        .expect("must not block on a FIFO");
+        assert!(read.is_err(), "no preview for a FIFO");
+        let missing = dir.path().join("new.txt");
+        assert!(read_preview_source(missing.to_str().unwrap())
+            .await
+            .unwrap()
+            .is_none());
+    }
     use crate::discovery_tools::{
         GlobTool, ListDirTool, SearchTool, SEARCH_LINE_MAX_BYTES, SEARCH_OUTPUT_MAX_BYTES,
     };

@@ -150,3 +150,7 @@ only when the native layer changes; do not force a native build for every CLI/de
 ## Workflow action pins
 
 The actions in `eas-update.yml` are pinned by commit SHA and bumped by Dependabot (for example `actions/setup-node` 7.1.0). A pin bump changes only the runner steps, never the app fingerprint, so it does not affect which installed builds receive an OTA.
+
+## Failure reporting
+
+`eas-update.yml` and `mobile-ota-reconcile.yml` each end with a `report` job that runs on main only (never on pull requests) on a hosted runner. It opens one tracking issue when the workflow goes red and closes it when the workflow is green again; cancelled and skipped runs are neutral. It does not change what the update or reconcile jobs publish.

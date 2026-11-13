@@ -35,6 +35,14 @@ pub enum RouteId {
     VoiceTranscribe,
     ListSkills,
     ListModels,
+    /// `GET /api/models/report?days=<n>&repo=<path>`: per-model report card from local counts. Read-only.
+    ModelReport,
+    /// `GET /api/sessions/{id}/turns?limit=<n>`: how the session's recent turns ended, with a plain
+    /// label and the way out for each. Read-only.
+    SessionTurns,
+    /// `GET /api/turns/summary?days=<n>&session=<id>`: counts by end reason and the recent turns
+    /// that did not finish. Read-only.
+    TurnsSummary,
     ReadConfig,
     UpdateConfig,
     ListHooks,
@@ -70,6 +78,9 @@ pub enum RouteId {
     Blame,
     /// `GET /api/sessions/{id}/jobs`.
     SessionJobs,
+    /// `GET /api/sessions/{id}/history/search?q=`: ranked word search over a session's whole
+    /// history, folded rows included. Read-only.
+    SessionHistorySearch,
     /// `GET /api/sessions/{id}/jobs/{job}/tail`. Two path parameters: the session id, the job id.
     SessionJobTail,
     /// `GET /api/projects/changes?cwd=`.
@@ -100,6 +111,8 @@ pub enum RouteId {
     /// Notifications the model sent with `push_notification`. Hosted push carries only a generic
     /// alert, so the app reads the real text here, inside the end-to-end encrypted bridge.
     ListNotices,
+    /// `GET /api/brief?since=<unix seconds>`: the "while you were away" digest. Read-only.
+    Brief,
     Identity,
     /// Account-sync status (`GET /api/anywhere/sync`). Read-only.
     AccountSyncStatus,
@@ -119,6 +132,65 @@ pub enum RouteId {
     /// Forge. Both of these are writes to the host's own session stores, reachable only with the
     /// `manage-providers` scope the daemon enforces.
     ContinueClaudeSession,
+    /// `GET /api/issues?session=`: the repository's GitHub issues, through the host's `gh`.
+    ListIssues,
+    /// `GET /api/issues/detail?session=&number=`: one issue's body and comments.
+    IssueDetail,
+    /// `POST /api/issues/start`: start a session on an issue and arm PR Watch for it. The host
+    /// builds the prompt from the issue text itself; the caller supplies only the issue number,
+    /// so the bridge cannot be used to hand the agent arbitrary text beyond what it could already
+    /// send with `SessionInput`.
+    StartIssue,
+    /// `POST /api/issues/drain`: queue several issues to run a few at a time under an optional
+    /// spend envelope. The caller names issue numbers and numbers only, like [`Self::StartIssue`].
+    DrainIssues,
+    /// `GET /api/issues/drains`: every backlog drain with its per-issue progress.
+    ListIssueDrains,
+    /// `POST /api/issues/drain/cancel`: stop a drain starting more issues.
+    CancelIssueDrain,
+    /// `GET /api/pr/queue`: the merge queue of every repository the host watches.
+    PrQueue,
+    /// `POST /api/pr/queue/action`: hold, release, move to the front or retry one queued PR. The
+    /// body names a session (or PR number) and one of four verbs; it carries no text the agent
+    /// would act on, and the daemon scopes it like every other `/api/pr/` write.
+    PrQueueAction,
+    /// `POST /api/pr/review/action`: let one PR merge without waiting for its review, or dismiss
+    /// one review finding. The body names a session (or PR number), one of two verbs and a
+    /// finding number; it carries no text the agent would act on.
+    PrReviewAction,
+    // Ship from the phone. The PR reads (`status`, `list`, `detail`, `diff`, `watch`, `watches`)
+    // are always bridged: they only show what `gh` already says about the host's repository.
+    // The two writes that follow commit and push the host's repository, which is what the git
+    // routes above refuse; they are bridged but the host refuses them unless its owner set
+    // `[anywhere] allow_ship_over_relay = true` (docs/features/ship-over-anywhere.md). That
+    // switch is this protocol's "own decision" for commit/push over the relay.
+    /// `GET /api/pr/status?session=`: the checked-out branch's PR with its checks rolled up.
+    PrStatus,
+    /// `GET /api/pr/list?session=[&state=]`: the repository's pull requests.
+    PrList,
+    /// `GET /api/pr/detail?session=&number=`: one PR's summary, comments, commits and files.
+    PrDetail,
+    /// `GET /api/pr/diff?session=&number=`: a PR's patch as diff rows.
+    PrDiff,
+    /// `GET /api/pr/watch?session=`: the session's PR Watch, or `null`.
+    PrWatchGet,
+    /// `GET /api/pr/watches`: every armed PR Watch.
+    PrWatches,
+    /// `POST /api/pr/watch`: arm or disarm PR Watch (`off|fix|merge`). Gated by the host's
+    /// `allow_ship_over_relay`, because `merge` hands the PR to the host's merge queue.
+    PrWatchSet,
+    /// `POST /api/sessions/{id}/ship`: commit the session's files, push, open or reuse the PR and
+    /// arm PR Watch in merge mode. Gated by the host's `allow_ship_over_relay`.
+    SessionShip,
+    /// `POST /api/sessions/{id}/done`: mark a session done (a lifecycle flag, nothing runs).
+    SessionDone,
+    /// `GET /api/sessions/{id}/ci`: the repository's workflows as a local CI plan with the last
+    /// run's result per step (docs/features/ci-parity.md). Read-only.
+    SessionCi,
+    /// `POST /api/sessions/{id}/ci/run`: run that plan on the host. It executes the repository's
+    /// own workflow commands in the session's worktree, like a turn does, so it is a session
+    /// action on the same footing as `SessionMessage`, not a ship/push route.
+    SessionCiRun,
     WebSocket,
     TerminalWebSocket,
 }
@@ -283,6 +355,43 @@ mod tests {
             .expect("encode response")
             .get("body_blob")
             .is_none());
+    }
+
+    #[test]
+    fn ship_and_pr_routes_use_stable_snake_case_names() {
+        for (route, name) in [
+            (RouteId::PrStatus, "pr_status"),
+            (RouteId::PrList, "pr_list"),
+            (RouteId::PrDetail, "pr_detail"),
+            (RouteId::PrDiff, "pr_diff"),
+            (RouteId::PrWatchGet, "pr_watch_get"),
+            (RouteId::PrWatches, "pr_watches"),
+            (RouteId::PrWatchSet, "pr_watch_set"),
+            (RouteId::SessionShip, "session_ship"),
+            (RouteId::SessionDone, "session_done"),
+        ] {
+            let encoded = serde_json::to_value(route).expect("encode route");
+            assert_eq!(encoded, name);
+            assert_eq!(
+                serde_json::from_value::<RouteId>(encoded).expect("decode route"),
+                route
+            );
+        }
+    }
+
+    #[test]
+    fn local_ci_routes_use_stable_snake_case_names() {
+        for (route, name) in [
+            (RouteId::SessionCi, "session_ci"),
+            (RouteId::SessionCiRun, "session_ci_run"),
+        ] {
+            let encoded = serde_json::to_value(route).expect("encode route");
+            assert_eq!(encoded, name);
+            assert_eq!(
+                serde_json::from_value::<RouteId>(encoded).expect("decode route"),
+                route
+            );
+        }
     }
 
     #[test]

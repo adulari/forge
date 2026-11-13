@@ -137,6 +137,32 @@ impl Store {
         Ok(())
     }
 
+    /// The id of the session's message at `seq`, when there is one.
+    pub fn message_id_at(&self, session_id: &str, seq: i64) -> Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT id FROM message WHERE session_id = ?1 AND seq = ?2",
+                (session_id, seq),
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// How many scout runs (`spawn_agents` of the built-in `scout` agent) the session made at or
+    /// after message `from_seq`.
+    pub fn count_scout_calls_since(&self, session_id: &str, from_seq: i64) -> Result<u32> {
+        let n: i64 = self.lock()?.query_row(
+            "SELECT COUNT(*) FROM tool_call t JOIN message m ON m.id = t.message_id
+             WHERE m.session_id = ?1 AND m.seq >= ?2 AND t.tool_name = 'spawn_agents'
+             AND t.args_json LIKE '%\"agent\":\"scout\"%'",
+            (session_id, from_seq),
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
     /// Number of tool calls recorded in a session, across every turn.
     pub fn session_tool_call_count(&self, session_id: &str) -> Result<u64> {
         let n: i64 = self.lock()?.query_row(
@@ -164,6 +190,56 @@ impl Store {
     /// row cannot say which summarizer returned nothing. The anchor message carries the model too:
     /// per-provider usage is grouped on `message.model`, and a NULL there made a side call count
     /// against whichever provider happened to own the neighbouring turn.
+    /// How many side-call usage rows whose label starts with `label_prefix` the session has
+    /// recorded at or after message `from_seq` (`expert/tool:` counts a turn's bridged consults).
+    pub fn count_side_calls_since(
+        &self,
+        session_id: &str,
+        label_prefix: &str,
+        from_seq: i64,
+    ) -> Result<u32> {
+        let conn = self.lock()?;
+        let like = format!("{}%", label_prefix.replace('%', ""));
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM message WHERE session_id = ?1 AND role = 'system' \
+             AND active = 0 AND seq >= ?2 AND content LIKE ?3",
+            (session_id, from_seq, like),
+            |r| r.get(0),
+        )?;
+        Ok(n.max(0) as u32)
+    }
+
+    /// The label of the session's newest side-call row whose label starts with `label_prefix`.
+    pub fn latest_side_call_label(
+        &self,
+        session_id: &str,
+        label_prefix: &str,
+    ) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let like = format!("{}%", label_prefix.replace('%', ""));
+        Ok(conn
+            .query_row(
+                "SELECT content FROM message WHERE session_id = ?1 AND role = 'system' \
+                 AND active = 0 AND content LIKE ?2 ORDER BY seq DESC LIMIT 1",
+                (session_id, like),
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    /// What the session's side calls whose label starts with `label_prefix` cost in total.
+    pub fn side_call_cost(&self, session_id: &str, label_prefix: &str) -> Result<f64> {
+        let conn = self.lock()?;
+        let like = format!("{}%", label_prefix.replace('%', ""));
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(u.cost_usd), 0.0) FROM usage u JOIN message m \
+             ON m.id = u.message_id WHERE m.session_id = ?1 AND m.role = 'system' \
+             AND m.active = 0 AND m.content LIKE ?2",
+            (session_id, like),
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn record_side_call_usage_for(
         &self,
         session_id: &str,

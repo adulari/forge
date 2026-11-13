@@ -54,7 +54,10 @@ impl PrintPresenter {
         }
     }
 
+    /// Trace and error lines carry model and tool text, so control characters are dropped before
+    /// they reach a terminal (stdout keeps the answer verbatim for scripts).
     fn trace(&mut self, text: &str) {
+        let text = &crate::app::sanitize_terminal_text(text);
         if let Some(trace) = self.trace.as_mut() {
             let _ = writeln!(trace, "{text}");
             let _ = trace.flush();
@@ -63,6 +66,7 @@ impl PrintPresenter {
 
     /// Errors are never hidden: they go to the trace when there is one, else straight to stderr.
     fn error(&mut self, text: &str) {
+        let text = &crate::app::sanitize_terminal_text(text);
         match self.trace.as_mut() {
             Some(trace) => {
                 let _ = writeln!(trace, "  ✖ {text}");
@@ -122,8 +126,26 @@ impl Presenter for PrintPresenter {
                 "    full output: {} ({} lines)",
                 output.path, output.lines
             )),
+            PresenterEvent::ExpertConsult {
+                trigger,
+                summary,
+                status,
+                ..
+            } => self.trace(&format!("  ◇ {status} ({trigger}): {summary}")),
             PresenterEvent::Warning(msg) => self.trace(&format!("  ⚠ {msg}")),
             PresenterEvent::Error(msg) => self.error(&msg),
+            PresenterEvent::ProviderOutage {
+                model,
+                since,
+                next_try,
+                until,
+                reason,
+                ..
+            } => self.trace(&crate::outage_line(&model, since, next_try, until, &reason)),
+            PresenterEvent::TurnStopped { text, .. } => self.error(&text),
+            PresenterEvent::ProviderRecovered { model, down_secs } => {
+                self.trace(&crate::recovered_line(&model, down_secs));
+            }
             PresenterEvent::ModelSearch { model, retrying } => {
                 let what = if retrying {
                     "retrying…"
@@ -319,6 +341,28 @@ mod tests {
         assert!(
             !trace.contains("All good."),
             "the answer is not repeated: {trace}"
+        );
+    }
+
+    #[test]
+    fn an_expert_consult_reaches_the_trace_and_never_stdout() {
+        let (out, trace) = (Buf::default(), Buf::default());
+        let mut p = PrintPresenter::with_writers(
+            Box::new(out.clone()),
+            Some(Box::new(trace.clone())),
+            false,
+        );
+        p.emit(PresenterEvent::ExpertConsult {
+            trigger: "stall".into(),
+            model: "codex-oauth::gpt-5.6-sol".into(),
+            summary: "reads the same file. Next: write notes.txt".into(),
+            status: "expert: codex-oauth::gpt-5.6-sol · 1 consult".into(),
+        });
+        assert_eq!(out.text(), "");
+        let trace = trace.text();
+        assert!(
+            trace.contains("expert: codex-oauth::gpt-5.6-sol · 1 consult (stall): reads the same file. Next: write notes.txt"),
+            "{trace}"
         );
     }
 

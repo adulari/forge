@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { pullResultView, worktreeNewCommand, worktreeSetupBanner } from "./worktreeCommands";
+import { pullResultView, worktreeBaseBanner, worktreeNewCommand, worktreeSetupBanner } from "./worktreeCommands";
 
 const base = { message: "", conflicts: [], handoff_prompt: null, stashed: false };
 
@@ -50,5 +50,23 @@ describe("worktreeSetupBanner", () => {
     const huge = worktreeSetupBanner({ state: "failed", message: `START${"x".repeat(9000)}END` });
     expect(huge?.message).toContain("END");
     expect(huge?.message).not.toContain("START");
+  });
+});
+
+describe("worktreeBaseBanner", () => {
+  it("is empty without a note", () => {
+    expect(worktreeBaseBanner(null)).toBeNull();
+    expect(worktreeBaseBanner("  ")).toBeNull();
+  });
+
+  it("states a fresh origin base plainly", () => {
+    const banner = worktreeBaseBanner("based on origin/main @1a2b3c4 (local main was 3 behind)");
+    expect(banner).toEqual({ tone: "neutral", message: "Worktree based on origin/main @1a2b3c4 (local main was 3 behind)" });
+  });
+
+  it("warns when origin could not be used to refresh the base", () => {
+    expect(worktreeBaseBanner("based on local main; fetch failed: timed out after 8s, 40 days since last fetch")?.tone).toBe("warn");
+    expect(worktreeBaseBanner("based on local main; it diverged from origin/main (2 behind, 1 ahead), so origin's tip was not used")?.tone).toBe("warn");
+    expect(worktreeBaseBanner("based on local main (no origin remote)")?.tone).toBe("neutral");
   });
 });

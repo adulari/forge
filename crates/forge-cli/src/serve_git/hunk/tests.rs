@@ -249,3 +249,26 @@ fn a_hunk_touching_an_unterminated_last_line_stages_and_reverts() {
     let on_disk = std::fs::read_to_string(dir.path().join("n.txt")).unwrap();
     assert_eq!(on_disk, "one\ntwo\nthree");
 }
+
+#[test]
+fn hunks_of_a_crlf_file_stage_and_revert() {
+    let dir = repo_with(&[("w.txt", "one\r\ntwo\r\nthree\r\n")]);
+    std::fs::write(dir.path().join("w.txt"), "one\r\nTWO\r\nthree\r\n").unwrap();
+    let diff = git_out(dir.path(), &["diff"]);
+    let header = diff
+        .split('\n')
+        .find(|l| l.starts_with("@@"))
+        .unwrap()
+        .trim_end()
+        .to_string();
+    let patch = validate_hunk_patch("w.txt", &header, &diff).unwrap();
+    apply_hunk(dir.path(), HunkAction::Stage, &patch).unwrap();
+    assert!(git_out(dir.path(), &["diff", "--cached"]).contains("+TWO\r"));
+
+    apply_hunk(dir.path(), HunkAction::Unstage, &patch).unwrap();
+    apply_hunk(dir.path(), HunkAction::Revert, &patch).unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("w.txt")).unwrap(),
+        b"one\r\ntwo\r\nthree\r\n"
+    );
+}

@@ -24,12 +24,14 @@ import Animated, {
   withTiming,
 } from "react-native-reanimated";
 
+import { isUnsupportedPromptFieldError } from "../../lib/api";
 import { useCreateSession, useProjects } from "../../lib/queries";
 import { durations, easings } from "../../theme/motion";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { depthDark, depthLight, radii, space } from "../../theme/tokens";
 import { formatCwd, type as typeScale, webInputTextStyle } from "../../theme/typography";
 import { ListRow } from "../ds/ListRow";
+import { useToast } from "../ds/ToastHost";
 import { SectionHeader } from "../ds/SectionHeader";
 import { Sheet } from "../ds/Sheet";
 import { useOverlayEscape } from "../../lib/useOverlayEscape";
@@ -69,6 +71,7 @@ export function QuickComposer({ visible, onClose }: QuickComposerProps) {
 
   const projects = useProjects();
   const createSession = useCreateSession();
+  const toast = useToast();
 
   const [text, setText] = useState("");
   const [cwd, setCwd] = useState("");
@@ -124,11 +127,24 @@ export function QuickComposer({ visible, onClose }: QuickComposerProps) {
   const forgeNow = () => {
     const trimmed = text.trim();
     if (!trimmed || createSession.isPending) return;
-    createSession.mutate(
-      { cwd: cwd || undefined, title: trimmed, worktree, temper },
-      { onSuccess: (res) => router.push(`/session/${res.id}`) },
-    );
-    onClose();
+    const body = { cwd: cwd || undefined, title: trimmed, worktree, temper };
+    // `prompt` starts the first turn; `title` alone only names an idle session. The composer
+    // stays open until the daemon answers, so a failure keeps the typed task.
+    void createSession
+      .mutateAsync({ ...body, prompt: trimmed })
+      .catch(async (error: unknown) => {
+        if (!isUnsupportedPromptFieldError(error)) throw error;
+        const res = await createSession.mutateAsync(body);
+        toast.show("This daemon is too old to start the task; paste it into the session.", { tone: "danger" });
+        return res;
+      })
+      .then((res) => {
+        onClose();
+        router.push(`/session/${res.id}`);
+      })
+      .catch((error: unknown) => {
+        toast.show(error instanceof Error ? error.message : "Could not start the session", { tone: "danger" });
+      });
   };
 
   const openFull = () => {

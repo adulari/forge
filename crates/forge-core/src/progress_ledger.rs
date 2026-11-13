@@ -434,6 +434,21 @@ impl ProgressLedger {
         self.stop_candidate = None;
     }
 
+    /// The expert gave a next step, so the stop that was about to fire waits one more
+    /// [`MIN_STEPS_AFTER_NUDGE`] steps for it to be tried. A stall that the expert's step does
+    /// not break stops then. Also forgets a resumed-stop match, so the model gets to try it.
+    pub(crate) fn defer_stop(&mut self) {
+        if let Episode::Nudged { lane, relapses, .. } = self.episode {
+            self.episode = Episode::Nudged {
+                lane,
+                since: 0,
+                relapses,
+            };
+        }
+        self.last_stop = None;
+        self.stop_candidate = None;
+    }
+
     /// Judge one finished tool step: the narration the model emitted with it, what its calls
     /// returned, whether a tracked task closed during it, and (called only when a step could have
     /// changed files unseen) the state of the working tree.

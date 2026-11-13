@@ -143,6 +143,13 @@ async fn run_script(script: Vec<(&str, Vec<forge_types::ToolCall>)>) -> (usize, 
 }
 
 async fn run_raw(script: Vec<(&str, Vec<forge_types::ToolCall>)>) -> (usize, usize, String) {
+    run_raw_with(script, Config::default()).await
+}
+
+async fn run_raw_with(
+    script: Vec<(&str, Vec<forge_types::ToolCall>)>,
+    config: Config,
+) -> (usize, usize, String) {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let store = Arc::new(Store::open_in_memory().unwrap());
     let capture = CapturePresenter::default();
@@ -162,7 +169,7 @@ async fn run_raw(script: Vec<(&str, Vec<forge_types::ToolCall>)>) -> (usize, usi
         }),
         ToolRegistry::with_core_tools_in(test_workspace()),
         Box::new(capture),
-        Config::default(),
+        config,
         test_workspace().to_str().expect("workspace path is UTF-8"),
     )
     .unwrap();
@@ -231,4 +238,18 @@ async fn question_to_the_user_is_not_nudged() {
     .await;
     assert_eq!((calls, nudges), (1, 0));
     assert_eq!(text, "Should I look at the layout now, or leave it?");
+}
+
+#[tokio::test]
+async fn the_redrive_can_be_switched_off() {
+    let mut config = Config::default();
+    config.harness.mid_intent_redrive = false;
+    let (calls, nudges, text) = run_raw_with(
+        vec![("Now let me look at the workspace layout:", vec![])],
+        config,
+    )
+    .await;
+    assert_eq!(nudges, 0);
+    assert_eq!(text, "Now let me look at the workspace layout:");
+    assert!(calls >= 1);
 }

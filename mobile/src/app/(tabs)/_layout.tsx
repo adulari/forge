@@ -20,7 +20,8 @@ import React from "react";
 import { Platform, StyleSheet } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { useSessions } from "../../lib/queries";
+import { waitingScoped } from "../../lib/allHostRows";
+import { useAllHostRows } from "../../lib/useAllHostRows";
 import { useTokens } from "../../theme/ThemeProvider";
 import { useBreakpoint } from "../../theme/useBreakpoint";
 
@@ -42,8 +43,7 @@ const SettingsTabIcon = makeTabIcon(Settings2);
 
 function IOSNativeTabs() {
   const tokens = useTokens();
-  const { data: sessions } = useSessions();
-  const waitingCount = sessions?.filter((session) => session.waiting).length ?? 0;
+  const waitingCount = waitingScoped(useAllHostRows()).length;
 
   return (
     <NativeTabs
@@ -81,8 +81,7 @@ function IOSNativeTabs() {
 
 function StandardTabs({ barless }: { barless: boolean }) {
   const tokens = useTokens();
-  const { data: sessions } = useSessions();
-  const waitingCount = sessions?.filter((session) => session.waiting).length ?? 0;
+  const waitingCount = waitingScoped(useAllHostRows()).length;
   const insets = useSafeAreaInsets();
   const webTabBar = Platform.OS === "web" ? { height: 58 + insets.bottom, paddingBottom: insets.bottom } : null;
 

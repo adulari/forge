@@ -17,7 +17,7 @@ const MAX_NOTES: usize = 3;
 pub(crate) fn lines(app: &App, width: u16, room: u16) -> Vec<TextLine<'static>> {
     let card = &app.update_card;
     if !card.visible(app.busy) {
-        return Vec::new();
+        return project_card(app, width, room);
     }
     let Some(offer) = card.offer_ref() else {
         return Vec::new();
@@ -145,6 +145,36 @@ pub(crate) fn lines(app: &App, width: u16, room: u16) -> Vec<TextLine<'static>> 
     out.extend(title_and_keys);
     // The keys are the point of the card: if even they do not fit, the title alone is kept.
     out.truncate(room.max(1));
+    out
+}
+
+/// The "move this session into the repo it keeps working in" card. It borrows the update card's
+/// slot: a newer Forge is the louder message, and the two never need the keys at once.
+fn project_card(app: &App, width: u16, room: u16) -> Vec<TextLine<'static>> {
+    let Some(offer) = app.project_offer.suggestion().filter(|_| !app.busy) else {
+        return Vec::new();
+    };
+    let width = width as usize;
+    let row = |text: String, style: Style| TextLine::from(Span::styled(fit(&text, width), style));
+    let title = row(
+        format!(
+            "{} This session is working in {}. Move it there? (project instructions, Lattice, changes view)",
+            g().brand,
+            offer.name
+        ),
+        styles::warn().add_modifier(Modifier::BOLD),
+    );
+    let keys = TextLine::from(
+        [Span::raw("  ")]
+            .into_iter()
+            .chain(styles::hint_row(&[
+                ("Alt+G", "Move there"),
+                ("Alt+D", "Not now"),
+            ]))
+            .collect::<Vec<_>>(),
+    );
+    let mut out = vec![title, keys];
+    out.truncate((room as usize).max(1));
     out
 }
 

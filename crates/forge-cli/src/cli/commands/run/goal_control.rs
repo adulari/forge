@@ -31,6 +31,17 @@ pub(crate) async fn goal_control_outcome(
         GoalControl::Pause => {
             if app.goal_request(GoalRequest::Pause) {
                 app.note("⏸ goal pauses after this turn — /goal resume continues it");
+            } else if let Some(envelope) = app
+                .goal
+                .as_mut()
+                .filter(|g| g.phase == GoalPhase::Paused)
+                .and_then(|g| g.envelope.as_mut())
+                .filter(|e| e.auto_resume_at().is_some())
+            {
+                envelope.held = true;
+                app.note(
+                    "⏸ auto-resume cancelled — /goal resume continues it once the window has reset",
+                );
             } else if app
                 .goal
                 .as_ref()
@@ -62,11 +73,53 @@ pub(crate) async fn goal_control_outcome(
                     Vec::new(),
                     None,
                     None,
+                    None,
+                    false,
                 )
                 .await;
             }
         }
+        GoalControl::Budget(text) => {
+            let default_provider = app
+                .goal
+                .as_ref()
+                .and_then(|g| g.envelope.as_ref())
+                .and_then(|e| match &e.spec.kind {
+                    forge_types::goal_envelope::EnvelopeKind::Quota { provider, .. } => {
+                        Some(provider.clone())
+                    }
+                    forge_types::goal_envelope::EnvelopeKind::Usd => None,
+                });
+            match forge_types::goal_envelope::EnvelopeSpec::parse(
+                &text,
+                default_provider.as_deref(),
+            ) {
+                Err(why) => app.note(&why),
+                Ok(spec) => {
+                    if app.goal_request_envelope(spec) {
+                        let meter = app
+                            .goal
+                            .as_ref()
+                            .and_then(|g| g.envelope.as_ref())
+                            .map_or_else(String::new, |e| e.meter());
+                        app.note(&format!("▤ envelope raised — {meter} (a running goal uses it from its next turn)"));
+                    } else {
+                        app.note(
+                            "no goal with an envelope to change — start one with \
+                             /goal <objective> --budget claude:20%w",
+                        );
+                    }
+                }
+            }
+        }
         GoalControl::Resume => {
+            if let Some(envelope) = app.goal.as_mut().and_then(|g| g.envelope.as_mut()) {
+                let now = chrono::Utc::now().timestamp();
+                if let Err(why) = goal_envelope::resume_gate(envelope, now) {
+                    app.note(&why);
+                    return Ok(DispatchOutcome::Handled);
+                }
+            }
             let Some(goal) = app.goal_prepare_resume() else {
                 app.note("no paused goal to resume");
                 return Ok(DispatchOutcome::Handled);
@@ -107,6 +160,16 @@ pub(crate) async fn apply_goal_requests(
         gs.budget.tokens_used.saturating_add(turn_tokens),
         gs.budget.started_at.elapsed().as_secs(),
     );
+    if let Some(spec) = app.goal_take_envelope_edit() {
+        if let Some(envelope) = gs.envelope.as_mut() {
+            envelope.retarget(spec);
+        }
+        gs.sync_envelope_budget();
+        if let Some(envelope) = &gs.envelope {
+            app.goal_envelope_sync(envelope);
+            app.note(&format!("▤ goal {}", envelope.meter()));
+        }
+    }
     if let Some(text) = app.goal_take_edit() {
         gs.goal = text.clone();
         gs.no_progress = 0;

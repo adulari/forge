@@ -53,12 +53,13 @@ fn snapshot(project: &str) -> Result<NotesSnapshot, String> {
 async fn start_thread(project: String, text: String) -> Result<String, String> {
     let token = crate::attach::resolve_token(None)
         .map_err(|e| format!("{e} Start the daemon with: forge serve --local"))?;
-    let http = reqwest::Client::builder()
+    let base = crate::attach::resolve_base_url(None);
+    let http = crate::attach::local_http_builder(&base)
         .connect_timeout(std::time::Duration::from_secs(2))
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
-    let daemon = Daemon::new(http, crate::attach::resolve_base_url(None), token);
+    let daemon = Daemon::new(http, base, token);
     let title: String = text
         .lines()
         .next()

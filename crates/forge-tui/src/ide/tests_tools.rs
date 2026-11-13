@@ -27,6 +27,7 @@ fn changes() -> ProjectChanges {
                     adds: 2,
                     dels: 1,
                     content_hash: "h1".into(),
+                    ..Default::default()
                 },
                 WireChangedFile {
                     path: "src/b.rs".into(),
@@ -34,6 +35,7 @@ fn changes() -> ProjectChanges {
                     adds: 1,
                     dels: 1,
                     content_hash: "h2".into(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -51,6 +53,7 @@ fn diff_file(path: &str, hunks: usize) -> WireDiffFile {
             .map(|i| WireHunk {
                 header: format!("@@ -{0},2 +{0},2 @@", i * 10 + 1),
                 lines: vec![" ctx".into(), "-old".into(), format!("+new{i}")],
+                ..Default::default()
             })
             .collect(),
         ..Default::default()
@@ -638,6 +641,31 @@ fn the_ship_row_says_what_it_will_do_and_runs_it() {
 }
 
 #[test]
+fn a_failed_commit_gives_the_message_back() {
+    let mut app = app();
+    press(&mut app, '4');
+    app.apply(IdeEvent::GitStatus("a".into(), Ok(git_status(1, 0))));
+    app.commit.text = "feat: keep me".into();
+    let actions = app.commit_now();
+    assert!(
+        matches!(actions.first(), Some(IdeAction::Commit { message, .. }) if message == "feat: keep me")
+    );
+    assert!(app.commit.text.is_empty(), "cleared while in flight");
+    app.apply(IdeEvent::GitOp(Err("pre-commit hook failed".into())));
+    assert_eq!(
+        app.commit.text, "feat: keep me",
+        "restored after the failure"
+    );
+
+    app.commit_now();
+    app.apply(IdeEvent::GitOp(Ok("committed".into())));
+    assert!(
+        app.commit.text.is_empty(),
+        "a successful commit keeps it cleared"
+    );
+}
+
+#[test]
 fn the_coach_line_shows_once_advances_and_is_remembered() {
     let mut app = IdeApp::new("/repo", NOW);
     app.apply(IdeEvent::Reviewed(Default::default()));
@@ -702,6 +730,7 @@ fn big_diff(lines: usize) -> WireDiffFile {
                         _ => format!("+let new_{h}_{l} = 3;"),
                     })
                     .collect(),
+                ..Default::default()
             })
             .collect(),
         ..Default::default()

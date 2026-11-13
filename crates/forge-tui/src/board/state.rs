@@ -71,6 +71,13 @@ pub struct BoardApp {
     pub(crate) detail_requested: HashSet<String>,
     /// Plan & dispatch: the dispatch list, the form, the checklist, zoom (`dispatch_state.rs`).
     pub(crate) dispatch: DispatchUi,
+    /// The "while you were away" digest, while its overlay is open.
+    pub(crate) brief: Option<super::brief::BriefCard>,
+    pub(crate) brief_cursor: usize,
+    /// The daemon host's disk/memory pressure, shown in the header while it is not fine.
+    pub(crate) pressure: Option<super::wire::PressureInfo>,
+    /// The daemon's merge queue, drawn as a section under the columns while it has rows.
+    pub(crate) queue: Vec<crate::queue_menu::QueueRow>,
 }
 
 impl BoardApp {
@@ -115,6 +122,10 @@ impl BoardApp {
             closed: HashSet::new(),
             detail_requested: HashSet::new(),
             dispatch: DispatchUi::default(),
+            brief: None,
+            brief_cursor: 0,
+            pressure: None,
+            queue: Vec::new(),
         }
     }
 
@@ -163,6 +174,23 @@ impl BoardApp {
             BoardEvent::History(id, rows) => {
                 self.history.insert(id, rows);
             }
+            BoardEvent::Brief(card) => {
+                self.brief = Some(card);
+                self.brief_cursor = 0;
+                self.focus = Focus::Brief;
+            }
+            BoardEvent::HostPressure(info) => self.pressure = info,
+            BoardEvent::Queue(rows) => self.queue = rows,
+            BoardEvent::ReclaimOffer { cwd, message } => {
+                self.confirm = Some(Confirm {
+                    kind: ConfirmKind::Reclaim(cwd),
+                    title: "Not enough disk for a new worktree".into(),
+                    body: format!("{message}\n\nReclaim now?"),
+                });
+                self.focus = Focus::Confirm;
+            }
+            BoardEvent::ShipPreview(id, Ok(lines)) => self.confirm_ship(id, &lines),
+            BoardEvent::ShipPreview(_, Err(reason)) => self.toast(ToastLevel::Error, reason),
             BoardEvent::Toast(level, text) => self.toast(level, text),
             BoardEvent::DeleteRefused(text) => {
                 self.confirm = Some(Confirm {
@@ -463,6 +491,16 @@ impl BoardApp {
         vec![BoardAction::WantDetail(id.to_string())]
     }
 
+    pub(crate) fn close_brief(&mut self) {
+        self.brief = None;
+        self.brief_cursor = 0;
+        self.focus = if self.detail_open {
+            Focus::Detail
+        } else {
+            Focus::Board
+        };
+    }
+
     pub(crate) fn close_detail(&mut self) {
         self.detail_open = false;
         self.focus = Focus::Board;
@@ -702,8 +740,9 @@ pub struct Totals {
 /// Ordering weight inside a column: the loudest signal first, waiting ahead of everything.
 fn severity(c: &Card) -> u8 {
     let base = match c.health {
-        super::model::Health::Waiting => 6,
-        super::model::Health::Stalled => 5,
+        super::model::Health::Waiting => 7,
+        super::model::Health::Stalled => 6,
+        super::model::Health::ProviderDown => 5,
         super::model::Health::Failed => 4,
         super::model::Health::Busy => 3,
         super::model::Health::Idle => 2,

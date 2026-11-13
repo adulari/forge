@@ -7,12 +7,12 @@ import type { DispatchInput, WorkflowRow, WorkflowRunRow } from "../../lib/apiPr
 import {
   useDispatchInputs,
   useDispatchWorkflow,
-  usePrAvailable,
   useRunAction,
   useRunDetail,
   useWorkflowRuns,
   useWorkflows,
 } from "../../lib/queriesPr";
+import { useDirectOnly } from "../../lib/prAccess";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { formatRelativeTime, type as typeScale } from "../../theme/typography";
@@ -255,7 +255,7 @@ function RunRow({
 export function ActionsDock({ sessionId }: { sessionId: string | null }) {
   const tokens = useTokens();
   const toast = useToast();
-  const direct = usePrAvailable();
+  const direct = useDirectOnly();
   const [pinned, togglePin] = usePinned();
   const [filter, setFilter] = useState<string | null>(null);
   const [dispatching, setDispatching] = useState<WorkflowRow | null>(null);

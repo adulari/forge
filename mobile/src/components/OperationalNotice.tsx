@@ -7,6 +7,7 @@ import { useAppVersion } from "../lib/appVersion";
 import { assessCompatibility, mismatchMessage } from "../lib/diagnostics";
 import { useDiagnostics } from "../lib/queries";
 import { PROTOCOL_VERSION } from "../lib/remoteProtocol";
+import { HostPressureBanner } from "./HostPressureBanner";
 import { UpdateBannerHost } from "./UpdateBannerHost";
 import { Banner } from "./ds/Banner";
 
@@ -67,5 +68,10 @@ export function OperationalNotice() {
       />
     );
   }
-  return <UpdateBannerHost appVersion={appVersion} />;
+  return (
+    <>
+      <HostPressureBanner />
+      <UpdateBannerHost appVersion={appVersion} />
+    </>
+  );
 }

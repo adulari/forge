@@ -371,6 +371,55 @@ CREATE TABLE IF NOT EXISTS project_todo (
 );
 CREATE INDEX IF NOT EXISTS idx_project_todo_project ON project_todo(project, position);
 
+-- Approvals learn: every answered permission prompt, keyed by project and command shape, so a
+-- shape the person keeps allowing can be offered as a standing rule. Also created in
+-- migration_0052 for pre-existing DBs.
+CREATE TABLE IF NOT EXISTS permission_decision (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project    TEXT NOT NULL,
+    tool       TEXT NOT NULL,
+    shape      TEXT NOT NULL DEFAULT '',
+    decision   TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_permission_decision_shape ON permission_decision(project, tool, shape, id);
+
+-- Key verdicts: a provider whose credential the provider itself refused (expired, revoked,
+-- out of quota), kept until a discovery or a call succeeds. Also created in migration_0054.
+CREATE TABLE IF NOT EXISTS provider_verdict (
+    provider   TEXT PRIMARY KEY,
+    status     TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT '',
+    first_seen INTEGER NOT NULL,
+    last_seen  INTEGER NOT NULL
+);
+
+-- One row per prompt-started turn and why it ended (NULL ended_at = running, or killed by a crash
+-- until the next daemon start sweeps it). Also created in migration_0056.
+CREATE TABLE IF NOT EXISTS turn (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id      TEXT NOT NULL,
+    prompt_seq      INTEGER NOT NULL,
+    started_at      INTEGER NOT NULL,
+    ended_at        INTEGER,
+    end_reason      TEXT,
+    detail_json     TEXT,
+    last_role_shape TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_turn_session_started ON turn(session_id, started_at);
+
+-- Fresh-worker hand-offs: a goal that wedged or wore its session out continues in a new session
+-- on the same worktree. Also created in migration_0058.
+CREATE TABLE IF NOT EXISTS session_relay (
+    successor_id   TEXT PRIMARY KEY,
+    predecessor_id TEXT NOT NULL,
+    reason         TEXT NOT NULL,
+    detail         TEXT NOT NULL DEFAULT '',
+    brief          TEXT NOT NULL DEFAULT '',
+    created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_relay_predecessor ON session_relay(predecessor_id);
+
 -- `forge queue`: overnight-autopilot task queue (feature: queue-autopilot). Each row is one
 -- queued headless task; a drain executes them in isolated worktrees and records the outcome
 -- back onto the row. Local machine state only — deliberately not in PORTABLE_METADATA_TABLES

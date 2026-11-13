@@ -51,10 +51,7 @@ struct ActionBody {
 async fn session_roots(state: &DaemonState, session: &str) -> Option<Vec<PathBuf>> {
     let handle = state.registry.get(session).await?;
     let mut roots = Vec::new();
-    for dir in [
-        handle.worktree.clone().unwrap_or_default(),
-        handle.cwd.clone(),
-    ] {
+    for dir in [handle.worktree.clone().unwrap_or_default(), handle.cwd()] {
         let path = PathBuf::from(dir);
         if path.is_dir() && !roots.contains(&path) {
             roots.push(path);

@@ -62,7 +62,15 @@ import { isKnownGitRepo, lastProjectStorageKey } from "../lib/projectSelection";
 import { useHomeProject } from "../lib/queriesProjects";
 import { rememberableProject } from "../lib/worktreePaths";
 import { transportForBaseUrl } from "../lib/serverTargets";
-import { useCreateSession, useProjects } from "../lib/queries";
+import { useCreateSession, useProjects, useReclaimHostSpace } from "../lib/queries";
+import {
+  canReclaimFrom,
+  createWarning,
+  floorRefusal,
+  reclaimLabel,
+  reclaimResultMessage,
+  RELAY_RECLAIM_HINT,
+} from "../lib/hostPressure";
 import { getSecureItem, setSecureItem } from "../lib/secureStore";
 import { useTheme, useTokens } from "../theme/ThemeProvider";
 import { depthDark, depthLight, gutter, hexToRgba, radii, shadowStyle, space } from "../theme/tokens";
@@ -336,6 +344,16 @@ export default function NewSessionScreen() {
     [activeServerId, create],
   );
 
+  // Set synchronously on submit and cleared only on failure: `create.isPending` turns false as
+  // soon as the create resolves, while the screen is still awaiting storage and the modal
+  // dismissal, and a second tap or Enter in that gap created a second session.
+  const submittingRef = useRef(false);
+  const [creating, setCreating] = useState(false);
+  const submitFailed = useCallback(() => {
+    submittingRef.current = false;
+    setCreating(false);
+  }, []);
+
   const handleSubmit = useCallback(() => {
     // Forge Anywhere: an offline host queues a remote job instead of creating a session
     // directly — queued jobs are immutable (cancel/replace only, never edit), so this is
@@ -359,9 +377,11 @@ export default function NewSessionScreen() {
       return;
     }
 
-    if (create.isPending) return;
+    if (create.isPending || submittingRef.current) return;
     if (worktreeMode === "existing" && !existingPath) return;
     if (worktreeMode === "new" && branchNameProblem(branch) !== null) return;
+    submittingRef.current = true;
+    setCreating(true);
     const trimmedCwd = cwd.trim();
     const trimmedTask = task.trim();
     const wt = worktreeRequest({ mode: worktreeMode, cwd: trimmedCwd, branch, existingPath });
@@ -391,7 +411,10 @@ export default function NewSessionScreen() {
       } catch (err) {
         // Any other failure (bad cwd, daemon down, ...) is a real error — `create.error` is
         // already set by the failed mutateAsync above and `serverError` below renders it.
-        if (!isUnsupportedPromptFieldError(err)) return;
+        if (!isUnsupportedPromptFieldError(err)) {
+          submitFailed();
+          return;
+        }
         // Pre-#1394 daemon: `deny_unknown_fields` rejected the whole body over `prompt`. Retry
         // without it — this is the exact request this screen always sent — then fall back to
         // the durable offline-prompt queue a live chat screen drains on its first socket-open
@@ -400,6 +423,8 @@ export default function NewSessionScreen() {
         res = await submit(baseBody);
       }
       if (incomingShareId) void consumeShare(incomingShareId);
+      const lowDisk = createWarning(res.pressure);
+      if (lowDisk) toast.show(lowDisk, { tone: "neutral" });
       if (activeServerId) {
         const project = worktreeMode === "existing" && trimmedCwd ? trimmedCwd : rememberableProject(res.cwd, trimmedCwd);
         void setSecureItem(lastProjectStorageKey(activeServerId), project);
@@ -428,10 +453,11 @@ export default function NewSessionScreen() {
         router.dismissTo(`/session/${res.id}`);
       });
     })().catch(() => {
-      // A failed retry (the non-prompt path) leaves `create.error` set by mutateAsync — nothing
-      // further to do here, the error text is already what `serverError` renders.
+      // A failed retry (the non-prompt path) leaves `create.error` set by mutateAsync — the
+      // error text is already what `serverError` renders.
+      submitFailed();
     });
-  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktreeMode, branch, existingPath, effort, temper, mcpOff, activeServerId, baseUrl, consumeShare, incomingShareId]);
+  }, [isOfflineHostQueue, queuing, hostChoice, task, toast, create, cwd, model, worktreeMode, branch, existingPath, effort, temper, mcpOff, activeServerId, baseUrl, consumeShare, incomingShareId, submitFailed]);
 
   const onClose = useCallback(() => goBackOr("/(tabs)"), []);
 
@@ -446,6 +472,18 @@ export default function NewSessionScreen() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
+  const refusal = isOfflineHostQueue ? null : floorRefusal(create.error);
+  const reclaimHost = useReclaimHostSpace();
+  const reclaimAndRetry = useCallback(async () => {
+    try {
+      const outcome = await reclaimHost.mutateAsync(cwd.trim() || undefined);
+      create.reset();
+      toast.show(`${reclaimResultMessage(outcome)} Try again.`, { tone: "neutral" });
+    } catch {
+      toast.show("Couldn't reclaim space. Try `forge worktree reclaim` on the host.", { tone: "danger" });
+    }
+  }, [reclaimHost, cwd, create, toast]);
+
   const serverError = isOfflineHostQueue
     ? queueError
     : create.error instanceof ApiError
@@ -454,7 +492,7 @@ export default function NewSessionScreen() {
         ? "create failed"
         : null;
 
-  const submitPending = isOfflineHostQueue ? queuing : create.isPending;
+  const submitPending = isOfflineHostQueue ? queuing : create.isPending || creating;
   const worktreeIncomplete =
     !isOfflineHostQueue
     && ((worktreeMode === "existing" && !existingPath) || (worktreeMode === "new" && branchNameProblem(branch) !== null));
@@ -533,6 +571,19 @@ export default function NewSessionScreen() {
           {serverError}
         </Text>
       ) : null}
+      {refusal ? (
+        canReclaimFrom(baseUrl) ? (
+          <Button
+            label={reclaimHost.isPending ? "Reclaiming..." : reclaimLabel(refusal.gate)}
+            variant="secondary"
+            disabled={reclaimHost.isPending}
+            onPress={() => void reclaimAndRetry()}
+            accessibilityLabel="Reclaim worktree space on the host"
+          />
+        ) : (
+          <Text style={[typeScale.meta, { color: tokens.ink3 }]}>{RELAY_RECLAIM_HINT}</Text>
+        )
+      ) : null}
       <View style={styles.claudeRow}>
         <Button
           label="Continue a Claude Code session…"
@@ -564,7 +615,7 @@ export default function NewSessionScreen() {
         </SafeAreaView>
 
         <Screen edges={["left", "right", "bottom"]} scroll keyboardAvoiding contentContainerStyle={styles.content}>
-          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} />
+          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={submitPending} onSubmitKey={handleSubmit} />
           {sharedCallout}
           {whereAndHow}
           <View style={styles.spacer} />
@@ -605,7 +656,7 @@ export default function NewSessionScreen() {
         </View>
 
         <ScrollView style={styles.modalScroll} keyboardShouldPersistTaps="handled">
-          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={create.isPending} onSubmitKey={handleSubmit} wide />
+          <TaskDescriptionBox value={task} onChangeText={setTask} disabled={submitPending} onSubmitKey={handleSubmit} wide />
           {sharedCallout}
           {whereAndHow}
         </ScrollView>

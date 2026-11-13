@@ -16,6 +16,7 @@ use crate::theme::styles;
 mod agent;
 mod bottom;
 mod edit;
+pub(crate) use edit::char_at_display_col;
 mod editor;
 mod files;
 mod help;

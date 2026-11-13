@@ -15,6 +15,16 @@ pub const INSTALLED_EVENT: &str = "forge://desktop-update-installed";
 
 /// The version installed in the background, kept so a UI that mounts after the event still sees it.
 static INSTALLED_VERSION: Mutex<Option<String>> = Mutex::new(None);
+/// A native background install is writing the update right now. The in-app Install button checks
+/// it, so the two never overwrite the same AppImage at once.
+static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A background download that stalls must not hold the six-hourly loop forever.
+const BACKGROUND_INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+#[tauri::command]
+pub fn desktop_update_installing() -> bool {
+    INSTALLING.load(std::sync::atomic::Ordering::Acquire)
+}
 
 #[tauri::command]
 pub fn desktop_update_installed_version() -> Option<String> {
@@ -281,16 +291,24 @@ pub fn start(app: AppHandle) {
     let policy = current_policy();
     let just_updated = std::env::var_os(JUST_UPDATED_ENV).is_some();
     if launch_gate(policy, just_updated) {
-        if let Some(main) = app.get_webview_window("main") {
-            let _ = main.hide();
+        // A window that launched hidden (autostart, "start minimized") stays hidden: the update
+        // only ever holds back a window that was about to appear.
+        let mut opened = crate::desktop_shell::started_hidden();
+        if !opened {
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.hide();
+            }
         }
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = launch_update(&app).await {
+            if let Err(error) = launch_update(&app, &mut opened).await {
                 eprintln!("forge: launch update skipped: {error}");
             }
-            // Every path ends here: the app always opens.
-            if let Some(main) = app.get_webview_window("main") {
-                let _ = main.show();
+            // Every path opens the app once. Not again after a late install: the user may have
+            // closed it to the tray while that downloaded.
+            if !opened {
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.show();
+                }
             }
             background_loop(app, policy).await;
         });
@@ -299,7 +317,9 @@ pub fn start(app: AppHandle) {
     }
 }
 
-async fn launch_update(app: &AppHandle) -> Result<(), String> {
+/// `opened` is true once the main window has been shown (or must stay hidden); this sets it when
+/// the check runs past the hold and the app opens before the answer.
+async fn launch_update(app: &AppHandle, opened: &mut bool) -> Result<(), String> {
     let started = Instant::now();
     let updater = updater(app).map_err(|e| e.to_string())?;
     let mut check = Box::pin(tokio::time::timeout(LAUNCH_CHECK_TIMEOUT, updater.check()));
@@ -311,8 +331,11 @@ async fn launch_update(app: &AppHandle) -> Result<(), String> {
             // No answer yet: show the app instead of a blank desktop and let the check finish.
             // It is on screen and may already be in use, so a release found now is installed for
             // the next launch, as the background loop does, rather than restarting under the user.
-            if let Some(main) = app.get_webview_window("main") {
-                let _ = main.show();
+            if !*opened {
+                if let Some(main) = app.get_webview_window("main") {
+                    let _ = main.show();
+                }
+                *opened = true;
             }
             let late = check
                 .await
@@ -349,17 +372,33 @@ async fn launch_update(app: &AppHandle) -> Result<(), String> {
 
 /// Download and install `update` for the next launch and tell the UI a restart is all that is left.
 async fn install_in_background(app: &AppHandle, update: tauri_plugin_updater::Update) {
+    use std::sync::atomic::Ordering;
+    if INSTALLING.swap(true, Ordering::AcqRel) {
+        return;
+    }
     eprintln!(
         "forge: installing update {} in the background",
         update.version
     );
-    if update.download_and_install(|_, _| {}, || {}).await.is_ok() {
-        #[cfg(target_os = "linux")]
-        crate::appimage_launcher::neutralize_current();
-        if let Ok(mut v) = INSTALLED_VERSION.lock() {
-            *v = Some(update.version.clone());
+    let result = tokio::time::timeout(
+        BACKGROUND_INSTALL_TIMEOUT,
+        update.download_and_install(|_, _| {}, || {}),
+    )
+    .await;
+    INSTALLING.store(false, Ordering::Release);
+    match result.unwrap_or_else(|_| Err(tauri_plugin_updater::Error::Network("timed out".into()))) {
+        Ok(()) => {
+            #[cfg(target_os = "linux")]
+            crate::appimage_launcher::neutralize_current();
+            if let Ok(mut v) = INSTALLED_VERSION.lock() {
+                *v = Some(update.version.clone());
+            }
+            let _ = app.emit(INSTALLED_EVENT, update.version.clone());
         }
-        let _ = app.emit(INSTALLED_EVENT, update.version.clone());
+        Err(error) => eprintln!(
+            "forge: update {} failed to install: {error}",
+            update.version
+        ),
     }
 }
 
@@ -392,7 +431,6 @@ fn open_splash(app: &AppHandle, version: &str) -> Option<tauri::WebviewWindow> {
 /// Every six hours: look for a release and, when there is one that is not already on disk,
 /// install it for the next launch. The restart banner is a courtesy; nothing waits on it.
 async fn background_loop(app: AppHandle, policy: Policy) {
-    let mut installed: Option<String> = None;
     loop {
         tokio::time::sleep(BACKGROUND_INTERVAL).await;
         if !policy.auto {
@@ -402,17 +440,13 @@ async fn background_loop(app: AppHandle, policy: Policy) {
         let Ok(Some(update)) = updater.check().await else {
             continue;
         };
+        // The launch path's late install records its version here too, so a release already on
+        // disk is not downloaded and written over again six hours later.
+        let installed = INSTALLED_VERSION.lock().ok().and_then(|v| v.clone());
         if !should_install(&update.version, installed.as_deref()) {
             continue;
         }
-        let version = update.version.clone();
         install_in_background(&app, update).await;
-        if INSTALLED_VERSION
-            .lock()
-            .is_ok_and(|v| v.as_deref() == Some(version.as_str()))
-        {
-            installed = Some(version);
-        }
     }
 }
 

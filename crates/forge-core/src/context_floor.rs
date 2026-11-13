@@ -407,6 +407,7 @@ impl Session {
     pub(crate) async fn prepare_step_context(&mut self, model: &str) {
         self.deliver_shell_diagnoses();
         self.settle_window_lookup(model, None).await;
+        self.checkpoint_if_landed().await;
         self.advance_floor_if_due(model, false);
         self.auto_compact_if_needed(model).await;
     }

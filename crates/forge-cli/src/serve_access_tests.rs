@@ -112,6 +112,23 @@ fn classification_maps_routes_to_scopes() {
     assert_eq!(scope(Method::PUT, "/api/workspace/file"), "workspace-write");
     assert_eq!(scope(Method::POST, "/api/git/push"), "workspace-write");
     assert_eq!(scope(Method::POST, "/api/pr/merge"), "workspace-write");
+    assert_eq!(scope(Method::GET, "/api/pr/queue"), "view");
+    assert_eq!(
+        scope(Method::POST, "/api/pr/queue/action"),
+        "workspace-write"
+    );
+    assert_eq!(
+        scope(Method::POST, "/api/pr/review/action"),
+        "workspace-write"
+    );
+    assert_eq!(
+        scope(Method::POST, "/api/sessions/s1/ship"),
+        "workspace-write"
+    );
+    assert_eq!(scope(Method::POST, "/api/pr/watch"), "workspace-write");
+    assert_eq!(scope(Method::GET, "/api/pr/watch"), "view");
+    assert_eq!(scope(Method::GET, "/api/pr/status"), "view");
+    assert_eq!(scope(Method::POST, "/api/sessions/s1/done"), "prompt");
     assert_eq!(scope(Method::GET, "/api/git/diff"), "view");
     assert_eq!(scope(Method::POST, "/api/git/hunk"), "workspace-write");
     assert_eq!(scope(Method::GET, "/api/blame"), "view");
@@ -267,6 +284,9 @@ async fn a_viewer_reads_but_gets_typed_refusals_for_everything_else() {
         ("POST", "/api/answer", "approve"),
         ("GET", "/api/terminals", "terminal"),
         ("PUT", "/api/workspace/file", "workspace-write"),
+        ("POST", "/api/sessions/s1/ship", "workspace-write"),
+        ("POST", "/api/sessions/s1/ci/run", "prompt"),
+        ("POST", "/api/pr/watch", "workspace-write"),
         ("GET", "/api/providers", "manage-providers"),
     ] {
         let (status, body) = send(&h, method, &format!("/{viewer}{path}"), None).await;
@@ -527,4 +547,26 @@ async fn dropping_the_guard_stops_the_tasks_it_owns() {
     let guard = AbortOnDrop(vec![task.abort_handle()]);
     drop(guard);
     assert!(task.await.unwrap_err().is_cancelled());
+}
+
+/// A device that may read and prompt but not write the workspace cannot ship or arm PR Watch.
+/// Relay requests reach the daemon as the owner, so this is the scope the gate enforces for every
+/// paired client token; the relay's own switch is `allow_ship_over_relay`.
+#[test]
+fn prompt_only_devices_lack_the_scope_ship_and_watch_writes_need() {
+    let prompt_only = ClientAuth {
+        id: Some("c1".into()),
+        label: "phone".into(),
+        scopes: vec![Scope::View, Scope::Prompt],
+    };
+    for path in ["/api/sessions/s1/ship", "/api/pr/watch"] {
+        match required(&Method::POST, path) {
+            Need::Scope(needed) => {
+                assert_eq!(needed, Scope::WorkspaceWrite, "{path}");
+                assert!(!prompt_only.allows(needed), "{path}");
+                assert!(ClientAuth::owner().allows(needed), "{path}");
+            }
+            Need::Owner => panic!("{path} should be scope-gated"),
+        }
+    }
 }

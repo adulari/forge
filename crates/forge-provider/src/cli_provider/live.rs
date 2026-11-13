@@ -528,7 +528,12 @@ impl LiveSession {
                         data.final_text = Some(f);
                         turn_done = true;
                     }
-                    Parsed::Error(e) => data.in_band_error = Some(e),
+                    Parsed::Error(e) => {
+                        if is_login_failure(kind.prefix(), &e) {
+                            return Err(TurnError::LoggedOut(e));
+                        }
+                        data.in_band_error = Some(e);
+                    }
                 }
             }
             if turn_done {

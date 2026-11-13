@@ -133,7 +133,7 @@ function maskToken(token: string | null): string {
 // Used by every settings sub-page at the `expanded` breakpoint.
 // -----------------------------------------------------------------------------
 
-type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/import" | "/hooks" | "/control" | "/crews" | "/session-tree" | "/workflows" | "/prs" | "/notes" | "/remote-access";
+type SettingsRoute = "/settings" | "/appearance" | "/desktop" | "/keybindings" | "/diagnostics" | "/legal" | "/anywhere" | "/anywhere/sync" | "/usage" | "/providers" | "/models" | "/plans" | "/mcp" | "/configuration" | "/skills" | "/import" | "/hooks" | "/control" | "/crews" | "/session-tree" | "/workflows" | "/prs" | "/merge-queue" | "/notes" | "/remote-access";
 
 const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] = [
   { key: "general", label: "General", href: "/settings" },
@@ -158,6 +158,7 @@ const SETTINGS_NAV_ITEMS: { key: string; label: string; href: SettingsRoute }[] 
   { key: "session-tree", label: "Session tree", href: "/session-tree" },
   { key: "workflows", label: "Workflows", href: "/workflows" },
   { key: "prs", label: "Pull requests", href: "/prs" },
+  { key: "merge-queue", label: "Merge queue", href: "/merge-queue" },
   { key: "notes", label: "Notes", href: "/notes" },
   { key: "remote-access", label: "Remote access", href: "/remote-access" },
 ];
@@ -715,6 +716,7 @@ export function SettingsScreen() {
           <NavListRow label="Session tree" onPress={() => router.push("/session-tree")} />
           <NavListRow label="Workflows" onPress={() => router.push("/workflows")} />
           <NavListRow label="Pull requests" onPress={() => router.push("/prs")} />
+          <NavListRow label="Merge queue" onPress={() => router.push("/merge-queue")} />
           <NavListRow label="Notes" onPress={() => router.push("/notes")} showSeparator={false} />
         </View>
 

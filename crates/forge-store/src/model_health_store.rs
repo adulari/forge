@@ -340,6 +340,7 @@ impl Store {
         self.clear_model_health(model)?;
         if let Some((provider, _)) = model.split_once("::") {
             self.clear_provider_health(provider)?;
+            self.clear_provider_verdict(provider)?;
         }
         Ok(())
     }

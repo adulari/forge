@@ -15,7 +15,7 @@ pub(crate) enum VerificationFamily {
 }
 
 impl VerificationFamily {
-    const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Typecheck => "typecheck",
             Self::Lint => "lint",
@@ -362,7 +362,7 @@ fn touches_only_run_artifacts(args: &str) -> bool {
 
 /// One shell command line: which family of check it is, and whether its exit status can be
 /// trusted as that check's result.
-fn classify_command(command: &str) -> VerificationObservation {
+pub(crate) fn classify_command(command: &str) -> VerificationObservation {
     match verification_family(command) {
         // POSIX pipelines report the final stage's status, and `;` / `||` chains can overwrite a
         // failed check with a later successful command. Never accept masked status as proof.
@@ -411,7 +411,7 @@ pub(crate) fn verification_family(command: &str) -> Option<VerificationFamily> {
     }
 }
 
-fn has_untrustworthy_control_flow(command: &str) -> bool {
+pub(crate) fn has_untrustworthy_control_flow(command: &str) -> bool {
     let shell = strip_heredoc_bodies(command);
     let operators = strip_quoted_literals(&shell);
     if operators.contains(';')

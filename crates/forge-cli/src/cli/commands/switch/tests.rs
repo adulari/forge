@@ -460,6 +460,38 @@ fn a_forge_turn_is_appended_after_the_current_leaf_and_only_once() {
 }
 
 #[test]
+fn a_shrunk_claude_code_transcript_gets_forge_turns_under_its_real_last_entry() {
+    let rig = Rig::new();
+    rig.export();
+    let path = rig.cc_path();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let keep: Vec<&str> = text
+        .lines()
+        .scan(false, |done, line| {
+            if *done {
+                return None;
+            }
+            *done = line.contains("\"uuid\"");
+            Some(line)
+        })
+        .collect();
+    std::fs::write(&path, format!("{}\n", keep.join("\n"))).unwrap();
+    let anchor = leaf(&path);
+    add(&rig.store, &rig.forge, Role::User, "q2");
+    add(&rig.store, &rig.forge, Role::Assistant, "a2");
+    rig.export();
+    let all = lines_of(&path);
+    let q2 = all
+        .iter()
+        .find(|e| e["message"]["content"] == "q2")
+        .unwrap();
+    assert_eq!(
+        q2["parentUuid"], anchor,
+        "chained to an entry the file still holds"
+    );
+}
+
+#[test]
 fn switching_back_and_forth_with_turns_on_each_side_never_duplicates() {
     let rig = Rig::new();
     rig.export();

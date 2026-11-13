@@ -30,6 +30,7 @@ mod error;
 mod genai_provider;
 mod genai_tool_chunk_progress;
 pub mod headroom;
+mod key_failure;
 mod mock;
 mod mock_advisor;
 mod mock_goal;
@@ -72,6 +73,7 @@ pub use genai_provider::{
     bundled_http_client, conversation_id, falls_back_to_local_ollama, is_discoverable,
     list_custom_models, list_models, set_conversation_id, GenAiProvider,
 };
+pub use key_failure::{classify_key_failure, KeyFailure};
 pub use mock::MockProvider;
 pub use tool_recovery::{
     looks_like_unexecuted_tool_call, recover_text_tool_calls, repair_malformed_args,

@@ -68,7 +68,8 @@ import { type HistoryRow } from "../../../lib/api";
 import { answerAlreadyShown, historyHasRealContentSince, shouldRetryEmptyHistory } from "../../../lib/historyMerge";
 import { shouldMountTranscript } from "../../../lib/transcriptMountGate";
 import { reconcilePendingMessages, unqueuedPendingMessages } from "../../../lib/sessionReconciler";
-import { OFFLINE_QUEUE_CAP, newClientMsgId, offlineQueueKey, parseOfflineQueue, queuedPromptInputs, type QueuedPrompt } from "../../../lib/offlineQueue";
+import { readOfflineQueue } from "../../../lib/serverStorageKeys";
+import { OFFLINE_QUEUE_CAP, newClientMsgId, offlineQueueKey, flushQueuedPrompts, parseOfflineQueue, type QueuedPrompt } from "../../../lib/offlineQueue";
 import { collapsePrompts } from "../../../lib/promptRecall";
 import { type FollowUpMode } from "../../../lib/followUp";
 import { useFollowUpSetting } from "../../../lib/useFollowUpSetting";
@@ -238,7 +239,7 @@ export function SessionChat() {
   useEffect(() => {
     offlineLoadedRef.current = false;
     let cancelled = false;
-    AsyncStorage.getItem(offlineQueueKey(baseUrl, sessionId)).then((raw) => {
+    readOfflineQueue(AsyncStorage, baseUrl, sessionId).then((raw) => {
       if (cancelled) return;
       setOfflineQueue(parseOfflineQueue(raw));
       offlineLoadedRef.current = true;
@@ -277,15 +278,17 @@ export function SessionChat() {
         clearPendingAnswer();
       }
     }
-    if (offlineQueue.length > 0) {
-      for (const input of queuedPromptInputs(offlineQueue)) send(input);
-      setOfflineQueue([]);
-    }
     // The pending interrupt is edge-only: it means "Stop pressed while offline", so it fires on the
-    // reconnect edge, not on a plain remount-while-online.
-    if (pendingInterrupt && was !== "open") {
-      send({ kind: "interrupt" });
+    // reconnect edge, not on a plain remount-while-online. It goes before the queued prompts: the
+    // Stop was meant for the turn that was running then, and sent after them it would cancel the
+    // prompt the user typed while offline instead.
+    if (pendingInterrupt) {
+      if (was !== "open") send({ kind: "interrupt" });
       setPendingInterrupt(false);
+    }
+    if (offlineQueue.length > 0) {
+      const sent = flushQueuedPrompts(offlineQueue, send);
+      if (sent > 0) setOfflineQueue((prev) => prev.slice(sent));
     }
   }, [connectionState, offlineQueue, pendingInterrupt, pendingAnswer, snapshot?.prompt_seq, snapshot?.permission_prompt, snapshot?.question, send, clearPendingAnswer]);
 
@@ -391,15 +394,18 @@ export function SessionChat() {
   const queuedKey = (snapshot?.queued ?? []).join("\u0000");
   const shownPending = useMemo(() => unqueuedPendingMessages(pendingSent, queuedKey ? queuedKey.split("\u0000") : []), [pendingSent, queuedKey]);
   useEffect(() => {
-    if (shownPending.length === 0) return;
-    const timers = shownPending.map((p) =>
+    // A prompt still in the offline queue has not been sent yet; its clock starts at the flush.
+    const offlineTexts = new Set(offlineQueue.map((q) => q.text));
+    const waiting = shownPending.filter((p) => !offlineTexts.has(p.text));
+    if (waiting.length === 0) return;
+    const timers = waiting.map((p) =>
       setTimeout(() => {
         setPendingSent((prev) => prev.filter((x) => x.id !== p.id));
         toast.show("message didn't confirm — check connection", { tone: "danger" });
       }, PENDING_SENT_TIMEOUT_MS),
     );
     return () => timers.forEach(clearTimeout);
-  }, [shownPending, toast]);
+  }, [shownPending, offlineQueue, toast]);
 
   // REST history is authoritative once populated. A successful-but-empty page is not evidence
   // that the daemon transcript is empty, so retain the snapshot tail until history has rows.
@@ -587,6 +593,7 @@ export function SessionChat() {
   // An older host sends no `activity`; a tool line is then the only sign of what the turn does.
   const activity = snapshot?.activity || undefined;
   const turnStartedAt = snapshot?.turn_started_at ?? 0;
+  const liveTail = snapshot?.live_tail ?? null;
   const activityToolLine = !activity || activity === "running tool" ? liveToolLine : null;
 
   const transcriptRows = snapshot?.transcript_rows;
@@ -794,6 +801,7 @@ export function SessionChat() {
               activity={activity}
               toolLine={activityToolLine}
               startedAt={turnStartedAt}
+              liveTail={liveTail}
             />
           );
         case "note":
@@ -811,7 +819,7 @@ export function SessionChat() {
           );
       }
     },
-    [tokens.ink2, tokens.ink3, tokens.selection, findSeq, streamStore, busy, activity, activityToolLine, turnStartedAt, onMessageLongPress, openGroups, toggleGroup],
+    [tokens.ink2, tokens.ink3, tokens.selection, findSeq, streamStore, busy, activity, activityToolLine, turnStartedAt, liveTail, onMessageLongPress, openGroups, toggleGroup],
   );
 
   // Each row reports its height so the sticky prompt bar can tell which row is at the top.
@@ -983,7 +991,7 @@ export function SessionChat() {
 
       <CardSlot />
 
-      <IntegrityDocks baseUrl={baseUrl} sessionId={sessionId} snapshot={snapshot} />
+      <IntegrityDocks baseUrl={baseUrl} sessionId={sessionId} snapshot={snapshot} onSendPrompt={(text) => handleSend(text, [])} />
 
       <SubagentStrip
         subagents={snapshot?.subagents ?? []}

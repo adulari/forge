@@ -10,20 +10,60 @@
 use super::*;
 use crate::cli::commands::run::queue_edit;
 
+const STALE_PROJECT_OFFER_NOTE: &str = "⚠ that project offer is no longer current";
+
 impl DriverState {
+    /// Whether `path` is the repository the card currently offers.
+    fn offered_project(&self, path: &str) -> bool {
+        self.app
+            .project_offer
+            .suggestion()
+            .is_some_and(|offer| offer.path == std::path::Path::new(path))
+    }
+
+    /// Re-root the session into the offered repository, as `/project` does. A running turn holds
+    /// the session lock for its whole length, so this declines (the card is only offered while
+    /// idle) rather than stall the driver loop.
+    fn project_move(&mut self, path: &str) {
+        if !self.offered_project(path) {
+            push_remote_note(&mut self.notes, STALE_PROJECT_OFFER_NOTE);
+            return;
+        }
+        let Ok(mut session) = self.session.try_lock() else {
+            push_remote_note(
+                &mut self.notes,
+                "⚠ finish the running turn, then move the session",
+            );
+            return;
+        };
+        let root = std::path::PathBuf::from(path);
+        match session.switch_project(&root) {
+            Ok(()) => {
+                self.cwd = session.workspace_scope();
+                drop(session);
+                self.app.project_offer.take_accepted();
+                self.app.follow_git_workspace(&root);
+                self.app.note(&format!("✓ now working in {}", self.cwd));
+            }
+            Err(error) => push_remote_note(
+                &mut self.notes,
+                &format!("⚠ could not move the session to {path}: {error}"),
+            ),
+        }
+    }
+
     /// One remote input — the headless mirror of `run_chat_tui`'s remote drain, minus the
     /// host-terminal cases (`/remote` toggling, host clipboard).
     pub(super) async fn handle_input(&mut self, input: remote::RemoteInput) -> Result<()> {
-        if self.draining.load(Ordering::Acquire)
-            && matches!(
-                input,
-                remote::RemoteInput::Prompt { .. }
-                    | remote::RemoteInput::Steer { .. }
-                    | remote::RemoteInput::FollowUp { .. }
-                    | remote::RemoteInput::Queue { .. }
-            )
-        {
-            return Ok(());
+        if self.draining.load(Ordering::Acquire) {
+            if let remote::RemoteInput::Prompt { text, .. }
+            | remote::RemoteInput::Steer { text }
+            | remote::RemoteInput::FollowUp { text }
+            | remote::RemoteInput::Queue { text, .. } = &input
+            {
+                self.queue_for_next_daemon(text);
+                return Ok(());
+            }
         }
         match input {
             remote::RemoteInput::Prompt { text, attachments } => {
@@ -56,14 +96,29 @@ impl DriverState {
                     }
                 }
             }
-            remote::RemoteInput::Allow { yes, seq, note } => {
+            remote::RemoteInput::ProjectMove { path } => self.project_move(&path),
+            remote::RemoteInput::ProjectDismiss { path } => {
+                if self.offered_project(&path) {
+                    self.app.project_offer.dismiss();
+                    self.app
+                        .note("ok, not offering that project again in this session");
+                } else {
+                    push_remote_note(&mut self.notes, STALE_PROJECT_OFFER_NOTE);
+                }
+            }
+            remote::RemoteInput::Allow {
+                yes,
+                seq,
+                note,
+                scope,
+            } => {
                 if !remote::prompt_seq_current(self.prompt_seq, seq) {
                     push_remote_note(
                         &mut self.notes,
                         "⚠ stale answer ignored — the prompt changed; review the current one",
                     );
                 } else if let Some((tool, reply)) = self.pending.take() {
-                    let _ = reply.send(remote::allow_reply(yes, note.as_deref()));
+                    let _ = reply.send(remote::allow_reply(yes, note.as_deref(), scope.as_deref()));
                     self.app.prompt = None;
                     if yes {
                         self.app.note(&format!("✓ remote allowed {tool}"));
@@ -216,7 +271,7 @@ impl DriverState {
     async fn handle_prompt(
         &mut self,
         text: String,
-        attachments: Vec<remote::PromptAttachment>,
+        attachments: Option<Vec<remote::PromptAttachment>>,
         steer: bool,
     ) -> Result<()> {
         // A fresh prompt starts a fresh interaction — drop stale notices + copy payload.
@@ -224,15 +279,50 @@ impl DriverState {
         self.copy_text = None;
 
         // A message-correlated attachment list (mobile upload race fix, mirrors
-        // `run_chat_tui`'s remote drain) is authoritative for THIS turn when non-empty:
-        // discard stale ambient state from an unrelated `Attach` up front (image
-        // attachment happens inside `resolve_prompt_attachments` regardless of dispatch
-        // branch, matching how it already applied ambiently); non-image mentions are
-        // threaded into `submit_line` and only actually prepended in its plain-prompt
-        // branch, exactly where the old ambient `pending_mentions` were.
-        let has_explicit_attachments = !attachments.is_empty();
+        // `run_chat_tui`'s remote drain) is authoritative for THIS turn when present, even if
+        // empty (the user may have removed an already-uploaded file from the tray): ambient
+        // state from an `Attach` is discarded. Idle, images attach to the session and the
+        // mentions are threaded into `submit_line`; busy, both travel with the queue entry so
+        // they ride the turn this prompt becomes, not whichever turn starts next.
+        let has_explicit_attachments = attachments.is_some();
         if has_explicit_attachments {
             self.pending_mentions.clear();
+        }
+
+        if self.busy {
+            let mut resolved = match attachments {
+                Some(list) => {
+                    discard_ambient_images(&self.session);
+                    load_prompt_attachments(&mut self.app, &mut self.notes, &self.cwd, list)
+                }
+                None => ResolvedAttachments {
+                    images: Vec::new(),
+                    mentions: Vec::new(),
+                },
+            };
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                // nothing to queue
+            } else if is_command_line(trimmed) {
+                self.busy_command(text).await?;
+            } else {
+                self.prompt_history.record(&text);
+                let text = prepend_attach_mentions(&mut resolved.mentions, text);
+                if steer && !resolved.images.is_empty() {
+                    self.app.note(
+                        "images can't join the running turn — queued with its image to run next",
+                    );
+                }
+                queue_prompt(
+                    &mut self.queued_prompts,
+                    &self.steer,
+                    &mut self.app,
+                    text,
+                    resolved.images,
+                    steer,
+                );
+            }
+            return Ok(());
         }
         let explicit_mentions = resolve_prompt_attachments(
             &self.session,
@@ -242,26 +332,6 @@ impl DriverState {
             attachments,
         )
         .await;
-
-        if self.busy {
-            let trimmed = text.trim();
-            if trimmed.is_empty() {
-                // nothing to queue
-            } else if is_command_line(trimmed) {
-                self.busy_command(text).await?;
-            } else {
-                self.prompt_history.record(&text);
-                queue_prompt(
-                    &mut self.queued_prompts,
-                    &self.steer,
-                    &mut self.app,
-                    text,
-                    Vec::new(),
-                    steer,
-                );
-            }
-            return Ok(());
-        }
         self.submit_line(text, has_explicit_attachments.then_some(explicit_mentions))
             .await?;
         Ok(())
@@ -311,12 +381,30 @@ impl DriverState {
                 self.prompt_history.record(&line);
                 queue_command(&mut self.queued_prompts, &mut self.app, &line);
             }
-            BusyRoute::Refuse => self
-                .app
-                .note("⏳ commands run when the turn is idle — finish or Stop first"),
+            BusyRoute::Refuse => self.app.note(
+                refuse_note(&line)
+                    .unwrap_or("⏳ commands run when the turn is idle — finish or Stop first"),
+            ),
             BusyRoute::RefuseAutonomous => self.app.note(REFUSE_AUTONOMOUS_NOTE),
         }
         Ok(())
+    }
+
+    /// A prompt that arrives while the daemon drains cannot run here. It joins the stored queue the
+    /// next daemon restores, and the person is told, instead of the prompt vanishing.
+    fn queue_for_next_daemon(&mut self, text: &str) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if let Some((store, id)) = &self.interrupt_record {
+            let mut stored = store.session_queued_prompts(id).unwrap_or_default();
+            stored.push(forge_store::QueuedPrompt::text(text));
+            if let Err(error) = store.set_session_queued_prompts(id, &stored) {
+                tracing::warn!(session = %id, %error, "could not keep a prompt sent during the drain");
+                return;
+            }
+        }
+        self.record_unrun(forge_store::QUEUED_FOR_RESTART_NOTE, false);
     }
 
     /// Run what the queue holds, in typed order, until a turn is running or the queue is empty.
@@ -326,7 +414,7 @@ impl DriverState {
             match dequeue_next(&mut self.queued_prompts, &mut self.app) {
                 Some(Queued::Command(line)) => {
                     if let Err(e) = Box::pin(self.submit_line(line, None)).await {
-                        self.app.note(&format!("⚠ {e}"));
+                        self.record_unrun(&format!("⚠ Queued command failed: {e}"), true);
                     }
                 }
                 Some(Queued::Prompt(next)) => self.start_turn(&next),
@@ -374,9 +462,10 @@ impl DriverState {
             )
             .await
             {
-                Err(reason) => self
-                    .app
-                    .note(&format!("⎇ prompt blocked by hook: {reason}")),
+                Err(reason) => self.record_unrun(
+                    &format!("⚠ Prompt not run: blocked by a hook ({reason})."),
+                    true,
+                ),
                 Ok(prompt) => self.start_turn(&prompt),
             }
             return Ok(());
@@ -426,9 +515,10 @@ impl DriverState {
         )
         .await
         {
-            Err(reason) => self
-                .app
-                .note(&format!("⎇ prompt blocked by hook: {reason}")),
+            Err(reason) => self.record_unrun(
+                &format!("⚠ Prompt not run: blocked by a hook ({reason})."),
+                true,
+            ),
             Ok(prompt) => {
                 // Expand `@path` mentions exactly like the TUI submit path.
                 attach_at_images(&prompt, Some(&hook_workspace), &self.session, &mut self.app)

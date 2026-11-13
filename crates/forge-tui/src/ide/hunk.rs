@@ -97,6 +97,8 @@ pub fn reverse_header(header: &str) -> String {
 pub fn reverse_hunk(hunk: &WireHunk) -> WireHunk {
     WireHunk {
         header: reverse_header(&hunk.header),
+        risk: String::new(),
+        reason: String::new(),
         lines: hunk
             .lines
             .iter()
@@ -146,6 +148,45 @@ pub struct UndoRecord {
     pub path: String,
     pub label: String,
     pub steps: Vec<UndoStep>,
+    /// What `steps` are sent as: `Revert` puts a reverted hunk back, `Unstage` takes an accept back.
+    pub action: HunkAction,
+    /// Files whose reviewed mark an accept set; undoing clears them.
+    pub unmark: Vec<(String, String)>,
+    /// Records undone together with this one (one accept touches many files).
+    pub with: Vec<UndoRecord>,
+}
+
+impl UndoRecord {
+    pub fn revert(session_id: String, path: String, label: String, steps: Vec<UndoStep>) -> Self {
+        Self {
+            session_id,
+            path,
+            label,
+            steps,
+            action: HunkAction::Revert,
+            unmark: Vec::new(),
+            with: Vec::new(),
+        }
+    }
+}
+
+/// The stage steps for the routine hunks of one working-tree-vs-index diff, last hunk first so
+/// the line numbers of the ones still to apply do not move. Empty for a diff a patch cannot
+/// rebuild faithfully (binary, rename, cut short). Each step doubles as its own undo: the same
+/// patch sent as `unstage`.
+pub fn routine_stage_steps(file: &WireDiffFile) -> Vec<UndoStep> {
+    if file.binary || file.skipped_lines > 0 || file.kind == "renamed" || file.orig_path.is_some() {
+        return Vec::new();
+    }
+    file.hunks
+        .iter()
+        .filter(|hunk| hunk.risk == "routine")
+        .map(|hunk| UndoStep {
+            hunk_header: hunk.header.clone(),
+            patch: build_patch(&file.path, &file.kind, hunk),
+        })
+        .rev()
+        .collect()
 }
 
 #[cfg(test)]
@@ -161,6 +202,7 @@ mod tests {
                 "+new".to_string(),
                 "+extra".to_string(),
             ],
+            ..Default::default()
         }
     }
 

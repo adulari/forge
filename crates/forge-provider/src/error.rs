@@ -53,6 +53,23 @@ pub enum ProviderError {
     NoModelAccess(String),
 }
 
+/// A failure to reach the endpoint at all (refused, unresolved, reset before a response), as
+/// opposed to an answer from it.
+pub fn is_transport_failure(text: &str) -> bool {
+    let l = text.to_lowercase();
+    [
+        "error sending request",
+        "connection refused",
+        "tcp connect error",
+        "error trying to connect",
+        "dns error",
+        "failed to lookup address",
+        "could not connect",
+    ]
+    .iter()
+    .any(|marker| l.contains(marker))
+}
+
 impl ProviderError {
     /// Whether the mesh should bench this model and fail over to another. True for
     /// rate-limit / unavailable / auth / capability / no-access; false for
@@ -123,6 +140,14 @@ impl ProviderError {
             }
             _ => None,
         }
+    }
+
+    /// Whether the endpoint could not be reached at all (refused, unresolved, reset before any
+    /// response). Such a failure comes back fast and with identical text every time, which is
+    /// what a REJECTION looks like too, so callers must not read speed or repetition as the
+    /// provider refusing the model.
+    pub fn is_unreachable(&self) -> bool {
+        matches!(self, Self::Unavailable(m) if is_transport_failure(m))
     }
 
     pub fn is_context_overflow(&self) -> bool {

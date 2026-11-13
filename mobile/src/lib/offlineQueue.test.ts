@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { buildInitialPromptQueue, newClientMsgId, offlineQueueKey, parseOfflineQueue, queuedPromptInputs } from "./offlineQueue";
+import { purgeServerStorage, readOfflineQueue, readGapAck, type KeyValueStorage } from "./serverStorageKeys";
+import { gapAckKey, legacyGapAckKey } from "./historyGap";
+import { buildInitialPromptQueue, flushQueuedPrompts, newClientMsgId, offlineQueueKey, parseOfflineQueue, queuedPromptInputs } from "./offlineQueue";
 
 describe("offline prompt queue", () => {
   it("migrates legacy strings and tolerates corrupt storage", () => {
@@ -57,10 +59,86 @@ describe("initial prompt queue (new-session -> chat handoff)", () => {
     expect(buildInitialPromptQueue("   \n\t ")).toEqual([]);
   });
 
-  it("keys the queue by baseUrl+sessionId so new-session and the chat screen agree", () => {
-    expect(offlineQueueKey("http://localhost:1234", "abc123")).toBe(
-      "forge.offlineQueue:http://localhost:1234:abc123",
-    );
-    expect(offlineQueueKey(null, "abc123")).toBe("forge.offlineQueue:unknown:abc123");
+  it("keys the queue by baseUrl+sessionId without embedding the baseUrl", () => {
+    const url = "http://localhost:1234/SECRETTOKEN";
+    const key = offlineQueueKey(url, "abc123");
+    expect(key).not.toContain("SECRETTOKEN");
+    expect(key).not.toContain("localhost");
+    expect(key).toBe(offlineQueueKey(url, "abc123"));
+    expect(key).not.toBe(offlineQueueKey("http://localhost:1234/OTHER", "abc123"));
+    expect(gapAckKey(url, "s1")).not.toContain("SECRETTOKEN");
+  });
+});
+
+function memoryStore(initial: Record<string, string>): KeyValueStorage & { data: Map<string, string> } {
+  const data = new Map(Object.entries(initial));
+  return {
+    data,
+    getItem: async (k) => data.get(k) ?? null,
+    setItem: async (k, v) => void data.set(k, v),
+    removeItem: async (k) => void data.delete(k),
+    getAllKeys: async () => [...data.keys()],
+    multiRemove: async (ks) => void ks.forEach((k) => data.delete(k)),
+  };
+}
+
+describe("token-free storage keys", () => {
+  const url = "http://h:1/SECRETTOKEN";
+
+  it("moves a legacy queue and ack entry to the new key and deletes the old one", async () => {
+    const legacyQueue = `forge.offlineQueue:${url}:s1`;
+    const store = memoryStore({ [legacyQueue]: '["hi"]', [legacyGapAckKey(url, "s1")]: "3" });
+    expect(await readOfflineQueue(store, url, "s1")).toBe('["hi"]');
+    expect(await readGapAck(store, url, "s1")).toBe("3");
+    expect(store.data.get(offlineQueueKey(url, "s1"))).toBe('["hi"]');
+    expect(store.data.get(gapAckKey(url, "s1"))).toBe("3");
+    expect([...store.data.keys()].some((k) => k.includes("SECRETTOKEN"))).toBe(false);
+  });
+
+  it("keeps the newer entry when both exist and still deletes the legacy one", async () => {
+    const store = memoryStore({ [`forge.offlineQueue:${url}:s1`]: "old", [offlineQueueKey(url, "s1")]: "new" });
+    expect(await readOfflineQueue(store, url, "s1")).toBe("new");
+    expect(store.data.size).toBe(1);
+  });
+
+  it("purges only the removed server's entries, new and legacy", async () => {
+    const other = "http://h:1/OTHER";
+    const store = memoryStore({
+      [offlineQueueKey(url, "s1")]: "a",
+      [gapAckKey(url, "s2")]: "1",
+      [`forge.offlineQueue:${url}:s3`]: "legacy",
+      [legacyGapAckKey(url, "s3")]: "1",
+      [offlineQueueKey(other, "s1")]: "keep",
+      unrelated: "keep",
+    });
+    await purgeServerStorage(store, url);
+    expect([...store.data.keys()].sort()).toEqual([offlineQueueKey(other, "s1"), "unrelated"].sort());
+  });
+});
+
+describe("flushQueuedPrompts", () => {
+  const queue = [
+    { text: "one", attachments: [], clientMsgId: "a" },
+    { text: "two", attachments: [], clientMsgId: "b" },
+    { text: "three", attachments: [], clientMsgId: "c" },
+  ];
+
+  it("sends everything in order when the socket takes it", () => {
+    const sent: string[] = [];
+    expect(flushQueuedPrompts(queue, (input) => (sent.push((input as { text: string }).text), true))).toBe(3);
+    expect(sent).toEqual(["one", "two", "three"]);
+  });
+
+  it("stops at the first refused send so the rest stay queued in order", () => {
+    const sent: string[] = [];
+    const n = flushQueuedPrompts(queue, (input) => {
+      const text = (input as { text: string }).text;
+      if (text === "two") return false;
+      sent.push(text);
+      return true;
+    });
+    expect(n).toBe(1);
+    expect(sent).toEqual(["one"]);
+    expect(queue.slice(n).map((q) => q.text)).toEqual(["two", "three"]);
   });
 });

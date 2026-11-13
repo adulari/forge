@@ -15,6 +15,8 @@ import React, {
 
 import { isTauri } from "./platform";
 import { getIdentity, probeConnection } from "./api";
+import AsyncStorage from "@react-native-async-storage/async-storage";
+import { purgeServerStorage } from "./serverStorageKeys";
 import { deleteSecureItem, getSecureItem, setSecureItem } from "./secureStore";
 import { parseConnectUrl } from "./connectUrl";
 import { applyServerIdentity, reconcileAnywhereHosts, repointMovedDaemons, selectActiveServerAfterSync, type ManagedAnywhereHost, type StoredServer } from "./serverTargets";
@@ -168,6 +170,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (repointed === current) return;
         const next = [...repointed];
         await saveServers(next);
+        for (const server of next) void registerPin(server.baseUrl, server.fingerprint);
         setServers(next);
       }).catch(() => {
         // discovery is best-effort; the socket keeps retrying the stored address regardless
@@ -252,8 +255,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async (id: string): Promise<void> => {
       await enqueueMutation(serverMutationQueue, async () => {
         const current = await loadServers();
+        const removed = current.find((s) => s.id === id);
         const next = current.filter((s) => s.id !== id);
         await saveServers(next);
+        if (removed) await purgeServerStorage(AsyncStorage, removed.baseUrl).catch(() => undefined);
         const active = await getSecureItem(ACTIVE_SERVER_KEY);
         let nextActive = active;
         if (active === id) {

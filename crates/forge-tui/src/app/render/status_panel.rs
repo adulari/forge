@@ -275,6 +275,12 @@ fn session_row(app: &App) -> Row {
     ("SESSION", joined(parts))
 }
 
+fn expert_row(app: &App) -> Option<Row> {
+    let status = app.expert_status.as_deref()?;
+    let value = status.strip_prefix("expert: ").unwrap_or(status);
+    Some(("EXPERT", vec![muted(value.to_string())]))
+}
+
 fn quotas_row(app: &App) -> Row {
     let o = &app.usage_overlay;
     let mut parts = Vec::new();
@@ -347,9 +353,9 @@ pub(crate) fn rows(app: &App) -> Vec<Row> {
     ]
     .into_iter()
     .chain(activity_row(app))
+    .chain([session_row(app), quotas_row(app)])
+    .chain(expert_row(app))
     .chain([
-        session_row(app),
-        quotas_row(app),
         mcp_row(app),
         (
             "VERSION",

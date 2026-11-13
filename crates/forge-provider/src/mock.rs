@@ -84,6 +84,12 @@ impl Provider for MockProvider {
         if mock_advisor::is_advisor_review(messages) {
             return Ok(resp(&mock_advisor::reply(messages), vec![], 120, 40));
         }
+        if mock_goal::is_mission_draft(messages) {
+            return Ok(resp(&mock_goal::mission(), vec![], 120, 60));
+        }
+        if mock_goal::is_contract_draft(messages) {
+            return Ok(resp(&mock_goal::contract(), vec![], 120, 60));
+        }
         if mock_goal::is_goal_evaluation(messages) {
             return Ok(resp(&mock_goal::verdict(messages), vec![], 120, 40));
         }
@@ -142,6 +148,35 @@ impl Provider for MockProvider {
                         && c.args.get("path").and_then(Value::as_str) == Some("mock-note-again.txt")
                 })
         });
+
+        // `mock:shell <command>` → run that one command through the `shell` tool, then answer.
+        // One call per user turn: the transcript after the last user message tells whether it ran.
+        if let Some(command) = shell_command_of(last_user) {
+            let ran = messages
+                .iter()
+                .rev()
+                .take_while(|m| m.role != Role::User)
+                .any(|m| {
+                    m.role == Role::Assistant && m.tool_calls.iter().any(|c| c.name == "shell")
+                });
+            if ran {
+                let content = "Ran the command.";
+                stream_words(content, on_event).await;
+                return Ok(resp(content, vec![], 42, 18));
+            }
+            let content = "Running it now.";
+            stream_words(content, on_event).await;
+            return Ok(resp(
+                content,
+                vec![ToolCall {
+                    id: new_id(),
+                    name: "shell".to_string(),
+                    args: json!({ "command": command }),
+                }],
+                30,
+                12,
+            ));
+        }
 
         // Planning turn → render the plan card, then stop for approval.
         if wants_plan {
@@ -374,9 +409,38 @@ impl Provider for MockProvider {
     }
 }
 
+/// The command after a `mock:shell` trigger in a user message, as typed.
+fn shell_command_of(user_text: &str) -> Option<String> {
+    let at = user_text.to_lowercase().find("mock:shell")?;
+    let command = user_text[at + "mock:shell".len()..].trim();
+    (!command.is_empty()).then(|| command.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn mock_shell_runs_the_typed_command_once_per_turn() {
+        let p = MockProvider;
+        let mut msgs = vec![Message::user("mock:shell cd ~/code/forge && ls")];
+        let res = p.complete("mock", &msgs, &[], &mut |_| {}).await.unwrap();
+        assert_eq!(res.tool_calls[0].name, "shell");
+        assert_eq!(res.tool_calls[0].args["command"], "cd ~/code/forge && ls");
+        msgs.push(Message::assistant_tool_calls(
+            "Running it now.",
+            res.tool_calls,
+        ));
+        msgs.push(Message::new(Role::Tool, "ok"));
+        let res = p.complete("mock", &msgs, &[], &mut |_| {}).await.unwrap();
+        assert!(!res.wants_tools());
+        msgs.push(Message::user("mock:shell cd ~/code/forge && ls"));
+        let res = p.complete("mock", &msgs, &[], &mut |_| {}).await.unwrap();
+        assert!(
+            res.wants_tools(),
+            "a second user turn runs the command again"
+        );
+    }
 
     #[tokio::test]
     async fn first_turn_requests_a_tool() {

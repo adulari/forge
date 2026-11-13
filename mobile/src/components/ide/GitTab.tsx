@@ -5,6 +5,8 @@ import React, { useCallback, useState } from "react";
 import { StyleSheet, Text, View , ScrollView } from "react-native";
 
 import { useAuth } from "../../lib/auth";
+import { openShip } from "../../lib/shipRequest";
+import { useProjectActions } from "../../lib/queriesProjectActions";
 import { useCommitAction } from "../../lib/commitAction";
 import { useDiscardPaths, useGenerateCommitMessage, usePushGit } from "../../lib/gitActions";
 import { useCommitStaged, useGitStatus, useStagePaths, useUnstagePaths } from "../../lib/queries";
@@ -21,7 +23,10 @@ import { GitSyncBar } from "../git/GitSyncBar";
 import { type CommitAction, type DiscardKind, classifyGitStatusError, discardMessage, isGitReviewReadOnly, isGitReviewSupported } from "../git/gitReviewSupport";
 import { useIde } from "./IdeContext";
 import { IdeTextButton } from "./ideUi";
-import { shipHint, shipLabel, shipSteps, type ShipStep } from "./shipModel";
+import { PullRequestSheet } from "../session/PullRequestSheet";
+import { usePrAvailable, usePrStatus } from "../../lib/queriesPr";
+import { checkActions, checkState } from "./checksModel";
+import { failedChecksWarning, postShipAction, shipHint, shipLabel, shipSteps, type ShipStep } from "./shipModel";
 
 export function GitTab() {
   const { panelSessionId } = useIde();
@@ -48,6 +53,10 @@ function GitColumn({ sessionId }: { sessionId: string }) {
   const [commitAction, setCommitAction] = useCommitAction();
   const [manual, setManual] = useState(false);
   const [shipping, setShipping] = useState<ShipStep | null>(null);
+  const [prVisible, setPrVisible] = useState(false);
+  const prDirect = usePrAvailable();
+  const prStatus = usePrStatus(pushedTo && prDirect ? sessionId : null);
+  const actionsQuery = useProjectActions(sessionId);
   const [pending, setPending] = useState<{ paths: string[]; kind: DiscardKind } | null>(null);
 
   const select = useCallback((selection: GitSelection) => openChange(sessionId, selection.path), [openChange, sessionId]);
@@ -81,6 +90,8 @@ function GitColumn({ sessionId }: { sessionId: string }) {
   };
 
   const unstagedPaths = [...data.unstaged, ...data.untracked].map((row) => row.path);
+  const postShip = postShipAction(pushedTo != null, prStatus.data?.pr);
+  const failedChecks = failedChecksWarning(checkActions(actionsQuery.data?.actions ?? []).filter((action) => checkState(action) === "fail").map((action) => action.name));
   const steps = shipSteps({ staged: data.staged.length, unstaged: unstagedPaths.length, hasMessage: message.trim().length > 0, canPush: data.has_remote !== false });
   const ship = async () => {
     setPushedTo(null);
@@ -150,6 +161,7 @@ function GitColumn({ sessionId }: { sessionId: string }) {
             <Text numberOfLines={2} style={[typeScale.meta, { color: shipping ? tokens.ink : tokens.ink3 }]}>
               {shipping ? `Now: ${shipping === "message" ? "writing a message" : shipping === "stage" ? "staging" : shipping === "commit" ? "committing" : "pushing"}…` : pushedTo ? `Shipped to ${pushedTo}.` : commit.data ? `Committed ${commit.data.sha.slice(0, 7)}.` : shipHint(steps)}
             </Text>
+            {failedChecks && !shipping ? <Text numberOfLines={1} style={[typeScale.meta, { color: tokens.danger }]}>{failedChecks}</Text> : null}
             {message.trim() ? (
               <Text numberOfLines={1} style={[typeScale.monoMeta, { color: tokens.ink2 }]}>
                 {message.split("\n")[0]}
@@ -157,6 +169,10 @@ function GitColumn({ sessionId }: { sessionId: string }) {
             ) : null}
           </View>
           <View style={styles.shipButtons}>
+            {postShip.kind !== "none" && !shipping ? (
+              <IdeTextButton label={postShip.kind === "view-pr" ? `View PR #${postShip.number}` : "Open pull request"} onPress={() => setPrVisible(true)} />
+            ) : null}
+            {prDirect ? <IdeTextButton label="Ship to PR" onPress={() => openShip(sessionId)} /> : null}
             <IdeTextButton label={manual ? "Hide message" : "Edit message"} onPress={() => setManual((value) => !value)} />
             <IdeTextButton
               label={shipLabel(steps)}
@@ -194,6 +210,7 @@ function GitColumn({ sessionId }: { sessionId: string }) {
           pushedTo={pushedTo}
         />
       ) : null}
+      <PullRequestSheet visible={prVisible} onClose={() => setPrVisible(false)} sessionId={sessionId} />
       <ConfirmDialog
         visible={pending != null}
         title={copy?.title ?? "Discard changes?"}

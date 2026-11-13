@@ -161,9 +161,17 @@ export interface FleetRowState {
   busy: boolean;
   waiting: boolean;
   last_turn_outcome?: "success" | "failed" | null;
+  /** Which paired host the row came from; absent when only one host is watched. */
+  serverId?: string;
+}
+
+/** Snapshot key: a session id on one host is not the same row as the same id on another. */
+export function fleetRowKey(row: { id: string; serverId?: string }): string {
+  return row.serverId ? `${row.serverId}:${row.id}` : row.id;
 }
 
 export interface FleetAlert {
+  serverId?: string;
   sessionId: string;
   title: string;
   category: AlertCategory;
@@ -174,9 +182,9 @@ export interface FleetAlert {
 export function detectFleetAlerts(previous: ReadonlyMap<string, FleetRowState>, rows: readonly FleetRowState[]): FleetAlert[] {
   const alerts: FleetAlert[] = [];
   for (const row of rows) {
-    const before = previous.get(row.id);
+    const before = previous.get(fleetRowKey(row));
     if (!before) continue;
-    const base = { sessionId: row.id, title: row.title.trim() || "A session" };
+    const base = { serverId: row.serverId, sessionId: row.id, title: row.title.trim() || "A session" };
     if (row.waiting && !before.waiting) alerts.push({ ...base, category: "attention" });
     else if (!row.busy && before.busy && !row.waiting) {
       alerts.push({ ...base, category: row.last_turn_outcome === "failed" ? "error" : "done" });

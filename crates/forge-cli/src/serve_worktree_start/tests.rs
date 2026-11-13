@@ -102,3 +102,69 @@ fn a_stored_setup_problem_is_shown_until_the_agent_has_been_told() {
     clear_marker(&wt);
     assert!(interrupted_status(&wt).is_none(), "cleared once delivered");
 }
+
+fn rev(dir: &Path, rev: &str) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", rev])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn a_new_worktree_branches_from_an_origin_that_is_ahead_and_keeps_the_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let mine = repo(&base);
+    let origin = base.join("origin.git");
+    git(
+        &base,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            mine.to_str().unwrap(),
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(
+        &mine,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&mine, &["fetch", "-q", "origin"]);
+    git(&mine, &["remote", "set-head", "origin", "main"]);
+    let other = base.join("other");
+    git(
+        &base,
+        &[
+            "clone",
+            "-q",
+            origin.to_str().unwrap(),
+            other.to_str().unwrap(),
+        ],
+    );
+    git(&other, &["config", "user.email", "t@t"]);
+    git(&other, &["config", "user.name", "t"]);
+    for n in 0..3 {
+        std::fs::write(other.join(format!("r{n}")), "x").unwrap();
+        git(&other, &["add", "."]);
+        git(&other, &["commit", "-qm", &format!("r{n}")]);
+    }
+    git(&other, &["push", "-q", "origin", "main"]);
+    let tip = rev(&other, "HEAD");
+    let local = rev(&mine, "HEAD");
+
+    let created = create_only(&mine, Some("fresh")).unwrap();
+
+    assert_eq!(rev(created.guard.path(), "HEAD"), tip);
+    assert_eq!(rev(&mine, "HEAD"), local);
+    assert_eq!(
+        forge_core::worktree_base::stored_note(created.guard.path()).unwrap(),
+        format!(
+            "based on origin/main @{} (local main was 3 behind)",
+            &tip[..7]
+        )
+    );
+}

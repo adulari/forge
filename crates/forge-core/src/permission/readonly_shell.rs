@@ -336,7 +336,7 @@ fn tag_only_lists(args: &[&str]) -> bool {
 /// `--show-signature`, the `%G` placeholders and `for-each-ref`'s `signature` atoms run `gpg` over a
 /// signature the repository supplied;
 /// `--submodule` and `--recurse-submodules` read through a submodule's own repository.
-fn git_arg_is_hostile(sub: &str, arg: &str) -> bool {
+pub(super) fn git_arg_is_hostile(sub: &str, arg: &str) -> bool {
     let name = arg.split_once('=').map_or(arg, |(name, _)| name);
     // Real options that only start like a hostile one: git takes an exact name over an
     // abbreviation, but only for the subcommands that have the option.

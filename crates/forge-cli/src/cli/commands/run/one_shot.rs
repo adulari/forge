@@ -33,6 +33,8 @@ pub(crate) struct RunRequest {
     /// Keep the run in this process: `--no-publish-to-fleet`, or a flag a daemon cannot honour.
     pub(crate) local_only: bool,
     pub(crate) usage_json: Option<std::path::PathBuf>,
+    /// `--wait-for-outage`: keep waiting out a provider outage as chat and the daemon do.
+    pub(crate) wait_for_outage: bool,
     /// `-p`: stdout carries only the final answer.
     pub(crate) print: bool,
     pub(crate) verbose: bool,
@@ -59,6 +61,7 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         publish_to_fleet,
         local_only,
         usage_json,
+        wait_for_outage,
         print,
         verbose,
         quiet,
@@ -87,6 +90,9 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     // `forge run "/goal …"` is a loop, not a prompt: it is published to a running daemon as-is
     // and otherwise driven locally by `run_goal_headless` (docs/features/goal-evaluator.md).
     let goal_spec = parse_goal_prompt(&prompt);
+    let fail_fast_on_outage = goal_spec.is_none()
+        && !wait_for_outage
+        && !forge_config::load().is_ok_and(|c| c.mesh.headless_outage_wait);
     match prompt.split_whitespace().next() {
         Some("/goal") if goal_spec.is_none() => anyhow::bail!(
             "could not parse the /goal command: --max-tokens and --max-minutes need whole numbers"
@@ -204,6 +210,9 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
         }
         session.attach_images(at_images);
         mark_one_shot(&mut session, true);
+        if fail_fast_on_outage {
+            session.fail_fast_on_outage();
+        }
         // A bridge pin's `claude` process starts now, beside the hooks and routing of the turn.
         session.prewarm_pinned_bridge();
         session.fire_session_start(None).await;
@@ -240,6 +249,9 @@ pub(crate) async fn run(req: RunRequest) -> Result<()> {
     }
     session.attach_images(at_images);
     mark_one_shot(&mut session, !tui);
+    if fail_fast_on_outage && !tui {
+        session.fail_fast_on_outage();
+    }
     session.prewarm_pinned_bridge();
     session.fire_session_start(None).await;
     let before = session.session_usage_detail();
@@ -401,25 +413,43 @@ async fn drive_turn(
             return Err(e);
         }
     };
-    let run = session.run_turn_with(&prompt, &guidance, turn.tier);
-    tokio::pin!(run);
-    tokio::select! {
-        r = &mut run => match r.context("running agent turn") {
-            Ok(outcome) => fail_if_incomplete(outcome).map(|()| false),
-            Err(e) => {
-                if machine {
-                    println!("{}", forge_tui::error_result_line(&format!("{e:#}")));
+    let mut finished = None;
+    let result = {
+        let run = session.run_turn_with(&prompt, &guidance, turn.tier);
+        tokio::pin!(run);
+        tokio::select! {
+            r = &mut run => match r.context("running agent turn") {
+                Ok(outcome) => {
+                    finished = Some(outcome);
+                    Ok(false)
                 }
-                Err(e)
+                Err(e) => Err(e),
+            },
+            _ = interrupt_signal() => {
+                if machine {
+                    println!("{}", forge_tui::error_result_line("interrupted"));
+                } else {
+                    eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — turn stopped (what streamed above is not saved to the session)\x1b[0m");
+                }
+                Ok(true)
             }
-        },
-        _ = interrupt_signal() => {
-            if machine {
-                println!("{}", forge_tui::error_result_line("interrupted"));
-            } else {
-                eprintln!("\r\x1b[K\x1b[2m⧖ interrupted — turn stopped (what streamed above is not saved to the session)\x1b[0m");
+        }
+    };
+    match finished {
+        Some(outcome) => {
+            fail_if_incomplete(outcome, session.last_end_reason().as_deref()).map(|()| false)
+        }
+        None => {
+            if let (true, Err(e)) = (machine, &result) {
+                println!(
+                    "{}",
+                    forge_tui::error_result_line_with(
+                        &format!("{e:#}"),
+                        session.last_end_reason().as_deref()
+                    )
+                );
             }
-            Ok(true)
+            result
         }
     }
 }
@@ -460,9 +490,9 @@ async fn interrupt_signal() {
 /// A headless one-shot run is unattended: a turn that stopped with tracked tasks still open has
 /// NOT done the job, and exiting 0 makes an orchestrator (or a human reading `$?`) treat it as if
 /// it had. Turn it into a process failure carrying the harness's ERROR line.
-fn fail_if_incomplete(outcome: forge_types::LoopOutcome) -> Result<()> {
+fn fail_if_incomplete(outcome: forge_types::LoopOutcome, end_reason: Option<&str>) -> Result<()> {
     use forge_types::StopReason;
-    if matches!(
+    let stopped_short = matches!(
         outcome.stop_reason,
         StopReason::TasksUnfinished
             | StopReason::MaxSteps
@@ -470,7 +500,24 @@ fn fail_if_incomplete(outcome: forge_types::LoopOutcome) -> Result<()> {
             | StopReason::NoOutput
             | StopReason::Stalled
             | StopReason::DaemonShutdown
-    ) {
+            | StopReason::ProviderDown
+    );
+    // The stored end reason also catches a "final answer" that left a step undone or tasks open.
+    if stopped_short || end_reason.is_some_and(forge_core::end_fails_run) {
+        // A final answer that left a step undone or tasks open is the model's own words, not an
+        // error: the stop line already said what happened, so the failure only names the end.
+        if !stopped_short {
+            if let Some(reason) = end_reason {
+                anyhow::bail!("the run did not finish: {}", forge_core::end_label(reason));
+            }
+        }
+        if outcome.text.trim().is_empty() {
+            anyhow::bail!(
+                "{}",
+                forge_core::stop_note(end_reason.unwrap_or(outcome.stop_reason.as_str()))
+                    .trim_start_matches("⚠ ")
+            );
+        }
         anyhow::bail!(outcome.text);
     }
     Ok(())
@@ -529,7 +576,7 @@ async fn publish_run_to_fleet(
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    let http = reqwest::Client::new();
+    let http = crate::attach::local_http_client(base);
     let resp = http
         .post(format!("{base}/{token}/api/sessions"))
         .json(&serde_json::json!({
@@ -716,6 +763,49 @@ mod tests {
                 .await
                 .is_none(),
             "an explicit machine-readable format must not be answered with prose"
+        );
+    }
+
+    fn outcome(reason: forge_types::StopReason, text: &str) -> forge_types::LoopOutcome {
+        forge_types::LoopOutcome {
+            text: text.into(),
+            stop_reason: reason,
+        }
+    }
+
+    #[test]
+    fn a_run_fails_for_every_end_that_did_not_finish() {
+        use forge_types::StopReason as S;
+        assert!(fail_if_incomplete(outcome(S::FinalAnswer, "done"), Some("final_answer")).is_ok());
+        for reason in [S::Stalled, S::TasksUnfinished, S::ProviderDown, S::NoOutput] {
+            assert!(
+                fail_if_incomplete(outcome(reason, "x"), None).is_err(),
+                "{reason:?}"
+            );
+        }
+        for end in [
+            "final_answer_mid_intent",
+            "final_answer_open_tasks",
+            "provider_down",
+        ] {
+            assert!(
+                fail_if_incomplete(outcome(S::FinalAnswer, "x"), Some(end)).is_err(),
+                "{end}"
+            );
+        }
+        let said = fail_if_incomplete(
+            outcome(S::FinalAnswer, "Next I will run the tests."),
+            Some("final_answer_mid_intent"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(said, "the run did not finish: answer left a step undone");
+        let blank = fail_if_incomplete(outcome(S::ProviderDown, " "), Some("provider_down"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            blank.starts_with("Turn stopped (model provider unreachable)"),
+            "{blank}"
         );
     }
 }

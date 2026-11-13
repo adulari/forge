@@ -17,7 +17,15 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use forge_core::goal_contract::ContractOutcome;
 use forge_core::{GoalEvalRequest, GoalVerdict};
+use forge_types::goal_contract::{failure_prompt, AssertionResult, GoalContract};
+use forge_types::goal_envelope::EnvelopeCheck;
+
+use forge_core::goal_relay::{RelayPolicy, RelayReason};
+
+use super::goal_envelope::{self, pause_message, EnvelopeSources};
+use super::goal_relay::{self, RelayPlan};
 
 use super::*;
 
@@ -58,6 +66,21 @@ pub(crate) struct GoalEvalTrack {
     pub(crate) disagreements: usize,
     /// The last quality-gate failure (`cmd`: output), shown to the evaluator and the next prompt.
     pub(crate) last_gate_failure: Option<String>,
+}
+
+/// Validator bookkeeping that lives for one `/goal --contract` run.
+#[derive(Debug, Default)]
+pub(crate) struct ValidationTrack {
+    /// Where the validator task leaves its results for the done-signal handler.
+    pub(crate) slot: Arc<Mutex<Option<Vec<AssertionResult>>>>,
+    /// A validator run finished since the last decision.
+    pub(crate) fresh: bool,
+    /// The failing assertion numbers of the previous run, and how many runs in a row repeated them.
+    pub(crate) last_failing: Vec<u32>,
+    pub(crate) unchanged: usize,
+    /// A mission's milestone passed on the last validation and the contract moved to the next:
+    /// the number of the one that passed, until the relay (or the in-place start) takes it.
+    pub(crate) milestone_passed: Option<u32>,
 }
 
 fn normalized(items: &[String]) -> Vec<String> {
@@ -167,6 +190,7 @@ fn goal_budget_check(state: &GoalState) -> Option<GoalDecision> {
 
 /// A completion (claimed or judged): the quality gates decide whether the run really ends.
 async fn finish_with_gates(state: &mut GoalState, reason: &str, cwd: &Path) -> GoalDecision {
+    ensure_ci_gate(&mut state.gates, cwd);
     let fingerprint = workspace_fingerprint(cwd).await;
     match run_gates(&mut state.gates, &state.gate_cfg, &fingerprint, cwd).await {
         GateOutcome::AllPassed => {
@@ -207,6 +231,9 @@ pub(crate) async fn next_goal_decision(
     state.budget.tokens_used = state.budget.tokens_used.saturating_add(tokens_this_turn);
     let progressed = done > state.prev_done;
     state.prev_done = done;
+    if state.contract.is_some() {
+        return contract_decision(state, cwd).await;
+    }
     let Some(verdict) = verdict else {
         state.no_progress = if progressed { 0 } else { state.no_progress + 1 };
         return match goal_stop_reason(said_complete, done, total, state.iter, state.no_progress) {
@@ -255,16 +282,101 @@ pub(crate) async fn next_goal_decision(
     })
 }
 
+/// The decision for a goal with a contract: the validator's results are the only judge of "done".
+/// An all-pass run still goes through the quality gates; a failing one becomes the next prompt;
+/// the same failing set three runs in a row stops the goal as wedged. A turn the validator did not
+/// get to report on (interrupted) re-runs it next time rather than falling back to the task plan
+/// or the model's own claim.
+async fn contract_decision(state: &mut GoalState, cwd: &Path) -> GoalDecision {
+    let fresh = std::mem::take(&mut state.validation.fresh);
+    let Some(contract) = state.contract.clone() else {
+        return GoalDecision::Retry { prompt: None };
+    };
+    if fresh && contract.all_passed() {
+        return finish_with_gates(state, GOAL_COMPLETE_REASON, cwd).await;
+    }
+    if fresh {
+        if let Some(prompt) = super::goal_mission::advance_if_passed(state) {
+            return goal_budget_check(state).unwrap_or(GoalDecision::Retry {
+                prompt: Some(prompt),
+            });
+        }
+    }
+    if state.iter >= GOAL_MAX_ITERS {
+        return GoalDecision::Stop("🎯 goal stopped — iteration ceiling".to_string());
+    }
+    let prompt = if fresh {
+        let failing = contract.failing_ids();
+        state.validation.unchanged = if failing == state.validation.last_failing {
+            state.validation.unchanged + 1
+        } else {
+            0
+        };
+        state.validation.last_failing = failing.clone();
+        if state.validation.unchanged + 1 >= GOAL_EVAL_WEDGED_TURNS {
+            let ids: Vec<String> = failing.iter().map(u32::to_string).collect();
+            return GoalDecision::Stop(format!(
+                "🎯 goal wedged — assertions {} still fail after {GOAL_EVAL_WEDGED_TURNS} validations",
+                ids.join(", ")
+            ));
+        }
+        failure_prompt(&state.goal, &contract)
+    } else {
+        GOAL_CONTINUE_PROMPT.to_string()
+    };
+    goal_budget_check(state).unwrap_or(GoalDecision::Retry {
+        prompt: Some(prompt),
+    })
+}
+
+/// What the contract flow left after the first turn of a `--contract` goal: adopt an approved
+/// contract, or end the goal that must not start. `None` when there is nothing to settle.
+pub(crate) fn adopt_contract_outcome(
+    gs: &mut GoalState,
+    outcome: Option<ContractOutcome>,
+) -> Option<Result<GoalContract, String>> {
+    match outcome? {
+        ContractOutcome::Approved(contract) => {
+            gs.contract = Some(contract.clone());
+            Some(Ok(contract))
+        }
+        ContractOutcome::Declined => Some(Err(
+            "🎯 goal not started — the contract was declined".to_string()
+        )),
+        ContractOutcome::Failed(why) => Some(Err(format!(
+            "🎯 goal not started — no contract could be drafted: {why}"
+        ))),
+    }
+}
+
+/// Fold a finished validator run into the goal's contract.
+pub(crate) fn record_validation(gs: &mut GoalState) {
+    let Some(results) = gs.validation.slot.lock().unwrap().take() else {
+        return;
+    };
+    if let Some(contract) = gs.contract.as_mut() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        contract.record(results, now);
+        gs.validation.fresh = true;
+    }
+}
+
 /// What a goal run does after a done signal.
 pub(crate) enum GoalNext {
     /// The run ended; any non-success reason was already noted.
     Stop,
     /// Run the evaluator on the turn that just finished.
     Evaluate(GoalEvalRequest),
+    /// Run the contract validator on the turn that just finished.
+    Validate(GoalContract),
     /// Run this prompt next (a gate failure — not displaced by a queued prompt).
     Turn(String),
     /// Run this prompt next unless the user queued a correction, which takes the turn instead.
     Continue(String),
+    /// The goal moved to a fresh worker session: the driver brings it up and ends this run.
+    Relay(RelayPlan),
 }
 
 /// What a finished turn (and its evaluation) looks like to the goal policy, read off the session.
@@ -279,6 +391,11 @@ pub(crate) struct GoalTurnFacts {
     /// Gates check the checkout the session is working in, which a `worktree enter` moves away
     /// from the directory Forge was launched in.
     root: std::path::PathBuf,
+    /// What the spend envelope is measured against: subscription readings and session cost.
+    sources: EnvelopeSources,
+    /// The fresh-worker relay settings; `None` where a run cannot hand its goal on (the headless
+    /// local run has no driver to start the successor).
+    relay: Option<RelayPolicy>,
 }
 
 impl GoalTurnFacts {
@@ -299,7 +416,15 @@ impl GoalTurnFacts {
             } else {
                 root.to_path_buf()
             },
+            sources: EnvelopeSources::read(s),
+            relay: Some(s.relay_policy()),
         }
+    }
+
+    /// For a run that has no driver to start a successor session.
+    pub(crate) fn without_relay(mut self) -> Self {
+        self.relay = None;
+        self
     }
 }
 
@@ -312,12 +437,23 @@ pub(crate) enum GoalStep {
     },
     Turn(String),
     Continue(String),
+    /// The spend envelope is spent (or cannot be verified): the goal pauses, resumable, instead
+    /// of starting another turn.
+    Pause {
+        reason: String,
+    },
+    /// The goal wedged, stalled or wore its session out: it continues in a fresh worker session.
+    Relay {
+        reason: RelayReason,
+        detail: String,
+    },
 }
 
 /// Fold the evaluation left in `gs.eval.slot` (if any) into the next step. Shared by the
 /// interactive/daemon drivers and the headless local run, so the stop conditions cannot drift.
 pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> GoalStep {
     gs.eval.evaluating = false;
+    record_validation(gs);
     let verdict = gs.eval.slot.lock().unwrap().take();
     let tokens = std::mem::take(&mut gs.eval.pending_tokens);
     if facts.budget_refused {
@@ -326,7 +462,20 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
             met: false,
         };
     }
-    if facts.run_budget_hit {
+    let envelope_check = gs.envelope.as_mut().map(|envelope| {
+        let mut check = facts.sources.check(envelope);
+        if facts.run_budget_hit && envelope.is_usd() && check == EnvelopeCheck::Within {
+            envelope.spent = true;
+            check = EnvelopeCheck::Spent;
+        }
+        check
+    });
+    gs.sync_envelope_budget();
+    let envelope_hit = matches!(
+        envelope_check,
+        Some(EnvelopeCheck::Spent | EnvelopeCheck::Unverified)
+    );
+    if facts.run_budget_hit && !envelope_hit {
         let reason = if gs
             .budget
             .max_elapsed
@@ -351,6 +500,43 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
         &facts.root,
     )
     .await;
+    if let (true, Some(envelope), Some(check)) =
+        (envelope_hit, gs.envelope.as_ref(), envelope_check)
+    {
+        if !matches!(decision, GoalDecision::Stop(_)) {
+            return GoalStep::Pause {
+                reason: pause_message(envelope, check),
+            };
+        }
+    }
+    if let Some(passed) = gs.validation.milestone_passed.take() {
+        let hosted = facts.relay.is_some_and(|policy| policy.max_relays > 0);
+        if hosted && !envelope_hit && matches!(decision, GoalDecision::Retry { .. }) {
+            return GoalStep::Relay {
+                reason: RelayReason::Milestone,
+                detail: format!("milestone {passed} passed"),
+            };
+        }
+    }
+    if let (Some(policy), false) = (facts.relay.filter(RelayPolicy::allowed), envelope_hit) {
+        match &decision {
+            GoalDecision::Stop(stop) => {
+                if let Some(reason) = RelayReason::of_stop(stop) {
+                    return GoalStep::Relay {
+                        reason,
+                        detail: goal_relay::stop_detail(stop),
+                    };
+                }
+            }
+            GoalDecision::GateFailed { .. } | GoalDecision::Retry { .. } if policy.worn() => {
+                return GoalStep::Relay {
+                    reason: RelayReason::Worn,
+                    detail: format!("compacted {} times", policy.compactions),
+                };
+            }
+            _ => {}
+        }
+    }
     match decision {
         GoalDecision::Stop(reason) => GoalStep::Stop {
             met: is_goal_complete_reason(&reason),
@@ -361,6 +547,22 @@ pub(crate) async fn settle_goal(gs: &mut GoalState, facts: GoalTurnFacts) -> Goa
             GoalStep::Continue(prompt.unwrap_or_else(|| GOAL_CONTINUE_PROMPT.to_string()))
         }
     }
+}
+
+/// Why a goal pauses when the provider stayed down for the whole outage allowance.
+const PROVIDER_DOWN_PAUSE: &str =
+    "goal paused — the provider stayed down; /goal resume continues it once it is back";
+
+/// Pause the goal, resumably, when the turn that just ended gave up on a down provider. Nothing
+/// about the goal went wrong and the turn did no work, so it must not be counted as a turn
+/// without progress (six of those stop the goal as stalled). True when it paused.
+pub(crate) fn pause_if_provider_down(app: &mut forge_tui::App) -> bool {
+    if app.last_stop_reason != Some(forge_types::StopReason::ProviderDown) {
+        return false;
+    }
+    app.note(&format!("⏸ {PROVIDER_DOWN_PAUSE}"));
+    app.goal_paused_by_envelope(PROVIDER_DOWN_PAUSE);
+    true
 }
 
 /// Advance a goal run whose in-flight generation just finished: after a turn, evaluate it (when
@@ -374,8 +576,32 @@ pub(crate) async fn advance_goal(
     if let Some(stop) = apply_goal_requests(gs, session, app).await {
         return stop;
     }
+    if !gs.eval.evaluating && pause_if_provider_down(app) {
+        session.lock().await.set_active_goal(None);
+        return GoalNext::Stop;
+    }
+    if !gs.eval.evaluating && gs.contract.is_none() {
+        let outcome = session.lock().await.take_goal_contract_outcome();
+        match adopt_contract_outcome(gs, outcome) {
+            Some(Ok(contract)) => app.goal_set_contract(contract),
+            Some(Err(reason)) => {
+                app.note(&reason);
+                app.goal_ended(false, &reason);
+                session.lock().await.set_active_goal(None);
+                return GoalNext::Stop;
+            }
+            None => {}
+        }
+    }
     if !gs.eval.evaluating {
         gs.eval.pending_tokens = app.turn_in + app.turn_out;
+        if let Some(contract) = gs.contract.clone() {
+            if !session.lock().await.run_budget_hit_last_turn() {
+                gs.eval.evaluating = true;
+                gs.validation.slot.lock().unwrap().take();
+                return GoalNext::Validate(contract.validation_scope());
+            }
+        }
         let s = session.lock().await;
         if s.goal_evaluator_enabled() && !s.run_budget_hit_last_turn() {
             drop(s);
@@ -384,8 +610,27 @@ pub(crate) async fn advance_goal(
             return GoalNext::Evaluate(gs.eval_request());
         }
     }
+    if let Some(envelope) = &gs.envelope {
+        goal_envelope::refresh_quota(session, &envelope.spec).await;
+    }
     let facts = GoalTurnFacts::read(&*session.lock().await, cwd);
-    match settle_goal(gs, facts).await {
+    let step = settle_goal(gs, facts).await;
+    if let Some(contract) = &gs.contract {
+        app.goal_set_contract(contract.clone());
+    }
+    if let Some(envelope) = &gs.envelope {
+        app.goal_envelope_sync(envelope);
+    }
+    match step {
+        GoalStep::Pause { reason } => {
+            app.note(&format!("⏸ {reason}"));
+            app.goal_paused_by_envelope(&reason);
+            if let Some(envelope) = app.goal.as_mut().and_then(|g| g.envelope.as_mut()) {
+                goal_envelope::mark_waiting(envelope, chrono::Utc::now().timestamp());
+            }
+            session.lock().await.set_active_goal(None);
+            GoalNext::Stop
+        }
         GoalStep::Stop { reason, met } => {
             if !met {
                 app.note(&reason);
@@ -393,6 +638,19 @@ pub(crate) async fn advance_goal(
             app.goal_ended(met, &reason);
             session.lock().await.set_active_goal(None);
             GoalNext::Stop
+        }
+        GoalStep::Relay { reason, detail } => {
+            match goal_relay::perform(gs, session, app, reason, &detail).await {
+                Ok(plan) => GoalNext::Relay(plan),
+                Err(why) => {
+                    let stop =
+                        format!("🎯 goal stopped — could not hand it to a fresh worker: {why}");
+                    app.note(&stop);
+                    app.goal_ended(false, &stop);
+                    session.lock().await.set_active_goal(None);
+                    GoalNext::Stop
+                }
+            }
         }
         GoalStep::Turn(prompt) => GoalNext::Turn(prompt),
         GoalStep::Continue(prompt) => GoalNext::Continue(prompt),
@@ -422,7 +680,7 @@ pub(crate) fn launch_goal_step(
 ) -> Option<LaunchedGoalStep> {
     gs.gen = gen;
     let prompt = match next {
-        GoalNext::Stop => return None,
+        GoalNext::Stop | GoalNext::Relay(_) => return None,
         GoalNext::Evaluate(request) => {
             app.done = false;
             app.tick = 0;
@@ -435,6 +693,24 @@ pub(crate) fn launch_goal_step(
                 let _done = DoneGuard(dt, gen);
                 let verdict = s.lock().await.evaluate_goal(&request).await;
                 *slot.lock().unwrap() = verdict;
+            });
+            return Some(LaunchedGoalStep {
+                handle,
+                prompt: None,
+            });
+        }
+        GoalNext::Validate(contract) => {
+            app.done = false;
+            app.tick = 0;
+            *busy = true;
+            *busy_since = std::time::Instant::now();
+            let s = session.clone();
+            let dt = done_tx.clone();
+            let slot = Arc::clone(&gs.validation.slot);
+            let handle = tokio::spawn(async move {
+                let _done = DoneGuard(dt, gen);
+                let results = s.lock().await.validate_goal_contract(&contract).await;
+                *slot.lock().unwrap() = Some(results);
             });
             return Some(LaunchedGoalStep {
                 handle,

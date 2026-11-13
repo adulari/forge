@@ -233,3 +233,364 @@ fn the_evaluator_request_carries_the_previous_list_and_gate_failure() {
     assert!(request.last_gate_failure.unwrap().contains("pytest"));
     assert!(request.started_unix > 0);
 }
+
+mod envelope {
+    use super::*;
+    use forge_types::goal_envelope::{EnvelopeSpec, EnvelopeState};
+
+    fn facts(windows: Vec<forge_store::SubscriptionWindow>, now: i64) -> GoalTurnFacts {
+        GoalTurnFacts {
+            done: 0,
+            total: 3,
+            said_complete: false,
+            budget_refused: false,
+            run_budget_hit: false,
+            root: std::env::temp_dir(),
+            sources: EnvelopeSources {
+                windows,
+                session_usd: 0.0,
+                now,
+            },
+            relay: None,
+        }
+    }
+
+    fn weekly(pct: f64, updated_at: i64) -> forge_store::SubscriptionWindow {
+        forge_store::SubscriptionWindow {
+            provider: "claude-cli".into(),
+            window_kind: "weekly".into(),
+            status: "ok".into(),
+            resets_at: Some(updated_at + 86_400),
+            fraction: Some(pct / 100.0),
+            updated_at,
+        }
+    }
+
+    fn enveloped(start: f64) -> GoalState {
+        let mut gs = state(&[]);
+        gs.envelope = Some(EnvelopeState::new(
+            EnvelopeSpec::parse("claude:20%w", None).unwrap(),
+            start,
+            None,
+        ));
+        gs
+    }
+
+    #[tokio::test]
+    async fn readings_rising_past_the_slice_pause_the_goal() {
+        let mut gs = enveloped(40.0);
+        let step = settle_goal(&mut gs, facts(vec![weekly(50.0, 1000)], 1000)).await;
+        assert!(matches!(step, GoalStep::Continue(_) | GoalStep::Turn(_)));
+        assert_eq!(
+            gs.envelope.as_ref().unwrap().meter(),
+            "envelope 10/20% claude weekly"
+        );
+
+        let step = settle_goal(&mut gs, facts(vec![weekly(60.0, 2000)], 2000)).await;
+        let GoalStep::Pause { reason } = step else {
+            panic!("expected a pause at the cap");
+        };
+        assert!(
+            reason.starts_with("Envelope spent (20% of Claude weekly)."),
+            "{reason}"
+        );
+        assert!(gs.envelope.as_ref().unwrap().spent);
+    }
+
+    #[tokio::test]
+    async fn a_stale_reading_pauses_instead_of_spending_blind() {
+        let mut gs = enveloped(40.0);
+        let step = settle_goal(&mut gs, facts(vec![weekly(41.0, 0)], 100_000)).await;
+        let GoalStep::Pause { reason } = step else {
+            panic!("expected a pause without a fresh reading");
+        };
+        assert!(reason.contains("can't be verified"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn a_goal_without_an_envelope_is_untouched() {
+        let mut gs = state(&[]);
+        let step = settle_goal(&mut gs, facts(Vec::new(), 1000)).await;
+        assert!(matches!(step, GoalStep::Continue(_) | GoalStep::Turn(_)));
+    }
+
+    #[tokio::test]
+    async fn a_usd_envelope_counts_session_cost_since_the_goal_started() {
+        let mut gs = state(&[]);
+        gs.envelope = Some(EnvelopeState::new(
+            EnvelopeSpec::parse("$2", None).unwrap(),
+            10.0,
+            None,
+        ));
+        let mut f = facts(Vec::new(), 1000);
+        f.sources.session_usd = 11.0;
+        assert!(matches!(
+            settle_goal(&mut gs, f).await,
+            GoalStep::Continue(_)
+        ));
+        assert_eq!(gs.budget.usd_remaining, Some(1.0));
+        let mut f = facts(Vec::new(), 1000);
+        f.sources.session_usd = 12.5;
+        assert!(matches!(
+            settle_goal(&mut gs, f).await,
+            GoalStep::Pause { .. }
+        ));
+    }
+}
+
+#[test]
+fn a_turn_that_ended_provider_down_pauses_the_goal_without_counting_it() {
+    let mut app = forge_tui::App::default();
+    app.goal_begin("ship it", &[], None, None);
+    app.apply(forge_tui::PresenterEvent::Done {
+        final_text: String::new(),
+        stop_reason: forge_types::StopReason::ProviderDown,
+    });
+    assert!(pause_if_provider_down(&mut app));
+    let goal = app
+        .goal
+        .as_ref()
+        .expect("the goal is kept for /goal resume");
+    assert_eq!(goal.phase, forge_tui::goal_status::GoalPhase::Paused);
+    assert!(goal
+        .reason
+        .as_deref()
+        .is_some_and(|r| r.contains("provider stayed down")));
+}
+
+#[test]
+fn every_other_stop_reason_leaves_the_goal_running() {
+    for reason in [
+        forge_types::StopReason::FinalAnswer,
+        forge_types::StopReason::NoOutput,
+        forge_types::StopReason::Stalled,
+    ] {
+        let mut app = forge_tui::App::default();
+        app.goal_begin("ship it", &[], None, None);
+        app.apply(forge_tui::PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: reason,
+        });
+        assert!(!pause_if_provider_down(&mut app), "{reason:?}");
+    }
+}
+
+fn scratch_repo_with_ci() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let wf = dir.path().join(".github/workflows");
+    std::fs::create_dir_all(&wf).unwrap();
+    crate::ci_run::opt_in_ci_gate(dir.path());
+    std::fs::write(
+        wf.join("ci.yml"),
+        "on: pull_request\nenv:\n  STRICT: \"1\"\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Strict check\n        run: test \"$STRICT\" = 1 && sh ./check.sh\n      - name: Needs a secret\n        env:\n          T: ${{ secrets.T }}\n        run: echo $T\n  win:\n    runs-on: windows-latest\n    steps:\n      - run: echo hi\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("check.sh"),
+        "echo lint-failed >&2\nexit 1\n",
+    )
+    .unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn a_goal_is_not_done_until_the_repos_ci_plan_passes() {
+    let repo = scratch_repo_with_ci();
+    let mut gs = state(&[]);
+    let done = verdict(true, &[], "");
+    let first =
+        next_goal_decision(&mut gs, false, 1, 1, 100, Some(done.clone()), repo.path()).await;
+    let GoalDecision::GateFailed { prompt } = first else {
+        panic!("a failing CI plan must not let the goal finish");
+    };
+    assert!(prompt.contains("forge ci run"), "{prompt}");
+    assert!(
+        prompt.contains("Local CI step failed: Strict check"),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("STRICT=1") && prompt.contains("lint-failed"),
+        "{prompt}"
+    );
+
+    std::fs::write(repo.path().join("check.sh"), "exit 0\n").unwrap();
+    let second = next_goal_decision(&mut gs, false, 1, 1, 100, Some(done), repo.path()).await;
+    assert!(matches!(second, GoalDecision::Stop(ref r) if is_goal_complete_reason(r)));
+}
+
+#[tokio::test]
+async fn gate_off_in_ci_toml_lets_the_goal_finish_without_running_the_plan() {
+    let repo = scratch_repo_with_ci();
+    std::fs::create_dir_all(repo.path().join(".forge")).unwrap();
+    std::fs::write(repo.path().join(".forge/ci.toml"), "[ci]\ngate = \"off\"\n").unwrap();
+    let mut gs = state(&[]);
+    let d = next_goal_decision(
+        &mut gs,
+        false,
+        1,
+        1,
+        100,
+        Some(verdict(true, &[], "")),
+        repo.path(),
+    )
+    .await;
+    assert!(matches!(d, GoalDecision::Stop(ref r) if is_goal_complete_reason(r)));
+    assert!(gs.gates.is_empty());
+}
+
+#[tokio::test]
+async fn a_contract_goal_also_waits_for_the_ci_plan() {
+    let repo = scratch_repo_with_ci();
+    let mut gs = state(&[]);
+    let d = finish_with_gates(&mut gs, GOAL_COMPLETE_REASON, repo.path()).await;
+    assert!(matches!(d, GoalDecision::GateFailed { .. }));
+}
+
+mod mission {
+    use super::*;
+    use forge_types::goal_contract::mission::parse_mission;
+
+    fn mission_state() -> GoalState {
+        let items = |t: &str| {
+            format!(
+                r#"{{"title":"{t}","assertions":[{{"assertion":"{t} a","check":"true"}},{{"assertion":"{t} b","check":"true"}}]}}"#
+            )
+        };
+        let reply = format!(
+            r#"{{"milestones":[{},{},{}]}}"#,
+            items("lexer"),
+            items("parser"),
+            items("cli")
+        );
+        let mut contract = parse_mission(&reply, 6).unwrap().into_contract().unwrap();
+        contract.approved = true;
+        let mut gs = state(&[]);
+        gs.contract = Some(contract);
+        gs
+    }
+
+    fn validated(gs: &mut GoalState, passing: &[u32]) {
+        let contract = gs.contract.as_mut().unwrap();
+        let results = contract
+            .active_assertions()
+            .map(|a| forge_types::goal_contract::AssertionResult {
+                id: a.id,
+                passed: passing.contains(&a.id),
+                proof: if passing.contains(&a.id) {
+                    String::new()
+                } else {
+                    "missing".into()
+                },
+                reason: if passing.contains(&a.id) {
+                    String::new()
+                } else {
+                    "exit 1".into()
+                },
+                artifact: None,
+            })
+            .collect();
+        contract.record(results, 1);
+        gs.validation.fresh = true;
+    }
+
+    fn current(gs: &GoalState) -> u32 {
+        gs.contract.as_ref().unwrap().mission_ref().unwrap().current
+    }
+
+    #[tokio::test]
+    async fn a_passing_milestone_moves_the_mission_on_with_the_next_milestones_prompt() {
+        let mut gs = mission_state();
+        validated(&mut gs, &[1, 2]);
+        let prompt = retry_prompt(decide(&mut gs, false, 0, 0, None).await).unwrap();
+        assert!(
+            prompt.contains("Milestone 1 passed. Now milestone 2/3: parser"),
+            "{prompt}"
+        );
+        assert_eq!(current(&gs), 2);
+        assert_eq!(gs.validation.milestone_passed, Some(1));
+        assert_eq!(
+            gs.contract.as_ref().unwrap().headline(),
+            "milestone 2/3: 0/2 pass"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_milestone_goes_back_to_the_worker_and_stays_put() {
+        let mut gs = mission_state();
+        validated(&mut gs, &[1]);
+        let prompt = retry_prompt(decide(&mut gs, true, 0, 0, None).await).unwrap();
+        assert!(prompt.contains("assertion 2 failed"), "{prompt}");
+        assert!(!prompt.contains("regression"), "{prompt}");
+        assert_eq!(current(&gs), 1);
+        assert_eq!(gs.validation.milestone_passed, None);
+    }
+
+    #[tokio::test]
+    async fn a_broken_earlier_assertion_becomes_the_prompt_and_blocks_the_boundary() {
+        let mut gs = mission_state();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        // Milestone 2 is done, but assertion 1 of milestone 1 no longer holds.
+        validated(&mut gs, &[2, 3, 4]);
+        let prompt = retry_prompt(decide(&mut gs, false, 0, 0, None).await).unwrap();
+        assert!(
+            prompt.contains("REGRESSION (milestone 1) assertion 1 failed"),
+            "{prompt}"
+        );
+        assert!(prompt.contains("Fix the regression first"), "{prompt}");
+        assert_eq!(
+            current(&gs),
+            2,
+            "the mission does not advance over a regression"
+        );
+        assert_eq!(gs.validation.milestone_passed, None);
+    }
+
+    #[tokio::test]
+    async fn the_mission_is_achieved_only_when_the_last_milestone_and_all_earlier_ones_pass() {
+        let mut gs = mission_state();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        validated(&mut gs, &[1, 2, 3, 4, 5]);
+        let decision = decide(&mut gs, true, 0, 0, None).await;
+        assert!(
+            matches!(decision, GoalDecision::Retry { .. }),
+            "milestone 3 itself fails"
+        );
+        let mut gs = mission_state();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        validated(&mut gs, &[2, 3, 4, 5, 6]);
+        let decision = decide(&mut gs, true, 0, 0, None).await;
+        assert!(
+            matches!(decision, GoalDecision::Retry { .. }),
+            "a regression in milestone 1 blocks the finish"
+        );
+        let mut gs = mission_state();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        gs.contract.as_mut().unwrap().advance_milestone();
+        validated(&mut gs, &[1, 2, 3, 4, 5, 6]);
+        match decide(&mut gs, false, 0, 0, None).await {
+            GoalDecision::Stop(reason) => assert!(is_goal_complete_reason(&reason), "{reason}"),
+            _ => panic!("expected the mission to complete"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wedge_rule_counts_only_the_active_failing_set() {
+        let mut gs = mission_state();
+        for round in 0..GOAL_EVAL_WEDGED_TURNS {
+            validated(&mut gs, &[1]);
+            let decision = decide(&mut gs, false, 0, 0, None).await;
+            if round + 1 < GOAL_EVAL_WEDGED_TURNS {
+                retry_prompt(decision);
+            } else {
+                match decision {
+                    GoalDecision::Stop(reason) => {
+                        assert!(reason.contains("assertions 2 still fail"), "{reason}")
+                    }
+                    _ => panic!("expected a wedge"),
+                }
+            }
+        }
+    }
+}

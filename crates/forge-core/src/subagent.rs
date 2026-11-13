@@ -77,8 +77,10 @@ pub use detached::{
     DetachedRegistry, DetachedSink,
 };
 mod execution;
+mod nested;
 pub use execution::sum_usage;
 use execution::{execute_tool, tool_result_failed};
+use nested::run_nested_spawn;
 
 mod progress;
 mod requests;
@@ -128,6 +130,9 @@ pub struct AgentCtx {
     pub inherit_pin: bool,
     /// Where a child's `Ask` decision is sent. `None` = nobody can be asked: the call is refused.
     pub asker: Option<ChildAsker>,
+    /// The parent turn's run or turn deadline, if either is set: a child waiting out a provider
+    /// outage (`mesh.outage_wait_secs`) never waits past it. `None` = bounded by the allowance only.
+    pub outage_deadline: Option<std::time::Instant>,
 }
 
 /// The result of running one child agent.
@@ -367,6 +372,7 @@ async fn run_agent_loop(
     let stream_idle = std::time::Duration::from_secs(ctx.config.mesh.stream_idle_timeout_secs);
     let mut chain = decision.fallbacks.clone().into_iter();
     let mut active_model = decision.model.clone();
+    let mut outage: Option<crate::outage_wait::ChildOutage> = None;
 
     let step_limit = progress::step_limit(agent.max_turns, ctx.config.mesh.max_steps);
     let mut supervisor = progress::ChildSupervisor::new(
@@ -452,7 +458,10 @@ async fn run_agent_loop(
             )
             .await
             {
-                Ok(r) => break r,
+                Ok(r) => {
+                    outage = None;
+                    break r;
+                }
                 Err(e) if failover_enabled && e.is_retryable() => {
                     let _ = ctx.store.bench_for(
                         &active_model,
@@ -468,7 +477,39 @@ async fn run_agent_loop(
                             active_model = next;
                             continue;
                         }
-                        None => return Err(e.into()),
+                        None => {
+                            // Every model of the chain failed as an outage: wait for the provider
+                            // like the parent turn does (shared allowance and deadlines) and start
+                            // the chain again, instead of failing the parent's spawn.
+                            let allowance =
+                                std::time::Duration::from_secs(ctx.config.mesh.outage_wait_secs);
+                            let wait = if allowance.is_zero()
+                                || !crate::outage_wait::is_outage(&e)
+                                || !child_may_wait_out_outage(&decision)
+                            {
+                                None
+                            } else {
+                                outage
+                                    .get_or_insert_with(|| {
+                                        crate::outage_wait::ChildOutage::begin(
+                                            allowance,
+                                            ctx.outage_deadline,
+                                        )
+                                    })
+                                    .next_wait(&e)
+                            };
+                            let Some(wait) = wait else {
+                                return Err(e.into());
+                            };
+                            on_delta(StreamEvent::Reasoning(format!(
+                                "provider `{active_model}` is down ({e}); waiting {}s before trying again",
+                                wait.as_secs()
+                            )));
+                            tokio::time::sleep(wait).await;
+                            chain = decision.fallbacks.clone().into_iter();
+                            active_model = decision.model.clone();
+                            continue;
+                        }
                     }
                 }
                 Err(e) => return Err(e.into()),
@@ -650,49 +691,6 @@ async fn run_agent_loop(
         schema_note,
         false,
     ))
-}
-
-/// A child agent delegating further: recurse one level deeper. Grandchildren are not surfaced
-/// to the live UI (no-op lifecycle) — their results roll up into this child's tool result.
-/// `Box::pin` breaks the orchestrate→run_subagent→orchestrate async-recursion type cycle.
-/// Returns a **boxed** (concrete, non-opaque) future so it does not participate in the
-/// orchestrate→run_subagent async-`impl Future` opaque-type cycle; `+ Send` asserts Send at the
-/// boundary. Owned args so the future is `'static`.
-fn run_nested_spawn(
-    ctx: AgentCtx,
-    parent_id: String,
-    args: serde_json::Value,
-    budget: BudgetState,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send>> {
-    Box::pin(async move {
-        let max = ctx.config.mesh.subagents.max_agents;
-        let requests = match parse_requests(&args, max) {
-            Ok(r) => r,
-            Err(e) => return format!("error: {e}"),
-        };
-        let deeper = AgentCtx {
-            depth: ctx.depth + 1,
-            // Nested spawns start without a pre-allocated worktree; orchestrate will create
-            // one per child if worktree_isolation is enabled.
-            worktree_root: None,
-            ..ctx.clone()
-        };
-        let concurrency = ctx.config.mesh.subagents.max_concurrency;
-        let mut noop = |_: Lifecycle| {};
-        match orchestrate(
-            &deeper,
-            &parent_id,
-            requests,
-            budget,
-            concurrency,
-            &mut noop,
-        )
-        .await
-        {
-            Ok((combined, _)) => combined,
-            Err(e) => format!("error: nested subagents failed: {e}"),
-        }
-    })
 }
 
 /// A message from a child task to the orchestrator's drain loop: a live activity delta, or the
@@ -1094,6 +1092,13 @@ pub(crate) fn summary(text: &str) -> String {
     line.chars().take(120).collect()
 }
 
+/// Whether a child may sit out a provider outage. Only a model someone chose (a pin) or a routed
+/// chain with fallbacks is worth hours of waiting; an agent type's tier default was never checked
+/// for reachability (an unreachable `ollama::` default would otherwise stall the parent's turn).
+fn child_may_wait_out_outage(decision: &RoutingDecision) -> bool {
+    decision.pinned || !decision.fallbacks.is_empty()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1484,6 +1489,7 @@ mod tests {
         let config = Config::default();
         let pricing = Pricing::from_config(&config);
         AgentCtx {
+            outage_deadline: None,
             provider,
             router,
             store,
@@ -1669,6 +1675,136 @@ mod tests {
         assert!(
             store.current_benched().unwrap().is_benched("bad::model"),
             "the rate-limited model was benched"
+        );
+    }
+
+    /// Answers every model with a 503 until `until` on the (virtual) clock.
+    struct DownUntilProvider {
+        until: tokio::time::Instant,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl Provider for DownUntilProvider {
+        async fn complete(
+            &self,
+            _model: &str,
+            _messages: &[forge_types::Message],
+            _tools: &[ToolSpec],
+            _on_event: &mut forge_provider::EventSink<'_>,
+        ) -> Result<forge_provider::ModelResponse, forge_provider::ProviderError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if tokio::time::Instant::now() < self.until {
+                return Err(forge_provider::ProviderError::Overloaded {
+                    status: 503,
+                    reason: "no_capacity".into(),
+                    message: String::new(),
+                    retry_after: None,
+                });
+            }
+            Ok(forge_provider::ModelResponse {
+                reasoning: String::new(),
+                reasoning_items: Vec::new(),
+                content: "child done".into(),
+                tool_calls: vec![],
+                usage: forge_types::Usage::default(),
+                quotas: Vec::new(),
+            })
+        }
+    }
+
+    async fn run_child_through_outage(
+        outage_wait_secs: u64,
+        deadline: Option<std::time::Instant>,
+        down_for: std::time::Duration,
+    ) -> (Result<SubagentOutcome, CoreError>, usize, Vec<String>) {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let child = store
+            .create_child_session(".", "default", "parent")
+            .unwrap();
+        let provider = Arc::new(DownUntilProvider {
+            until: tokio::time::Instant::now() + down_for,
+            calls: Default::default(),
+        });
+        let router = Arc::new(FixedRouter {
+            model: "down::model".into(),
+            fallbacks: vec!["down::other".into()],
+        });
+        let mut ctx = ctx_with(provider.clone(), router, store);
+        ctx.config.mesh.outage_wait_secs = outage_wait_secs;
+        ctx.outage_deadline = deadline;
+        let agent = plain_agent();
+        let notes = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink_notes = Arc::clone(&notes);
+        let mut sink = move |ev: StreamEvent| {
+            if let StreamEvent::Reasoning(text) = ev {
+                sink_notes.lock().unwrap().push(text);
+            }
+        };
+        let decision = route_child(&ctx, &agent, BudgetState::default()).await;
+        let out = run_subagent(
+            &ctx,
+            &child,
+            &agent,
+            decision,
+            BudgetState::default(),
+            &mut sink,
+        )
+        .await;
+        let calls = provider.calls.load(std::sync::atomic::Ordering::SeqCst);
+        let notes = notes.lock().unwrap().clone();
+        (out, calls, notes)
+    }
+
+    #[test]
+    fn only_a_pinned_or_routed_child_waits_out_an_outage() {
+        let mut d = RoutingDecision {
+            effort: None,
+            tier: TaskTier::Trivial,
+            model: "ollama::llama3.2".into(),
+            rationale: "pinned by agent type 'scout'".into(),
+            fallbacks: Vec::new(),
+            pinned: false,
+            unroutable: false,
+        };
+        assert!(!child_may_wait_out_outage(&d), "a tier default fails fast");
+        d.fallbacks = vec!["groq::x".into()];
+        assert!(child_may_wait_out_outage(&d), "a routed chain may wait");
+        d.fallbacks.clear();
+        d.pinned = true;
+        assert!(child_may_wait_out_outage(&d), "a pin may wait");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_child_waits_out_a_provider_outage_instead_of_failing_the_parent() {
+        let (out, calls, notes) =
+            run_child_through_outage(8 * 3600, None, std::time::Duration::from_secs(20 * 60)).await;
+        let out = out.expect("the child rides out the outage");
+        assert_eq!(out.final_text, "child done");
+        assert!(calls > 4, "kept probing: {calls}");
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("is down") && n.contains("waiting")),
+            "{notes:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_child_gives_up_at_the_allowance_and_at_the_parent_deadline() {
+        let (out, _, _) =
+            run_child_through_outage(600, None, std::time::Duration::from_secs(3600)).await;
+        assert!(out.is_err(), "the allowance bounds the wait");
+        let soon = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        let (out, calls, _) =
+            run_child_through_outage(8 * 3600, Some(soon), std::time::Duration::from_secs(3600))
+                .await;
+        assert!(out.is_err(), "the parent deadline bounds the wait");
+        assert!(calls < 40, "{calls}");
+        let (out, calls, _) =
+            run_child_through_outage(0, None, std::time::Duration::from_secs(3600)).await;
+        assert!(
+            out.is_err() && calls == 2,
+            "0 keeps the old failure: {calls}"
         );
     }
 

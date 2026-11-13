@@ -50,10 +50,14 @@ pub(crate) fn any_remote_modal_open(app: &forge_tui::App) -> bool {
         || app.notes_overlay.open
         || app.run_menu.open
         || app.import_menu.open
+        || app.issues_menu.open
+        || app.queue_menu.open
+        || app.ship_menu.open
         || app.workspace_menu.open
         || app.agents_menu.open
         || app.diff_overlay.open
         || app.jobs_overlay.open
+        || app.history_overlay.open
         || app.command_center.open
         || app.palette.open
         || app.usage_overlay.open
@@ -264,7 +268,9 @@ pub(crate) fn prepend_attach_mentions(mentions: &mut Vec<String>, text: String) 
     }
     let m = mentions
         .drain(..)
-        .map(|p| format!("@{p}"))
+        // Braced when the path has whitespace (a workspace under "Trading Bots/"): an unbraced
+        // mention ends at the first space and the file would silently never reach the model.
+        .map(|p| crate::attach_paths::mention_for(std::path::Path::new(&p)))
         .collect::<Vec<_>>()
         .join(" ");
     format!("{m}\n{text}")
@@ -348,35 +354,33 @@ pub(crate) async fn handle_remote_attach(
     }
 }
 
+/// Drop whatever images an earlier `Attach` left pending on the session (the session is locked
+/// by the running turn while busy, so this defers until it is free).
+pub(crate) fn discard_ambient_images(session: &Arc<tokio::sync::Mutex<Session>>) {
+    with_session(session, |s| drop(s.take_pending_images()));
+}
+
+/// A prompt's explicit attachment list, resolved: images loaded (NOT yet attached to the
+/// session) and every accepted upload path (images included) for `@path` mentions.
+pub(crate) struct ResolvedAttachments {
+    pub images: Vec<forge_types::ImageAttachment>,
+    pub mentions: Vec<String>,
+}
+
 /// Resolve a [`remote::RemoteInput::Prompt`]'s explicit, message-correlated `attachments` list
-/// (mobile-upload-race fix): when non-empty it is AUTHORITATIVE for this turn, so any stale
-/// `pending_images` left over from an unrelated `Attach` (e.g. an image already uploading for a
-/// different, adjacent message) is discarded first — it must never leak into this turn — then
-/// each listed attachment is resolved fresh with the same confinement check
-/// [`handle_remote_attach`] uses. Images ride straight onto the session; non-image files come
-/// back as plain paths (the caller prepends them onto the prompt text as `@path` mentions via
-/// [`prepend_attach_mentions`] itself, at the point where the old ambient mentions were applied —
-/// this function never touches `text`, so a `//`-escape or `/command` dispatched off the SAME
-/// prompt still parses cleanly).
-///
-/// An empty list (older client, or a plain message with genuinely no attachments) is a no-op that
-/// returns an empty `Vec` without touching any session state — callers fall back to exactly the
-/// pre-existing ambient `Attach`-then-`Prompt` behavior.
-pub(crate) async fn resolve_prompt_attachments(
-    session: &Arc<tokio::sync::Mutex<Session>>,
+/// without touching the session's images, so a busy prompt can carry them in its queue entry.
+/// Confinement and load failures are reported through `remote_notes` / `app` exactly like the
+/// ambient `Attach` leg.
+pub(crate) fn load_prompt_attachments(
     app: &mut forge_tui::App,
     remote_notes: &mut Vec<String>,
     cwd: &str,
     attachments: Vec<remote::PromptAttachment>,
-) -> Vec<String> {
-    if attachments.is_empty() {
-        return Vec::new();
-    }
-    // Drop, don't use: whatever's ambiently pending belongs to no turn now that an explicit,
-    // authoritative list has arrived for THIS one.
-    with_session(session, |s| drop(s.take_pending_images()));
-
-    let mut mentions = Vec::new();
+) -> ResolvedAttachments {
+    let mut out = ResolvedAttachments {
+        images: Vec::new(),
+        mentions: Vec::new(),
+    };
     for att in attachments {
         if !remote_attach_confined(&att.path, cwd) {
             tracing::warn!(
@@ -394,7 +398,8 @@ pub(crate) async fn resolve_prompt_attachments(
             match crate::image_input::load_image_file(&att.path) {
                 Ok((img, label)) => {
                     tracing::info!(path = %att.path, %label, "prompt image attachment resolved");
-                    with_session(session, move |s| s.attach_images(vec![img]));
+                    out.images.push(img);
+                    out.mentions.push(att.path);
                     app.note(&format!("🖼 image attached ({label}) — rides this prompt"));
                 }
                 Err(e) => {
@@ -403,10 +408,40 @@ pub(crate) async fn resolve_prompt_attachments(
                 }
             }
         } else {
-            mentions.push(att.path);
+            out.mentions.push(att.path);
         }
     }
-    mentions
+    out
+}
+
+/// Resolve a [`remote::RemoteInput::Prompt`]'s explicit, message-correlated `attachments` list.
+/// `Some(list)` — even an empty one — is AUTHORITATIVE for this turn: whatever is ambiently
+/// pending (`pending_images` from an `Attach` the user may since have removed from the tray, or
+/// one uploaded for an adjacent message) is discarded first, then each listed attachment is
+/// resolved fresh with the same confinement check [`handle_remote_attach`] uses. Images ride
+/// straight onto the session; the returned paths (images too, so the stored user row records
+/// them) are prepended by the caller via [`prepend_attach_mentions`] at the point where the old
+/// ambient mentions were applied — this function never touches `text`, so a `//`-escape or
+/// `/command` dispatched off the SAME prompt still parses cleanly.
+///
+/// `None` (older client, or the local TUI) touches no session state — callers fall back to the
+/// ambient `Attach`-then-`Prompt` behavior.
+pub(crate) async fn resolve_prompt_attachments(
+    session: &Arc<tokio::sync::Mutex<Session>>,
+    app: &mut forge_tui::App,
+    remote_notes: &mut Vec<String>,
+    cwd: &str,
+    attachments: Option<Vec<remote::PromptAttachment>>,
+) -> Vec<String> {
+    let Some(attachments) = attachments else {
+        return Vec::new();
+    };
+    discard_ambient_images(session);
+    let resolved = load_prompt_attachments(app, remote_notes, cwd, attachments);
+    if !resolved.images.is_empty() {
+        with_session(session, move |s| s.attach_images(resolved.images));
+    }
+    resolved.mentions
 }
 
 /// Start or stop remote control in response to `/remote`. On: bind the server (LAN-reachable by
@@ -575,5 +610,24 @@ mod qr_overlay_tests {
             "the QR no longer claims keys"
         );
         assert!(keys.len() <= 1);
+    }
+}
+
+#[cfg(test)]
+mod mention_tests {
+    use super::*;
+
+    #[test]
+    fn an_upload_under_a_path_with_spaces_is_mentioned_braced() {
+        let mut mentions = vec!["/home/f/Trading Bots/r/.forge/uploads/s/1-notes.txt".to_string()];
+        assert_eq!(
+            prepend_attach_mentions(&mut mentions, "hi".into()),
+            "@{/home/f/Trading Bots/r/.forge/uploads/s/1-notes.txt}\nhi"
+        );
+        let mut plain = vec!["/r/.forge/uploads/s/2-a.txt".to_string()];
+        assert_eq!(
+            prepend_attach_mentions(&mut plain, "x".into()),
+            "@/r/.forge/uploads/s/2-a.txt\nx"
+        );
     }
 }

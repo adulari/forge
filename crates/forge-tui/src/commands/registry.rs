@@ -46,9 +46,24 @@ pub const COMMANDS: &[Command] = &[
         usage: "/sidebar [on|off]",
     },
     Command {
+        name: "history",
+        desc: "search this session's whole history, including messages folded out of context",
+        usage: "/history <words>",
+    },
+    Command {
         name: "jobs",
         desc: "background shells of this workspace: view their logs, stop them",
         usage: "/jobs",
+    },
+    Command {
+        name: "turns",
+        desc: "why turns stopped short, and what to do about it",
+        usage: "/turns",
+    },
+    Command {
+        name: "contract",
+        desc: "the goal's validation contract: each assertion, pass or fail, and its proof",
+        usage: "/contract",
     },
     Command {
         name: "sessions",
@@ -149,7 +164,7 @@ pub const COMMANDS: &[Command] = &[
     },
     Command {
         name: "models",
-        desc: "browse available models by provider (counts + frontier/free)",
+        desc: "browse models by provider, with how each did for you over 30 days",
         usage: "/models",
     },
     Command {
@@ -300,12 +315,22 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "goal",
         desc: "set a goal and track it as a plan, or steer it: pause, resume, edit, clear",
-        usage: "/goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] | pause | resume | clear | status | edit <objective>",
+        usage: "/goal <objective> [--contract|--mission] [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] [--budget claude:20%w|$5] | budget <spec> | pause | resume | clear | status | edit <objective>",
     },
     Command {
         name: "pr",
         desc: "turn this session's work into a branch, a commit and a pull request",
         usage: "/pr [title]",
+    },
+    Command {
+        name: "ci",
+        desc: "run the repository's own CI (from .github/workflows) locally, with its environment",
+        usage: "/ci",
+    },
+    Command {
+        name: "ship",
+        desc: "commit, push, open the pull request and let PR Watch merge it when checks pass",
+        usage: "/ship",
     },
     Command {
         name: "loop",
@@ -411,6 +436,16 @@ pub const COMMANDS: &[Command] = &[
         name: "import",
         desc: "import Claude Code and Codex conversations from this computer",
         usage: "/import",
+    },
+    Command {
+        name: "issues",
+        desc: "list this project's GitHub issues and start a session on one",
+        usage: "/issues",
+    },
+    Command {
+        name: "queue",
+        desc: "the merge queue: which PR lands next; hold, release, move to front, retry",
+        usage: "/queue",
     },
     Command {
         name: "clis",

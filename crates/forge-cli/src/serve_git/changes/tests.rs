@@ -162,6 +162,46 @@ async fn edits_that_predate_the_last_commit_do_not_claim_a_file() {
 }
 
 #[tokio::test]
+async fn committing_one_file_keeps_the_other_uncommitted_edits_attributed() {
+    let dir = repo_with(&[("a.txt", "a\n"), ("b.txt", "b\n")]);
+    let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+    let sid = live_session(&store, dir.path(), None);
+    std::fs::write(dir.path().join("a.txt"), "a\nagent\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "b\nagent\n").unwrap();
+    edited(&store, &sid, "edit_file", "a.txt");
+    edited(&store, &sid, "edit_file", "b.txt");
+    // The user commits only b.txt (dated later than the edits); a.txt is still the agent's.
+    git_in(dir.path(), &["add", "b.txt"]);
+    let later = (chrono::Utc::now().timestamp() + 3_600).to_string();
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir.path())
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "b only",
+        ])
+        .env("GIT_COMMITTER_DATE", &later)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    std::fs::write(dir.path().join("b.txt"), "b\nagent\nhuman\n").unwrap();
+
+    let app = router(store, dir.path());
+    let (_, body) = http_get(
+        &app,
+        &format!("/api/projects/changes?cwd={}", dir.path().display()),
+    )
+    .await;
+    assert_eq!(paths(session(&body, &sid)), ["a.txt"]);
+    assert_eq!(paths(session(&body, "unattributed")), ["b.txt"]);
+}
+
+#[tokio::test]
 async fn a_worktree_session_reports_its_diff_against_the_fork_point() {
     let dir = repo_with(&[("a.txt", "a\n"), ("keep.txt", "k\n")]);
     let worktree = dir.path().join(".forge/worktrees/child");
@@ -314,4 +354,85 @@ fn noise_path_matcher() {
     ] {
         assert!(!is_noise_path(real), "{real}");
     }
+}
+
+#[tokio::test]
+async fn files_carry_a_risk_verdict_and_hunk_counts() {
+    let dir = repo_with(&[
+        ("Cargo.lock", "version = 1\n"),
+        (
+            "src/a.rs",
+            "use std::io;\nuse std::fs;\n\nfn f() {\n    1\n}\n",
+        ),
+        ("src/b.rs", "fn g() {\n    let a = read()?;\n}\n"),
+    ]);
+    let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
+    let id = live_session(&store, dir.path(), None);
+    std::fs::write(dir.path().join("Cargo.lock"), "version = 2\n").unwrap();
+    std::fs::write(
+        dir.path().join("src/a.rs"),
+        "use std::fs;\nuse std::io;\n\nfn f() {\n    1\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/b.rs"),
+        "fn g() {\n    let a = read();\n}\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/new.rs"), "fn n() {}\n").unwrap();
+    for path in ["Cargo.lock", "src/a.rs", "src/b.rs", "src/new.rs"] {
+        edited(&store, &id, "edit_file", path);
+    }
+
+    let app = router(store, dir.path());
+    let url = format!("/api/projects/changes?cwd={}", dir.path().display());
+    let (status, body) = http_get(&app, &url).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let files = session(&body, &id)["files"].as_array().unwrap().clone();
+    let verdict = |path: &str| {
+        let f = files.iter().find(|f| f["path"] == path).unwrap();
+        (
+            f["risk"].as_str().unwrap().to_string(),
+            f["risk_reason"].as_str().unwrap().to_string(),
+            f["look_hunks"].as_u64().unwrap(),
+            f["routine_hunks"].as_u64().unwrap(),
+        )
+    };
+    assert_eq!(
+        verdict("Cargo.lock"),
+        ("routine".into(), "lockfile churn".into(), 0, 1)
+    );
+    assert_eq!(
+        verdict("src/a.rs"),
+        ("routine".into(), "import reorder".into(), 0, 1)
+    );
+    assert_eq!(
+        verdict("src/b.rs"),
+        ("look".into(), "removes error handling".into(), 1, 0)
+    );
+    assert_eq!(
+        verdict("src/new.rs"),
+        ("look".into(), "new file".into(), 1, 0)
+    );
+
+    // Staging is accepting: the staged file leaves the counts, whatever its hunks were.
+    assert!(std::process::Command::new("git")
+        .current_dir(dir.path())
+        .args(["add", "Cargo.lock", "src/b.rs"])
+        .status()
+        .unwrap()
+        .success());
+    let (_, body) = http_get(&app, &url).await;
+    let files = session(&body, &id)["files"].as_array().unwrap().clone();
+    let staged = |path: &str| {
+        let f = files.iter().find(|f| f["path"] == path).unwrap();
+        (
+            f["risk"].as_str().unwrap().to_string(),
+            f["risk_reason"].as_str().unwrap().to_string(),
+            f["look_hunks"].as_u64().unwrap() + f["routine_hunks"].as_u64().unwrap(),
+        )
+    };
+    assert_eq!(staged("Cargo.lock"), ("routine".into(), "staged".into(), 0));
+    assert_eq!(staged("src/b.rs"), ("routine".into(), "staged".into(), 0));
+    assert_eq!(staged("src/a.rs").1, "import reorder");
 }

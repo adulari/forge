@@ -690,19 +690,23 @@ mod tests {
 
     #[tokio::test]
     async fn requests_reach_only_the_scope_of_the_connection_that_sent_them() {
+        // Scopes live in one process-wide registry, and tests run in parallel: another test's
+        // scopes on a shared server name make the owner-less route below ambiguous, so it
+        // declines without sending and the wait for the form never ends.
+        const SERVER: &str = "srv-connection-scoping";
         let (a, b) = (new_owner_id(), new_owner_id());
         assert_eq!(
-            route(Some(a), "srv", "hi".into(), url()).await,
+            route(Some(a), SERVER, "hi".into(), url()).await,
             ElicitReply::Decline,
             "no scope open"
         );
         let (_b_other, mut b_other_rx) = open_scope(b, "elsewhere");
-        let (scope_a, mut a_rx) = open_scope(a, "srv");
-        let (scope_b, mut b_rx) = open_scope(b, "srv");
+        let (scope_a, mut a_rx) = open_scope(a, SERVER);
+        let (scope_b, mut b_rx) = open_scope(b, SERVER);
 
         // A private connection of manager A reaches A's scope even though B's is newer.
-        let task = tokio::spawn(route(Some(a), "srv", "hi".into(), url()));
-        let req = a_rx.recv().await.unwrap();
+        let task = tokio::spawn(route(Some(a), SERVER, "hi".into(), url()));
+        let req = form_arrives(&mut a_rx).await;
         assert_eq!(req.message, "hi");
         assert!(b_rx.try_recv().is_err() && b_other_rx.try_recv().is_err());
         req.reply.send(ElicitReply::Cancel).unwrap();
@@ -711,18 +715,33 @@ mod tests {
         // A pooled connection (owner unknown) shared by two sessions is ambiguous: declined,
         // and neither session sees the form.
         assert_eq!(
-            route(None, "srv", "hi".into(), url()).await,
+            route(None, SERVER, "hi".into(), url()).await,
             ElicitReply::Decline
         );
         assert!(a_rx.try_recv().is_err() && b_rx.try_recv().is_err());
 
         // With only one session covering the server there is no ambiguity.
         drop(scope_a);
-        let task = tokio::spawn(route(None, "srv", "hi".into(), url()));
-        let req = b_rx.recv().await.unwrap();
+        let task = tokio::spawn(route(None, SERVER, "hi".into(), url()));
+        let req = form_arrives(&mut b_rx).await;
         req.reply.send(ElicitReply::Decline).unwrap();
         assert_eq!(task.await.unwrap(), ElicitReply::Decline);
         drop(scope_b);
+    }
+
+    /// A wait that never ends would hold the test runner until the job times out, so every await
+    /// on the registry or the connection is bounded and names the step that stalled.
+    async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(std::time::Duration::from_secs(30), fut)
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting until {step}"))
+    }
+
+    async fn form_arrives(rx: &mut mpsc::UnboundedReceiver<ElicitRequest>) -> ElicitRequest {
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("the elicitation form should reach this scope")
+            .unwrap()
     }
 
     #[tokio::test]
@@ -732,7 +751,9 @@ mod tests {
         let (_sb, _b_rx) = open_scope(b, "srv");
         assert!(!user_is_answering(a, "srv"));
         let task = tokio::spawn(route(Some(a), "srv", "hi".into(), url()));
-        let req = a_rx.recv().await.unwrap();
+        let req = within("the request reaches its scope", a_rx.recv())
+            .await
+            .unwrap();
         assert!(user_is_answering(a, "srv"));
         assert!(
             !user_is_answering(b, "srv"),
@@ -740,7 +761,7 @@ mod tests {
         );
         assert!(!user_is_answering(a, "other"));
         req.reply.send(ElicitReply::Decline).unwrap();
-        task.await.unwrap();
+        within("the route returns", task).await.unwrap();
     }
 
     #[tokio::test]
@@ -753,7 +774,9 @@ mod tests {
             let mgr = std::sync::Arc::clone(&mgr);
             tokio::spawn(async move { mgr.call("test__ask", &json!({})).await })
         };
-        let request = rx.recv().await.expect("the server asked");
+        let request = within("the server's question reaches the scope", rx.recv())
+            .await
+            .expect("the server asked");
         assert_eq!(request.message, "Need two things");
         let ElicitPrompt::Form(form) = &request.prompt else {
             panic!("expected a form");
@@ -780,7 +803,7 @@ mod tests {
             .collect();
         let values = form.resolve(&answers).expect("valid");
         request.reply.send(ElicitReply::Accept(values)).unwrap();
-        let outcome = call.await.unwrap();
+        let outcome = within("the answered call returns", call).await.unwrap();
         assert!(outcome.ok, "{}", outcome.text);
         assert!(
             outcome.text.contains("\"action\":\"accept\""),
@@ -796,7 +819,11 @@ mod tests {
 
         // The scope is shared process state, so the no-listener case runs in the same test.
         drop(_scope);
-        let outcome = mgr.call("test__ask", &json!({})).await;
+        let outcome = within(
+            "the call with no listener returns",
+            mgr.call("test__ask", &json!({})),
+        )
+        .await;
         assert!(
             outcome.text.contains("\"action\":\"decline\""),
             "{}",

@@ -145,7 +145,8 @@ impl App {
                 indent: has_summary,
             };
             b.row(row, card.start, Some((span.id, kind)));
-            if waiting {
+            // The body of a running card is its pending diff, or the live tail of its output.
+            if waiting || !card.live_tail.is_empty() {
                 for at in card.start + 1..card.start + card.len {
                     let mut body = self.main_log[at].clone();
                     if has_summary {

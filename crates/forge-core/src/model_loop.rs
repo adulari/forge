@@ -274,6 +274,9 @@ impl Session {
                 step,
             )
             .await?;
+            // The retry allowance is per request: a long pass that rode out two blips early must
+            // still get its retries when a third one lands hundreds of steps later.
+            transient_retries = 0;
             // A bridge's `worktree` call moved the session inside `mcp-serve`; a direct one moved
             // it in-process. Either way the next request (and bridge spawn) runs at the new root.
             if let Some(before) = bridge_cwd {
@@ -311,6 +314,13 @@ impl Session {
             }
 
             if let Some(text) = self.hard_guard_after_call(resp.usage.cost_usd) {
+                if resp.wants_tools() {
+                    self.close_unrun_tool_calls(&resp.tool_calls, &text)?;
+                } else {
+                    // The reply streamed to the person but is stored provider-only until a turn
+                    // accepts it; this turn ends here, so publish it before the reason below.
+                    self.publish_terminal_answer(&resp.content)?;
+                }
                 final_text = text;
                 hit_step_cap = false;
                 halted_by_loop_guard = true;
@@ -623,7 +633,7 @@ impl Session {
                     // (bounded) so the work completes instead of ending the turn mid-task.
                     let open_titles = nudge_policy::open_titles(&self.tasks);
                     let unfinished = open_titles.len();
-                    if unfinished > 0 && self.advisory_nudges_on() {
+                    if unfinished > 0 && self.task_nudges_on() {
                         // Work is still open — any earlier "all done" verification is stale.
                         verify_attempts = 0;
                         let progress_now = (
@@ -653,16 +663,7 @@ impl Session {
                                 ));
                                 let nudge =
                                     nudge_policy::continue_nudge(&open_titles, continue_nudges);
-                                let nseq = self.next_seq();
-                                let _ = self.store.add_message(
-                                    &self.id,
-                                    nseq,
-                                    Role::System,
-                                    &nudge,
-                                    None,
-                                );
-                                self.transcript.push(Message::system(&nudge));
-                                self.ledger.note_gate();
+                                let _ = self.push_note(forge_types::MessageKind::Continue, nudge);
                                 continue;
                             }
                             ContinueNudge::BlockedStop => {
@@ -736,6 +737,12 @@ impl Session {
                         }
                     }
                 }
+                // The answer is being accepted: whatever is still open at this point is what the
+                // turn leaves behind, so it is reported as unfinished under every profile and
+                // whether or not the nudges were on.
+                if !self.tasks.is_empty() {
+                    self.turn_unfinished_tasks = nudge_policy::open_titles(&self.tasks);
+                }
                 let unresolved = verification_ledger.lock().unwrap().unresolved_summary();
                 let pass_mutations = mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
                 if self
@@ -784,12 +791,16 @@ impl Session {
                 break;
             }
             let unresolved = verification_ledger.lock().unwrap().unresolved_summary();
-            if let Some(stop) = self.supervise_step(
-                &resp.content,
-                &step_observations,
-                self.done_task_count() > done_before,
-                unresolved.as_deref(),
-            ) {
+            if let Some(stop) = self
+                .supervise_step(
+                    &resp.content,
+                    &step_observations,
+                    self.done_task_count() > done_before,
+                    unresolved.as_deref(),
+                    &active_model,
+                )
+                .await
+            {
                 final_text = stop.final_text;
                 hard_guard_abort = stop.hard;
                 halted_by_loop_guard = true;
@@ -809,25 +820,15 @@ impl Session {
         // any single loop's count.
         self.mutations_this_turn += mutations_ran.load(std::sync::atomic::Ordering::Relaxed);
 
-        if let (true, true, Some(limit)) = (hit_step_cap, unattended, step_limit) {
-            final_text = self.abort_for_step_ceiling(limit);
-            halted_by_loop_guard = true;
-            hard_guard_abort = true;
-        }
-
-        // A loop guard (or an unrecoverable empty reply) can end a turn that did real work with
-        // nothing to say; never hand that back as the result.
-        if final_text.trim().is_empty()
-            && !hard_guard_abort
-            && !hit_step_cap
-            && !self.past_turn_deadline()
-            && tools_ran.load(std::sync::atomic::Ordering::Relaxed) > 0
-        {
-            final_text = self
-                .answer_for_halted_turn(&active_model, halted_by_loop_guard)
-                .await;
-            self.publish_terminal_answer(&final_text.clone())?;
-        }
+        let (final_text, halted_by_loop_guard, hard_guard_abort) = self
+            .close_out_turn_text(
+                final_text,
+                &active_model,
+                (hit_step_cap, unattended, step_limit),
+                (halted_by_loop_guard, hard_guard_abort),
+                tools_ran.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .await?;
 
         Ok(ModelLoopOutcome {
             final_text,

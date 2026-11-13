@@ -190,7 +190,7 @@ async fn recent_candidates(state: &DaemonState) -> Result<Vec<(String, i64)>, St
         .filter(|handle| handle.worktree.is_none())
         .map(|handle| {
             (
-                handle.cwd.clone(),
+                handle.cwd(),
                 handle
                     .last_activity
                     .load(std::sync::atomic::Ordering::Relaxed),
@@ -199,16 +199,12 @@ async fn recent_candidates(state: &DaemonState) -> Result<Vec<(String, i64)>, St
         .collect();
 
     let store = state.store.clone();
-    let past = match tokio::task::spawn_blocking(move || store.list_sessions_for_resume()).await {
+    let past = match tokio::task::spawn_blocking(move || store.recent_project_activity()).await {
         Ok(Ok(rows)) => rows,
         Ok(Err(error)) => return Err(format!("listing recent projects failed: {error}")),
         Err(error) => return Err(format!("listing recent projects task failed: {error}")),
     };
-    candidates.extend(
-        past.into_iter()
-            .filter(|session| session.worktree_path.is_none())
-            .map(|session| (session.cwd, session.last_activity)),
-    );
+    candidates.extend(past);
     candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.1));
     Ok(candidates)
 }

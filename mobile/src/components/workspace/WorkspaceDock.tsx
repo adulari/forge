@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   ArrowLeft,
   ChevronsDownUp,
   FileCode2,
@@ -66,7 +67,8 @@ import {
   type FileViewMode,
 } from "./fileKind";
 import { collapseWithin, creationDirectory, expandTo, loadExpanded, saveExpanded, toggleExpanded } from "./treeState";
-import { joinWorkspacePath, parentWorkspacePath, workspaceBasename } from "./workspaceModel";
+import { externalChange } from "../ide/editorModel";
+import { joinWorkspacePath, parentWorkspacePath, savedDraftDirty, workspaceBasename } from "./workspaceModel";
 import { setWorkspaceDirty } from "./workspaceDirty";
 import { markRevealHandled, requestReveal, useRevealRequest } from "./workspaceReveal";
 
@@ -374,6 +376,8 @@ function WorkspaceEditor({
   const kind = fileViewKind(path);
   const [viewMode, setViewMode] = useState<FileViewMode>(() => defaultViewMode(kind, line, CAN_RENDER_SVG));
   const loadedHashRef = useRef<string | null>(null);
+  const baseRef = useRef<string | null>(null);
+  const savingRef = useRef(false);
   const firstEditRef = useRef(onFirstEdit);
   useEffect(() => {
     firstEditRef.current = onFirstEdit;
@@ -439,14 +443,22 @@ function WorkspaceEditor({
 
   const loadResponse = useCallback((response: WorkspaceFileResponse) => {
     setDraft(response.content);
+    baseRef.current = response.content;
     setLoadedHash(response.hash);
     loadedHashRef.current = response.hash;
     setDirty(false);
   }, []);
 
+  const change = externalChange(loadedHash, file.data?.hash, dirty);
   useEffect(() => {
-    if (file.data && file.data.hash !== loadedHashRef.current) loadResponse(file.data);
-  }, [file.data, loadResponse]);
+    if (file.data && change === "reload") loadResponse(file.data);
+  }, [file.data, change, loadResponse]);
+
+  const keepMine = () => {
+    if (!file.data) return;
+    setLoadedHash(file.data.hash);
+    loadedHashRef.current = file.data.hash;
+  };
 
   const reload = async () => {
     const result = await file.refetch();
@@ -454,18 +466,25 @@ function WorkspaceEditor({
   };
 
   const save = async () => {
-    if (!loadedHash || !dirty || readOnly) return;
+    if (!loadedHash || !dirty || readOnly || savingRef.current) return;
+    savingRef.current = true;
+    const sent = draft;
     try {
       const saved = await write.mutateAsync({
         session: sessionId,
         path: actualPath,
-        content: draft,
+        content: sent,
         expected_hash: loadedHash,
       });
-      loadResponse(saved);
+      baseRef.current = sent;
+      setLoadedHash(saved.hash);
+      loadedHashRef.current = saved.hash;
+      setDirty(savedDraftDirty(sent, draftRef.current));
       toast.show(`Saved ${workspaceBasename(actualPath)}`, { tone: "success" });
     } catch {
       // The mutation's concrete daemon message renders below the toolbar.
+    } finally {
+      savingRef.current = false;
     }
   };
 
@@ -566,6 +585,16 @@ function WorkspaceEditor({
           />
         )}
       </View>
+      {change === "conflict" ? (
+        <View style={[styles.conflictBar, { backgroundColor: tokens.warnBg }]}>
+          <AlertTriangle size={13} strokeWidth={1.75} color={tokens.warnBgInk} />
+          <Text style={[typeScale.meta, { color: tokens.warnBgInk, flex: 1 }]}>
+            The agent changed this file on disk. You have unsaved edits.
+          </Text>
+          <Button label="Reload (lose my edits)" variant="secondary" onPress={() => void reload()} />
+          <Button label="Keep mine" variant="secondary" onPress={keepMine} />
+        </View>
+      ) : null}
       {write.error ? (
         <View style={[styles.saveError, { backgroundColor: tokens.dangerBg }]}>
           <Text style={[typeScale.meta, { color: tokens.danger }]}>{write.error.message}</Text>
@@ -586,7 +615,7 @@ function WorkspaceEditor({
         onKeyPress={(event) => saveOnShortcut(event as unknown as Parameters<typeof saveOnShortcut>[0])}
         onChangeText={(text) => {
           setDraft(text);
-          setDirty(text !== file.data?.content);
+          setDirty(text !== baseRef.current);
           write.reset();
         }}
         multiline
@@ -786,6 +815,14 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   editorMeta: { flex: 1, minWidth: 0 },
+  conflictBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    flexWrap: "wrap",
+    gap: space.space8,
+    paddingHorizontal: space.space12,
+    paddingVertical: space.space8,
+  },
   saveError: { paddingHorizontal: space.space12, paddingVertical: space.space8 },
   hiddenEditor: { display: "none" },
   editor: {

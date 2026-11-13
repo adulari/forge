@@ -2,11 +2,12 @@
 // project directory (through that directory's most recent session); a row opens the same
 // Summary / Changes / Checks view the session header's chip opens.
 import { GitPullRequest } from "lucide-react-native";
+import { useQueryClient } from "@tanstack/react-query";
 import React, { useMemo, useState } from "react";
 import { ActivityIndicator, RefreshControl, StyleSheet, Text, View } from "react-native";
 
 import { PrDetailView } from "../components/pr/PrDetailView";
-import { checksLabel, checksTone, projectReps } from "../components/pr/prModel";
+import { checksLabel, checksTone, owningSession, projectReps } from "../components/pr/prModel";
 import { toneColor } from "../components/pr/PrChip";
 import { PageHeader } from "../components/ds/PageHeader";
 import { Badge } from "../components/ds/Badge";
@@ -14,11 +15,16 @@ import { Chip } from "../components/ds/Chip";
 import { EmptyState } from "../components/ds/EmptyState";
 import { ListRow } from "../components/ds/ListRow";
 import { Screen } from "../components/ds/Screen";
+import { Segmented } from "../components/ds/Segmented";
+import { IssuesList } from "../components/issues/IssuesList";
 import { Sheet } from "../components/ds/Sheet";
 import { DesktopDrillDown } from "../components/fleet/DesktopDrillDown";
 import type { PrListRow, PrState } from "../lib/apiPr";
 import { useSessions } from "../lib/queries";
-import { useAllPrs, usePrAvailable } from "../lib/queriesPr";
+import { UPDATE_HOST_MESSAGE, prReadable, usePrAccess } from "../lib/prAccess";
+import { useAllPrs, usePrQueue, usePrWatches } from "../lib/queriesPr";
+import { queueSummary, summaryLabel } from "../components/pr/mergeQueueModel";
+import { router } from "expo-router";
 import { usePullRefresh } from "../lib/usePullRefresh";
 import { SettingsShell } from "./(tabs)/settings";
 import { useTokens } from "../theme/ThemeProvider";
@@ -32,6 +38,13 @@ const STATES: { value: PrState; label: string }[] = [
   { value: "all", label: "All" },
 ];
 
+type PrsView = "prs" | "issues";
+
+const VIEWS: { value: PrsView; label: string }[] = [
+  { value: "prs", label: "Pull requests" },
+  { value: "issues", label: "Issues" },
+];
+
 const ago = (iso: string): string => (Number.isNaN(Date.parse(iso)) ? "" : formatRelativeTime(Date.parse(iso)));
 
 interface Row extends PrListRow {
@@ -40,8 +53,10 @@ interface Row extends PrListRow {
 
 function PrsBody() {
   const tokens = useTokens();
-  const direct = usePrAvailable();
+  const access = usePrAccess();
+  const direct = prReadable(access);
   const sessions = useSessions();
+  const [view, setView] = useState<PrsView>("prs");
   const [state, setState] = useState<PrState>("open");
   const [selected, setSelected] = useState<Row | null>(null);
   const reps = useMemo(() => projectReps(sessions.data ?? []), [sessions.data]);
@@ -49,8 +64,11 @@ function PrsBody() {
     reps.map((r) => r.sessionId),
     state,
   );
+  const queryClient = useQueryClient();
+  const queue = usePrQueue();
+  const watches = usePrWatches();
   const pull = usePullRefresh(async () => {
-    await Promise.all(results.map((r) => r.refetch()));
+    await Promise.all([...results.map((r) => r.refetch()), queryClient.invalidateQueries({ queryKey: ["issues"] })]);
   });
 
   const rows = useMemo(() => {
@@ -60,11 +78,11 @@ function PrsBody() {
       for (const pr of result.data?.prs ?? []) {
         if (seen.has(pr.url)) continue;
         seen.add(pr.url);
-        out.push({ ...pr, sessionId: reps[i].sessionId });
+        out.push({ ...pr, sessionId: owningSession(pr.url, reps[i].sessionId, watches.data?.watches ?? []) });
       }
     });
     return out.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  }, [results, reps]);
+  }, [results, reps, watches.data]);
 
   const loading = results.some((r) => r.isPending) || sessions.isPending;
   const unavailable = results.find((r) => r.data && !r.data.available)?.data?.error ?? null;
@@ -80,46 +98,73 @@ function PrsBody() {
       refreshControl={<RefreshControl refreshing={pull.refreshing} onRefresh={pull.onRefresh} />}
       contentContainerStyle={styles.content}
     >
-      <PageHeader title="Pull requests" subtitle="Pull requests across the projects on this host." />
-      <View style={styles.chips}>
-        {STATES.map((s) => (
-          <Chip key={s.value} label={s.label} size="compact" selected={state === s.value} onPress={() => setState(s.value)} />
-        ))}
-      </View>
-      {!direct ? (
-        <EmptyState icon={GitPullRequest} message="Pull requests need a direct connection to the host." />
-      ) : unavailable && rows.length === 0 ? (
-        <EmptyState icon={GitPullRequest} message={unavailable} />
-      ) : loading && rows.length === 0 ? (
-        <ActivityIndicator color={tokens.accent} style={styles.loading} />
-      ) : rows.length === 0 ? (
-        <EmptyState icon={GitPullRequest} message={`No ${state === "all" ? "" : `${state} `}pull requests in your projects.`} />
-      ) : (
-        groups.map(([repo, list]) => (
-          <View key={repo} style={styles.group}>
-            <Text style={[typeScale.meta, { color: tokens.ink2 }]}>{repo}</Text>
-            {list.map((pr, i) => (
-              <ListRow
-                key={pr.url}
-                title={pr.title}
-                subtitle={`#${pr.number} ${pr.head_ref} - ${pr.author} - ${ago(pr.updated_at)}`}
-                trailing={
-                  pr.state === "open" ? (
-                    <Text style={[typeScale.monoMeta, { color: toneColor(checksTone(pr.checks), tokens) }]}>
-                      {pr.draft ? "draft" : checksLabel(pr.checks)}
-                    </Text>
-                  ) : (
-                    <Badge label={pr.state} tone={pr.state === "merged" ? "accent" : "neutral"} lowercase />
-                  )
-                }
-                onPress={() => setSelected(pr)}
-                showSeparator={i < list.length - 1}
-                accessibilityLabel={`Pull request ${pr.number}: ${pr.title}`}
-              />
-            ))}
-          </View>
-        ))
-      )}
+      <PageHeader
+        title={view === "prs" ? "Pull requests" : "Issues"}
+        subtitle={
+          view === "prs"
+            ? "Pull requests across the projects on this host."
+            : "Start a session on an issue; Forge opens the pull request and PR Watch follows it."
+        }
+      />
+      <ListRow
+        title="Merge queue"
+        subtitle={queue.data ? summaryLabel(queueSummary(queue.data)) : "PRs landing one at a time"}
+        onPress={() => router.push("/merge-queue")}
+        showSeparator={false}
+        accessibilityLabel="Open the merge queue"
+      />
+      <Segmented options={VIEWS} value={view} onChange={setView} />
+      {view === "issues" ? <IssuesList sessionIds={reps.map((r) => r.sessionId)} /> : null}
+      {view === "prs" ? (
+        <>
+        <View style={styles.chips}>
+          {STATES.map((s) => (
+            <Chip key={s.value} label={s.label} size="compact" selected={state === s.value} onPress={() => setState(s.value)} />
+          ))}
+        </View>
+        {!direct ? (
+          <EmptyState icon={GitPullRequest} message={
+              access.kind === "relay"
+                ? access.state === "update-host"
+                  ? UPDATE_HOST_MESSAGE
+                  : "Checking what this host supports over Anywhere…"
+                : "Pull requests need a connection to the host."
+            }
+          />
+        ) : unavailable && rows.length === 0 ? (
+          <EmptyState icon={GitPullRequest} message={unavailable} />
+        ) : loading && rows.length === 0 ? (
+          <ActivityIndicator color={tokens.accent} style={styles.loading} />
+        ) : rows.length === 0 ? (
+          <EmptyState icon={GitPullRequest} message={`No ${state === "all" ? "" : `${state} `}pull requests in your projects.`} />
+        ) : (
+          groups.map(([repo, list]) => (
+            <View key={repo} style={styles.group}>
+              <Text style={[typeScale.meta, { color: tokens.ink2 }]}>{repo}</Text>
+              {list.map((pr, i) => (
+                <ListRow
+                  key={pr.url}
+                  title={pr.title}
+                  subtitle={`#${pr.number} ${pr.head_ref} - ${pr.author} - ${ago(pr.updated_at)}`}
+                  trailing={
+                    pr.state === "open" ? (
+                      <Text style={[typeScale.monoMeta, { color: toneColor(checksTone(pr.checks), tokens) }]}>
+                        {pr.draft ? "draft" : checksLabel(pr.checks)}
+                      </Text>
+                    ) : (
+                      <Badge label={pr.state} tone={pr.state === "merged" ? "accent" : "neutral"} lowercase />
+                    )
+                  }
+                  onPress={() => setSelected(pr)}
+                  showSeparator={i < list.length - 1}
+                  accessibilityLabel={`Pull request ${pr.number}: ${pr.title}`}
+                />
+              ))}
+            </View>
+          ))
+        )}
+        </>
+      ) : null}
       <Sheet visible={selected != null} onClose={() => setSelected(null)} accessibilityLabel="Pull request" snapPoints={[0.92]}>
         {selected ? <PrDetailView sessionId={selected.sessionId} number={selected.number} /> : null}
       </Sheet>

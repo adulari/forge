@@ -7,94 +7,8 @@ use crate::failure_verdict::{
 };
 use crate::model_stream::handle_stream_event;
 
-/// Advance `chain` to the next model this turn may dispatch, applying the live subscription
-/// pacing verdict: a model in `paced_held` is parked in `deferred_held` instead of dispatched,
-/// so failover exhausts every non-held candidate (free or on-pace subscription, in rank order)
-/// first. Returns `None` when only held models remain.
-async fn advance_to_next_usable(
-    session: &mut Session,
-    chain: &mut std::vec::IntoIter<String>,
-    paced_held: &[String],
-    skip_provider: Option<&str>,
-    freshly_benched: Option<&forge_types::ModelHealth>,
-    skip_reserved: bool,
-    deferred_held: &mut Vec<String>,
-) -> Result<Option<String>, CoreError> {
-    for next in chain.by_ref() {
-        if forge_config::is_model_disabled(&next, &session.config.mesh.disabled) {
-            continue;
-        }
-        if skip_provider.is_some_and(|p| forge_config::provider_of(&next) == p) {
-            continue;
-        }
-        // A CLI bridge already known to have no credentials — from its own credential file, or
-        // because it printed its own sign-in prompt earlier in this process — cannot serve this
-        // hop. Skipping it saves a subprocess launch that can only fail the same way.
-        //
-        // Set only by the CLI's own login machinery ("please sign in", an OAuth prompt), never by
-        // this loop's auth classification (`one_auth_error_benches_only_the_model_not_the_whole_provider`).
-        if forge_provider::bridge_credentials_known_absent(forge_config::provider_of(&next)) {
-            continue;
-        }
-        if session.skips_for_vision(&next) {
-            continue;
-        }
-        if skip_reserved && session.store.is_model_reserved(&next) {
-            continue;
-        }
-        // The original chain was built before this failure. Re-read health so an auth failure's
-        // new provider-wide bench immediately skips its sibling aliases in THIS turn.
-        if freshly_benched.is_some_and(|health| health.is_benched(&next)) {
-            continue;
-        }
-        if paced_held.iter().any(|held| held == &next) {
-            deferred_held.push(next);
-            continue;
-        }
-        match session.admit_failover_model(&next).await {
-            Ok(true) => return Ok(Some(next)),
-            Ok(false) => {
-                session.presenter.emit(PresenterEvent::Warning(format!(
-                    "skipped {next} (declined compaction) — trying the next model"
-                )));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(None)
-}
-
-/// Take the best held model as a genuine LAST RESORT, once nothing non-held is left. Named as
-/// such in the routing rationale so the operator can see the pacing hold was overridden rather
-/// than ignored.
-async fn admit_paced_held(
-    session: &mut Session,
-    deferred_held: &mut Vec<String>,
-) -> Result<Option<String>, CoreError> {
-    while !deferred_held.is_empty() {
-        let next = deferred_held.remove(0);
-        match session.admit_failover_model(&next).await {
-            Ok(true) => return Ok(Some(next)),
-            Ok(false) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(None)
-}
-
-/// One per-turn line naming what pacing kept the failover chain away from, so a hop that skipped
-/// an over-pace subscription is explainable after the fact.
-fn warn_paced_held_skips(session: &mut Session, deferred_held: &[String], warned: &mut bool) {
-    if *warned || deferred_held.is_empty() {
-        return;
-    }
-    *warned = true;
-    session.presenter.emit(PresenterEvent::Warning(format!(
-        "subscription pacing: skipped {} in failover — over pace on its window; \
-         trying non-held models first",
-        deferred_held.join(", ")
-    )));
-}
+mod failover_chain;
+use failover_chain::{admit_paced_held, advance_to_next_usable, warn_paced_held_skips};
 
 pub(super) const PACING_LAST_RESORT_RATIONALE: &str = "last resort: pacing hold overridden";
 
@@ -143,6 +57,9 @@ pub(super) async fn request_provider_response(
     let tools_before = tools_ran.load(std::sync::atomic::Ordering::Relaxed);
     let mut attempted = std::collections::HashSet::new();
     let mut failures = Vec::new();
+    // Whether any failure of this round of the chain was something waiting cannot cure. Only a
+    // chain that failed wholly as an outage is waited out (outage_wait.rs).
+    let mut non_outage_failure = false;
     // Models the chain reached while subscription pacing holds them: parked here, tried only
     // once every non-held candidate is exhausted (see `admit_paced_held`).
     let mut deferred_held: Vec<String> = Vec::new();
@@ -151,6 +68,34 @@ pub(super) async fn request_provider_response(
     // Consecutive token throttles on this request, and the compactions spent on them. Local: both
     // describe one request's retries, not the turn.
     let mut throttles = throttle_recovery::TokenThrottles::default();
+    // The whole chain is down: wait for the head model on the slow schedule, then start the chain
+    // again from it. Dispatch does not consult the bench, so the head is always probed, and
+    // fallbacks rejoin as their short benches expire. The model's reservation is released first:
+    // another session queues on it for at most five minutes, and these sleeps run far longer.
+    macro_rules! wait_out_dead_chain {
+        ($e:expr, $d:expr, $reservation:ident) => {
+            drop($reservation);
+            if !non_outage_failure
+                && session
+                    .wait_out_outage(&$d.model, &$e, std::time::Duration::ZERO)
+                    .await
+            {
+                *active_model = $d.model.clone();
+                *chain = $d.fallbacks.clone().into_iter();
+                attempted.clear();
+                failures.clear();
+                deferred_held.clear();
+                *last_resort_used = false;
+                failover_hop = 0;
+                continue;
+            }
+            if !non_outage_failure {
+                if let Some(down) = session.provider_down_error(&$d.model, &$e) {
+                    return Err(down);
+                }
+            }
+        };
+    }
     let resp = loop {
         // Bound what we send to the active model's context window (fetched/heuristic), so a
         // long conversation can't overflow it — which otherwise fails the turn as
@@ -178,6 +123,10 @@ pub(super) async fn request_provider_response(
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs() as i64);
         let attempt_started = std::time::Instant::now();
+        // The recovery line belongs before the answer it unblocked, so the first stream event
+        // announces it instead of the end of the response.
+        let mut live_recovery = session.outage_since();
+        let recovery_announced = std::sync::atomic::AtomicBool::new(false);
         let result = if !explicit_pin && reservation.is_none() {
             Err(forge_provider::ProviderError::Unavailable(format!(
                 "model '{active_model}' is serving another session"
@@ -225,6 +174,18 @@ pub(super) async fn request_provider_response(
             // A failed attempt's events belong to no response: each attempt starts a fresh trace.
             *session.bridge_trace.lock().unwrap() = Default::default();
             let mut sink = |ev: StreamEvent| {
+                if let Some(since) = live_recovery.take() {
+                    let down = tokio::time::Instant::now().saturating_duration_since(since);
+                    presenter.emit(PresenterEvent::Warning(crate::outage_wait::recovery_text(
+                        active_model,
+                        down,
+                    )));
+                    presenter.emit(PresenterEvent::ProviderRecovered {
+                        model: active_model.clone(),
+                        down_secs: down.as_secs(),
+                    });
+                    recovery_announced.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 handle_stream_event(
                     ev,
                     presenter.as_mut(),
@@ -321,6 +282,10 @@ pub(super) async fn request_provider_response(
                 // runtime re-probes, so before this a wrong exclusion outlived every observation
                 // that contradicted it.
                 let _ = session.store.clear_health_after_success(active_model);
+                session.outage_recovered(
+                    active_model,
+                    recovery_announced.load(std::sync::atomic::Ordering::SeqCst),
+                );
                 if !r.content.is_empty() && r.wants_tools() {
                     session.presenter.emit(PresenterEvent::AssistantDone);
                 }
@@ -396,6 +361,7 @@ pub(super) async fn request_provider_response(
                 let permanent = e.is_permanent();
                 attempted.insert(active_model.clone());
                 failures.push(classify_attempt_failure(&e));
+                non_outage_failure |= !crate::outage_wait::is_outage(&e);
                 if permanent {
                     session.record_model_failure(active_model, &e, default_cooldown);
                 }
@@ -530,7 +496,10 @@ pub(super) async fn request_provider_response(
                         // Surface the real text and fail the turn instead of burning the budget.
                         let overloaded = e.is_overloaded();
                         let message = e.to_string();
-                        let fast = attempt_started.elapsed() <= DETERMINISTIC_REJECTION_WINDOW;
+                        // A refused connection or a failed lookup is instant and identical every
+                        // time too, but nothing answered: that is the network, never a refusal.
+                        let fast = attempt_started.elapsed() <= DETERMINISTIC_REJECTION_WINDOW
+                            && !e.is_unreachable();
                         let repeated = !overloaded
                             && pinned_outage_last_error.as_deref() == Some(message.as_str());
                         *pinned_outage_last_error = (fast && !overloaded).then(|| message.clone());
@@ -588,6 +557,18 @@ pub(super) async fn request_provider_response(
                             *pinned_outage_waited = std::time::Duration::ZERO;
                             *pinned_outage_last_error = None;
                         } else {
+                            // The hot budget is spent and nothing else can serve a pin: keep
+                            // re-sending the real request on the slow schedule until the
+                            // outage allowance ends (outage_wait.rs).
+                            if session
+                                .wait_out_outage(active_model, &e, *pinned_outage_waited)
+                                .await
+                            {
+                                continue;
+                            }
+                            if let Some(down) = session.provider_down_error(active_model, &e) {
+                                return Err(down);
+                            }
                             session.presenter.emit(PresenterEvent::Warning(format!(
                                 "{active_model}: still {} after \
                              {pinned_outage_attempts} backoff retries — failing the turn \
@@ -716,6 +697,7 @@ pub(super) async fn request_provider_response(
                                 continue;
                             }
                             None => {
+                                wait_out_dead_chain!(e, d, reservation);
                                 let reason = e.reason();
                                 session.presenter.emit(PresenterEvent::Warning(format!(
                                     "{active_model} {reason} — model chain exhausted: {e}"
@@ -753,6 +735,7 @@ pub(super) async fn request_provider_response(
                         // doesn't exist. Mirror `advance_fallback`'s terminal warning and
                         // carry the error into the returned CoreError.
                         None => {
+                            wait_out_dead_chain!(e, d, reservation);
                             let reason = e.reason();
                             session.presenter.emit(PresenterEvent::Warning(format!(
                                 "{active_model} {reason} — model chain exhausted: {e}"
@@ -766,6 +749,34 @@ pub(super) async fn request_provider_response(
                         }
                     },
                 }
+            }
+            // A pass with no failover (a guard or hook re-drive, architect mode's editor pass,
+            // `mesh.failover = false`) used to fail the whole turn on the first transient error,
+            // after the answer had already been given. There is no other model to hop to, so the
+            // same model is retried: 2 retries, 500 ms then 1 s (or the server's own pause).
+            Err(e)
+                if !failover_enabled
+                    && *transient_retries < MAX_TRANSIENT_RETRIES
+                    && matches!(
+                        e,
+                        forge_provider::ProviderError::Unavailable(_)
+                            | forge_provider::ProviderError::Overloaded { .. }
+                    )
+                    && !e.is_context_overflow() =>
+            {
+                *transient_retries += 1;
+                let backoff = e
+                    .retry_after()
+                    .map(|d| d.min(std::time::Duration::from_secs(30)))
+                    .unwrap_or_else(|| {
+                        std::time::Duration::from_millis(500u64 << (*transient_retries - 1))
+                    });
+                session.presenter.emit(PresenterEvent::ModelSearch {
+                    model: active_model.clone(),
+                    retrying: true,
+                });
+                tokio::time::sleep(backoff).await;
+                continue;
             }
             Err(e) => {
                 // Paths that never enter the failover arm above — `mesh.failover = false`, or a

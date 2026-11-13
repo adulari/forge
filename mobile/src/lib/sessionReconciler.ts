@@ -1,4 +1,5 @@
 import type { HistoryRow } from "./api";
+import { stripAttachMentions } from "./attachMentions";
 import type { Snapshot } from "./ws";
 
 /** Transport-independent result of applying one snapshot revision. */
@@ -32,7 +33,7 @@ export function reconcilePendingMessages<T extends PendingMessage>(
         (row) =>
           row.seq > message.baselineSeq &&
           row.role === "user" &&
-          row.content === message.text,
+          (row.content === message.text || stripAttachMentions(row.content) === message.text),
       ),
   );
 }
@@ -43,7 +44,7 @@ export function reconcilePendingMessages<T extends PendingMessage>(
  * It becomes a bubble once the daemon takes it off the queue. Each queued entry hides one
  * message, so a prompt sent twice with one copy picked up still shows that copy. */
 export function unqueuedPendingMessages<T extends PendingMessage>(pending: readonly T[], queued: readonly string[]): T[] {
-  const waiting = queued.map((text) => text.trim());
+  const waiting = queued.map((text) => stripAttachMentions(text).trim());
   const hidden = new Set<T>();
   // Newest first: the queue drains oldest first, so a still-queued copy is the later send.
   for (let i = pending.length - 1; i >= 0; i--) {

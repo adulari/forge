@@ -256,3 +256,98 @@ async fn an_invalidation_burst_costs_one_refetch() {
     assert_eq!(fleets, 1);
     assert!(live, "an open fleet socket is the board's Live signal");
 }
+
+/// A daemon whose host is under pressure: identity carries the sample and a new worktree session
+/// is refused with the stable `host_disk_floor` code.
+async fn serve_low_disk() -> String {
+    let app = Router::new()
+        .route(
+            &format!("/{TOKEN}/api/identity"),
+            get(|| async {
+                json(serde_json::json!({
+                    "hostname": "box",
+                    "pressure": { "level": "floor", "summary": "projects disk: 2.0 GB free of 500.0 GB (0%)", "disks": [] }
+                }))
+            }),
+        )
+        .route(
+            &format!("/{TOKEN}/api/sessions"),
+            post(|| async {
+                (
+                    axum::http::StatusCode::INSUFFICIENT_STORAGE,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    serde_json::json!({
+                        "error": "not creating a worktree: 2.0 GB free — below the hard floor. Reclaim can free 30.0 GB from old worktrees.",
+                        "code": "host_disk_floor"
+                    })
+                    .to_string(),
+                )
+                    .into_response()
+            }),
+        )
+        .route(
+            &format!("/{TOKEN}/api/host/reclaim"),
+            post(|| async {
+                json(serde_json::json!({
+                    "freed_bytes": 3u64 * 1024 * 1024 * 1024,
+                    "removed": 2,
+                    "pruned": 1,
+                    "failures": []
+                }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn low_disk_reaches_the_board_as_a_chip_a_reclaim_dialog_and_a_result_toast() {
+    let base = serve_low_disk().await;
+    let http = reqwest::Client::new();
+
+    let info = super::client::fetch_pressure(&http, &base, TOKEN)
+        .await
+        .unwrap()
+        .expect("the daemon reported pressure");
+    assert!(info.is_floor());
+    assert!(info.summary.unwrap().contains("2.0 GB free"));
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (refresh_tx, _refresh_rx) = mpsc::unbounded_channel();
+    super::client::create_session(
+        http.clone(),
+        super::client::api_url(&base, TOKEN, "api/sessions"),
+        serde_json::json!({ "cwd": "/repo", "worktree": true }),
+        "do the thing".into(),
+        tx.clone(),
+        refresh_tx.clone(),
+    )
+    .await;
+    match rx.recv().await.unwrap() {
+        Ev::Board(BoardEvent::ReclaimOffer { cwd, message }) => {
+            assert_eq!(cwd.as_deref(), Some("/repo"));
+            assert!(message.contains("Reclaim can free 30.0 GB"), "{message}");
+        }
+        _ => panic!("a floor refusal must open the reclaim dialog"),
+    }
+
+    super::client::reclaim_action(
+        http,
+        super::client::api_url(&base, TOKEN, "api/host/reclaim"),
+        Some("/repo".into()),
+        tx,
+        refresh_tx,
+    )
+    .await;
+    match rx.recv().await.unwrap() {
+        Ev::Board(BoardEvent::Toast(ToastLevel::Ok, text)) => {
+            assert!(text.contains("reclaimed 3.0 GB"), "{text}");
+            assert!(text.contains("2 worktree(s) removed"), "{text}");
+        }
+        _ => panic!("expected the result toast"),
+    }
+}

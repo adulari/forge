@@ -80,15 +80,16 @@ pub use kernel::PYTHON_TOOL;
 pub use kernel::{discover_python, PythonTool};
 pub use lattice_tool::LatticeTool;
 pub use open_pr::{
-    create_pr_in, set_open_pr_settings, OpenPrSettings, OpenPrTool, ProvenanceFn, RedactFn,
-    RepoFlagFn, OPEN_PR_TOOL,
+    create_pr_for_session, create_pr_in, set_open_pr_settings, OpenPrSettings, OpenPrTool,
+    ProvenanceFn, RedactFn, RepoFlagFn, OPEN_PR_TOOL,
 };
 pub use proxy::{ProxyNetworkTool, ProxyTool};
 pub use sandbox::{ApplyResult, SandboxPolicy};
 pub use shell::{
-    job_tail, job_views, reap_orphan_tunnels, scope_job_exit_sink, set_preview_settings, stop_job,
-    JobExit, JobExitSink, JobView, PreviewSettings, ReapReason, ReapReport, ReapedTunnel,
-    RtkRewriter, ShellJobTool, ShellTool, TunnelRecord, JOB_HINT,
+    job_tail, job_views, reap_orphan_tunnels, scope_job_exit_sink, scope_live_tail,
+    set_preview_settings, stop_job, JobExit, JobExitSink, JobView, LiveTail, PreviewSettings,
+    ReapReason, ReapReport, ReapedTunnel, RtkRewriter, ShellJobTool, ShellTool, TunnelRecord,
+    JOB_HINT, LIVE_TAIL_LINES,
 };
 pub use web::{
     Bing, BraveKeyless, BraveSearch, DuckDuckGo, SearchBackend, SearchResult, SearxNg,

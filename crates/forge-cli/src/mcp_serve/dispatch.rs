@@ -62,16 +62,13 @@ fn bridge_session_id() -> Option<String> {
 
 fn local_daemon(timeout: Duration) -> Result<Daemon, String> {
     let token = crate::attach::resolve_token(None).map_err(|e| e.to_string())?;
-    let http = reqwest::Client::builder()
+    let base = crate::attach::resolve_base_url(None);
+    let http = crate::attach::local_http_builder(&base)
         .connect_timeout(timeout)
         .timeout(timeout)
         .build()
         .map_err(|e| e.to_string())?;
-    Ok(Daemon::new(
-        http,
-        crate::attach::resolve_base_url(None),
-        token,
-    ))
+    Ok(Daemon::new(http, base, token))
 }
 
 pub(super) async fn coordinated_dispatch(

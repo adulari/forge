@@ -25,11 +25,13 @@ pub mod wire;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
+mod tests_risk;
+#[cfg(test)]
 mod tests_tools;
 
 pub use keys::{handle_key, handle_mouse, handle_paste, HELP};
 pub use render::{draw, mode_for, Mode, AGENT_W, MID, RAIL_W, WIDE};
 pub use state::{
     AgentRow, BottomTab, DiffLoaded, Hit, HunkFailure, HunkOutcome, IdeAction, IdeApp, IdeEvent,
-    Pane, RailFocus, RailTab, SaveFailure, View,
+    Pane, RailFocus, RailTab, RoutineOutcome, RoutineTarget, SaveFailure, View,
 };

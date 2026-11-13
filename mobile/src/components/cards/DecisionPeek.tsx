@@ -98,6 +98,7 @@ function DecisionPeekBody({ sessionId, onClose }: { sessionId: string; onClose: 
             prompt={snapshot.permission_prompt}
             diff={snapshot.diff}
             promptSeq={snapshot.prompt_seq}
+            suggestion={snapshot.permission_suggestion ?? null}
             send={send}
           />
         ) : snapshot.question != null ? (

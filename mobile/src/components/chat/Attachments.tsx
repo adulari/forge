@@ -39,7 +39,7 @@ export function AttachmentRow({ attachments }: { attachments: SentAttachment[] }
               accessibilityLabel={`view image ${a.name}`}
             >
               <Image
-                source={{ uri: a.uri }}
+                source={{ uri: a.thumbUri ?? a.uri }}
                 style={[styles.thumb, { borderColor: tokens.border }]}
                 resizeMode="cover"
               />

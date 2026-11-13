@@ -41,7 +41,7 @@ impl HttpControl {
         let Ok(url) = self.url("/api/control/scope") else {
             return true;
         };
-        let Ok(http) = reqwest::Client::builder()
+        let Ok(http) = crate::attach::local_http_builder(&url)
             .timeout(std::time::Duration::from_secs(10))
             .build()
         else {
@@ -65,12 +65,13 @@ impl HttpControl {
 
     /// Run `tool` on the daemon. `Ok` text is the result, `Err` text is the refusal or failure.
     pub(crate) async fn run(&self, me: &str, tool: &str, args: &Value) -> Result<String, String> {
-        let http = reqwest::Client::builder()
+        let url = self.url("/api/control/call")?;
+        let http = crate::attach::local_http_builder(&url)
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|e| e.to_string())?;
         let response = http
-            .post(self.url("/api/control/call")?)
+            .post(url)
             .json(&json!({"tool": tool, "args": args, "me": me}))
             .send()
             .await

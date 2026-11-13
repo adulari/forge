@@ -122,17 +122,26 @@ pub(crate) async fn run_command(h: &HookConfig, payload: &str) -> HookRun {
         .spawn()
         .map_err(|e| e.to_string())?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(payload.as_bytes()).await;
-        // Dropping `stdin` here sends EOF so a hook that reads to end returns.
-    }
+    // Feed stdin from its own task. Written inline, a hook that never reads its stdin (a
+    // notifier, `sleep 60; ...`) blocked the write as soon as the payload (a PostToolUse result
+    // can be a whole file) outgrew the pipe buffer, and the timeout below never started.
+    let writer = child.stdin.take().map(|mut stdin| {
+        let bytes = payload.as_bytes().to_vec();
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&bytes).await;
+            // Dropping `stdin` here sends EOF so a hook that reads to end returns.
+        })
+    });
 
-    let out = match tokio::time::timeout(
+    let waited = tokio::time::timeout(
         Duration::from_secs(h.timeout_secs),
         child.wait_with_output(),
     )
-    .await
-    {
+    .await;
+    if let Some(writer) = writer {
+        writer.abort();
+    }
+    let out = match waited {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => return Err(e.to_string()),
         Err(_) => return Err(format!("timed out after {}s", h.timeout_secs)),
@@ -148,6 +157,28 @@ pub(crate) async fn run_command(h: &HookConfig, payload: &str) -> HookRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hook_that_never_reads_a_large_payload_still_times_out() {
+        let mut hook = HookConfig::new(HookEvent::PostToolUse, "sleep 30");
+        hook.timeout_secs = 1;
+        let payload = "x".repeat(4 << 20);
+        let started = std::time::Instant::now();
+        let run = run_command(&hook, &payload).await;
+        assert!(run.unwrap_err().contains("timed out"));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let quick = HookConfig::new(HookEvent::PostToolUse, "echo done");
+        assert_eq!(
+            run_command(&quick, &payload).await.unwrap().1.trim(),
+            "done"
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

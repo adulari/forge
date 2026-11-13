@@ -29,8 +29,10 @@ pub const CORE_TOOLS: &[&str] = &[
     "update_tasks",
     "present_plan",
     "use_skill",
+    crate::recall::RECALL_TOOL,
     "dispatch_sessions",
     crate::worktree_ops::WORKTREE_TOOL,
+    crate::CONSULT_EXPERT_TOOL,
     TOOL_SEARCH,
     TOOL_CALL,
 ];
@@ -42,6 +44,7 @@ pub const CORE_TOOLS: &[&str] = &[
 pub const DIRECT_CORE_EXTRA: &[&str] = &[
     "ask_user",
     "spawn_agents",
+    "scout",
     crate::codemode::RUN_CODE_TOOL,
     forge_tools::PYTHON_TOOL,
 ];

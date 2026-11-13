@@ -31,6 +31,19 @@ fn display_col(line: &str, col: usize) -> usize {
         .sum()
 }
 
+/// The char index of the character drawn at display cell `target` of `line` (tabs and wide chars
+/// span several cells), or the line's length when `target` lies past its end.
+pub(crate) fn char_at_display_col(line: &str, target: usize) -> usize {
+    let mut cells = 0;
+    for (index, c) in line.chars().enumerate() {
+        cells += display_col(&c.to_string(), 1);
+        if cells > target {
+            return index;
+        }
+    }
+    line.chars().count()
+}
+
 fn language_of(path: &str) -> &str {
     path.rsplit_once('.')
         .map(|(_, ext)| ext)
@@ -218,7 +231,7 @@ pub(super) fn draw(app: &mut IdeApp, buf: &mut Buffer, rect: Rect, hits: &mut Ve
                 height: 1,
                 ..body
             },
-            Hit::EditLine(index, text_x),
+            Hit::EditLine(index, text_x, hscroll),
         ));
     }
     if focused && row >= scroll && row < end {
@@ -259,5 +272,22 @@ fn bar_row(buf: &mut Buffer, bar: Rect, loading: bool, dirty: bool, why: bool) {
             styles::faint(),
             bar.right().saturating_sub(x),
         );
+    }
+}
+
+#[cfg(test)]
+mod click_tests {
+    use super::*;
+
+    #[test]
+    fn a_click_cell_maps_to_the_char_drawn_there() {
+        assert_eq!(char_at_display_col("abc", 1), 1);
+        // 日 and 本 take two cells each: cells 0-1 are 日, 2-3 are 本, 4 is ' '.
+        assert_eq!(char_at_display_col("日本 foo", 3), 1);
+        assert_eq!(char_at_display_col("日本 foo", 5), 3);
+        // A tab spans TAB_WIDTH cells.
+        assert_eq!(char_at_display_col("\tfoo", 2), 0);
+        assert_eq!(char_at_display_col("\tfoo", 4), 1);
+        assert_eq!(char_at_display_col("ab", 9), 2);
     }
 }

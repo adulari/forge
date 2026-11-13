@@ -374,6 +374,52 @@ impl BoardApp {
         self.focus = Focus::Confirm;
     }
 
+    /// `S`: ask the daemon what shipping the selected live session would commit. The confirm
+    /// opens with the file list once the answer arrives ([`Self::confirm_ship`]). Unlike
+    /// merge/discard it needs no worktree: a session on its own branch in a shared checkout
+    /// ships too, and the daemon refuses the base branch itself.
+    pub(crate) fn request_ship(&mut self) -> Vec<BoardAction> {
+        let Some(card) = self.selected_card() else {
+            return Vec::new();
+        };
+        let refusal = if card.past {
+            Some("resume it first: shipping works on live sessions")
+        } else if card.terminal {
+            Some("this session runs in a terminal; ship it from there with /ship")
+        } else if card.busy {
+            Some("the session is still working; ship it when it finishes")
+        } else {
+            None
+        };
+        if let Some(r) = refusal {
+            self.toast(ToastLevel::Info, r);
+            return Vec::new();
+        }
+        let id = card.id.clone();
+        self.toast(ToastLevel::Info, "checking what would be committed…");
+        vec![BoardAction::ShipPreview(id)]
+    }
+
+    /// The preview arrived: confirm shipping exactly the files it lists.
+    pub(crate) fn confirm_ship(&mut self, id: String, plan: &[String]) {
+        let title = self
+            .cards
+            .iter()
+            .find(|c| c.id == id)
+            .map_or_else(|| id.clone(), |c| c.display_title());
+        self.confirm = Some(Confirm {
+            kind: ConfirmKind::Ship(id),
+            title: "Ship this session?".into(),
+            body: format!(
+                "{title}: commit exactly these files with a generated message, push the branch \
+                 (never forced), open a pull request and let PR Watch merge it when checks \
+                 pass. It stops at the first refusal and says why.\n\n{}",
+                plan.join("\n")
+            ),
+        });
+        self.focus = Focus::Confirm;
+    }
+
     pub(crate) fn request_discard(&mut self) {
         let Some((id, title, wt)) = self.worktree_target() else {
             return;
@@ -394,9 +440,11 @@ impl BoardApp {
             ConfirmKind::CancelDispatch(id) => (BoardAction::CancelDispatch(id), "cancelling…"),
             ConfirmKind::MergeFinished(id) => (BoardAction::MergeFinished(id), "merging…"),
             ConfirmKind::Merge(id) => (BoardAction::Merge(id), "merging…"),
+            ConfirmKind::Ship(id) => (BoardAction::Ship(id), "shipping…"),
             ConfirmKind::Discard(id) => (BoardAction::Discard(id), "discarding…"),
             ConfirmKind::Archive(id) => (BoardAction::Archive(id), "archiving…"),
             ConfirmKind::Delete(id) => (BoardAction::Delete(id), "deleting…"),
+            ConfirmKind::Reclaim(cwd) => (BoardAction::Reclaim(cwd), "reclaiming…"),
             ConfirmKind::Refusal => return Vec::new(),
         };
         self.toast(ToastLevel::Info, toast);

@@ -20,6 +20,8 @@ pub(crate) struct SnapshotIdentity<'a> {
     pub model_pinned: bool,
     /// Progress of the worktree's background copy + `setup`, for a daemon-hosted session.
     pub worktree_setup: Option<remote::SnapWorktreeSetup>,
+    /// What the session's worktree was branched from; see [`remote::Snapshot::worktree_base`].
+    pub worktree_base: Option<String>,
 }
 
 /// Build one wire [`remote::Snapshot`] frame from the App's remote projection. The ONE snapshot
@@ -84,6 +86,7 @@ pub(crate) fn build_snapshot_frame(
         streaming_offset: view.streaming_offset,
         activity: view.activity,
         turn_started_at: view.turn_started_at,
+        expert: view.expert,
         transcript: view.transcript,
         transcript_rows: view
             .transcript_rows
@@ -133,6 +136,14 @@ pub(crate) fn build_snapshot_frame(
             .collect(),
         queued: view.queued,
         permission_prompt: view.permission_prompt,
+        permission_suggestion: view.permission_suggestion,
+        project_suggestion: view
+            .project_suggestion
+            .map(|s| remote::SnapProjectSuggestion {
+                path: s.path.display().to_string(),
+                name: s.name,
+                calls: s.calls,
+            }),
         question: view.question,
         question_options: view
             .question_options
@@ -168,8 +179,25 @@ pub(crate) fn build_snapshot_frame(
         closed: false,
         parent: None,
         thread_error: None,
+        last_turn_end: None,
         history_gap: None,
         worktree_setup: ident.worktree_setup,
+        worktree_base: ident.worktree_base,
+        outage: app.provider_outage.as_ref().map(|o| remote::SnapOutage {
+            provider: forge_config::provider_of(&o.model).to_string(),
+            model: o.model.clone(),
+            since_unix: o.since,
+            next_try_unix: o.next_try,
+            until_unix: o.until,
+            attempts: o.attempt,
+            reason: o.reason.clone(),
+        }),
+        live_tail: view.live_tail.map(|t| remote::SnapLiveTail {
+            tool: t.tool,
+            lines: t.lines,
+            elapsed_ms: t.elapsed_ms,
+        }),
+        ci: crate::ci_run::live::for_cwd(std::path::Path::new(ident.cwd)),
     }
 }
 
@@ -370,3 +398,6 @@ mod job_notice_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod ci_tests;

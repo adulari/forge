@@ -1,0 +1,286 @@
+//! `forge turns`: how turns ended (docs/features/session-replay.md, "Turn endings"). Counts by end
+//! reason, the last turns that did not finish, and `--backfill` for history recorded before the
+//! `turn` table existed.
+
+use crate::*;
+use anyhow::{Context, Result};
+use forge_store::TurnRow;
+
+pub(crate) struct TurnsArgs {
+    pub since: String,
+    pub session: Option<String>,
+    pub limit: usize,
+    pub json: bool,
+    pub backfill: bool,
+    pub write: bool,
+}
+
+/// `7d`, `12h`, `30m` or a bare number of days, in seconds.
+pub(crate) fn parse_window(text: &str) -> Result<i64> {
+    let text = text.trim();
+    let (digits, unit) = match text.char_indices().last() {
+        Some((i, c)) if c.is_ascii_alphabetic() => (&text[..i], c),
+        _ => (text, 'd'),
+    };
+    let n: i64 = digits
+        .parse()
+        .with_context(|| format!("not a window like 7d, 12h or 30m: {text}"))?;
+    let unit_secs = match unit {
+        'd' => 86_400,
+        'h' => 3_600,
+        'm' => 60,
+        other => anyhow::bail!("unknown window unit '{other}' (use d, h or m)"),
+    };
+    Ok(n * unit_secs)
+}
+
+pub(crate) fn turns_cmd(args: TurnsArgs) -> Result<()> {
+    let store = open_store()?;
+    let session = match args.session.as_deref() {
+        None => None,
+        Some(prefix) => Some(resolve_session(&store, prefix)?),
+    };
+    let now = chrono::Utc::now().timestamp();
+    let since = now - parse_window(&args.since)?;
+    if args.backfill {
+        let turns = store
+            .backfill_turns(session.as_deref(), since)
+            .context("classifying history")?;
+        if args.write {
+            let written = store.write_backfilled_turns(&turns)?;
+            println!("Stored {written} turn(s) classified from the transcript.");
+        } else if args.json {
+            println!("{}", serde_json::to_string_pretty(&turns)?);
+        } else {
+            print!("{}", render_backfill(&turns));
+        }
+        return Ok(());
+    }
+    let counts = store.turn_end_counts(since, session.as_deref())?;
+    let unfinished = store.recent_unfinished_turns(since, session.as_deref(), args.limit)?;
+    let consulted = store.recent_expert_turns(since, session.as_deref(), args.limit)?;
+    let scouted = store.recent_scout_turns(since, session.as_deref(), args.limit)?;
+    if args.json {
+        let counts: serde_json::Map<String, serde_json::Value> = counts
+            .iter()
+            .map(|(reason, n)| (reason.clone(), (*n).into()))
+            .collect();
+        let value = serde_json::json!({
+            "since": since,
+            "counts": counts,
+            "unfinished": unfinished,
+            "expert_turns": consulted.iter().map(forge_core::TurnEndView::from_row).collect::<Vec<_>>(),
+            "scout_turns": scouted.iter().map(forge_core::TurnEndView::from_row).collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        print!("{}", render(&counts, &unfinished, &args.since));
+        print!("{}", render_expert(&consulted));
+        print!("{}", render_scouts(&scouted));
+    }
+    Ok(())
+}
+
+fn when(secs: i64) -> String {
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|t| {
+            t.with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "?".into())
+}
+
+pub(crate) fn render(counts: &[(String, i64)], unfinished: &[TurnRow], since: &str) -> String {
+    let total: i64 = counts.iter().map(|(_, n)| n).sum();
+    if total == 0 {
+        return format!("No turns recorded in the last {since}.\n");
+    }
+    let mut out = format!("Turn endings, last {since} ({total} turns)\n");
+    for (reason, n) in counts {
+        out.push_str(&format!("  {:<34} {n:>6}\n", forge_core::end_label(reason)));
+    }
+    if !unfinished.is_empty() {
+        out.push_str(&format!(
+            "\nLast {} turns that did not finish\n  {:<7} {:<12} {:<34} {:<26} {}\n",
+            unfinished.len(),
+            "id",
+            "time",
+            "what happened",
+            "tail",
+            "session"
+        ));
+        for t in unfinished {
+            let view = forge_core::TurnEndView::from_row(t);
+            out.push_str(&format!(
+                "  {:<7} {:<12} {:<34} {:<26} {}\n",
+                t.id,
+                when(t.started_at),
+                view.label,
+                view.shape_label.as_deref().unwrap_or("-"),
+                &t.session_id[..t.session_id.len().min(8)]
+            ));
+        }
+    }
+    out
+}
+
+/// The turns that consulted the expert on call, with how many consults and which triggers.
+pub(crate) fn render_expert(turns: &[TurnRow]) -> String {
+    if turns.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\nLast {} turns that consulted the expert\n  {:<7} {:<12} {:<9} {:<34} {}\n",
+        turns.len(),
+        "id",
+        "time",
+        "consults",
+        "expert (triggers)",
+        "session"
+    );
+    for t in turns {
+        let view = forge_core::TurnEndView::from_row(t);
+        out.push_str(&format!(
+            "  {:<7} {:<12} {:<9} {:<34} {}\n",
+            t.id,
+            when(t.started_at),
+            view.expert_consults.unwrap_or(0),
+            view.expert.as_deref().unwrap_or("-"),
+            &t.session_id[..t.session_id.len().min(8)]
+        ));
+    }
+    out
+}
+
+/// The turns that ran scouts, with how many.
+pub(crate) fn render_scouts(turns: &[TurnRow]) -> String {
+    if turns.is_empty() {
+        return String::new();
+    }
+    let mut out = format!(
+        "\nLast {} turns that ran scouts\n  {:<7} {:<12} {:<7} {}\n",
+        turns.len(),
+        "id",
+        "time",
+        "scouts",
+        "session"
+    );
+    for t in turns {
+        let view = forge_core::TurnEndView::from_row(t);
+        out.push_str(&format!(
+            "  {:<7} {:<12} {:<7} {}\n",
+            t.id,
+            when(t.started_at),
+            view.scouts.unwrap_or(0),
+            &t.session_id[..t.session_id.len().min(8)]
+        ));
+    }
+    out
+}
+
+fn render_backfill(turns: &[TurnRow]) -> String {
+    let mut by_reason: std::collections::BTreeMap<&str, i64> = Default::default();
+    for t in turns {
+        *by_reason
+            .entry(t.end_reason.as_deref().unwrap_or("?"))
+            .or_default() += 1;
+    }
+    let mut out = format!(
+        "{} historical turn(s) not yet recorded (shape only; nothing written, add --write)\n",
+        turns.len()
+    );
+    for (reason, n) in by_reason {
+        out.push_str(&format!("  {:<34} {n:>6}\n", forge_core::end_label(reason)));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_parse_in_days_hours_and_minutes() {
+        assert_eq!(parse_window("7d").unwrap(), 7 * 86_400);
+        assert_eq!(parse_window("12h").unwrap(), 12 * 3_600);
+        assert_eq!(parse_window("30m").unwrap(), 1_800);
+        assert_eq!(parse_window("2").unwrap(), 2 * 86_400);
+        assert!(parse_window("soon").is_err());
+        assert!(parse_window("5y").is_err());
+    }
+
+    #[test]
+    fn the_report_lists_counts_and_unfinished_turns() {
+        let row = TurnRow {
+            id: 9,
+            session_id: "abcdef1234567890".into(),
+            prompt_seq: 3,
+            started_at: 1_700_000_000,
+            ended_at: Some(1_700_000_050),
+            end_reason: Some("stalled".into()),
+            detail_json: None,
+            last_role_shape: Some("unanswered_tool_results".into()),
+        };
+        let text = render(
+            &[("final_answer".into(), 5), ("stalled".into(), 1)],
+            &[row],
+            "7d",
+        );
+        assert!(text.contains("(6 turns)"), "{text}");
+        assert!(text.contains("finished"), "{text}");
+        assert!(text.contains("no progress"), "{text}");
+        assert!(text.contains("tool results never read"), "{text}");
+        assert!(!text.contains("final_answer"), "{text}");
+        assert!(!text.contains("unanswered_tool_results"), "{text}");
+        assert!(!text.contains("stalled"), "{text}");
+        assert!(text.contains("abcdef12"));
+        assert_eq!(
+            render(&[], &[], "7d"),
+            "No turns recorded in the last 7d.\n"
+        );
+    }
+
+    #[test]
+    fn the_report_lists_turns_that_consulted_the_expert() {
+        let row = TurnRow {
+            id: 4,
+            session_id: "feedface12345678".into(),
+            prompt_seq: 0,
+            started_at: 1_700_000_000,
+            ended_at: Some(1_700_000_050),
+            end_reason: Some("final_answer".into()),
+            detail_json: Some(
+                r#"{"expert_consults":2,"expert_model":"codex-oauth::gpt-5.6-sol","expert_triggers":["stall","done"]}"#
+                    .into(),
+            ),
+            last_role_shape: None,
+        };
+        let text = render_expert(&[row]);
+        assert!(text.contains("turns that consulted the expert"), "{text}");
+        assert!(
+            text.contains("codex-oauth::gpt-5.6-sol (stall, done)"),
+            "{text}"
+        );
+        assert!(text.contains("feedface"), "{text}");
+        assert_eq!(render_expert(&[]), "");
+    }
+
+    #[test]
+    fn the_report_lists_turns_that_ran_scouts() {
+        let row = TurnRow {
+            id: 4,
+            session_id: "abcdef1234567890".into(),
+            prompt_seq: 1,
+            started_at: 1_700_000_000,
+            ended_at: Some(1_700_000_050),
+            end_reason: Some("final_answer".into()),
+            detail_json: Some(r#"{"scouts":2}"#.into()),
+            last_role_shape: None,
+        };
+        let text = render_scouts(&[row]);
+        assert!(text.contains("turns that ran scouts"), "{text}");
+        assert!(text.contains("abcdef12"), "{text}");
+        assert_eq!(render_scouts(&[]), "");
+    }
+}

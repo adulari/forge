@@ -890,3 +890,7 @@ Hunk actions: `stage` applies the hunk to the index (`git apply --cached`, patch
 Project changes: a worktree session lists its worktree against the fork point (the `GET /api/sessions/{id}/diff` machinery). Sessions sharing one checkout split that checkout's `git status`, attributed by the store's `write_file`/`edit_file` records made since the last commit; a file several sessions edited lists under each, and dirty files no record explains go under a synthetic session `unattributed`. Changes made by shell commands are not tool-call edits and are never attributed. `.forge/` is ignored. `content_hash` is a stable digest of the file's current bytes (`deleted` when absent).
 
 TUI: `/diff` opens the diff overlay; `x` then `y` reverts the hunk under the view in the working-tree source (`crates/forge-cli/src/cli/commands/run/hunk_revert.rs`). Mobile: the working-tree review cards show Stage/Unstage/Revert per hunk, and Session actions > Background jobs lists jobs with their log tail.
+
+## Terminal working directory
+
+The terminal WebSocket route (`serve_terminal.rs`) now starts the shell in the session's worktree when it has one, and otherwise in the session's current working directory (`session.cwd()`), so a session moved to another project opens its terminal in the right place, matching the git, changes and ports routes.

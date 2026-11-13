@@ -14,6 +14,7 @@ import { noteHostResponse } from "./hostStatus";
 import { tFetch, TWebSocket } from "./transport";
 import type { DaemonUpdateInfo } from "./updateBanner";
 import { offsetChanges } from "./usageActivity";
+import type { HostPressure, ReclaimOutcome, WorktreeGate } from "./hostPressure";
 
 export class ApiError extends Error {
   status: number;
@@ -33,6 +34,14 @@ export class ApiError extends Error {
 
 export interface ConfigResponse {
   fields: ConfigField[];
+  /** A saved setting that cannot work yet (an expert model without its budget), keyed by field.
+   * Absent on older daemons and when nothing is wrong. */
+  warnings?: ConfigWarning[];
+}
+
+export interface ConfigWarning {
+  key: string;
+  text: string;
 }
 
 export interface HostIdentity {
@@ -43,6 +52,10 @@ export interface HostIdentity {
   protocol?: number;
   /** Newest release this daemon has seen when it is newer than the daemon itself. */
   update_available?: string | null;
+  /** Disk and memory pressure on the host; absent from daemons that predate the sampler. */
+  pressure?: HostPressure | null;
+  /** What the host does for PRs and Ship over Anywhere; absent from a host that predates them. */
+  ship?: { pr: boolean; over_relay: boolean };
 }
 
 export interface DiagnosticsResponse {
@@ -189,6 +202,16 @@ export interface ProviderRow {
   version: string | null;
   serving: boolean | null;
   restart_required: boolean;
+  /** Set when the provider itself refused this key; cleared by the next success. Optional so an
+   * older daemon, which never sends it, still type-checks as "no verdict". */
+  key_verdict?: ProviderKeyVerdict | null;
+}
+export interface ProviderKeyVerdict {
+  status: "expired" | "rejected" | "quota";
+  headline: string;
+  reason: string;
+  first_seen: number;
+  last_seen: number;
 }
 export interface ProvidersResponse {
   direct_only: true;
@@ -279,7 +302,15 @@ export interface GitSwitchRequest { session: string; branch: string; }
 export interface GitCreateBranchRequest { session: string; name: string; }
 export interface GitBranchActionResponse { ok: boolean; branch: string; }
 /** Same shape as the WS snapshot's `DiffHunk` — the first character of each line is the gutter. */
-export interface GitDiffHunk { header: string; lines: string[]; }
+export interface GitDiffHunk {
+  header: string;
+  lines: string[];
+  /** The daemon's verdict: "routine" hunks (lockfile churn, whitespace, import reorders) can be accepted in bulk. Absent from an older daemon. */
+  risk?: HunkRisk;
+  /** One line saying why: "lockfile churn", "deletes a test". */
+  reason?: string;
+}
+export type HunkRisk = "routine" | "look";
 export interface GitDiffFile {
   path: string;
   kind: "created" | "modified" | "deleted" | "renamed";
@@ -401,6 +432,9 @@ export interface SessionRow {
   /** The precise reason behind `last_turn_outcome` (`final_answer`, `max_steps`,
    * `budget_exhausted`, `interrupted`, `no_output`, `stalled`). Additive. */
   last_stop_reason?: string | null;
+  /** Set while the session's turn waits out a provider outage: which provider, since when (unix
+   * seconds). Absent otherwise and from an older daemon. Additive. */
+  outage?: SessionOutage | null;
   /** The model's namespace (`claude-cli`, `inferhub`), so a row can show its provider mark. Absent
    * from an older daemon; `providerFamily(row.model)` reads the same thing off the model id. */
   provider?: string | null;
@@ -419,6 +453,14 @@ export interface SessionRow {
   pr_watch?: "fix" | "merge" | null;
   /** How many `/duel` candidates this session raced; absent or 0 when it never ran one. Additive. */
   duel_candidates?: number;
+}
+
+export interface SessionOutage {
+  provider: string;
+  model?: string;
+  since_unix: number;
+  next_try_unix?: number;
+  until_unix?: number;
 }
 
 export interface PastSessionRow {
@@ -571,6 +613,8 @@ export interface CreateSessionResponse {
   title: string;
   cwd: string;
   worktree: string | null;
+  /** Set when the worktree was created while the host's disk was under its warn threshold. */
+  pressure?: WorktreeGate | null;
 }
 
 export interface ProjectRow {
@@ -606,6 +650,8 @@ export interface MergeSuccessResponse {
   ok: true;
   merged: true;
   branch: string;
+  /** The repository the changes were staged in; absent from older daemons. */
+  base?: string;
 }
 
 export interface MergeDirtyConflictResponse {
@@ -849,6 +895,19 @@ export function browseProjects(baseUrl: string, path?: string): Promise<BrowsePr
   return request(baseUrl, `/api/projects/browse${qs({ path })}`);
 }
 
+/** Free what `forge worktree reclaim --artifacts --yes` would on the host (direct connections only). */
+export function reclaimHostSpace(baseUrl: string, cwd?: string): Promise<ReclaimOutcome> {
+  return request(baseUrl, "/api/host/reclaim", {
+    method: "POST",
+    body: JSON.stringify({ cwd }),
+  });
+}
+
+/** What Reclaim would free across every repo the host knows (`reclaimable_bytes` is null when it could not be surveyed). */
+export function getReclaimPreview(baseUrl: string): Promise<{ reclaimable_bytes?: number | null }> {
+  return request(baseUrl, "/api/host/pressure");
+}
+
 export function createSession(
   baseUrl: string,
   body: CreateSessionRequest,
@@ -964,6 +1023,29 @@ export function getWorkflows(baseUrl: string, session?: string): Promise<Workflo
  * projecting its cached catalog — what a pull-to-refresh should mean. */
 export function getModels(baseUrl: string, refresh = false): Promise<ModelsResponse> {
   return request(baseUrl, refresh ? "/api/models?refresh=true" : "/api/models");
+}
+
+export interface ModelReportEntry {
+  model: string;
+  calls: number;
+  completed: number;
+  failed: number;
+  failed_over: number;
+  median_latency_ms: number | null;
+  median_cost_usd: number | null;
+  cost_samples: number;
+  tool_calls: number;
+  tool_errors: number;
+  completion_rate: number | null;
+  tool_error_rate: number | null;
+  benchmark_intelligence: number | null;
+  benchmark_coding: number | null;
+}
+export interface ModelReportResponse { days: number; repo: string | null; generated_at: number; models: ModelReportEntry[]; /** How the window's turns ended, most common first; absent from an older host. */ turn_endings?: { reason: string; count: number }[] }
+
+/** How each model did for this user over the last `days` days, from the host's local counts. */
+export function getModelReport(baseUrl: string, days = 30, repo?: string): Promise<ModelReportResponse> {
+  return request(baseUrl, `/api/models/report${qs({ days, repo })}`);
 }
 
 export interface UpdateModelRequest { model: string; favorite?: boolean; hidden?: boolean }
@@ -1230,6 +1312,35 @@ export interface AgentIndexRow {
 
 export function getSessionAgents(baseUrl: string, id: string): Promise<AgentIndexRow[]> {
   return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/agents`);
+}
+
+/** One turn as the host reports how it ended: the plain label and the way out are the host's
+ * words, so no client prints a raw end-reason name. */
+export interface TurnEndRow {
+  id: number;
+  session_id: string;
+  started_at: number;
+  ended_at: number | null;
+  reason: string;
+  label: string;
+  advice: string;
+  shape: string | null;
+  shape_label: string | null;
+  finished: boolean;
+  resumable: boolean;
+}
+export interface TurnEndCount { reason: string; label: string; count: number }
+export interface SessionTurnsResponse { session_id: string; counts: TurnEndCount[]; turns: TurnEndRow[] }
+export interface TurnsSummaryResponse { since: number; days: number; counts: TurnEndCount[]; unfinished: TurnEndRow[] }
+
+/** How a session's recent turns ended. An older host answers an error ("no endings to show"). */
+export function getSessionTurns(baseUrl: string, id: string, limit = 20): Promise<SessionTurnsResponse> {
+  return request(baseUrl, `/api/sessions/${encodeURIComponent(id)}/turns${qs({ limit })}`);
+}
+
+/** Counts by end reason and the recent turns that did not finish, across the host's sessions. */
+export function getTurnsSummary(baseUrl: string, days = 7): Promise<TurnsSummaryResponse> {
+  return request(baseUrl, `/api/turns/summary${qs({ days })}`);
 }
 
 export interface SpendTotals {
@@ -1780,6 +1891,27 @@ export interface JobTailResponse { id: number; running: boolean; status: string;
 export function getSessionJobs(baseUrl: string, session: string): Promise<SessionJobsResponse> {
   return request(baseUrl, `/api/sessions/${encodeURIComponent(session)}/jobs`);
 }
+export interface HistorySearchHit {
+  seq: number;
+  role: string;
+  /** The match in context; matched words are wrapped in `[` `]`. */
+  snippet: string;
+  /** Folded out of the model's context by a compaction (still stored, still readable). */
+  folded: boolean;
+}
+export interface HistorySearchResponse { hits: HistorySearchHit[]; }
+/** Ranked word search over a session's whole history, folded rows included. */
+export function searchSessionHistory(
+  baseUrl: string,
+  session: string,
+  query: string,
+  limit = 30,
+): Promise<HistorySearchResponse> {
+  return request(
+    baseUrl,
+    `/api/sessions/${encodeURIComponent(session)}/history/search${qs({ q: query, limit })}`,
+  );
+}
 export function getJobTail(
   baseUrl: string,
   session: string,
@@ -1799,6 +1931,11 @@ export interface ChangedFile {
   dels: number;
   /** Changes whenever the file's current content does; drop "reviewed" marks on a new value. */
   content_hash: string;
+  /** "routine" when every hunk is safe to accept in bulk. Absent from an older daemon. */
+  risk?: HunkRisk;
+  risk_reason?: string;
+  look_hunks?: number;
+  routine_hunks?: number;
 }
 export interface SessionChanges {
   /** A session id, or the synthetic group `"unattributed"`. */

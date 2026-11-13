@@ -21,7 +21,7 @@ import { ApiError, type MergeDirtyConflictResponse, type SessionRow } from "../.
 import { useAuth } from "../../lib/auth";
 import { useHasDraft } from "../../lib/drafts";
 import { providerIdOf } from "../../lib/providerFamily";
-import { diffLabel, failedTurn, projectAccent, projectName } from "../../lib/sidebarModel";
+import { diffLabel, failedTurn, projectAccent, projectName, providerDownLabel } from "../../lib/sidebarModel";
 import { haptics } from "../../lib/haptics";
 import { useArchiveSession, useDiscardSession, useMergeSession, usePrefetchSessionHistory } from "../../lib/queries";
 import { transportForBaseUrl } from "../../lib/serverTargets";
@@ -42,6 +42,8 @@ import { ActionRunningIndicator } from "../ports/ActionRunningIndicator";
 import { SessionActionRows } from "../ports/SessionActionRows";
 import { StatusDot } from "../ds/StatusDot";
 import { useToast } from "../ds/ToastHost";
+import { useWorkbench } from "../workbench/WorkbenchProvider";
+import { mergeStagedMessage } from "../../lib/mergeNextStep";
 import { SessionLifecycleSheet } from "../session/SessionLifecycleSheet";
 import { shortModelLabel } from "./shortModelLabel";
 
@@ -88,6 +90,15 @@ const ICON_STROKE = 1.75;
 function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const tokens = useTokens();
   const toast = useToast();
+  const workbench = useWorkbench();
+  const openSession = useOpenSession();
+  const reviewMerged = useCallback(
+    (id: string) => {
+      openSession(id);
+      workbench.openSurface({ kind: "git" });
+    },
+    [openSession, workbench],
+  );
   const reduced = useReducedMotion();
   const entranceStyle = useForgeline(index);
   // Forge Anywhere: host + transport prefix on the meta line (design mobile.dc.html
@@ -116,6 +127,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const { scheme } = useTheme();
   const hasDraft = useHasDraft(row.id);
   const failed = failedTurn(row);
+  const downLabel = providerDownLabel(row);
   const providerId = providerIdOf(row);
   const project = projectName(row.cwd);
   const diff = diffLabel(row.diff_added, row.diff_removed);
@@ -178,7 +190,11 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
     merge.mutate(row.id, {
       onSuccess: (res) => {
         haptics.pairSuccess();
-        toast.show(`merged branch ${res.branch}`, { tone: "success" });
+        toast.show(mergeStagedMessage(res.base, res.branch), {
+          tone: "success",
+          duration: 10_000,
+          action: { label: "Review", onPress: () => reviewMerged(row.id) },
+        });
       },
       onError: (err) => {
         haptics.mergeConflict();
@@ -189,7 +205,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
         }
       },
     });
-  }, [closeSwipe, merge, row.id, toast]);
+  }, [closeSwipe, merge, row.id, toast, reviewMerged]);
 
   const runDiscard = useCallback(() => {
     closeSwipe();
@@ -200,7 +216,6 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
   const prefetchSessionHistory = usePrefetchSessionHistory();
   const prefetchHistory = useCallback(() => prefetchSessionHistory(row.id), [prefetchSessionHistory, row.id]);
 
-  const openSession = useOpenSession();
   const goToSession = useCallback(() => openSession(row.id), [openSession, row.id]);
 
   // The row's trailing `…` IconButton is a real nested <button>, so on react-native-web the
@@ -295,7 +310,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                   onPress={goToSession}
                   onLongPress={openActions}
                   accessibilityRole={Platform.OS === "web" ? undefined : "button"}
-                  accessibilityLabel={`${title}, ${state}${failed ? ", last turn failed" : ""}${hasDraft ? ", unsent draft" : ""}, ${row.cwd}`}
+                  accessibilityLabel={`${title}, ${state}${failed ? ", last turn failed" : ""}${downLabel ? `, provider ${downLabel}` : ""}${hasDraft ? ", unsent draft" : ""}, ${row.cwd}`}
                   accessibilityState={{ selected }}
                   style={styles.cardPressable}
                 >
@@ -316,6 +331,7 @@ function SessionCardBase({ row, index, selected = false }: SessionCardProps) {
                       {title}
                     </Text>
                     {failed ? <Badge label="failed" tone="danger" /> : null}
+                    {downLabel ? <Badge label={downLabel} tone="warn" /> : null}
                     {row.pr_watch ? <Badge label={row.pr_watch === "merge" ? "watching - merge" : "watching"} tone="accent" /> : null}
                     <ActionRunningIndicator sessionId={row.id} variant="chip" />
                     {hasDraft ? (
@@ -508,6 +524,7 @@ export const SessionCard = React.memo(SessionCardBase, (prev, next) => {
     a.diff_added === b.diff_added &&
     a.diff_removed === b.diff_removed &&
     a.last_turn_outcome === b.last_turn_outcome &&
+    a.outage?.since_unix === b.outage?.since_unix &&
     a.last_activity === b.last_activity
   );
 });

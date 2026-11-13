@@ -3,6 +3,7 @@
 
 use forge_types::{Message, Role};
 
+use crate::compaction_episodes::{split_episodes, Episode};
 use crate::compaction_summary::{
     head_tail, split_verbatim, VerbatimEntry, INPUT_MESSAGE_MAX_CHARS, INPUT_TOOL_RESULT_MAX_CHARS,
     SUMMARY_PREFIX,
@@ -21,6 +22,11 @@ pub(crate) struct FoldedInput {
     pub user_messages: Vec<String>,
     /// Entries of the verbatim section the previous summary carried.
     pub previous_verbatim: Vec<VerbatimEntry>,
+    /// Episode list the previous summary carried.
+    pub previous_episodes: Vec<Episode>,
+    /// Episodes of the range being folded now, cut from the store's rows (empty when the rows are
+    /// not recallable afterwards, as with "summarize from here").
+    pub new_episodes: Vec<Episode>,
 }
 
 /// User-role text the harness writes itself, recognized by its wording. Messages carry a
@@ -68,6 +74,10 @@ pub(crate) fn fold_inputs(older: &[Message], tool_results: &[(String, String)]) 
                 let (body, entries) = split_verbatim(&message.content);
                 if !entries.is_empty() {
                     out.previous_verbatim = entries;
+                }
+                let (body, episodes) = split_episodes(body);
+                if !episodes.is_empty() {
+                    out.previous_episodes = episodes;
                 }
                 message.content = body.to_string();
             }

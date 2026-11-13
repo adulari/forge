@@ -20,7 +20,13 @@ pub struct JsonResultPresenter {
 /// a machine consumer must see `is_error: true`, not an empty stdout it cannot tell from a crash.
 /// It carries the same fields as a finished run's result, zeroed, as Claude Code's does.
 pub fn error_result_line(message: &str) -> String {
-    let value = serde_json::json!({
+    error_result_line_with(message, None)
+}
+
+/// [`error_result_line`] plus the stored end reason of the turn that failed, so a script can tell
+/// "the provider stayed down" from any other failure without parsing the message.
+pub fn error_result_line_with(message: &str, end_reason: Option<&str>) -> String {
+    let mut value = serde_json::json!({
         "type": "result",
         "subtype": "error_during_execution",
         "is_error": true,
@@ -40,6 +46,9 @@ pub fn error_result_line(message: &str) -> String {
         "modelUsage": {},
         "permission_denials": [],
     });
+    if let Some(reason) = end_reason {
+        value["end_reason"] = reason.into();
+    }
     value.to_string()
 }
 
@@ -84,6 +93,7 @@ impl Presenter for JsonResultPresenter {
         match event {
             PresenterEvent::Error(msg) => eprintln!("error: {msg}"),
             PresenterEvent::Warning(msg) => eprintln!("warning: {msg}"),
+            PresenterEvent::TurnStopped { text, .. } => eprintln!("warning: {text}"),
             PresenterEvent::Done {
                 final_text,
                 stop_reason,
@@ -107,6 +117,10 @@ impl Presenter for JsonResultPresenter {
 
     fn is_attended(&self) -> bool {
         false
+    }
+
+    fn turn_end_reason(&mut self, reason: &str) {
+        self.totals.set_end_reason(reason);
     }
 
     fn consumes_recap(&self) -> bool {
@@ -156,6 +170,42 @@ mod tests {
             context_tokens: 100,
             context_limit: None,
         }
+    }
+
+    #[test]
+    fn a_failed_run_result_names_the_stored_end_reason() {
+        let with: serde_json::Value =
+            serde_json::from_str(&error_result_line_with("down", Some("provider_down"))).unwrap();
+        assert_eq!(with["stop_reason"], "error");
+        assert_eq!(with["end_reason"], "provider_down");
+        let without: serde_json::Value = serde_json::from_str(&error_result_line("boom")).unwrap();
+        assert!(without.get("end_reason").is_none());
+    }
+
+    #[test]
+    fn the_result_carries_the_stored_end_reason_next_to_the_stop_reason() {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let mut p = JsonResultPresenter::with_writer(Box::new(Buf(buf.clone())));
+        p.turn_end_reason("final_answer_open_tasks");
+        p.emit(PresenterEvent::Done {
+            final_text: "Next I will run the tests".into(),
+            stop_reason: StopReason::FinalAnswer,
+        });
+        p.emit(PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: StopReason::Stalled,
+        });
+        let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let out: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(out[0]["stop_reason"], "final_answer");
+        assert_eq!(out[0]["end_reason"], "final_answer_open_tasks");
+        assert_eq!(
+            out[1]["end_reason"], "stalled",
+            "falls back to the stop reason"
+        );
     }
 
     #[test]

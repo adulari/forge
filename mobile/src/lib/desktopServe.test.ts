@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  desktopConnectUrl,
   resolveDesktopConnection,
   type DesktopConnectionProbes,
   type DetectedServeState,
@@ -77,5 +78,19 @@ describe("desktop launch connection", () => {
       probes({ binaryAvailable: vi.fn(async () => true) }),
     );
     expect(plan).toEqual({ kind: "manual", reason: "start-timeout" });
+  });
+
+  it("connects to a lan daemon through its certificate fingerprint", async () => {
+    const fp = `sha256:${"ab".repeat(32)}`;
+    const found = daemon({ exposure: "lan", base_url: "https://192.168.1.20:7420/tok", token: "tok", fingerprint: fp });
+    const plan = await resolveDesktopConnection(probes({ detect: vi.fn(async () => found) }));
+    expect(plan).toEqual({ kind: "connect", state: found, started: false });
+    expect(desktopConnectUrl(found)).toContain(`fp=${fp}`);
+  });
+
+  it("keeps the hint for a lan daemon whose certificate could not be read", async () => {
+    const found = daemon({ exposure: "lan", fingerprint: null });
+    const plan = await resolveDesktopConnection(probes({ detect: vi.fn(async () => found) }));
+    expect(plan).toEqual({ kind: "confirm-lan", state: found });
   });
 });

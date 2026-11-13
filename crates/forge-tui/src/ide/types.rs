@@ -91,8 +91,9 @@ pub enum Hit {
     Check(usize),
     Job(usize),
     Draft,
-    /// A line of the text editor: its index and the screen column its text starts at.
-    EditLine(usize, u16),
+    /// A line of the text editor: its index, the screen column its text starts at, and how many
+    /// display cells the view is scrolled sideways.
+    EditLine(usize, u16, usize),
     Terminal,
 }
 
@@ -132,6 +133,23 @@ pub struct HunkOutcome {
     pub is_undo: bool,
 }
 
+/// A file whose routine hunks "accept routine" should stage; `session_id` is the routed session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutineTarget {
+    pub session_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoutineOutcome {
+    /// Hunks that went into the index.
+    pub staged: usize,
+    /// Hunks (or files) the daemon refused, usually because the file changed meanwhile.
+    pub failed: usize,
+    /// Takes the whole accept back with `u`.
+    pub undo: Option<UndoRecord>,
+}
+
 /// Something the host learned and the IDE should reflect.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
@@ -145,6 +163,7 @@ pub enum IdeEvent {
     SessionClosed(String),
     History(String, Vec<HistoryRow>),
     Hunk(HunkOutcome),
+    Routine(RoutineOutcome),
     /// A stage, commit or push finished.
     GitOp(Result<String, String>),
     Toast(ToastLevel, String),
@@ -225,6 +244,11 @@ pub enum IdeAction {
         path: String,
         undo: Option<UndoRecord>,
     },
+    /// Stage every routine hunk of these files, one hunk request each.
+    AcceptRoutine(Vec<RoutineTarget>),
+    /// Take an accept back: unstage these hunks one request at a time (two `git apply --cached`
+    /// at once would fight over the index lock).
+    UnstageHunks(Vec<UndoRecord>),
     StagePaths {
         session_id: String,
         paths: Vec<String>,

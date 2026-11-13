@@ -117,3 +117,32 @@ jobs:
             v[0-9]*) ;;
             *) echo "::error::releases/latest is not a version tag"; exit 1 ;;
           esac
+
+  # Opens one tracking issue when this workflow goes red and closes it when it is green again, so a
+  # scheduled or release failure is not silent. Hosted runner on purpose: it must still report when
+  # the self-hosted runners are the thing that is down. Main-only, never PR CI; `cancelled` and
+  # `skipped` legs are neutral (see scripts/ci/report-workflow-status.sh).
+  report:
+    name: report status to tracking issue
+    needs: [publish]
+    if: ${{ always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          sparse-checkout: scripts/ci
+      - name: Open, update or close the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          WORKFLOW_NAME: ${{ github.workflow }}
+          RUN_ID: ${{ github.run_id }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          SERVER_URL: ${{ github.server_url }}
+        run: bash scripts/ci/report-workflow-status.sh

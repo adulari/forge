@@ -52,6 +52,10 @@ const ANYWHERE_ENVELOPE_OVERHEAD_BYTES = ANYWHERE_HEADER_BYTES + ANYWHERE_TAG_BY
 // The fallback deadline for a caller that supplies no signal of its own.
 const REQUEST_TIMEOUT_MS = 30_000;
 
+// Bound on token + ticket + WebSocket handshake. RN fetch has no timeout of its own, and the
+// shared `connecting` promise makes every caller wait on the same hung attempt.
+const CONNECT_TIMEOUT_MS = 15_000;
+
 // A caller that DOES supply one owns the deadline, and this is only a backstop so that a signal
 // which never fires cannot leak a pending entry forever.
 //
@@ -146,9 +150,15 @@ interface PreparedDelivery {
 }
 
 /** Ticketed, end-to-end encrypted implementation backing AnywhereTransport. */
+/** A frame to drop without tearing down the connection: a replay, or a sender not enrolled yet. */
+class DiscardFrame extends Error {}
+
 export class EncryptedAnywhereRelay implements AnywhereRelay {
   private connection: WebSocket | null = null;
   private connecting: Promise<WebSocket> | null = null;
+  // Last time any frame arrived on the current socket (or it opened). A request that times out
+  // with nothing inbound since it was sent means the socket is dead, e.g. after a network switch.
+  private lastInboundAt = 0;
   private incoming = Promise.resolve();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly streams = new Map<string, AnywhereRemoteSocket>();
@@ -276,8 +286,12 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
         this.pending.delete(key);
         if (onAbort) signal?.removeEventListener("abort", onAbort);
       };
+      const sentAtMs = Date.now();
       const timeout = setTimeout(() => {
         settle();
+        // Drop only the socket, not the other pending work: a live host would have sent something,
+        // so the next request reconnects instead of queueing behind a dead socket for another 30s.
+        if (this.connection === connection && this.lastInboundAt <= sentAtMs) this.dropStaleConnection(connection);
         reject(new Error("Forge Anywhere relay request timed out"));
       }, budget);
       if (signal) {
@@ -492,9 +506,42 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     return this.connecting;
   }
 
+  private dropStaleConnection(socket: WebSocket): void {
+    this.connection = null;
+    try {
+      socket.close(1000, "relay unresponsive");
+    } catch {
+      // Already closed.
+    }
+  }
+
   private async connect(): Promise<WebSocket> {
+    const controller = new AbortController();
+    let socket: WebSocket | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        try {
+          socket?.close();
+        } catch {
+          // Already closed.
+        }
+        reject(new Error("Forge Anywhere relay connection timed out"));
+      }, CONNECT_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([this.openConnection(controller.signal, (opened) => { socket = opened; }), deadline]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async openConnection(signal: AbortSignal, onSocket: (socket: WebSocket) => void): Promise<WebSocket> {
     const accessToken = await this.credentials.accessToken();
+    if (signal.aborted) throw new Error("Forge Anywhere relay connection timed out");
     const response = await fetch(`${trimSlash(this.credentials.serviceUrl)}/v1/relay/tickets`, {
+      signal,
       method: "POST",
       headers: {
         authorization: `Bearer ${accessToken}`,
@@ -508,13 +555,18 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     const url = new URL(`${trimSlash(this.credentials.serviceUrl)}/v1/relay`);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
     url.searchParams.set("ticket", ticket.ticket);
+    if (signal.aborted) throw new Error("Forge Anywhere relay connection timed out");
     const socket = new WebSocket(url.toString());
+    onSocket(socket);
     socket.binaryType = "arraybuffer";
     await new Promise<void>((resolve, reject) => {
       socket.onopen = () => resolve();
       socket.onerror = () => reject(new Error("Forge Anywhere relay WebSocket failed to connect"));
     });
+    if (signal.aborted) throw new Error("Forge Anywhere relay connection timed out");
+    this.lastInboundAt = Date.now();
     socket.onmessage = (event) => {
+      if (this.connection === socket) this.lastInboundAt = Date.now();
       // A rejected decoder task must not poison all later sockets/frames in this relay runtime.
       this.incoming = this.incoming.catch(() => undefined).then(() => this.handleEnvelope(event.data));
     };
@@ -551,7 +603,9 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       }
       const dataKey = await this.dataKeyForEpoch(decoded.metadata.keyEpoch);
       const senderId = bytesToHex(decoded.metadata.senderDeviceId);
-      const signingKey = await this.credentials.signingPublicKey(senderId);
+      const signingKey = await this.credentials.signingPublicKey(senderId).catch((error: unknown) => {
+        throw new DiscardFrame(asError(error).message);
+      });
       const opened = openEnvelope(bytes, dataKey, signingKey);
       let prepared: PreparedDelivery;
       if (opened.metadata.kind === 2) prepared = await this.prepareBridgeResponse(opened.plaintext, senderId);
@@ -562,12 +616,16 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       }
       const sequences = [...(prepared.precedingSequences ?? []), opened.metadata.sequence];
       if (!(await this.credentials.acceptSequences(senderId, opened.metadata.keyEpoch, sequences))) {
-        throw new Error("replayed or out-of-order Anywhere response");
+        throw new DiscardFrame("replayed or out-of-order Anywhere response");
       }
       await prepared.consume?.().catch(() => undefined);
       prepared.deliver();
       recordInboundHandling(nowMs() - startedAt);
     } catch (error) {
+      // The relay redelivers queued envelopes after a reconnect, and a device enrolled since the
+      // keys were loaded is not known yet. Dropping just that frame (as the host connector does)
+      // keeps every other in-flight request and stream alive; closing here failed them all.
+      if (error instanceof DiscardFrame) return;
       const connection = this.connection;
       this.connectionClosed(asError(error));
       connection?.close(1002, "invalid encrypted relay frame");

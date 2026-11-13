@@ -5,7 +5,7 @@
 
 pub use forge_types::{
     Answer, ConfirmOutcome, ConfirmReply, Presenter, PresenterEvent, QChoice, Question, ReplayItem,
-    NO_ANSWER,
+    RuleSuggestion, NO_ANSWER,
 };
 pub use question_form::{parse_structured_answers, FormOutcome, QuestionForm};
 
@@ -30,8 +30,12 @@ mod app_remote;
 pub use app_btw::BtwOverlay;
 pub mod agents_menu;
 pub mod anywhere_menu;
+pub mod ci_menu;
 pub mod import_menu;
+pub mod issues_menu;
+pub mod queue_menu;
 mod session_delete;
+pub mod ship_menu;
 pub mod workspace_menu;
 pub use session_delete::{DeleteKeyOutcome, SessionDeleteDialog};
 mod arg_parse;
@@ -51,7 +55,9 @@ mod keybind_configurator;
 pub mod keybinds;
 pub mod notes_overlay;
 pub mod onboarding;
+mod outage_text;
 mod overlays;
+pub use outage_text::{outage_line, recovered_line};
 mod peer_message;
 pub mod perf;
 mod picker;
@@ -69,14 +75,16 @@ mod stream_json;
 mod stream_json_message;
 pub mod throughput;
 mod usage_source;
-pub use json_result::{error_result_line, JsonResultPresenter};
+pub use json_result::{error_result_line, error_result_line_with, JsonResultPresenter};
 pub use print_presenter::PrintPresenter;
 mod shell_mode;
 pub use shell_mode::bang_command;
 pub use stream_json::{StreamInit, StreamInitSlot, StreamJsonPresenter};
 pub use usage_source::{ModelUsage, UsageSlot, UsageSource};
 pub mod diff_overlay;
+pub mod history_overlay;
 pub mod jobs_overlay;
+pub mod project_offer;
 mod qr_overlay;
 pub mod session_strip;
 pub mod sidebar;

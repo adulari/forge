@@ -15,7 +15,7 @@ use crate::open_store;
 /// Below this fraction of free space, the report says so loudly instead of leaving the user to
 /// notice when a linker dies with a bus error.
 const LOW_FREE_FRACTION: f64 = 0.10;
-const DEFAULT_ARTIFACT_MIN_AGE_HOURS: u64 = 24;
+pub(crate) const DEFAULT_ARTIFACT_MIN_AGE_HOURS: u64 = 24;
 
 pub(crate) fn worktree_cmd(op: WorktreeOp) -> Result<()> {
     let repo_root = repo_root()?;

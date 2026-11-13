@@ -4,8 +4,10 @@ import {
   CircleCheck,
   ExternalLink,
   GitBranch,
+  ListChecks,
   Pencil,
   Play,
+  Rocket,
   Star,
   Trash2,
 } from "lucide-react-native";
@@ -14,6 +16,8 @@ import React, { useEffect, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { ApiError } from "../../lib/api";
+import { openCi } from "../../lib/ciRequest";
+import { openShip } from "../../lib/shipRequest";
 import {
   useArchiveSession,
   useCreateSession,
@@ -23,6 +27,7 @@ import {
   useRestoreSession,
   useStarSession,
 } from "../../lib/queries";
+import { usePrAvailable } from "../../lib/queriesPr";
 import { useTokens } from "../../theme/ThemeProvider";
 import { space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
@@ -71,6 +76,7 @@ export function SessionLifecycleSheet({
   const starSession = useStarSession();
   const markDone = useMarkSessionDone();
   const restoreSession = useRestoreSession();
+  const canShip = usePrAvailable();
   const [current, setCurrent] = useState<SessionLifecycleTarget | null>(target);
   const [mode, setMode] = useState<"actions" | "rename">("actions");
   const [title, setTitle] = useState(target?.title ?? "");
@@ -293,6 +299,28 @@ export function SessionLifecycleSheet({
                     }}
                   />
                 ) : null}
+                {canShip && !current.archived ? (
+                  <ListRow
+                    title="Ship"
+                    subtitle="Commit, push, open the PR and merge it when checks pass"
+                    leading={<Rocket size={19} color={tokens.ink2} />}
+                    onPress={() => {
+                      const id = current.id;
+                      close();
+                      openShip(id);
+                    }}
+                  />
+                ) : null}
+                <ListRow
+                  title="Local CI"
+                  subtitle="Run the repository's workflows here, before a push"
+                  leading={<ListChecks size={19} color={tokens.ink2} />}
+                  onPress={() => {
+                    const id = current.id;
+                    close();
+                    openCi(id);
+                  }}
+                />
                 <ListRow
                   title="Rename session"
                   leading={<Pencil size={19} color={tokens.ink2} />}

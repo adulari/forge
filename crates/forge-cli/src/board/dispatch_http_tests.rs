@@ -173,6 +173,30 @@ async fn serve(fixture: Arc<Fixture>, with_list: bool) -> String {
                             }),
                         );
                     }
+                    if verb == "ship" && id == "s-ship" {
+                        return json(
+                            StatusCode::OK,
+                            serde_json::json!({
+                                "ok": true,
+                                "steps": [{"step": "pr", "status": "done", "detail": "PR #9 opened"}],
+                                "refused": null,
+                                "pr": {"number": 9, "url": "https://github.com/a/b/pull/9"},
+                                "plan": {"source": "session", "left_out": [],
+                                    "files": [{"path": "src/a.rs", "kind": "modified"}]},
+                            }),
+                        );
+                    }
+                    if verb == "ship" {
+                        return json(
+                            StatusCode::OK,
+                            serde_json::json!({
+                                "ok": false,
+                                "steps": [{"step": "branch", "status": "refused", "detail": "x"}],
+                                "refused": {"step": "branch", "reason": "on `main`, the base branch; create a branch first"},
+                                "pr": null,
+                            }),
+                        );
+                    }
                     json(StatusCode::OK, serde_json::json!({ "ok": true }))
                 },
             ),
@@ -217,6 +241,7 @@ async fn perform_one(base: &str, action: BoardAction) -> Run {
     let mut pool = SocketPool::new(base.to_string(), TOKEN.into(), ev_tx.clone());
     let mut clipboard = None;
     let mut host = Host {
+        brief_since: 0,
         http: &http,
         base,
         token: TOKEN,
@@ -230,7 +255,10 @@ async fn perform_one(base: &str, action: BoardAction) -> Run {
     loop {
         match tokio::time::timeout(Duration::from_secs(5), ev_rx.recv()).await {
             Ok(Some(ev)) => {
-                let toast = matches!(ev, Ev::Board(BoardEvent::Toast(..)));
+                let toast = matches!(
+                    ev,
+                    Ev::Board(BoardEvent::Toast(..) | BoardEvent::ShipPreview(..))
+                );
                 events.push(ev);
                 if toast {
                     // Give a trailing event (DispatchStarted follows its toast) a moment.
@@ -368,6 +396,59 @@ async fn merge_and_discard_report_success_and_a_conflict_names_files_and_worktre
         )
     );
     assert_eq!(discarded.toasts()[0].0, ToastLevel::Ok);
+}
+
+#[tokio::test]
+async fn ship_toasts_the_pr_on_success_and_the_refusal_reason_otherwise() {
+    let fixture = Arc::new(Fixture::default());
+    let base = serve(fixture.clone(), true).await;
+    let shipped = perform_one(&base, BoardAction::Ship("s-ship".into())).await;
+    let refused = perform_one(&base, BoardAction::Ship("s-main".into())).await;
+    assert_eq!(fixture.paths(), vec!["ship s-ship", "ship s-main"]);
+    assert_eq!(shipped.toasts()[0].0, ToastLevel::Ok);
+    assert!(
+        shipped.toasts()[0].1.contains("PR #9 is open"),
+        "{:?}",
+        shipped.toasts()
+    );
+    assert_eq!(refused.toasts()[0].0, ToastLevel::Error);
+    assert!(
+        refused.toasts()[0]
+            .1
+            .contains("Stopped before committing: on `main`"),
+        "{:?}",
+        refused.toasts()
+    );
+}
+
+#[tokio::test]
+async fn ship_preview_asks_for_a_preview_and_delivers_the_file_list_or_the_refusal() {
+    let fixture = Arc::new(Fixture::default());
+    let base = serve(fixture.clone(), true).await;
+    let ok = perform_one(&base, BoardAction::ShipPreview("s-ship".into())).await;
+    let refused = perform_one(&base, BoardAction::ShipPreview("s-main".into())).await;
+    assert!(
+        fixture
+            .posts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, body)| body == &serde_json::json!({ "preview": true })),
+        "the preview request must not ship"
+    );
+    match &ok.events[0] {
+        Ev::Board(BoardEvent::ShipPreview(id, Ok(lines))) => {
+            assert_eq!(id, "s-ship");
+            assert!(lines.iter().any(|l| l.contains("M src/a.rs")), "{lines:?}");
+        }
+        _ => panic!("not a ship preview"),
+    }
+    match &refused.events[0] {
+        Ev::Board(BoardEvent::ShipPreview(_, Err(reason))) => {
+            assert!(reason.contains("base branch"), "{reason}")
+        }
+        _ => panic!("not a ship preview"),
+    }
 }
 
 #[tokio::test]

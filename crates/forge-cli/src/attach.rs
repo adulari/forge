@@ -7,11 +7,15 @@
 //! daemon token is the leading path segment (`/<token>/…`); a wrong token is a 404. Defaults
 //! target the local daemon (loopback + the persisted `serve-token`); `--url` / `--token` override.
 
-use std::io::Write as _;
-
 use anyhow::{bail, Context, Result};
 use futures::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message;
+
+#[path = "attach_render.rs"]
+mod render;
+use render::Renderer;
+#[cfg(test)]
+use render::{new_suffix, outage_notice};
 
 /// One row of `GET /api/sessions` — only the fields the client renders (the daemon sends more).
 /// Shared (via `pub(crate)`) with `cli::commands::send` and `mcp_serve::fleet`, the other two
@@ -110,12 +114,41 @@ struct ClientSnapshot {
     /// The worktree's background copy + `setup`, when the daemon is provisioning one.
     #[serde(default)]
     worktree_setup: Option<ClientSetup>,
+    /// What the worktree was branched from, e.g. `based on origin/main @1a2b3c4 (...)`.
+    #[serde(default)]
+    worktree_base: Option<String>,
+    /// The rolling output of the foreground tool call in flight, when the daemon reports one.
+    #[serde(default)]
+    live_tail: Option<ClientLiveTail>,
     /// Monotonic server snapshot revision. Replayed frames can race a live broadcast during the
     /// WebSocket handshake, so the client must discard duplicate/out-of-order revisions.
     #[serde(default)]
     revision: Option<u64>,
     #[serde(default)]
     closed: bool,
+    /// Set while the turn waits out a provider outage.
+    #[serde(default)]
+    outage: Option<ClientOutage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+struct ClientOutage {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    since_unix: u64,
+    #[serde(default)]
+    next_try_unix: u64,
+    #[serde(default)]
+    until_unix: u64,
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct ClientLiveTail {
+    #[serde(default)]
+    lines: Vec<String>,
 }
 
 /// Whether the question being asked wants a secret (an MCP server's token or password).
@@ -144,7 +177,7 @@ pub(crate) async fn attach_cmd(
 ) -> Result<()> {
     let base = resolve_base_url(url);
     let token = resolve_token(token)?;
-    let http = reqwest::Client::new();
+    let http = local_http_client(&base);
 
     // One fetch does triple duty: connectivity check, token check, and session resolution.
     let sessions = fetch_sessions(&http, &base, &token).await?;
@@ -178,23 +211,105 @@ pub(crate) async fn attach_cmd(
     result
 }
 
-/// Default base URL: the local daemon on the configured `[remote] port` (7420), loopback. The
-/// LAN default binds self-signed HTTPS which a same-machine attach can't validate, so the
-/// no-flag default is loopback HTTP — pair with `forge serve --local`, or pass `--url`.
+/// Default base URL: the live daemon recorded in `serve-state.json` (its own port and scheme),
+/// else the configured `[remote] port` (7420) on loopback HTTP. A LAN daemon is reached by
+/// `localhost`, a name its self-signed certificate covers, and `local_http_client` /
+/// `ws_connect` trust exactly that certificate.
 pub(crate) fn resolve_base_url(url: Option<String>) -> String {
     let raw = url.unwrap_or_else(|| {
-        let port = forge_config::load().unwrap_or_default().remote.serve_port();
-        format!("http://127.0.0.1:{port}")
+        let state = crate::serve::read_state()
+            .ok()
+            .flatten()
+            .filter(|state| state.process_is_alive());
+        default_base_url(state.as_ref(), || {
+            forge_config::load().unwrap_or_default().remote.serve_port()
+        })
     });
     raw.trim_end_matches('/').to_string()
 }
 
-/// Default token: the persisted `serve-token` the daemon reads (never rotate from the client).
+fn local_daemon_cert(base: &str) -> Option<Vec<u8>> {
+    if !(base.starts_with("https://localhost:") || base.starts_with("wss://localhost:")) {
+        return None;
+    }
+    std::fs::read(forge_config::config_dir()?.join("serve-tls-cert.pem")).ok()
+}
+
+/// HTTP client for the local daemon: a LAN daemon's own certificate is the one added trusted root,
+/// so its self-signed HTTPS verifies; any other base keeps normal verification.
+pub(crate) fn local_http_builder(base: &str) -> reqwest::ClientBuilder {
+    let mut builder = reqwest::Client::builder();
+    if let Some(cert) =
+        local_daemon_cert(base).and_then(|pem| reqwest::Certificate::from_pem(&pem).ok())
+    {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder
+}
+
+pub(crate) fn local_http_client(base: &str) -> reqwest::Client {
+    local_http_builder(base).build().unwrap_or_default()
+}
+
+pub(crate) type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+pub(crate) async fn ws_connect(
+    url: &str,
+) -> Result<
+    (
+        WsStream,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    tokio_tungstenite::tungstenite::Error,
+> {
+    let connector = local_daemon_cert(url).and_then(|pem| {
+        let mut roots = rustls::RootCertStore::empty();
+        roots
+            .add(crate::serve_pairing::der_of_pem(&pem)?.into())
+            .ok()?;
+        let provider = std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .ok()?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        Some(tokio_tungstenite::Connector::Rustls(std::sync::Arc::new(
+            config,
+        )))
+    });
+    tokio_tungstenite::connect_async_tls_with_config(url, None, false, connector).await
+}
+
+fn default_base_url(
+    state: Option<&crate::serve::ServeState>,
+    config_port: impl FnOnce() -> u16,
+) -> String {
+    match state {
+        Some(state) => {
+            let scheme = if state.exposure == "lan" {
+                "https"
+            } else {
+                "http"
+            };
+            let host = if state.exposure == "lan" {
+                "localhost"
+            } else {
+                "127.0.0.1"
+            };
+            format!("{scheme}://{host}:{}", state.port)
+        }
+        None => format!("http://127.0.0.1:{}", config_port()),
+    }
+}
+
+/// Default token: the persisted `serve-token` the daemon reads. Never minted or repaired from the
+/// client — a missing file means no daemon has run yet.
 pub(crate) fn resolve_token(token: Option<String>) -> Result<String> {
     match token {
         Some(t) => Ok(t),
-        None => crate::serve::daemon_token(false).context(
-            "no --token given and no persisted daemon token found — start `forge serve` once, \
+        None => crate::serve::read_daemon_token().context(
+            "no --token given and no usable persisted daemon token found — start `forge serve` once, \
              or pass --token",
         ),
     }
@@ -240,7 +355,7 @@ pub(crate) async fn fetch_sessions(
 }
 
 /// Resolve a full session id from an exact id or a unique prefix; ambiguity/absence is an error.
-fn resolve_session_id(sessions: &[SessionInfo], needle: &str) -> Result<String> {
+pub(crate) fn resolve_session_id(sessions: &[SessionInfo], needle: &str) -> Result<String> {
     if let Some(exact) = sessions.iter().find(|s| s.id == needle) {
         return Ok(exact.id.clone());
     }
@@ -324,9 +439,7 @@ async fn run_attach(base: &str, token: &str, id: &str) -> Result<()> {
 async fn attach_once(base: &str, token: &str, id: &str, first: bool) -> Result<bool> {
     let ws_base = ws_scheme(base)?;
     let ws_url = format!("{ws_base}/{token}/ws?session={id}&rev=0");
-    let (ws, _resp) = tokio_tungstenite::connect_async(&ws_url)
-        .await
-        .map_err(|e| map_ws_error(e, id))?;
+    let (ws, _resp) = ws_connect(&ws_url).await.map_err(|e| map_ws_error(e, id))?;
     let (mut ws_tx, mut ws_rx) = ws.split();
     let mut lost = false;
 
@@ -477,125 +590,6 @@ fn interpret_input(line: &str, pending: &Pending) -> Option<Action> {
     }
 }
 
-/// Incremental line-oriented renderer: the daemon re-sends a full (bounded, sliding) snapshot each
-/// frame, so this prints only what's new since the last frame and never re-prints scrollback.
-#[derive(Default)]
-struct Renderer {
-    header_shown: bool,
-    last_revision: Option<u64>,
-    printed_transcript: Vec<String>,
-    printed_notes: Vec<String>,
-    shown_prompt_seq: Option<u64>,
-    was_busy: bool,
-    shown_setup: Option<ClientSetup>,
-}
-
-impl Renderer {
-    fn render(&mut self, snap: &ClientSnapshot, pending: &mut Pending) {
-        // `revision` is optional for compatibility with older daemons. When present, it is the
-        // authoritative ordering key; when absent, the overlap renderer below still de-duplicates.
-        if let Some(next_revision) = snap.revision {
-            if self
-                .last_revision
-                .is_some_and(|revision| next_revision <= revision)
-            {
-                return;
-            }
-            self.last_revision = Some(next_revision);
-        }
-
-        if !self.header_shown {
-            let title = if snap.title.is_empty() {
-                "(untitled)"
-            } else {
-                snap.title.as_str()
-            };
-            println!("── {} · {title} · {} ──", snap.session_id, snap.cwd);
-            println!("   model: {}   cost: ${:.4}\n", snap.model, snap.cost_usd);
-            self.header_shown = true;
-        }
-
-        for l in new_suffix(&self.printed_transcript, &snap.transcript) {
-            println!("{l}");
-        }
-        self.printed_transcript = snap.transcript.clone();
-
-        if snap.worktree_setup != self.shown_setup {
-            if let Some(setup) = &snap.worktree_setup {
-                println!("{}", setup.notice());
-            }
-            self.shown_setup.clone_from(&snap.worktree_setup);
-        }
-
-        for n in new_suffix(&self.printed_notes, &snap.notes) {
-            println!("· {n}");
-        }
-        self.printed_notes = snap.notes.clone();
-
-        // Turn boundary: announce when a turn finishes so the operator knows it's their move.
-        if self.was_busy
-            && !snap.busy
-            && snap.permission_prompt.is_none()
-            && snap.question.is_none()
-        {
-            println!("— turn complete (${:.4}) —", snap.cost_usd);
-        }
-        self.was_busy = snap.busy;
-
-        // Permission prompt: print once per distinct prompt_seq; a new seq replaces the old.
-        if let Some(body) = &snap.permission_prompt {
-            if self.shown_prompt_seq != Some(snap.prompt_seq) {
-                println!("\n⚠ permission needed:");
-                for l in body.lines() {
-                    println!("    {l}");
-                }
-                println!("  answer:  y  (allow)   ·   n  (deny)\n");
-                self.shown_prompt_seq = Some(snap.prompt_seq);
-            }
-            *pending = Pending::Permission(snap.prompt_seq);
-        } else if let Some(q) = &snap.question {
-            if self.shown_prompt_seq != Some(snap.prompt_seq) {
-                println!("\n❓ {q}");
-                for (i, opt) in snap.question_options.iter().enumerate() {
-                    println!("    {}. {}", i + 1, opt.label);
-                }
-                if question_is_secret(snap) {
-                    println!("  this answer is a secret: answer it in the Forge terminal or app, not here\n");
-                } else {
-                    println!("  answer by typing a number or free text\n");
-                }
-                self.shown_prompt_seq = Some(snap.prompt_seq);
-            }
-            // A typed line here would be echoed into the terminal's scrollback.
-            *pending = if question_is_secret(snap) {
-                Pending::None
-            } else {
-                Pending::Question(snap.prompt_seq)
-            };
-        } else {
-            self.shown_prompt_seq = None;
-            *pending = Pending::None;
-        }
-        let _ = std::io::stdout().flush();
-    }
-}
-
-/// The lines of `next` that follow everything already printed. Because the transcript/notes are a
-/// bounded window that slides, alignment uses the longest suffix/prefix overlap. Anchoring on only
-/// the last line is incorrect when common lines repeat (for example `— turn complete —`): it can
-/// match the wrong occurrence and replay a large block.
-fn new_suffix(prev: &[String], next: &[String]) -> Vec<String> {
-    if prev.is_empty() {
-        return next.to_vec();
-    }
-    let max_overlap = prev.len().min(next.len());
-    let overlap = (1..=max_overlap)
-        .rev()
-        .find(|&len| prev[prev.len() - len..] == next[..len])
-        .unwrap_or(0);
-    next[overlap..].to_vec()
-}
-
 /// Turn a WS handshake failure into an operator-facing message (unknown session / bad token vs.
 /// daemon down), so the client exits cleanly instead of dumping a tungstenite error.
 fn map_ws_error(e: tokio_tungstenite::tungstenite::Error, id: &str) -> anyhow::Error {
@@ -613,6 +607,33 @@ fn map_ws_error(e: tokio_tungstenite::tungstenite::Error, id: &str) -> anyhow::E
 
 #[cfg(test)]
 mod tests {
+    fn state(port: u16, exposure: &str) -> crate::serve::ServeState {
+        crate::serve::ServeState {
+            pid: 1,
+            port,
+            exposure: exposure.into(),
+            base_url: String::new(),
+            token: String::new(),
+            started_at: 0,
+            store_path: None,
+        }
+    }
+
+    #[test]
+    fn default_base_url_prefers_live_state_port_and_scheme() {
+        let local = state(9000, "local");
+        assert_eq!(
+            default_base_url(Some(&local), || unreachable!()),
+            "http://127.0.0.1:9000"
+        );
+        let lan = state(9001, "lan");
+        assert_eq!(
+            default_base_url(Some(&lan), || unreachable!()),
+            "https://localhost:9001"
+        );
+        assert_eq!(default_base_url(None, || 7420), "http://127.0.0.1:7420");
+    }
+
     use super::*;
 
     /// The prompts the client sends must deserialize into the daemon's OWN `RemoteInput` — this is
@@ -626,7 +647,7 @@ mod tests {
             serde_json::from_value::<RemoteInput>(prompt).unwrap(),
             RemoteInput::Prompt {
                 text: "fix the bug".into(),
-                attachments: Vec::new(),
+                attachments: None,
             }
         );
 
@@ -636,7 +657,8 @@ mod tests {
             RemoteInput::Allow {
                 yes: true,
                 seq: 7,
-                note: None
+                note: None,
+                scope: None
             }
         );
 
@@ -646,7 +668,8 @@ mod tests {
             RemoteInput::Allow {
                 yes: false,
                 seq: 7,
-                note: None
+                note: None,
+                scope: None
             }
         );
 
@@ -718,6 +741,97 @@ mod tests {
     }
 
     #[test]
+    fn attach_prints_the_outage_line_on_change_and_the_recovery_line_at_the_end() {
+        let down = |next| {
+            Some(ClientOutage {
+                model: "inferhub::flash".into(),
+                since_unix: 1_000,
+                next_try_unix: next,
+                until_unix: 40_000,
+                reason: "503 no_capacity".into(),
+            })
+        };
+        let line = outage_notice(&None, &down(1_300), 1_010, false, false).expect("a wait began");
+        assert!(line.contains("inferhub down since"), "{line}");
+        assert!(line.contains("503 no_capacity"), "{line}");
+        assert_eq!(
+            outage_notice(&down(1_300), &down(1_300), 1_020, false, false),
+            None
+        );
+        assert!(outage_notice(&down(1_300), &down(1_600), 1_310, false, false).is_some());
+        let back =
+            outage_notice(&down(1_600), &None, 1_000 + 4 * 3600 + 9 * 60, false, false).unwrap();
+        assert_eq!(back, "  · inferhub::flash back after 4h09m, turn resumed");
+        assert_eq!(outage_notice(&None, &None, 1_000, false, false), None);
+    }
+
+    #[test]
+    fn attach_does_not_say_twice_what_a_stored_note_already_said() {
+        let down = |next| {
+            Some(ClientOutage {
+                model: "inferhub::flash".into(),
+                since_unix: 1_000,
+                next_try_unix: next,
+                until_unix: 40_000,
+                reason: "503 no_capacity".into(),
+            })
+        };
+        assert_eq!(outage_notice(&None, &down(1_300), 1_010, true, false), None);
+        assert!(outage_notice(&down(1_300), &down(1_600), 1_310, true, false).is_some());
+        assert_eq!(outage_notice(&down(1_600), &None, 5_000, false, true), None);
+    }
+
+    #[test]
+    fn the_renderer_remembers_the_notes_across_frames() {
+        let mut r = Renderer::default();
+        let mut pending = Pending::None;
+        let mut snap = ClientSnapshot {
+            notes: vec![
+                "⏸ drill::flash: provider down since 10:18 (503), retrying every <=5 min until 18:18. Esc to stop."
+                    .into(),
+            ],
+            outage: Some(ClientOutage {
+                model: "drill::flash".into(),
+                since_unix: 1_000,
+                next_try_unix: 1_300,
+                until_unix: 40_000,
+                reason: "503".into(),
+            }),
+            ..Default::default()
+        };
+        r.render(&snap, &mut pending);
+        assert!(
+            r.enter_note_printed,
+            "the down note is remembered while the outage stands"
+        );
+        snap.notes
+            .push("▶ drill::flash back after 3m, turn resumed".into());
+        r.render(&snap, &mut pending);
+        assert!(r.back_note_printed);
+        snap.outage = None;
+        r.render(&snap, &mut pending);
+        assert!(
+            !r.enter_note_printed && !r.back_note_printed,
+            "reset once the outage is over"
+        );
+    }
+
+    #[test]
+    fn client_snapshot_reads_the_outage_field() {
+        let snap: ClientSnapshot = serde_json::from_str(
+            r#"{"session_id":"s","outage":{"model":"m::x","provider":"m","since_unix":5,"next_try_unix":9,"until_unix":99,"attempts":2,"reason":"503"}}"#,
+        )
+        .unwrap();
+        assert_eq!(snap.outage.unwrap().next_try_unix, 9);
+        assert!(
+            serde_json::from_str::<ClientSnapshot>(r#"{"session_id":"s"}"#)
+                .unwrap()
+                .outage
+                .is_none()
+        );
+    }
+
+    #[test]
     fn new_suffix_handles_growth_and_sliding_window() {
         // Growth: only the appended tail is new.
         let prev = vec!["a".to_string(), "b".to_string()];
@@ -734,6 +848,53 @@ mod tests {
         assert_eq!(new_suffix(&prev, &next3), next3);
         // Nothing printed yet: everything is new.
         assert_eq!(new_suffix(&[], &next), next);
+    }
+
+    #[test]
+    fn live_tail_lines_print_once_and_restart_after_the_call_ends() {
+        let mut renderer = Renderer::default();
+        let mut pending = Pending::None;
+        let frame = |revision, lines: &[&str]| ClientSnapshot {
+            revision: Some(revision),
+            live_tail: Some(ClientLiveTail {
+                lines: lines.iter().map(|l| (*l).to_string()).collect(),
+            }),
+            ..ClientSnapshot::default()
+        };
+        renderer.render(&frame(1, &["a", "b"]), &mut pending);
+        renderer.render(&frame(2, &["a", "b", "c"]), &mut pending);
+        assert_eq!(renderer.printed_live, vec!["a", "b"]);
+        assert_eq!(renderer.held_live.as_deref(), Some("c"));
+        renderer.render(
+            &ClientSnapshot {
+                revision: Some(3),
+                ..ClientSnapshot::default()
+            },
+            &mut pending,
+        );
+        assert!(renderer.printed_live.is_empty());
+        assert!(renderer.held_live.is_none());
+    }
+
+    #[test]
+    fn a_growing_last_line_never_replays_the_lines_before_it() {
+        let mut renderer = Renderer::default();
+        let mut pending = Pending::None;
+        let frame = |revision, lines: &[&str]| ClientSnapshot {
+            revision: Some(revision),
+            live_tail: Some(ClientLiveTail {
+                lines: lines.iter().map(|l| (*l).to_string()).collect(),
+            }),
+            ..ClientSnapshot::default()
+        };
+        renderer.render(&frame(1, &["a", "b", "t.py .."]), &mut pending);
+        assert_eq!(renderer.printed_live, vec!["a", "b"]);
+        renderer.render(&frame(2, &["a", "b", "t.py ...."]), &mut pending);
+        renderer.render(&frame(3, &["a", "b", "t.py ......"]), &mut pending);
+        assert_eq!(renderer.printed_live, vec!["a", "b"]);
+        assert_eq!(renderer.held_live.as_deref(), Some("t.py ......"));
+        renderer.render(&frame(4, &["a", "b", "t.py ......", "done"]), &mut pending);
+        assert_eq!(renderer.printed_live, vec!["a", "b", "t.py ......"]);
     }
 
     #[test]

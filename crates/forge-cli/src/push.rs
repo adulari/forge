@@ -16,7 +16,9 @@
 //! drops its WS within seconds, so "a WS is connected" is a reliable proxy for "someone is
 //! watching" — while visibility reporting adds a protocol field and still lies for an unattended
 //! wall dashboard. Documented trade-off: a desktop tab left open in the background suppresses
-//! pushes to the phone.
+//! pushes to the phone — except that a decision (permission / question) still unanswered after
+//! `[remote] push_escalate_secs` (default 180, `0` = off) is pushed anyway, and once more at five
+//! times that delay ([`DeferredPush::tick`]).
 //!
 //! ## Delivery
 //!
@@ -57,7 +59,7 @@ const DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10)
 const TTL_DECISION: u32 = 300;
 
 /// TTL for completion pushes (turn done / failed): still worth seeing an hour later.
-const TTL_COMPLETION: u32 = 3600;
+pub(crate) const TTL_COMPLETION: u32 = 3600;
 
 /// Notification body cap — push services reject large payloads (~4KB) and lock screens show
 /// roughly two lines anyway.
@@ -339,6 +341,63 @@ pub(crate) struct PushMessage {
 }
 
 impl PushMessage {
+    /// A goal that waited out its window resumed by itself while nobody was looking.
+    pub(crate) fn goal_resumed(cur: &Snapshot) -> Self {
+        let title = if cur.title.is_empty() {
+            let short: String = cur.session_id.chars().take(8).collect();
+            format!("session {short}")
+        } else {
+            cur.title.clone()
+        };
+        Self {
+            kind: "done",
+            session: cur.session_id.clone(),
+            title,
+            body: "Window reset — goal resumed".to_string(),
+            seq: cur.prompt_seq,
+            ttl: TTL_COMPLETION,
+        }
+    }
+
+    fn session_title(cur: &Snapshot) -> String {
+        if cur.title.is_empty() {
+            let short: String = cur.session_id.chars().take(8).collect();
+            format!("session {short}")
+        } else {
+            cur.title.clone()
+        }
+    }
+
+    /// The turn has been waiting out a provider outage for a while: say so once, while it is
+    /// still waiting, instead of letting the session look dead.
+    pub(crate) fn provider_outage(
+        cur: &Snapshot,
+        provider: &str,
+        since: &str,
+        until: &str,
+    ) -> Self {
+        Self {
+            kind: "outage",
+            session: cur.session_id.clone(),
+            title: Self::session_title(cur),
+            body: format!("{provider} down since {since}, retrying until {until}"),
+            seq: cur.prompt_seq,
+            ttl: TTL_COMPLETION,
+        }
+    }
+
+    /// The provider answered again and the turn carries on where it was.
+    pub(crate) fn provider_recovered(cur: &Snapshot, provider: &str, down: &str) -> Self {
+        Self {
+            kind: "recovered",
+            session: cur.session_id.clone(),
+            title: Self::session_title(cur),
+            body: format!("{provider} back after {down} — turn resumed"),
+            seq: cur.prompt_seq,
+            ttl: TTL_COMPLETION,
+        }
+    }
+
     /// The cleartext JSON the service worker's `push` handler reads (encrypted on the wire).
     pub(crate) fn payload_json(&self) -> String {
         serde_json::json!({
@@ -351,6 +410,22 @@ impl PushMessage {
         .to_string()
     }
 }
+
+/// `HH:MM` local time of a unix timestamp, for a push body.
+pub(crate) fn clock_label(unix_secs: u64) -> String {
+    chrono::DateTime::<chrono::Local>::from(
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs),
+    )
+    .format("%H:%M")
+    .to_string()
+}
+
+mod outage;
+pub(crate) use outage::OutagePusher;
+#[cfg(test)]
+use outage::OUTAGE_PUSH_AFTER_SECS;
+#[cfg(test)]
+pub(crate) use outage::OUTAGE_PUSH_AFTER_TEST;
 
 /// True when a push may fire at all: only with ZERO WebSocket clients attached to the session
 /// (see the module docs for why "any client connected" is the chosen debounce signal).
@@ -402,6 +477,22 @@ pub(crate) fn detect_trigger(
             });
         }
     }
+    let handed_off = |s: &Snapshot| s.goal.as_ref().is_some_and(|g| g.state == "handed_off");
+    if handed_off(cur) && !prev.is_some_and(handed_off) {
+        let why = cur
+            .goal
+            .as_ref()
+            .and_then(|g| g.relay.iter().rev().find_map(|l| l.reason.clone()))
+            .unwrap_or_default();
+        return Some(PushMessage {
+            kind: "done",
+            session: cur.session_id.clone(),
+            title,
+            body: crate::remote::SnapGoal::handed_off_body(cur.goal.as_ref(), &why),
+            seq: cur.prompt_seq,
+            ttl: TTL_COMPLETION,
+        });
+    }
     if prev.is_some_and(|p| p.busy)
         && !cur.busy
         && cur.permission_prompt.is_none()
@@ -434,6 +525,180 @@ pub(crate) fn detect_trigger(
     None
 }
 
+/// The "failed" push for a prompt that never became a turn (a hook block, a rejected input).
+pub(crate) fn unrun_message(cur: &Snapshot, text: &str) -> PushMessage {
+    let title = if cur.title.is_empty() {
+        let short: String = cur.session_id.chars().take(8).collect();
+        format!("session {short}")
+    } else {
+        cur.title.clone()
+    };
+    PushMessage {
+        kind: "failed",
+        session: cur.session_id.clone(),
+        title,
+        body: truncate_chars(text.trim_start_matches('⚠').trim(), BODY_MAX_CHARS),
+        seq: cur.prompt_seq,
+        ttl: TTL_COMPLETION,
+    }
+}
+
+/// True while `msg` still describes the live state of `cur`: the prompt it announced is still
+/// pending (same `prompt_seq`), or the turn it announced is still finished with nothing newer.
+pub(crate) fn push_is_current(msg: &PushMessage, cur: &Snapshot) -> bool {
+    if cur.closed || cur.prompt_seq != msg.seq {
+        return false;
+    }
+    match msg.kind {
+        "question" => cur.question.is_some(),
+        "permission" => cur.permission_prompt.is_some(),
+        "outage" => cur.busy && cur.outage.is_some(),
+        "recovered" => cur.busy,
+        _ => !cur.busy && cur.permission_prompt.is_none() && cur.question.is_none(),
+    }
+}
+
+/// `text` with every `http(s)://…` run replaced by `<url>`.
+fn without_urls(text: &str) -> String {
+    text.split_inclusive(char::is_whitespace)
+        .map(|word| {
+            let trimmed = word.trim_start_matches(['(', '"', '\'']);
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                let lead = &word[..word.len() - trimmed.len()];
+                let tail: String = word
+                    .chars()
+                    .rev()
+                    .take_while(|c| matches!(c, ')' | '"' | '\'' | ',' | ':' | ';' | ' ' | '\n'))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                format!("{lead}<url>{tail}")
+            } else {
+                word.to_string()
+            }
+        })
+        .collect()
+}
+
+/// The most recent pushable event that was suppressed because a client was attached. Delivered
+/// once, when the last client detaches, if it is still current; never delivered stale.
+///
+/// A pending decision (permission prompt / question) is also timed: a client that stays attached
+/// but unattended must not swallow it forever, so [`DeferredPush::tick`] sends it after the
+/// escalation delay anyway and nudges once more at [`RENUDGE_FACTOR`] times that delay.
+#[derive(Debug, Default)]
+pub(crate) struct DeferredPush {
+    held: Option<PushMessage>,
+    decision: Option<DecisionClock>,
+}
+
+#[derive(Debug)]
+struct DecisionClock {
+    msg: PushMessage,
+    since: std::time::Instant,
+    /// 0 = nothing sent yet, 1 = announced once, 2 = re-nudged (done).
+    stage: u8,
+}
+
+/// The re-nudge fires at this multiple of the escalation delay (180 s default -> 15 min).
+const RENUDGE_FACTOR: u32 = 5;
+
+fn is_decision(msg: &PushMessage) -> bool {
+    matches!(msg.kind, "permission" | "question")
+}
+
+/// A failed turn is escalated like a decision (sent after the delay although a client is attached,
+/// which overnight may be a tab nobody reads), but only once: nothing is waiting on the person.
+fn is_escalatable(msg: &PushMessage) -> bool {
+    is_decision(msg) || msg.kind == "failed"
+}
+
+impl DeferredPush {
+    pub(crate) fn hold(&mut self, msg: PushMessage) {
+        self.held = Some(msg);
+    }
+
+    /// Starts the unanswered-decision clock for `msg`; `sent` says it already went out.
+    pub(crate) fn track(&mut self, msg: &PushMessage, sent: bool, now: std::time::Instant) {
+        if !is_escalatable(msg) {
+            if self
+                .decision
+                .as_ref()
+                .is_some_and(|c| c.msg.kind == "failed")
+            {
+                self.decision = None;
+            }
+            return;
+        }
+        self.decision = Some(DecisionClock {
+            msg: msg.clone(),
+            since: now,
+            stage: u8::from(sent),
+        });
+    }
+
+    /// Drops the held event once stale; releases it when no client is attached and it is current.
+    pub(crate) fn release(
+        &mut self,
+        connected_ws_clients: usize,
+        cur: Option<&Snapshot>,
+    ) -> Option<PushMessage> {
+        let msg = self.held.as_ref()?;
+        if !cur.is_some_and(|c| push_is_current(msg, c)) {
+            self.held = None;
+            return None;
+        }
+        if should_push(connected_ws_clients) {
+            let msg = self.held.take()?;
+            if let Some(clock) = self.decision.as_mut().filter(|c| c.msg.seq == msg.seq) {
+                clock.stage = clock.stage.max(1);
+            }
+            Some(msg)
+        } else {
+            None
+        }
+    }
+
+    /// [`Self::release`] plus the escalation: a still-pending decision whose clock ran past
+    /// `delay` is sent although clients are attached; once more at `delay * RENUDGE_FACTOR`.
+    /// A zero `delay` disables the escalation. Answered or replaced decisions send nothing.
+    pub(crate) fn tick(
+        &mut self,
+        connected_ws_clients: usize,
+        cur: Option<&Snapshot>,
+        now: std::time::Instant,
+        delay: std::time::Duration,
+    ) -> Option<PushMessage> {
+        if let Some(msg) = self.release(connected_ws_clients, cur) {
+            return Some(msg);
+        }
+        let clock = self.decision.as_mut()?;
+        if !cur.is_some_and(|c| push_is_current(&clock.msg, c)) {
+            self.decision = None;
+            return None;
+        }
+        if delay.is_zero() {
+            return None;
+        }
+        let waited = now.saturating_duration_since(clock.since);
+        let due = match clock.stage {
+            0 => waited >= delay,
+            1 => is_decision(&clock.msg) && waited >= delay * RENUDGE_FACTOR,
+            _ => false,
+        };
+        if !due {
+            return None;
+        }
+        clock.stage += 1;
+        let msg = clock.msg.clone();
+        if self.held.as_ref().is_some_and(|h| h.seq == msg.seq) {
+            self.held = None;
+        }
+        Some(msg)
+    }
+}
+
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
@@ -454,6 +719,8 @@ pub(crate) struct PushNotifier {
     client: reqwest::Client,
     /// Off only in tests that post to a loopback stand-in for a push service.
     strict_endpoints: bool,
+    /// Delivery-failure kinds already logged at warn, so a dead endpoint warns once, not per push.
+    warned: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl PushNotifier {
@@ -473,6 +740,7 @@ impl PushNotifier {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             strict_endpoints: true,
+            warned: Default::default(),
             vapid,
             store,
             client: reqwest::Client::builder()
@@ -496,6 +764,25 @@ impl PushNotifier {
         });
     }
 
+    fn log_failure(&self, endpoint: &str, error: &anyhow::Error) {
+        // Push endpoints are capability URLs (anyone holding one can push to the device), and
+        // reqwest puts the URL in its error text: keep it out of the warn-level log.
+        let text = without_urls(&error.to_string());
+        let kind: String = text.chars().take(80).collect();
+        let first = self
+            .warned
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(kind);
+        if first {
+            tracing::warn!(
+                "push delivery failed (further failures of this kind logged at debug): {text}"
+            );
+        } else {
+            tracing::debug!("push to {endpoint} failed: {error}");
+        }
+    }
+
     async fn send_all(&self, msg: PushMessage) {
         let store = self.store.clone();
         let subs = tokio::task::spawn_blocking(move || {
@@ -517,7 +804,7 @@ impl PushNotifier {
                     .await;
                 }
                 Ok(_) => {}
-                Err(e) => tracing::debug!("push to {} failed: {e}", sub.endpoint),
+                Err(e) => self.log_failure(&sub.endpoint, &e),
             }
         }
     }
@@ -733,11 +1020,218 @@ mod tests {
         assert!(!should_push(3));
     }
 
+    #[test]
+    fn push_failures_never_log_the_endpoint_url() {
+        let text = without_urls(
+            "error sending request for url (https://fcm.googleapis.com/fcm/send/abc123): timed out",
+        );
+        assert_eq!(text, "error sending request for url (<url>): timed out");
+    }
+
+    fn attention() -> (Snapshot, PushMessage) {
+        let cur = Snapshot {
+            busy: true,
+            permission_prompt: Some("allow shell [y/n]".into()),
+            prompt_seq: 4,
+            ..snap()
+        };
+        let msg = detect_trigger(Some(&snap()), &cur, None).unwrap();
+        (cur, msg)
+    }
+
+    #[test]
+    fn a_suppressed_prompt_is_sent_once_when_the_last_client_drops() {
+        let (cur, msg) = attention();
+        let mut held = DeferredPush::default();
+        held.hold(msg.clone());
+        assert_eq!(held.release(1, Some(&cur)), None, "client still attached");
+        assert_eq!(held.release(0, Some(&cur)), Some(msg));
+        assert_eq!(held.release(0, Some(&cur)), None, "sent exactly once");
+    }
+
+    #[test]
+    fn a_prompt_answered_before_the_drop_is_never_sent() {
+        let (cur, msg) = attention();
+        let mut held = DeferredPush::default();
+        held.hold(msg);
+        let answered = Snapshot {
+            permission_prompt: None,
+            ..cur
+        };
+        assert_eq!(held.release(1, Some(&answered)), None);
+        assert_eq!(
+            held.release(0, Some(&answered)),
+            None,
+            "stale event stays dropped"
+        );
+    }
+
+    #[test]
+    fn a_suppressed_done_is_dropped_once_a_new_turn_starts() {
+        let busy = Snapshot {
+            busy: true,
+            ..snap()
+        };
+        let finished = snap();
+        let msg = detect_trigger(Some(&busy), &finished, None).unwrap();
+        let mut held = DeferredPush::default();
+        held.hold(msg.clone());
+        assert_eq!(held.release(0, Some(&finished)), Some(msg.clone()));
+        held.hold(msg);
+        assert_eq!(held.release(0, Some(&busy)), None);
+    }
+
+    #[test]
+    fn an_unanswered_prompt_escalates_past_an_attached_client_then_nudges_once() {
+        use std::time::{Duration, Instant};
+        let delay = Duration::from_secs(2);
+        let (cur, msg) = attention();
+        let t0 = Instant::now();
+        let mut held = DeferredPush::default();
+        held.hold(msg.clone());
+        held.track(&msg, false, t0);
+        let at = |s| t0 + Duration::from_secs(s);
+        assert_eq!(held.tick(1, Some(&cur), at(1), delay), None, "too early");
+        assert_eq!(held.tick(1, Some(&cur), at(2), delay), Some(msg.clone()));
+        assert_eq!(held.tick(1, Some(&cur), at(3), delay), None, "once");
+        assert_eq!(
+            held.tick(0, Some(&cur), at(3), delay),
+            None,
+            "no double send on detach"
+        );
+        assert_eq!(
+            held.tick(1, Some(&cur), at(9), delay),
+            None,
+            "re-nudge not yet due"
+        );
+        assert_eq!(held.tick(1, Some(&cur), at(10), delay), Some(msg));
+        assert_eq!(
+            held.tick(1, Some(&cur), at(500), delay),
+            None,
+            "only one re-nudge"
+        );
+    }
+
+    #[test]
+    fn an_answered_prompt_never_escalates_and_zero_delay_disables_it() {
+        use std::time::{Duration, Instant};
+        let (cur, msg) = attention();
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(1000);
+        let mut off = DeferredPush::default();
+        off.hold(msg.clone());
+        off.track(&msg, false, t0);
+        assert_eq!(off.tick(1, Some(&cur), later, Duration::ZERO), None);
+        let mut answered = DeferredPush::default();
+        answered.hold(msg.clone());
+        answered.track(&msg, false, t0);
+        let done = Snapshot {
+            permission_prompt: None,
+            ..cur
+        };
+        assert_eq!(
+            answered.tick(1, Some(&done), later, Duration::from_secs(1)),
+            None
+        );
+        assert_eq!(
+            answered.tick(1, Some(&done), later, Duration::from_secs(1)),
+            None,
+            "the clock is gone"
+        );
+    }
+
+    #[test]
+    fn a_prompt_pushed_at_once_still_gets_the_one_renudge() {
+        use std::time::{Duration, Instant};
+        let (cur, msg) = attention();
+        let t0 = Instant::now();
+        let delay = Duration::from_secs(2);
+        let mut held = DeferredPush::default();
+        held.track(&msg, true, t0);
+        assert_eq!(
+            held.tick(0, Some(&cur), t0 + Duration::from_secs(3), delay),
+            None
+        );
+        assert_eq!(
+            held.tick(0, Some(&cur), t0 + Duration::from_secs(10), delay),
+            Some(msg)
+        );
+    }
+
+    #[test]
+    fn a_stalled_turn_pushes_failed_with_the_reason_and_escalates_once() {
+        use std::time::{Duration, Instant};
+        let prev = Snapshot {
+            busy: true,
+            prompt_seq: 4,
+            ..snap()
+        };
+        let cur = Snapshot {
+            busy: false,
+            prompt_seq: 4,
+            ..snap()
+        };
+        let reason = "Turn stopped (no progress): edits are kept; send continue";
+        let msg = detect_trigger(Some(&prev), &cur, Some(reason)).expect("a push");
+        assert_eq!(msg.kind, "failed");
+        assert!(msg.body.contains("no progress"));
+
+        let t0 = Instant::now();
+        let delay = Duration::from_secs(2);
+        let mut held = DeferredPush::default();
+        held.track(&msg, false, t0);
+        held.hold(msg.clone());
+        assert_eq!(
+            held.tick(1, Some(&cur), t0 + Duration::from_secs(1), delay),
+            None
+        );
+        assert_eq!(
+            held.tick(1, Some(&cur), t0 + Duration::from_secs(3), delay),
+            Some(msg)
+        );
+        assert_eq!(
+            held.tick(1, Some(&cur), t0 + Duration::from_secs(60), delay),
+            None,
+            "a failed turn is announced once, never re-nudged"
+        );
+    }
+
     fn snap() -> Snapshot {
         Snapshot {
             session_id: "sess12345678".into(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn trigger_announces_a_goal_handed_to_a_fresh_worker_once() {
+        use forge_tui::goal_status::GoalRelayLink;
+        let mut app = forge_tui::App::default();
+        app.goal_begin("ship it", &[], None, None);
+        let running = Snapshot {
+            goal: Some(crate::remote::SnapGoal::from(app.goal.as_ref().unwrap())),
+            busy: true,
+            ..snap()
+        };
+        app.goal_set_relay(vec![
+            GoalRelayLink {
+                session_id: "aaaa".into(),
+                handed_off: Some("wedged".into()),
+            },
+            GoalRelayLink {
+                session_id: "bbbb".into(),
+                handed_off: None,
+            },
+        ]);
+        app.goal_handed_off("handed over");
+        let handed = Snapshot {
+            goal: Some(crate::remote::SnapGoal::from(app.goal.as_ref().unwrap())),
+            busy: false,
+            ..snap()
+        };
+        let msg = detect_trigger(Some(&running), &handed, None).expect("a push");
+        assert_eq!(msg.body, "goal handed to a fresh worker (wedged)");
+        assert_eq!(detect_trigger(Some(&handed), &handed, None), None);
     }
 
     #[test]
@@ -774,6 +1268,89 @@ mod tests {
         assert_eq!(msg3.seq, 2);
         // No prev frame at all (driver restart): a pending prompt still pushes.
         assert!(detect_trigger(None, &cur, None).is_some());
+    }
+
+    #[test]
+    fn an_outage_pushes_once_after_two_minutes_and_its_recovery_once() {
+        let mut pusher = OutagePusher::default();
+        let since = 1_000;
+        assert!(
+            !pusher.outage_probe_after(since + 15, since, OUTAGE_PUSH_AFTER_SECS),
+            "a blip is not news"
+        );
+        assert!(!pusher.outage_probe_after(since + 119, since, OUTAGE_PUSH_AFTER_SECS));
+        assert!(pusher.outage_probe_after(since + 120, since, OUTAGE_PUSH_AFTER_SECS));
+        assert!(
+            !pusher.outage_probe_after(since + 600, since, OUTAGE_PUSH_AFTER_SECS),
+            "one push per turn"
+        );
+        assert!(pusher.recovered());
+        assert!(!pusher.recovered(), "one recovery push");
+        assert!(
+            !pusher.outage_probe_after(since + 900, since, OUTAGE_PUSH_AFTER_SECS),
+            "a second episode in the same turn"
+        );
+        pusher.new_turn();
+        assert!(pusher.outage_probe_after(since + 900, since, OUTAGE_PUSH_AFTER_SECS));
+    }
+
+    #[test]
+    fn a_recovery_nobody_was_told_the_start_of_is_not_pushed() {
+        let mut pusher = OutagePusher::default();
+        assert!(!pusher.recovered());
+    }
+
+    #[test]
+    fn outage_pushes_name_the_provider_and_stay_current_while_they_hold() {
+        let cur = Snapshot {
+            busy: true,
+            title: "overnight".into(),
+            prompt_seq: 2,
+            outage: Some(crate::remote::SnapOutage {
+                model: "inferhub::flash".into(),
+                provider: "inferhub".into(),
+                since_unix: 1,
+                next_try_unix: 2,
+                until_unix: 3,
+                attempts: 1,
+                reason: "503 no_capacity".into(),
+            }),
+            ..snap()
+        };
+        let down = PushMessage::provider_outage(&cur, "InferHub", "10:18", "18:18");
+        assert_eq!(
+            (down.kind, down.body.as_str()),
+            ("outage", "InferHub down since 10:18, retrying until 18:18")
+        );
+        assert!(push_is_current(&down, &cur));
+        let back = PushMessage::provider_recovered(&cur, "InferHub", "4h09m");
+        assert_eq!(
+            (back.kind, back.body.as_str()),
+            ("recovered", "InferHub back after 4h09m — turn resumed")
+        );
+        let ended = Snapshot {
+            busy: false,
+            outage: None,
+            ..cur.clone()
+        };
+        assert!(
+            !push_is_current(&down, &ended),
+            "a finished turn drops the outage push"
+        );
+    }
+
+    #[test]
+    fn a_goal_resumed_at_the_window_reset_pushes_a_done_notice() {
+        let cur = Snapshot {
+            title: "overnight refactor".into(),
+            prompt_seq: 4,
+            ..snap()
+        };
+        let msg = PushMessage::goal_resumed(&cur);
+        assert_eq!(msg.kind, "done");
+        assert_eq!(msg.title, "overnight refactor");
+        assert_eq!(msg.body, "Window reset — goal resumed");
+        assert_eq!(msg.ttl, TTL_COMPLETION);
     }
 
     #[test]

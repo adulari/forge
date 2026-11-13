@@ -41,6 +41,9 @@ pub struct FleetRow {
     /// Runs in a terminal rather than hosted by the daemon; archive/mode are unavailable.
     #[serde(default)]
     pub terminal: bool,
+    /// Set while the session's turn waits out a provider outage.
+    #[serde(default)]
+    pub outage: Option<RowOutage>,
     /// The plan-and-dispatch run this session belongs to, when it belongs to one.
     #[serde(default)]
     pub dispatch_id: Option<String>,
@@ -50,6 +53,19 @@ pub struct FleetRow {
     /// 1-based item number, workers only.
     #[serde(default)]
     pub dispatch_index: Option<usize>,
+}
+
+/// A provider outage a session is waiting out: the fleet row's and the snapshot's shared shape.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize)]
+pub struct RowOutage {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub since_unix: u64,
+    #[serde(default)]
+    pub next_try_unix: u64,
+    #[serde(default)]
+    pub until_unix: u64,
 }
 
 /// One row of `GET /api/dispatches` — a plan-and-dispatch run and its items.
@@ -318,6 +334,8 @@ pub struct LiveSnapshot {
     #[serde(default)]
     pub notes: Vec<String>,
     #[serde(default)]
+    pub outage: Option<RowOutage>,
+    #[serde(default)]
     pub revision: Option<u64>,
     #[serde(default)]
     pub closed: bool,
@@ -406,4 +424,34 @@ pub struct HistoryRow {
     pub adds: Option<usize>,
     #[serde(default)]
     pub dels: Option<usize>,
+}
+
+/// The daemon's host-pressure sample (`GET /api/identity` → `pressure`), reduced to what the
+/// header shows. Every field defaults so a daemon that predates the sampler parses as "fine".
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize)]
+pub struct PressureInfo {
+    /// `ok` | `warn` | `floor`.
+    #[serde(default)]
+    pub level: String,
+    /// One sentence naming the tightest disk and/or low memory; absent while the host is fine.
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// `disk` | `memory`; absent from a daemon that predates the field (treated as disk).
+    #[serde(default)]
+    pub cause: Option<String>,
+}
+
+impl PressureInfo {
+    pub fn is_pressured(&self) -> bool {
+        matches!(self.level.as_str(), "warn" | "floor")
+    }
+
+    /// Reclaim frees disk, so a memory-only warning has nothing to offer.
+    pub fn offers_reclaim(&self) -> bool {
+        self.is_pressured() && self.cause.as_deref() != Some("memory")
+    }
+
+    pub fn is_floor(&self) -> bool {
+        self.level == "floor"
+    }
 }

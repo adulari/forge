@@ -269,6 +269,29 @@ describe("AnywhereTransport", () => {
     await transport.fetch("fany://host-1/api/sessions/s1/claude");
     await transport.fetch("fany://host-1/api/sessions/s1/claude", { method: "POST", body: "{}" });
     await transport.fetch("fany://host-1/api/claude/sessions/0a1b-22/continue", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/turns?limit=5");
+    await transport.fetch("fany://host-1/api/turns/summary?days=7");
+    await transport.fetch("fany://host-1/api/issues?session=s1&state=open");
+    await transport.fetch("fany://host-1/api/issues/detail?session=s1&number=4");
+    await transport.fetch("fany://host-1/api/issues/start", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/history/search?q=backoff");
+    await transport.fetch("fany://host-1/api/issues/drain", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/issues/drains");
+    await transport.fetch("fany://host-1/api/issues/drain/cancel", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/pr/queue");
+    await transport.fetch("fany://host-1/api/pr/queue/action", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/pr/review/action", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/pr/status?session=s1");
+    await transport.fetch("fany://host-1/api/pr/list?session=s1&state=open");
+    await transport.fetch("fany://host-1/api/pr/detail?session=s1&number=4");
+    await transport.fetch("fany://host-1/api/pr/diff?session=s1&number=4");
+    await transport.fetch("fany://host-1/api/pr/watch?session=s1");
+    await transport.fetch("fany://host-1/api/pr/watches");
+    await transport.fetch("fany://host-1/api/pr/watch", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/ship", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/done", { method: "POST", body: "{}" });
+    await transport.fetch("fany://host-1/api/sessions/s1/ci");
+    await transport.fetch("fany://host-1/api/sessions/s1/ci/run", { method: "POST", body: "{}" });
 
     expect(captured.map((request) => [request.route, request.parameters[0] ?? ""])).toEqual([
       ["workspace_entries", "?session=s1&path=src"],
@@ -286,7 +309,49 @@ describe("AnywhereTransport", () => {
       ["session_claude", "s1"],
       ["export_session_claude", "s1"],
       ["continue_claude_session", "0a1b-22"],
+      ["session_turns", "s1"],
+      ["turns_summary", "?days=7"],
+      ["list_issues", "?session=s1&state=open"],
+      ["issue_detail", "?session=s1&number=4"],
+      ["start_issue", ""],
+      ["session_history_search", "s1"],
+      ["drain_issues", ""],
+      ["list_issue_drains", ""],
+      ["cancel_issue_drain", ""],
+      ["pr_queue", ""],
+      ["pr_queue_action", ""],
+      ["pr_review_action", ""],
+      ["pr_status", "?session=s1"],
+      ["pr_list", "?session=s1&state=open"],
+      ["pr_detail", "?session=s1&number=4"],
+      ["pr_diff", "?session=s1&number=4"],
+      ["pr_watch_get", "?session=s1"],
+      ["pr_watches", ""],
+      ["pr_watch_set", ""],
+      ["session_ship", "s1"],
+      ["session_done", "s1"],
+      ["session_ci", "s1"],
+      ["session_ci_run", "s1"],
     ]);
+    // Only the methods the host serves: a GET on ship, a PUT on the watch and the create/merge/
+    // comment writes stay unreachable over the relay.
+    for (const [path, method] of [
+      ["/api/sessions/s1/ship", "GET"],
+      ["/api/sessions/s1/ship", "PUT"],
+      ["/api/pr/watch", "DELETE"],
+      ["/api/pr/status", "POST"],
+      ["/api/pr/create", "POST"],
+      ["/api/pr/merge", "POST"],
+      ["/api/pr/comment", "POST"],
+      ["/api/sessions/..%2Fx/ship", "POST"],
+      ["/api/sessions/a%2Fb/ship", "POST"],
+      ["/api/sessions/s1/ci", "POST"],
+      ["/api/sessions/s1/ci/run", "GET"],
+      ["/api/sessions/s1/ci/run", "PUT"],
+      ["/api/sessions/..%2Fx/ci/run", "POST"],
+    ] as const) {
+      await expect(transport.fetch(`fany://host-1${path}`, { method })).rejects.toThrow();
+    }
     await expect(
       transport.fetch("fany://host-1/api/schedules", { method: "POST", body: "{}" }),
     ).rejects.toThrow("not allowlisted");

@@ -6,6 +6,7 @@ import {
   Archive,
   BellDot,
   Clock,
+  ListChecks,
   Eye,
   Flame,
   FolderCog,
@@ -16,6 +17,7 @@ import {
   MoonStar,
   Plus,
   QrCode,
+  Rocket,
   Settings2,
   Sparkles,
   SquareTerminal,
@@ -33,13 +35,19 @@ import { haptics } from "../../lib/haptics";
 import { mergeCommandSources } from "../../lib/commandSources";
 import { BUILTIN_COMMANDS, useSkillCommands } from "../../lib/commands";
 import { openClaudePicker } from "../../lib/claudeHandoff";
+import { openCi } from "../../lib/ciRequest";
+import { openShip } from "../../lib/shipRequest";
+import { usePrAvailable } from "../../lib/queriesPr";
 import { useContinueInClaudeCode } from "../../lib/claudeHandoffQueries";
 import { openSession } from "../../lib/nav";
 import { SETTINGS_ENTRIES } from "../../lib/palette/settingsEntries";
 import { configHref, settingsIndex } from "../../lib/settingsSearch";
 import { recencyOf } from "../../lib/palette/recents";
 import { formatShortcut, getResolvedShortcut, type AppShortcutAction, useShortcutLabel } from "../../lib/shortcuts";
-import { useArchiveSession, useConfig, useSessions } from "../../lib/queries";
+import { useArchiveSession, useConfig, useHostPressure, useSessions } from "../../lib/queries";
+import { useAuth } from "../../lib/auth";
+import { canReclaimFrom, offersReclaim } from "../../lib/hostPressure";
+import { requestHostReclaim } from "../../lib/hostReclaimRequest";
 import { useTheme, useTokens } from "../../theme/ThemeProvider";
 import { space, type StatusDotState } from "../../theme/tokens";
 import { formatCwd, formatRelativeTime, type as typeScale } from "../../theme/typography";
@@ -134,6 +142,9 @@ export function usePaletteSources(options: PaletteSourceOptions) {
   const skillCommands = useSkillCommands();
   const { signedIn: anywhereSignedIn, account: anywhereAccount } = useAnywhere();
   const { hosts: anywhereHosts } = useAnywhereHosts();
+  const { baseUrl: paletteBaseUrl } = useAuth();
+  const canShip = usePrAvailable();
+  const hostPressure = useHostPressure();
   const newSessionHint = useShortcutLabel("session.new");
   const fleetHint = useShortcutLabel("nav.fleet");
   const inboxHint = useShortcutLabel("nav.inbox");
@@ -235,6 +246,34 @@ export function usePaletteSources(options: PaletteSourceOptions) {
           const id = activeSessionId;
           close();
           continueInClaudeCode(id);
+        },
+      });
+      if (canShip) {
+        items.push({
+          id: "action:ship-current",
+          section: "commands",
+          title: "Ship current session",
+          subtitle: "commit, push, open the PR and merge when green",
+          keywords: "ship commit push pull request pr merge watch finish",
+          leading: <Rocket size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+          onSelect: () => {
+            const id = activeSessionId;
+            close();
+            openShip(id);
+          },
+        });
+      }
+      items.push({
+        id: "action:local-ci",
+        section: "commands",
+        title: "Local CI",
+        subtitle: "the workflows' steps Forge runs before a push, and their last result",
+        keywords: "ci local continuous integration checks workflows github actions clippy tests lint run plan gate",
+        leading: <ListChecks size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+        onSelect: () => {
+          const id = activeSessionId;
+          close();
+          openCi(id);
         },
       });
       items.push({
@@ -357,6 +396,20 @@ export function usePaletteSources(options: PaletteSourceOptions) {
       });
     }
 
+    if (offersReclaim(hostPressure.data) && canReclaimFrom(paletteBaseUrl)) {
+      items.push({
+        id: "host:reclaim",
+        section: "commands",
+        title: "Reclaim worktree space",
+        subtitle: hostPressure.data?.summary ?? "The host is low on disk or memory",
+        keywords: "reclaim worktree space disk full low free clean build target host pressure",
+        leading: <Settings2 size={ICON_SIZE} strokeWidth={ICON_STROKE} color={tokens.ink2} />,
+        onSelect: () => {
+          close();
+          requestHostReclaim();
+        },
+      });
+    }
     if (anywhereSignedIn) {
       for (const host of anywhereHosts) {
         items.push({
@@ -406,7 +459,7 @@ export function usePaletteSources(options: PaletteSourceOptions) {
     return items.map((item) => ({ ...item, recency: recencyOf(recents, item.id) }));
   }, [
     tokens, activeSessionId, scheme, setScheme, close, archiveSession, continueInClaudeCode, toast, runSlashCommand, skillCommands, isCompact,
-    newSessionHint, fleetHint, inboxHint, historyHint, anywhereSignedIn, anywhereHosts, anywhereAccount, recents,
+    newSessionHint, fleetHint, inboxHint, historyHint, hostPressure.data, paletteBaseUrl, canShip, anywhereSignedIn, anywhereHosts, anywhereAccount, recents,
     openWhatsNew, openSchedules,
   ]);
 

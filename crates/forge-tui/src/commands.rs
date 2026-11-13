@@ -37,6 +37,8 @@ pub enum GoalControl {
     Status,
     /// Reword the goal; a running one takes the new wording at its next turn.
     Edit(String),
+    /// Raise (or set) the spend envelope: `/goal budget 30%w`, `/goal budget $10`.
+    Budget(String),
 }
 
 /// `/workflow` sub-actions (docs/rfcs/forge-workflow.md).
@@ -121,6 +123,12 @@ pub enum CommandAction {
         gates: Vec<String>,
         max_tokens: Option<u64>,
         max_minutes: Option<u64>,
+        /// The validated `--budget` envelope text (`claude:20%w`, `$5`); see
+        /// `forge_types::goal_envelope`.
+        budget: Option<String>,
+        /// `--contract`: first draft a validation contract and ask for approval
+        /// (docs/features/goal-contract.md).
+        contract: bool,
     },
     /// Steer the goal that is running or paused (`/goal pause|resume|clear|status|edit <text>`).
     GoalControl(GoalControl),
@@ -168,8 +176,19 @@ pub enum CommandAction {
     Run,
     /// Pick Claude Code and Codex conversations from this computer and import them (`/import`).
     Import,
+    Issues,
+    /// Open the `/queue` overlay: the merge queue, with hold, release, front and retry.
+    Queue,
+    /// Open the `/ci` overlay: the repository's workflows as a local plan, with a one-key run.
+    Ci,
+    /// Open the `/ship` card: commit, push, open the PR and watch it to merge.
+    Ship,
     /// Open the control-tools menu: which tools agents may use to drive the app, and what they did.
     Control,
+    /// Open the turn endings overlay (`/turns`).
+    Turns,
+    /// Open the goal contract table (`/contract`).
+    Contract,
     /// Open the agent CLI install/update menu (`/clis`).
     AgentClis,
     /// Show or hide the session strip (`/strip [on|off]`).
@@ -178,6 +197,8 @@ pub enum CommandAction {
     Sidebar(String),
     /// List this workspace's background shells (`/jobs`).
     Jobs,
+    /// Search this session's whole history, folded messages included (`/history <words>`).
+    History(String),
     /// Toggle display of model reasoning/thinking blocks (`/thinking`).
     Thinking,
     /// Open the latest tool call's complete output in the full-output viewer (`/output`).
@@ -550,12 +571,19 @@ pub fn parse_command(line: &str) -> CommandAction {
         "notes" | "todo" | "todos" => CommandAction::Notes,
         "run" | "actions" | "ports" => CommandAction::Run,
         "import" => CommandAction::Import,
+        "issues" => CommandAction::Issues,
+        "queue" | "merge-queue" => CommandAction::Queue,
+        "ci" => CommandAction::Ci,
+        "ship" => CommandAction::Ship,
         "host" | "hosts" => CommandAction::Host(arg.trim().to_string()),
         "control" => CommandAction::Control,
         "clis" | "agent-clis" => CommandAction::AgentClis,
         "strip" => CommandAction::Strip(arg),
         "sidebar" => CommandAction::Sidebar(arg),
         "jobs" | "shells" => CommandAction::Jobs,
+        "turns" => CommandAction::Turns,
+        "contract" => CommandAction::Contract,
+        "history" => CommandAction::History(arg.trim().to_string()),
         "thinking" | "think" => CommandAction::Thinking,
         "output" => CommandAction::ToolOutput,
         "image" | "img" => CommandAction::Image(arg),
@@ -590,6 +618,21 @@ pub fn parse_command(line: &str) -> CommandAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn history_takes_its_search_words_and_is_in_the_palette() {
+        assert_eq!(
+            parse_command("/history retry  policy "),
+            CommandAction::History("retry  policy".into())
+        );
+        assert_eq!(
+            parse_command("/history"),
+            CommandAction::History(String::new())
+        );
+        let mut p = Palette::default();
+        p.open_with("history");
+        assert!(p.matches().iter().any(|e| e.name == "history"));
+    }
 
     #[test]
     fn palette_carries_usage_and_exposes_selected_hint() {
@@ -699,6 +742,8 @@ mod tests {
                 gates: Vec::new(),
                 max_tokens: None,
                 max_minutes: None,
+                budget: None,
+                contract: false,
             }
         );
         assert_eq!(
@@ -708,6 +753,8 @@ mod tests {
                 gates: Vec::new(),
                 max_tokens: None,
                 max_minutes: None,
+                budget: None,
+                contract: false,
             }
         );
         assert_eq!(
@@ -765,6 +812,8 @@ mod tests {
             gates: Vec::new(),
             max_tokens: None,
             max_minutes: None,
+            budget: None,
+            contract: false,
         };
         assert_eq!(
             parse_command("/goal pause"),
@@ -798,6 +847,95 @@ mod tests {
     }
 
     #[test]
+    fn goal_contract_flag_is_taken_anywhere_but_not_from_inside_a_gate() {
+        let parsed = |input: &str| match parse_command(input) {
+            CommandAction::Goal {
+                objective,
+                gates,
+                contract,
+                ..
+            } => (objective, gates, contract),
+            other => panic!("not a goal: {other:?}"),
+        };
+        assert_eq!(
+            parsed("/goal --contract ship the parser"),
+            ("ship the parser".into(), Vec::new(), true)
+        );
+        assert_eq!(
+            parsed("/goal ship the parser --contract --max-minutes 5"),
+            ("ship the parser".into(), Vec::new(), true)
+        );
+        assert_eq!(
+            parsed("/goal ship the parser"),
+            ("ship the parser".into(), Vec::new(), false)
+        );
+        let (_, gates, contract) = parsed("/goal ship it --gate \"echo --contract\"");
+        assert!(!contract);
+        assert_eq!(gates, vec!["echo --contract".to_string()]);
+    }
+
+    #[test]
+    fn goal_budget_flag_is_validated_and_the_verb_needs_a_real_spec() {
+        let goal = |objective: &str, budget: &str| CommandAction::Goal {
+            objective: objective.into(),
+            gates: Vec::new(),
+            max_tokens: None,
+            max_minutes: None,
+            budget: Some(budget.into()),
+            contract: false,
+        };
+        assert_eq!(
+            parse_command("/goal harden the importer --budget claude:20%w"),
+            goal("harden the importer", "claude:20%w")
+        );
+        assert_eq!(
+            parse_command("/goal --budget $5 harden the importer"),
+            goal("harden the importer", "$5")
+        );
+        assert_eq!(
+            parse_command("/goal harden it --budget codex:15%w --max-minutes 30"),
+            CommandAction::Goal {
+                objective: "harden it".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: Some(30),
+                budget: Some("codex:15%w".into()),
+                contract: false,
+            }
+        );
+        assert_eq!(
+            parse_command("/goal fix the user's login bug --budget claude:20%w"),
+            goal("fix the user's login bug", "claude:20%w")
+        );
+        for bad in ["--budget", "--budget nonsense", "--budget claude:0%w"] {
+            let action = parse_command(&format!("/goal harden it {bad}"));
+            assert!(
+                matches!(&action, CommandAction::Unknown(msg) if msg.contains("nothing was started")),
+                "{bad}: {action:?}"
+            );
+        }
+        assert_eq!(
+            parse_command("/goal budget 30%w"),
+            CommandAction::GoalControl(GoalControl::Budget("30%w".into()))
+        );
+        assert_eq!(
+            parse_command("/goal budget $10"),
+            CommandAction::GoalControl(GoalControl::Budget("$10".into()))
+        );
+        assert_eq!(
+            parse_command("/goal budget the importer"),
+            CommandAction::Goal {
+                objective: "budget the importer".into(),
+                gates: Vec::new(),
+                max_tokens: None,
+                max_minutes: None,
+                budget: None,
+                contract: false,
+            }
+        );
+    }
+
+    #[test]
     fn parses_loop_and_goal_gate_and_budget_options() {
         // A single quoted gate, before the prompt.
         assert_eq!(
@@ -828,6 +966,8 @@ mod tests {
                 gates: vec!["npm run lint".into()],
                 max_tokens: None,
                 max_minutes: None,
+                budget: None,
+                contract: false,
             }
         );
         // Bare form (no options) must be untouched — exact prior behavior, whitespace and all.

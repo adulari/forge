@@ -6,6 +6,7 @@
 //! behind, which the next tick or daemon read turns into `interrupted`.
 
 use std::io::Read;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -17,6 +18,10 @@ use crate::cli::commands::replay::open_store;
 pub(crate) const STOP_MARKER: &str = "[[schedule:done]]";
 const MAX_RETRIES: i64 = 5;
 const SUMMARY_CHARS: usize = 800;
+/// Time a capped run gets to stop on SIGTERM (flush its transcript, end the turn) before SIGKILL.
+const TERM_GRACE: Duration = Duration::from_secs(10);
+const CAPTURE_BYTES: usize = 4 << 20;
+const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) fn unix_now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -64,12 +69,69 @@ fn truncate(text: &str, max: usize) -> String {
     format!("{cut}…")
 }
 
-fn drain<R: Read + Send + 'static>(mut reader: R) -> std::thread::JoinHandle<String> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = reader.read_to_end(&mut buf);
+struct Capture {
+    buf: Arc<Mutex<Vec<u8>>>,
+    done: mpsc::Receiver<()>,
+}
+
+impl Capture {
+    fn finish(self) -> String {
+        let _ = self.done.recv_timeout(DRAIN_GRACE);
+        let buf = self.buf.lock().unwrap_or_else(|e| e.into_inner());
         String::from_utf8_lossy(&buf).into_owned()
-    })
+    }
+}
+
+fn drain<R: Read + Send + 'static>(mut reader: R) -> Capture {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    let (tx, done) = mpsc::channel();
+    let shared = Arc::clone(&buf);
+    std::thread::spawn(move || {
+        let mut chunk = [0u8; 8192];
+        while let Ok(n) = reader.read(&mut chunk) {
+            if n == 0 {
+                break;
+            }
+            let mut buf = shared.lock().unwrap_or_else(|e| e.into_inner());
+            let room = CAPTURE_BYTES.saturating_sub(buf.len()).min(n);
+            buf.extend_from_slice(&chunk[..room]);
+        }
+        let _ = tx.send(());
+    });
+    Capture { buf, done }
+}
+
+/// A tick is capped only when the schedule asks for it (`--max-runtime`): Forge does not hard-cap
+/// productive work by default.
+fn runtime_cap(schedule: &Schedule) -> Option<Duration> {
+    schedule
+        .policy
+        .max_runtime_secs
+        .filter(|secs| *secs > 0)
+        .map(|secs| Duration::from_secs(secs as u64))
+}
+
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let group = -(child.id() as i32);
+        // SAFETY: signalling a process group we created; no memory is involved.
+        unsafe {
+            libc::kill(group, libc::SIGTERM);
+        }
+        let stop_by = Instant::now() + TERM_GRACE;
+        while Instant::now() < stop_by {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // SAFETY: as above; anything left in the group after the grace period is killed.
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
 }
 
 fn run_once(schedule: &Schedule, session_id: &str) -> Outcome {
@@ -93,6 +155,12 @@ fn run_once(schedule: &Schedule, session_id: &str) -> Outcome {
     if std::env::var_os("FORGE_SCHEDULE_TICK_MOCK").is_some() {
         command.arg("--mock");
     }
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    execute(command, runtime_cap(schedule))
+}
+
+fn execute(mut command: std::process::Command, cap: Option<Duration>) -> Outcome {
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -106,11 +174,7 @@ fn run_once(schedule: &Schedule, session_id: &str) -> Outcome {
     };
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
-    let deadline = schedule
-        .policy
-        .max_runtime_secs
-        .filter(|secs| *secs > 0)
-        .map(|secs| Instant::now() + Duration::from_secs(secs as u64));
+    let deadline = cap.map(|cap| Instant::now() + cap);
     let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
@@ -119,15 +183,15 @@ fn run_once(schedule: &Schedule, session_id: &str) -> Outcome {
             Err(_) => break None,
         }
         if deadline.is_some_and(|d| Instant::now() >= d) {
-            let _ = child.kill();
+            kill_tree(&mut child);
             let _ = child.wait();
             timed_out = true;
             break None;
         }
         std::thread::sleep(Duration::from_millis(250));
     };
-    let out = stdout.and_then(|h| h.join().ok()).unwrap_or_default();
-    let err = stderr.and_then(|h| h.join().ok()).unwrap_or_default();
+    let out = stdout.map(Capture::finish).unwrap_or_default();
+    let err = stderr.map(Capture::finish).unwrap_or_default();
 
     if timed_out {
         return Outcome {
@@ -135,7 +199,7 @@ fn run_once(schedule: &Schedule, session_id: &str) -> Outcome {
             summary: None,
             error: Some(format!(
                 "stopped after hitting the {}s runtime limit",
-                schedule.policy.max_runtime_secs.unwrap_or_default()
+                cap.map_or(0, |c| c.as_secs())
             )),
             stop_requested: false,
         };
@@ -307,5 +371,32 @@ mod tests {
     fn summaries_are_clipped_on_char_boundaries() {
         assert_eq!(truncate("  hi  ", 10), "hi");
         assert_eq!(truncate("ééééé", 3), "ééé…");
+    }
+
+    #[test]
+    fn a_tick_has_no_runtime_cap_unless_the_schedule_sets_one() {
+        let mut s = schedule(None);
+        assert_eq!(runtime_cap(&s), None);
+        s.policy.max_runtime_secs = Some(0);
+        assert_eq!(runtime_cap(&s), None);
+        s.policy.max_runtime_secs = Some(90);
+        assert_eq!(runtime_cap(&s), Some(Duration::from_secs(90)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hung_run_is_killed_with_its_grandchildren_and_recorded_failed() {
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "sleep 600 & sleep 600"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        std::os::unix::process::CommandExt::process_group(&mut command, 0);
+        let started = Instant::now();
+        let outcome = execute(command, Some(Duration::from_secs(1)));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert_eq!(outcome.status, "failed");
+        assert!(outcome.error.unwrap().contains("runtime limit"));
     }
 }

@@ -337,6 +337,52 @@ fn switch_project(session: &SharedSession, app: &mut App, path: &Path, label: &s
     });
 }
 
+/// Alt+G / Alt+D on the "move this session into the repo it keeps working in" card. True when the key
+/// was the card's; every other key (including a plain `g` or `d`) stays ordinary typing.
+pub(super) fn project_offer_key(session: &SharedSession, app: &mut App, key: KeyKind) -> bool {
+    match key {
+        KeyKind::ProjectMove => {
+            let Some(offer) = app.project_offer.take_accepted() else {
+                return false;
+            };
+            switch_project(session, app, &offer.path, &offer.name);
+            true
+        }
+        KeyKind::ProjectDismiss => {
+            app.project_offer.dismiss();
+            app.note("ok, not offering that project again in this session");
+            true
+        }
+        _ => false,
+    }
+}
+
+/// A phone's answer to the card, for a TUI host with `/remote` on. False when `path` is not the
+/// repository currently offered.
+pub(super) fn project_offer_remote(
+    session: &SharedSession,
+    app: &mut App,
+    path: &str,
+    accept: bool,
+) -> bool {
+    let current = app
+        .project_offer
+        .suggestion()
+        .is_some_and(|offer| offer.path == Path::new(path));
+    if !current {
+        return false;
+    }
+    project_offer_key(
+        session,
+        app,
+        if accept {
+            KeyKind::ProjectMove
+        } else {
+            KeyKind::ProjectDismiss
+        },
+    )
+}
+
 fn go_home(session: &SharedSession, app: &mut App) {
     match project_ops::home_dir() {
         Ok(dir) => switch_project(session, app, &dir, "Home"),

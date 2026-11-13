@@ -226,6 +226,7 @@ pub fn run(process_start: Instant) {
             desktop_render_diagnostics,
             auto_update::desktop_update_installable,
             auto_update::desktop_update_installed_version,
+            auto_update::desktop_update_installing,
             ota::ota_status,
             ota::ota_check_now,
             ota::ota_mark_healthy,

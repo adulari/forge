@@ -39,6 +39,7 @@ pub fn record_model_failure_in(
     {
         return;
     }
+    record_key_verdict(store, model, err);
     let detail = err.to_string();
     let reason = model_health_reason(err, &detail);
     if err.is_auth() {
@@ -66,5 +67,67 @@ pub fn record_model_failure_in(
         let _ = store.exclude_model(model, reason);
     } else {
         let _ = store.bench_for(model, err.cooldown(default_cooldown), reason);
+    }
+}
+
+/// A key the provider itself refused gets a persisted verdict for the providers screens. Only
+/// keyed API providers: a logged-out CLI bridge is also `Auth`, but there is no key to renew.
+fn record_key_verdict(
+    store: &forge_store::Store,
+    model: &str,
+    err: &forge_provider::ProviderError,
+) {
+    let Some((provider, _)) = model.split_once("::") else {
+        return;
+    };
+    if !forge_config::known_key_providers().any(|p| p == provider) {
+        return;
+    }
+    let Some((kind, reason)) = err.key_failure() else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    if let Ok(forge_store::VerdictChange::New | forge_store::VerdictChange::Changed) =
+        store.set_provider_verdict(provider, kind.as_str(), &reason, now)
+    {
+        tracing::warn!("{provider}: {} ({reason})", kind.headline());
+    }
+}
+
+#[cfg(test)]
+mod key_verdict_tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_key_sets_a_verdict_and_a_completed_call_clears_it() {
+        let store = forge_store::Store::open_in_memory().unwrap();
+        let err = forge_provider::ProviderError::Auth("401 This API key has expired".into());
+        record_model_failure_in(
+            &store,
+            "groq::llama",
+            &err,
+            std::time::Duration::from_secs(60),
+        );
+        let verdicts = store.provider_verdicts().unwrap();
+        assert_eq!(verdicts.len(), 1);
+        assert_eq!(verdicts[0].status, "expired");
+
+        store.clear_health_after_success("groq::llama").unwrap();
+        assert!(store.provider_verdicts().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_logged_out_bridge_is_not_a_key_verdict() {
+        let store = forge_store::Store::open_in_memory().unwrap();
+        let err = forge_provider::ProviderError::Auth("Not logged in".into());
+        record_model_failure_in(
+            &store,
+            "claude-cli::opus",
+            &err,
+            std::time::Duration::from_secs(60),
+        );
+        assert!(store.provider_verdicts().unwrap().is_empty());
     }
 }

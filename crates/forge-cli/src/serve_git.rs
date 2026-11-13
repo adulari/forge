@@ -15,6 +15,7 @@
 //! - `POST /api/git/discard` `{session, paths[]}` → drop working-tree changes
 //! - `POST /api/git/switch`  `{session, branch}` → switch a clean shared workspace
 //! - `POST /api/git/branches` `{session, name}` → create + switch a clean shared workspace
+//! - `POST /api/sessions/{id}/ship` `{message?, title?, body?, base?, draft?, method?}` → commit, push, PR, watch
 //! - `GET  /api/sessions/{id}/diff`                         a forked session's worktree vs its base
 //!
 //! Every route resolves its repository from the SESSION (its worktree if it has one, else its
@@ -39,6 +40,7 @@ use crate::serve::{
 pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
     Router::new()
         .route(&format!("{base}/api/git/status"), get(status::git_status))
+        .merge(ci::routes(base))
         .route(
             &format!("{base}/api/git/branches"),
             get(git_branches).post(git_create_branch),
@@ -62,6 +64,8 @@ pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
         .route(&format!("{base}/api/git/push"), post(sync::git_push))
         .route(&format!("{base}/api/git/discard"), post(sync::git_discard))
         .merge(crate::serve_pr::routes(base))
+        .merge(crate::serve_issues::routes(base))
+        .merge(crate::serve_drain::routes(base))
         .merge(crate::serve_ide::routes(base))
         .merge(crate::serve_actions::routes(base))
 }
@@ -79,19 +83,27 @@ pub(crate) fn parse_patch(raw: &str, drop_unchanged: bool) -> Vec<GitDiffFile> {
 
 mod branches;
 pub(crate) mod changes;
+mod ci;
+mod commit;
 mod diff;
 pub(crate) mod hunk;
 mod message;
+mod risk;
+pub(crate) mod ship;
 mod status;
 mod sync;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod url;
 pub(crate) use branches::{git_branches, git_create_branch, git_switch_branch};
+#[cfg(test)]
+use commit::update_index;
+pub(crate) use commit::{git_commit, git_stage, git_unstage};
 use diff::{
     is_untracked, parse_unified_diff, parse_unified_diff_window, staged_rename_source,
     untracked_counts, untracked_diff,
 };
+pub(crate) use ship::session_ship;
 
 /// Hunk lines returned per file. A review dock needs the whole change, but an unbounded diff of a
 /// generated file would push megabytes at a phone — the excess is reported as `skipped_lines`.
@@ -189,6 +201,10 @@ pub(crate) struct GitBranchesResponse {
 #[derive(serde::Serialize)]
 pub(crate) struct GitDiffHunk {
     header: String,
+    /// `"routine"` (safe to accept in bulk) or `"look"`; see [`risk`].
+    risk: &'static str,
+    /// One line saying why: "lockfile churn", "deletes a test", ...
+    reason: String,
     /// Each line keeps its gutter character (`+`/`-`/` `) as its first byte.
     lines: Vec<String>,
 }
@@ -329,7 +345,18 @@ async fn stored_session_dir(state: &DaemonState, session: &str) -> Option<(Strin
     tokio::task::spawn_blocking(move || {
         let worktree = store.session_worktree(&session).ok().flatten();
         match worktree {
-            Some(worktree) => Some((worktree, true)),
+            // A merged session's worktree is deleted but its changes are staged in the base repo
+            // (its cwd): resolve there so the merge can still be reviewed and committed.
+            Some(worktree) if Path::new(&worktree).is_dir() => Some((worktree, true)),
+            Some(worktree) => crate::serve_worktree_start::worktree_repo_and_branch(&worktree)
+                .map(|(root, _)| (root.display().to_string(), false))
+                .or_else(|| {
+                    store
+                        .session_cwd(&session)
+                        .ok()
+                        .flatten()
+                        .map(|cwd| (cwd, false))
+                }),
             None => store
                 .session_cwd(&session)
                 .ok()
@@ -348,12 +375,7 @@ async fn stored_session_dir(state: &DaemonState, session: &str) -> Option<(Strin
 /// session.
 pub(crate) async fn session_dir(state: &DaemonState, session: &str) -> Option<String> {
     if let Some(handle) = state.registry.get(session).await {
-        return Some(
-            handle
-                .worktree
-                .clone()
-                .unwrap_or_else(|| handle.cwd.clone()),
-        );
+        return Some(handle.worktree.clone().unwrap_or_else(|| handle.cwd()));
     }
     stored_session_dir(state, session).await.map(|(dir, _)| dir)
 }
@@ -521,103 +543,6 @@ pub(crate) async fn git_diff(
 }
 
 // ---------------------------------------------------------------------------
-// Stage / unstage / commit
-// ---------------------------------------------------------------------------
-
-async fn stage_impl(state: Arc<DaemonState>, request: GitPathsRequest, unstage: bool) -> Response {
-    let Some(dir) = session_dir(&state, &request.session).await else {
-        return no_such_session();
-    };
-    let paths = match repo_relative_all(&request.paths) {
-        Ok(paths) => paths,
-        Err(message) => return err_response(axum::http::StatusCode::BAD_REQUEST, &message),
-    };
-    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let root = repo_root_of(&dir)?;
-        let mut args: Vec<&str> = if unstage {
-            // `restore --staged` (not `reset`) so an unstage never moves HEAD or touches the
-            // working tree — the dock only ever changes what is in the index.
-            vec!["restore", "--staged", "--"]
-        } else {
-            vec!["add", "--"]
-        };
-        args.extend(paths.iter().map(String::as_str));
-        git_raw(&root, &args).map(|_| ())
-    })
-    .await;
-    match result {
-        Ok(Ok(())) => json_response(&serde_json::json!({ "ok": true })),
-        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "git index update failed",
-        ),
-    }
-}
-
-/// `POST /api/git/stage` `{session, paths[]}`.
-pub(crate) async fn git_stage(
-    State(state): State<Arc<DaemonState>>,
-    Json(request): Json<GitPathsRequest>,
-) -> Response {
-    stage_impl(state, request, false).await
-}
-
-/// `POST /api/git/unstage` `{session, paths[]}`.
-pub(crate) async fn git_unstage(
-    State(state): State<Arc<DaemonState>>,
-    Json(request): Json<GitPathsRequest>,
-) -> Response {
-    stage_impl(state, request, true).await
-}
-
-/// `POST /api/git/commit` `{session, message}` — commits ONLY what is already staged (no `-a`), so
-/// the dock's staging decisions are the whole contract.
-pub(crate) async fn git_commit(
-    State(state): State<Arc<DaemonState>>,
-    Json(request): Json<GitCommitRequest>,
-) -> Response {
-    let Some(dir) = session_dir(&state, &request.session).await else {
-        return no_such_session();
-    };
-    let message = request.message.trim().to_string();
-    if message.is_empty() {
-        return err_response(
-            axum::http::StatusCode::BAD_REQUEST,
-            "a commit message is required",
-        );
-    }
-    let result = tokio::task::spawn_blocking(move || -> Result<GitCommitResponse, String> {
-        let root = repo_root_of(&dir)?;
-        if git_stdout(&root, &["diff", "--cached", "--name-only"])
-            .unwrap_or_default()
-            .is_empty()
-        {
-            return Err("nothing staged to commit".to_string());
-        }
-        // `--` terminates options so a message beginning with `-` is never read as one; `-F -`
-        // is avoided because it would need stdin plumbing for no gain.
-        git_raw(&root, &["commit", "-m", message.as_str(), "--"])?;
-        let sha = git_stdout(&root, &["rev-parse", "HEAD"]).unwrap_or_default();
-        let summary = git_stdout(&root, &["show", "-s", "--format=%s", "HEAD"]).unwrap_or_default();
-        Ok(GitCommitResponse {
-            ok: true,
-            sha,
-            summary,
-        })
-    })
-    .await;
-    match result {
-        Ok(Ok(response)) => json_response(&response),
-        Ok(Err(message)) => err_response(axum::http::StatusCode::BAD_REQUEST, &message),
-        Err(_) => err_response(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "git commit failed",
-        ),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Cross-session diff
 // ---------------------------------------------------------------------------
 
@@ -652,6 +577,44 @@ pub(super) fn is_noise_path(path: &str) -> bool {
     false
 }
 
+/// What `git diff --no-index -- /dev/null <rel>` prints for a plain file, without the process.
+/// Only the parts [`parse_unified_diff`] reads are reproduced (the `index` line is omitted).
+/// `None` for anything git renders specially (symlinks, unreadable files, paths git would quote).
+fn new_file_diff(full: &Path, rel: &str) -> Option<String> {
+    if rel.chars().any(|c| c.is_control() || c == '"' || c == '\\') {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(full).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let bytes = std::fs::read(full).ok()?;
+    let mut out = format!("diff --git a/{rel} b/{rel}\nnew file mode 100644\n");
+    if bytes.is_empty() {
+        return Some(out);
+    }
+    if bytes.iter().take(8000).any(|b| *b == 0) {
+        out.push_str(&format!("Binary files /dev/null and b/{rel} differ\n"));
+        return Some(out);
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let lines = text.split_inclusive('\n').count();
+    let span = if lines == 1 {
+        "1".to_string()
+    } else {
+        format!("1,{lines}")
+    };
+    out.push_str(&format!("--- /dev/null\n+++ b/{rel}\n@@ -0,0 +{span} @@\n"));
+    for line in text.split_inclusive('\n') {
+        out.push('+');
+        out.push_str(line);
+        if !line.ends_with('\n') {
+            out.push_str("\n\\ No newline at end of file\n");
+        }
+    }
+    Some(out)
+}
+
 /// Unified new-file diffs for the untracked, non-ignored files of `dir` (capped), without touching
 /// the index. `git diff --no-index` exits 1 when the files differ, so the status is not checked.
 fn untracked_as_new_file_diffs(dir: &Path) -> String {
@@ -667,6 +630,10 @@ fn untracked_as_new_file_diffs(dir: &Path) -> String {
         .take(MAX_FILES)
     {
         if std::fs::metadata(dir.join(rel)).is_ok_and(|m| !m.is_file() || m.len() > MAX_BYTES) {
+            continue;
+        }
+        if let Some(diff) = new_file_diff(&dir.join(rel), rel) {
+            out.push_str(&diff);
             continue;
         }
         let Ok(output) = std::process::Command::new("git")
@@ -695,8 +662,8 @@ pub(crate) fn worktree_diff(worktree: &str) -> Result<SessionDiffResponse, Strin
     let Some((repo_root, branch)) = worktree_repo_and_branch(worktree) else {
         return Err("worktree path is not a recognised forge worktree".to_string());
     };
-    let base = git_stdout(&repo_root, &["merge-base", "HEAD", &branch])
-        .map_err(|e| format!("finding the fork point failed: {e}"))?;
+    let base = forge_core::worktree_base::fork_point(&repo_root, &branch)
+        .ok_or_else(|| format!("finding the fork point of {branch} failed"))?;
     let raw = String::from_utf8_lossy(&git_raw(
         Path::new(worktree),
         &[
@@ -751,6 +718,65 @@ mod tests {
     use super::branches::{is_forge_managed_worktree, parse_branch_rows, parse_worktree_branches};
     use super::status::{parse_numstat_z, parse_status_z};
     use super::*;
+
+    #[test]
+    fn in_process_new_file_diff_parses_like_git_no_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let cases: [(&str, &[u8]); 7] = [
+            ("multi.txt", b"one\ntwo\nthree\n"),
+            ("single.txt", b"only\n"),
+            ("nonl.txt", b"a\nno newline"),
+            ("empty.txt", b""),
+            ("bin.dat", b"\x00\x01\x02binary\n"),
+            ("crlf.txt", b"a\r\nb\r\n"),
+            ("blank.txt", b"\n\nx\n"),
+        ];
+        for (name, body) in cases {
+            std::fs::write(root.join(name), body).unwrap();
+            let old = std::process::Command::new("git")
+                .current_dir(root)
+                .args(["diff", "--no-index", "--", "/dev/null", name])
+                .output()
+                .unwrap();
+            let old = parse_unified_diff(&String::from_utf8_lossy(&old.stdout));
+            let new = parse_unified_diff(&new_file_diff(&root.join(name), name).unwrap());
+            assert_eq!(
+                serde_json::to_value(&old).unwrap(),
+                serde_json::to_value(&new).unwrap(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn unstage_works_before_the_first_commit_and_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| git_raw(root, args).unwrap();
+        git(&["init", "-q", "-b", "main"]);
+        std::fs::write(root.join("a.txt"), "a\n").unwrap();
+        update_index(root, &["a.txt".to_string()], false).unwrap();
+        update_index(root, &["a.txt".to_string()], true).unwrap();
+        let status = String::from_utf8(git(&["status", "--porcelain"])).unwrap();
+        assert_eq!(status.trim(), "?? a.txt", "unstaged, still on disk");
+
+        update_index(root, &["a.txt".to_string()], false).unwrap();
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "first",
+        ]);
+        std::fs::write(root.join("a.txt"), "changed\n").unwrap();
+        update_index(root, &["a.txt".to_string()], false).unwrap();
+        update_index(root, &["a.txt".to_string()], true).unwrap();
+        let status = String::from_utf8(git(&["status", "--porcelain"])).unwrap();
+        assert_eq!(status.trim(), "M a.txt");
+    }
 
     #[test]
     fn worktree_porcelain_maps_local_branches_to_paths() {

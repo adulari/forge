@@ -5,6 +5,7 @@ import {
   sessionsRefetchPolicy,
   sessionsRetryPolicy,
   SESSIONS_RECOVERY_POLL_MS,
+  SESSIONS_RELAY_POLL_MS,
 } from "./peekQueries";
 
 describe("sessionsRefetchPolicy", () => {
@@ -31,6 +32,12 @@ describe("sessionsRefetchPolicy", () => {
     expect(policy.refetchInterval).toBe(false);
     // Unfocused is not the same as peeked: arriving still has to catch up.
     expect(policy.refetchOnMount).toBe("always");
+  });
+
+  it("polls faster when the host has no fleet socket", () => {
+    const policy = sessionsRefetchPolicy({ peeking: false, isFocused: true, hasFleetSocket: false });
+    expect(policy.refetchInterval).toBe(SESSIONS_RELAY_POLL_MS);
+    expect(SESSIONS_RELAY_POLL_MS).toBeLessThan(SESSIONS_RECOVERY_POLL_MS);
   });
 
   it("lets peeking win over focus, since a peek is rendered inside the focused route", () => {

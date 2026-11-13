@@ -104,3 +104,12 @@ export function projectReps(sessions: readonly { id: string; cwd: string; last_a
     .sort((a, b) => b[1].at - a[1].at)
     .map(([cwd, v]) => ({ cwd, sessionId: v.id }));
 }
+
+/** The session whose PR Watch follows `url`, else `fallback` (the project's representative session). */
+export function owningSession(
+  url: string,
+  fallback: string,
+  watches: readonly { session_id: string; pr_url: string | null }[],
+): string {
+  return watches.find((w) => w.pr_url === url)?.session_id ?? fallback;
+}

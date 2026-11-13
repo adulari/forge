@@ -160,6 +160,24 @@ impl TurnPhase {
     }
 }
 
+/// What the status bar shows while a turn waits out a provider outage. Times are unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderOutageView {
+    pub model: String,
+    pub since: u64,
+    pub next_try: u64,
+    pub attempt: u32,
+    pub until: u64,
+    pub reason: String,
+}
+
+impl ProviderOutageView {
+    /// `InferHub down since 10:18 · next try 10:43 · until 18:18 · Esc stops`.
+    pub fn status_line(&self) -> String {
+        crate::outage_text::status_line(&self.model, self.since, self.next_try, self.until)
+    }
+}
+
 /// Live, per-turn observability derived from real presenter events. The counters make hidden model
 /// reasoning visibly alive, while `last_event_tick` distinguishes an active stream from a request
 /// that has produced no UI events for a long time.
@@ -214,6 +232,13 @@ pub struct App {
     /// searching for a replacement. Set on a `ModelSearch` event, cleared the moment real output
     /// (assistant text / a tool call) arrives, so it shows only during the recovery, never after.
     pub model_search: Option<(String, bool)>,
+    /// The provider outage the turn is waiting out (`mesh.outage_wait_secs`): drives the status
+    /// bar's "down since / next try / until" line. Cleared on recovery and the moment real output
+    /// arrives, like `model_search`.
+    pub provider_outage: Option<ProviderOutageView>,
+    /// `expert: <model> · 2 consults · 2.1% of weekly window`, from the latest expert consult of
+    /// the session (`[harness.expert]`); shown in `/status` and on the remote snapshot.
+    pub expert_status: Option<String>,
     pub cost_usd: f64,
     /// Live token counter (tui-token-counter.md): session totals + current context fill.
     pub session_in: u64,
@@ -402,6 +427,14 @@ pub struct App {
     pub run_menu: crate::run_menu::RunMenu,
     /// The `/import` picker for Claude Code and Codex conversations, while open.
     pub import_menu: crate::import_menu::ImportMenu,
+    /// The `/issues` list (GitHub issues, one-key start), while open.
+    pub issues_menu: crate::issues_menu::IssuesMenu,
+    /// The `/queue` merge queue (hold, release, front, retry), while open.
+    pub queue_menu: crate::queue_menu::QueueMenu,
+    /// The `/ci` overlay (the repository's workflows as a local plan), while open.
+    pub ci_menu: crate::ci_menu::CiMenu,
+    /// The `/ship` card (commit, push, PR, watch in one action), while open.
+    pub ship_menu: crate::ship_menu::ShipMenu,
     /// The `/worktree` and `/project` overlay, while open.
     pub workspace_menu: crate::workspace_menu::WorkspaceMenu,
     /// The `/clis` menu (install and update the subscription CLIs), while open.
@@ -414,10 +447,13 @@ pub struct App {
     pub diff_overlay: crate::diff_overlay::DiffOverlay,
     /// The background-shells list (`/jobs`), while open.
     pub jobs_overlay: crate::jobs_overlay::JobsOverlay,
+    pub history_overlay: crate::history_overlay::HistoryOverlay,
     /// `/ide` or its key asked for IDE mode; the host opens it on its next loop turn.
     pub ide_requested: bool,
     /// The "newer Forge available" card (`update_card.rs`), shown above the composer when idle.
     pub update_card: crate::update_card::UpdateCard,
+    /// "This session keeps working in <repo> — move it there?" (`project_offer.rs`).
+    pub project_offer: crate::project_offer::ProjectOffer,
     /// The `/usage` overlay state.
     pub usage_overlay: UsageOverlay,
     /// The `/btw` answer card (`app_btw.rs`); `None` when no side question is on screen.
@@ -598,6 +634,8 @@ pub struct App {
     pub goal_chip: Option<String>,
     /// The `/goal` run, live or ended, as the surfaces report it (`goal_status.rs`).
     pub goal: Option<crate::goal_status::GoalStatus>,
+    /// The envelope a `/goal --budget` just baselined, waiting for the run to adopt it.
+    pub pending_envelope: Option<forge_types::goal_envelope::EnvelopeState>,
     /// Loop chip text (`5m`), shown on the composer border while a `/loop` runs.
     pub loop_chip: Option<String>,
     /// Fold each run of tool calls into one summary row (`[tui] fold_tool_groups`, full-screen).
@@ -954,6 +992,10 @@ pub enum KeyKind {
     NextToolGroup,
     /// Alt+O — open every tool group, or fold them all again.
     ToggleToolGroups,
+    /// Alt+G — accept the "move this session into the repo" card (shell-handled).
+    ProjectMove,
+    /// Alt+D — dismiss the "move this session into the repo" card (shell-handled).
+    ProjectDismiss,
     /// Ctrl+R — toggle the effort-level slider popup above the input bar.
     ToggleEffortSlider,
     /// Mid-turn: abort + retry with next mesh model.
@@ -1103,7 +1145,7 @@ fn next_word_end(s: &str, mut pos: usize) -> usize {
     pos
 }
 
-fn sanitize_terminal_text(text: &str) -> String {
+pub(crate) fn sanitize_terminal_text(text: &str) -> String {
     text.chars()
         .filter(|&c| c == '\n' || c == '\t' || !c.is_control())
         .collect()
@@ -1222,6 +1264,8 @@ pub fn handle_key(input: &mut String, cursor: &mut usize, key: KeyKind) -> Input
         | KeyKind::PrevToolGroup
         | KeyKind::NextToolGroup
         | KeyKind::ToggleToolGroups
+        | KeyKind::ProjectMove
+        | KeyKind::ProjectDismiss
         | KeyKind::ToggleEffortSlider
         | KeyKind::PageUp
         | KeyKind::PageDown
@@ -1330,6 +1374,7 @@ impl App {
             }
             PresenterEvent::ProviderProgress => {
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.provider_events =
                     self.turn_activity.provider_events.saturating_add(1);
                 self.set_turn_activity(
@@ -1342,6 +1387,7 @@ impl App {
             }
             PresenterEvent::ProviderToolInput { name, chars } => {
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.provider_events =
                     self.turn_activity.provider_events.saturating_add(1);
                 let name = tool_display_name(&name).to_string();
@@ -1356,6 +1402,7 @@ impl App {
             }
             PresenterEvent::ProviderThinking { tokens } => {
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.provider_events =
                     self.turn_activity.provider_events.saturating_add(1);
                 self.turn_activity.thinking_tokens = tokens;
@@ -1368,6 +1415,18 @@ impl App {
                 self.turn_activity.model = Some(model);
                 self.turn_activity.auxiliary_chars = 0;
                 self.set_turn_activity(TurnPhase::Auxiliary, purpose);
+            }
+            PresenterEvent::ExpertConsult {
+                trigger,
+                summary,
+                status,
+                ..
+            } => {
+                self.push_notice(
+                    NoticeKind::Info,
+                    &format!("{status} ({trigger}): {summary}"),
+                );
+                self.expert_status = Some(status);
             }
             PresenterEvent::AuxiliaryProgress { chars } => {
                 self.turn_activity.auxiliary_chars =
@@ -1383,6 +1442,33 @@ impl App {
             // Failover in progress: keep a single animated indicator instead of one warning per
             // hop. The model that just failed is recorded only for the (dim) hint; the status bar's
             // own routing line shows the model now being tried.
+            PresenterEvent::ProviderOutage {
+                model,
+                since,
+                next_try,
+                attempt,
+                until,
+                reason,
+            } => {
+                self.provider_outage = Some(ProviderOutageView {
+                    model,
+                    since,
+                    next_try,
+                    attempt,
+                    until,
+                    reason,
+                });
+                self.set_turn_activity(TurnPhase::Recovering, "provider down — waiting");
+            }
+            PresenterEvent::TurnStopped { text, .. } => {
+                let text = sanitize_terminal_text(&text);
+                self.push_notice(NoticeKind::Warn, &text);
+            }
+            PresenterEvent::ProviderRecovered { .. } => {
+                self.provider_outage = None;
+                self.model_search = None;
+                self.set_turn_activity(TurnPhase::ContactingModel, "provider back — resuming");
+            }
             PresenterEvent::ModelSearch { model, retrying } => {
                 self.model_search = Some((model, retrying));
                 self.set_turn_activity(
@@ -1398,6 +1484,7 @@ impl App {
             PresenterEvent::AssistantText(text) => {
                 let text = sanitize_terminal_text(&text);
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.response_chars += text.chars().count();
                 self.set_turn_activity(TurnPhase::Finalizing, "complete response received");
                 self.flush_reasoning();
@@ -1406,6 +1493,7 @@ impl App {
             }
             PresenterEvent::Reasoning(delta) => {
                 self.model_search = None;
+                self.provider_outage = None;
                 let delta = sanitize_terminal_text(&delta);
                 self.transcript_ui
                     .reasoning_since
@@ -1419,6 +1507,7 @@ impl App {
             PresenterEvent::AssistantDelta(delta) => {
                 let delta = sanitize_terminal_text(&delta);
                 self.model_search = None;
+                self.provider_outage = None;
                 self.turn_activity.response_chars += delta.chars().count();
                 self.throughput
                     .on_delta(delta.chars().count(), std::time::Instant::now());
@@ -1467,6 +1556,7 @@ impl App {
             PresenterEvent::ToolStart { name, args } => {
                 let name = tool_cards::bare_tool_name(&name).to_string();
                 self.model_search = None;
+                self.provider_outage = None;
                 if self.streaming_active {
                     self.finish_streaming_text();
                 }
@@ -1488,8 +1578,19 @@ impl App {
                     ),
                 );
                 let origin = LineOrigin::tool_call(&name);
+                if name == "shell" {
+                    self.observe_shell_for_project_offer(&args);
+                }
                 self.interaction_ui.note_tool_call(&name, &args);
                 self.open_tool_card(origin, name, args);
+            }
+            PresenterEvent::ToolOutputDelta {
+                name,
+                lines,
+                elapsed_ms,
+            } => {
+                let name = tool_cards::bare_tool_name(&name).to_string();
+                self.update_card_live_tail(&name, lines, elapsed_ms);
             }
             PresenterEvent::ToolResult {
                 name,
@@ -1841,6 +1942,7 @@ impl App {
             }
             PresenterEvent::Done { stop_reason, .. } => {
                 self.model_search = None;
+                self.provider_outage = None;
                 // An interrupt aborts the turn's task, so a compaction it was running never sends
                 // CompactionFinished; without this the band stayed up, restarting with each turn.
                 self.compaction = None;
@@ -2719,6 +2821,11 @@ impl App {
         }
     }
 
+    /// Whether a queued prompt still holds pasted images.
+    pub fn has_queued_images(&self, text: &str) -> bool {
+        self.queued_images.iter().any(|(t, _)| t == text)
+    }
+
     /// A queued prompt is about to run: move its stashed images (if any) to the ready slot.
     pub fn promote_queued_images(&mut self, text: &str) {
         if let Some(i) = self.queued_images.iter().position(|(t, _)| t == text) {
@@ -3157,6 +3264,7 @@ impl App {
         self.transcript_scroll = 0;
         self.transcript_follow = true;
         self.suggested_prompt = None; // stale once the session it was predicted for is gone
+        self.project_offer.reset();
         self.turn_activity = TurnActivity::default();
         let seen = self.transcript_ui.bridge_notice_seen;
         self.transcript_ui = Default::default();

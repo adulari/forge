@@ -16,6 +16,10 @@ use crate::record::{downmix, resample_linear};
 use crate::{Result, VoiceError};
 
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
+/// Longest clip transcribed. A 32 MiB upload of low-bitrate audio can be hours long; decoding it
+/// whole holds hundreds of MB and pins every core for minutes, so longer clips are refused while
+/// decoding, before they are held in memory.
+pub const MAX_AUDIO_SECONDS: u64 = 30 * 60;
 
 /// Decode `bytes` (a whole audio file, e.g. an HTTP multipart upload body) into 16kHz mono f32
 /// samples. `hint` is the uploaded file name or MIME type, if known — it steers symphonia's
@@ -51,6 +55,10 @@ fn decode_wav(bytes: &[u8]) -> Result<Vec<f32>> {
                 .map_err(|e| VoiceError::Decode(format!("wav: {e}")))?
         }
     };
+    let rate = u64::from(spec.sample_rate.max(1)) * u64::from(spec.channels.max(1));
+    if samples.len() as u64 > MAX_AUDIO_SECONDS * rate {
+        return Err(VoiceError::Decode(too_long()));
+    }
     let mono = downmix(&samples, spec.channels as usize);
     Ok(resample_linear(
         &mono,
@@ -128,6 +136,10 @@ fn decode_with_symphonia(bytes: &[u8], hint: Option<&str>) -> Result<Vec<f32>> {
         match decoder.decode(&packet) {
             Ok(audio_buf) => {
                 let start = interleaved.len();
+                let limit = MAX_AUDIO_SECONDS as usize * sample_rate as usize * channels;
+                if start + audio_buf.samples_interleaved() > limit {
+                    return Err(VoiceError::Decode(too_long()));
+                }
                 interleaved.resize(start + audio_buf.samples_interleaved(), 0.0);
                 audio_buf.copy_to_slice_interleaved(&mut interleaved[start..]);
             }
@@ -138,6 +150,13 @@ fn decode_with_symphonia(bytes: &[u8], hint: Option<&str>) -> Result<Vec<f32>> {
 
     let mono = downmix(&interleaved, channels);
     Ok(resample_linear(&mono, sample_rate, WHISPER_SAMPLE_RATE))
+}
+
+fn too_long() -> String {
+    format!(
+        "audio is longer than {} minutes; record a shorter clip",
+        MAX_AUDIO_SECONDS / 60
+    )
 }
 
 /// Build a forensic "no decodable audio track" message: container name, track count, and a
@@ -222,6 +241,15 @@ mod tests {
             writer.finalize().unwrap();
         }
         cursor.into_inner()
+    }
+
+    #[test]
+    fn a_clip_longer_than_the_limit_is_refused() {
+        // One sample per second keeps the fixture tiny while being "longer" than the cap.
+        let samples = vec![0i16; MAX_AUDIO_SECONDS as usize + 1];
+        let wav = make_wav(&samples, 1, 1);
+        let err = decode_audio(&wav, Some("clip.wav")).unwrap_err();
+        assert!(err.to_string().contains("longer than"), "{err}");
     }
 
     #[test]

@@ -131,6 +131,17 @@ impl ClaudeStreamState {
                     _ => {}
                 }
             }
+            // Claude retries a rejected login up to ten times with growing backoff, announcing
+            // each attempt as a `system` line. Those lines count as liveness, so a logged-out
+            // bridge held its turn open for minutes; the first one is already the verdict.
+            Some("system")
+                if v.get("subtype").and_then(Value::as_str) == Some("api_retry")
+                    && claude_retry_is_auth(&v) =>
+            {
+                out.push(Parsed::Error(
+                    "authentication_failed: 401 Not logged in".to_string(),
+                ));
+            }
             // Hidden thinking (Opus 5.x streams no text): `estimated_tokens` is cumulative here and
             // the per-delta `estimated_tokens` on empty `thinking_delta`s is deliberately ignored,
             // so the two are never added together.
@@ -340,6 +351,19 @@ impl ClaudeStreamState {
         }
         out
     }
+}
+
+/// Whether an `api_retry` line is a retry of a rejected credential rather than of an overload.
+fn claude_retry_is_auth(v: &Value) -> bool {
+    let status_is_auth = v
+        .get("error_status")
+        .and_then(Value::as_u64)
+        .is_some_and(|s| s == 401 || s == 403);
+    let named = v
+        .get("error")
+        .and_then(Value::as_str)
+        .is_some_and(|e| e.contains("authentication") || e.contains("unauthorized"));
+    status_is_auth || named
 }
 
 fn unseen_consolidated_suffix<'a>(
@@ -653,9 +677,19 @@ pub(super) fn parse_antigravity_line(line: &str) -> Vec<Parsed> {
     }
     if line.trim().is_empty() {
         Vec::new()
+    } else if agy_sign_in_line(line) {
+        vec![Parsed::Error(line.trim().to_string())]
     } else {
         vec![Parsed::Text(format!("{line}\n"))]
     }
+}
+
+/// `agy` prints its logged-out state as a plain stdout line ("Please sign in to view available
+/// models..."). Only a line that STARTS that way counts: an answer that merely mentions signing in
+/// is the model talking.
+fn agy_sign_in_line(line: &str) -> bool {
+    let lower = line.trim().to_ascii_lowercase();
+    lower.starts_with("please sign in") || lower.starts_with("error: not logged in")
 }
 
 fn parse_antigravity_json(v: &Value) -> Vec<Parsed> {

@@ -107,6 +107,14 @@ pub(crate) struct ToolCard {
     /// Why a failed shell command failed, from the shell-error interceptor, shown under the card
     /// instead of as a notice repeating the command.
     pub(crate) note: Option<CardNote>,
+    /// The rolling tail of a foreground call's output while it runs (ANSI-stripped), sampled by
+    /// the session. Dropped when the call ends: the result's `detail` takes over.
+    pub(crate) live_tail: Vec<String>,
+    /// Set once the first live sample arrived, so a running header can show a ticking clock.
+    pub(crate) live: bool,
+    /// The session's elapsed clock at the last live sample, shown to remote clients (a clock read
+    /// at snapshot time would change every frame).
+    pub(crate) live_elapsed_ms: u64,
 }
 
 /// A diagnosis attached to a failed call.
@@ -139,6 +147,9 @@ impl ToolCard {
             batch: None,
             parent: None,
             note: None,
+            live_tail: Vec::new(),
+            live: false,
+            live_elapsed_ms: 0,
         }
     }
 
@@ -183,6 +194,8 @@ impl ToolCard {
         self.diff = None;
         self.diff_counts = (0, 0);
         self.started = Instant::now();
+        self.live_tail.clear();
+        self.live = false;
     }
 }
 
@@ -290,6 +303,9 @@ fn diff_outcome(diff: &FileDiff, (adds, dels): (usize, usize)) -> String {
 pub(crate) fn right_text(card: &ToolCard) -> String {
     let sep = format!(" {} ", g().sep);
     let mut parts = vec![outcome_text(card)];
+    if card.status == CardStatus::Running && card.live {
+        parts.push(fmt_ms(card.started.elapsed().as_millis()));
+    }
     if card.status != CardStatus::Running {
         if let Some(full) = &card.full {
             parts.push(format!("{} lines", group(full.lines)));
@@ -479,6 +495,7 @@ pub(crate) fn card_lines(card: &ToolCard, width: u16) -> Vec<TextLine<'static>> 
             }
         }
     }
+    out.extend(live_rows(card));
     out.extend(note_rows(card));
     // The preview above is bounded; this row is the way to everything. It sits directly above the
     // collapse hint so `full_output_row` can find it without re-rendering the card.
@@ -527,6 +544,7 @@ fn collapsed_body(card: &ToolCard, out: &mut Vec<TextLine<'static>>) {
         }
         return;
     }
+    out.extend(live_rows(card));
     if card.status == CardStatus::Failed {
         if let Some(detail) = &card.detail {
             let lines: Vec<&str> = detail.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -537,6 +555,17 @@ fn collapsed_body(card: &ToolCard, out: &mut Vec<TextLine<'static>>) {
         }
         out.extend(note_rows(card));
     }
+}
+
+/// The rolling output of a call still running, dim under its header.
+fn live_rows(card: &ToolCard) -> Vec<TextLine<'static>> {
+    if card.status != CardStatus::Running {
+        return Vec::new();
+    }
+    card.live_tail
+        .iter()
+        .map(|l| text_row(truncate_cells(l, 200), styles::muted()))
+        .collect()
 }
 
 /// A failed call's diagnosis, dim under its header: the likely cause, then the fix.

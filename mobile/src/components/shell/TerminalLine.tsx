@@ -7,7 +7,7 @@ import { type ColorTokens, hexToRgba } from "../../theme/tokens";
 import { monoFamily } from "../../theme/typography";
 import { type AnsiColor, type AnsiLine, type AnsiSpan } from "./ansi";
 import { type LineHighlight, splitByHighlights } from "./terminalFind";
-import { detectTerminalLinks, type TerminalLinkTarget } from "./terminalLinks";
+import { detectTerminalLinks, osc8Target, type TerminalLinkTarget } from "./terminalLinks";
 
 export interface AnsiPalette {
   /** The 16 ANSI slots, in order. */
@@ -92,15 +92,6 @@ function spanStyle(span: AnsiSpan, palette: AnsiPalette): TextStyle {
   return out;
 }
 
-/** What an OSC 8 target opens: web pages in a browser, `file://` URIs in the Files dock. */
-export function osc8Target(uri: string): TerminalLinkTarget | null {
-  if (/^https?:\/\//i.test(uri)) return { kind: "url", url: uri };
-  if (/^file:\/\//i.test(uri)) {
-    const path = decodeURIComponent(uri.replace(/^file:\/\/[^/]*/i, ""));
-    return path ? { kind: "path", ref: { path, line: null, column: null } } : null;
-  }
-  return null;
-}
 
 const webLink = Platform.select<TextStyle | null>({ web: { cursor: "pointer" } as TextStyle, default: null });
 

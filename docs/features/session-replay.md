@@ -104,3 +104,49 @@ A finished turn stores its final answer twice: a provider-continuity `llm_only` 
 the usage) and the published `ui` copy. `Store::load_replay` drops the published copy when it
 repeats the row right before it, so `forge replay` and `--html` print each answer once with its
 model and cost.
+
+## Turn endings
+
+Every turn that a prompt starts gets a `turn` row (migration 56): opened right after the prompt
+is stored, closed in `Session::run_turn_with`, so the TUI, headless `forge run`, the daemon,
+subagents and MCP all record it. It holds `end_reason`, `detail_json` (model, open task count,
+mutations, error kind), `last_role_shape` (`finished`, `unanswered_prompt`, `pending_tool_calls`,
+`unanswered_tool_results`, from the same tail classifier a restart uses) and the start and end
+times. Steers and harness nudges join the running turn; they never open one.
+
+End reasons: `final_answer`, `final_answer_mid_intent` (the answer announces a step it did not
+take), `final_answer_open_tasks` (it ended with tracked tasks still open), `max_steps`,
+`budget_exhausted`, `no_output`, `tasks_unfinished`, `stalled`, `provider_down`,
+`daemon_shutdown`, `interrupted` (Esc, a remote interrupt, a queued prompt sent now; written by a
+drop guard), `provider_error` (kind in the detail), `no_healthy_model`, `pinned_rejected`,
+`review_blocked`, `internal`, `plan_presented`, `daemon_restart_or_crash` (a daemon start closes
+turns its predecessor left open) and `abandoned`. `unknown_<shape>` marks backfilled history.
+
+A turn that stops short never ends silently. The core writes one stored note,
+`Turn stopped (<reason>): <what to do>` (or `Turn failed: <error>` for an error), unless the
+newest visible row already explains the stop. The daemon pushes it as `failed` with the reason
+(held pushes escalate once after `push_escalate_secs` even with a client attached), and the
+snapshot carries `last_turn_end {reason, label, at}`, which the app and desktop show as a banner.
+A prompt that never becomes a turn (a hook block, a rejected input, a failed queued command)
+leaves a stored note too, and a prompt sent while the daemon drains joins the stored queue
+("queued: runs after the restart"). `forge run --output-format json` adds `end_reason` next to
+`stop_reason`.
+
+`forge turns [--since 7d] [--session <id>] [--limit N] [--json]` prints counts by end reason and
+the last turns that did not finish; the model report card (`forge models --report`, the Models
+page) ends with the same counts. `forge turns --backfill` classifies turns recorded before the
+table existed from the transcript tail (shape only, reason `unknown_<shape>`); it prints, and
+`--write` stores them.
+
+Every surface shows and acts on the same ends. The core emits one `TurnStopped` presenter event
+when it writes the stop note (never for an error end, which has its own Error line, and never when
+an earlier note already explained the stop), so the TUI prints the line the moment the turn ends;
+headless `forge run` prints it once on stderr and exits non-zero for every end reason that is not
+a finished answer (`final_answer_mid_intent`, `final_answer_open_tasks` and `provider_down`
+included). `/turns` in the TUI lists the counts for the session and the project (7 days) and the
+recent turns that stopped short; Enter shows what happened and what to do. The daemon serves
+`GET /api/sessions/{id}/turns` and `GET /api/turns/summary?days=7` (both bridged), with a plain
+`label`, the `advice` and a `resumable` flag per turn. The app and desktop banner opens a "Turn
+endings" sheet and offers a Continue button (it sends `continue`) when the reason is resumable;
+the banner is hidden as soon as the next turn runs. `forge turns` prints the same plain labels;
+the raw reason names are in `--json` only.

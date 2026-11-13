@@ -310,12 +310,21 @@ pub fn global_shortcut_plugin<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri_plugin_global_shortcut::Builder::new().build()
 }
 
+static STARTED_HIDDEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether setup kept the main window hidden at launch (autostart with "start minimized"), so
+/// nothing else should open it until the user does.
+pub fn started_hidden() -> bool {
+    STARTED_HIDDEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Called once from the setup hook, after the tray has had its chance to install.
 pub fn setup<R: Runtime>(app: &AppHandle<R>, tray_installed: bool) {
     let args: Vec<String> = std::env::args().collect();
     if tray_installed && should_start_hidden(&args, read_prefs(app).start_minimized) {
         if let Some(window) = app.get_webview_window("main") {
             let _ = window.hide();
+            STARTED_HIDDEN.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
     let state = app.state::<Handoff>();

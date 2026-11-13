@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use super::risk;
 use super::*;
 
 /// Path out of a `diff --git a/<x> b/<y>` header. Git quotes non-ASCII/space paths in this header
@@ -74,6 +75,8 @@ pub(super) fn parse_unified_diff_window(
         if line.starts_with("@@") {
             file.hunks.push(GitDiffHunk {
                 header: line.to_string(),
+                risk: risk::LOOK,
+                reason: String::new(),
                 lines: Vec::new(),
             });
             continue;
@@ -113,6 +116,9 @@ pub(super) fn parse_unified_diff_window(
     }
     if let Some(file) = current.take() {
         files.push(file);
+    }
+    for file in &mut files {
+        risk::classify_file(file);
     }
     if offset > 0 {
         // A hunk wholly before the window would be a bare header; drop it.
@@ -180,9 +186,12 @@ pub(super) fn untracked_diff(
     if !lines.is_empty() || offset == 0 {
         file.hunks.push(GitDiffHunk {
             header: format!("@@ -0,0 +1,{} @@", file.adds),
+            risk: risk::LOOK,
+            reason: String::new(),
             lines,
         });
     }
+    risk::classify_file(&mut file);
     Ok(file)
 }
 

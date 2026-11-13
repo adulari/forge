@@ -24,6 +24,10 @@ use super::{detail, dispatch_render as dr, form_render, overlays};
 const MIN_COLUMN: u16 = 30;
 /// Below this body height a card drops its last-line and gauge rows.
 const COMPACT_BELOW: u16 = 22;
+/// PRs listed in the merge-queue section; the title counts the rest.
+const QUEUE_ROWS: usize = 4;
+/// The queue section needs a body at least this tall to leave the columns usable.
+const QUEUE_MIN_BODY: u16 = 16;
 
 pub fn draw(app: &mut BoardApp, frame: &mut Frame) {
     app.hits.clear();
@@ -74,6 +78,9 @@ pub fn draw(app: &mut BoardApp, frame: &mut Frame) {
         overlays::draw_composer(app, frame, area);
     } else if app.dispatch.form.is_some() {
         form_render::draw_form(app, frame, area);
+    }
+    if app.focus == Focus::Brief {
+        super::brief::draw_brief(app, frame, area);
     }
     if app.focus == Focus::Help {
         overlays::draw_help(frame, area);
@@ -154,7 +161,17 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
     } else {
         "○"
     };
-    let mut chips: Vec<(String, Style)> = vec![
+    let mut chips: Vec<(String, Style)> = Vec::new();
+    if let Some(p) = app.pressure.as_ref().filter(|p| p.is_pressured()) {
+        let style = if p.is_floor() {
+            styles::err().bold()
+        } else {
+            styles::warn()
+        };
+        let what = p.summary.as_deref().unwrap_or("host is low on resources");
+        chips.push((format!("⚠ {}", w::clip_cells(what, 52)), style));
+    }
+    chips.extend([
         (format!("{dot} {} needs you", t.attention), attn),
         (
             format!("{spin} {} working", t.working),
@@ -173,7 +190,7 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
             }),
         ),
         (format!("{} done", t.done), styles::muted()),
-    ];
+    ]);
     if t.subagents > 0 {
         chips.push((format!("⑂ {} subagents", t.subagents), styles::user()));
     }
@@ -197,7 +214,11 @@ fn draw_header(app: &BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<(Re
             break;
         }
         row.sep();
-        row.add(text, style);
+        let is_pressure = text.starts_with('⚠');
+        let r = row.add(text, style);
+        if is_pressure {
+            w::push_hit(hits, r, area, Hit::Pressure);
+        }
     }
     let left_end = area.x + row.width() + 1;
     let left_area = Rect {
@@ -277,6 +298,19 @@ fn draw_board(app: &mut BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<
         draw_hero(app, frame, area);
         return;
     }
+    let queue_h = queue_section_height(app, area);
+    let queue_rect = Rect {
+        y: area.y + area.height - queue_h,
+        height: queue_h,
+        ..area
+    };
+    let area = Rect {
+        height: area.height - queue_h,
+        ..area
+    };
+    if queue_h > 0 {
+        draw_queue_section(app, frame, queue_rect);
+    }
     let fit = ((area.width / MIN_COLUMN) as usize).clamp(1, 4);
     let mut top = area.y;
     let mut height = area.height;
@@ -306,6 +340,80 @@ fn draw_board(app: &mut BoardApp, frame: &mut Frame, area: Rect, hits: &mut Vec<
         };
         draw_column(app, frame, rect, col, card_h, hits);
         x += width;
+    }
+}
+
+/// PRs the merge queue still has to do something about: waiting, held or handed back.
+fn queue_rows(app: &BoardApp) -> Vec<&crate::queue_menu::QueueRow> {
+    app.queue
+        .iter()
+        .filter(|r| !matches!(r.state.as_str(), "merged" | "blocked"))
+        .collect()
+}
+
+/// Rows the queue section takes under the columns: its title and up to [`QUEUE_ROWS`] PRs. A
+/// short terminal keeps all of its height for the cards.
+fn queue_section_height(app: &BoardApp, area: Rect) -> u16 {
+    let n = queue_rows(app).len();
+    if n == 0 || area.height < QUEUE_MIN_BODY {
+        return 0;
+    }
+    1 + n.min(QUEUE_ROWS) as u16
+}
+
+/// The merge queue under the columns: `#1 PR #7  next to land  reason`, in the board's tones.
+/// Hold, release, front and retry live in `/queue` (and `forge prs queue`).
+fn draw_queue_section(app: &BoardApp, frame: &mut Frame, area: Rect) {
+    let rows = queue_rows(app);
+    let waiting = rows.iter().filter(|r| r.position.is_some()).count();
+    let back = rows.iter().filter(|r| r.state == "skipped").count();
+    let held = rows.iter().filter(|r| r.state == "held").count();
+    let mut title = format!("Merge queue · {waiting} waiting");
+    if held > 0 {
+        title.push_str(&format!(" · {held} held"));
+    }
+    if back > 0 {
+        title.push_str(&format!(" · {back} handed back"));
+    }
+    if rows.len() > QUEUE_ROWS {
+        title.push_str(&format!(" · +{} more", rows.len() - QUEUE_ROWS));
+    }
+    let width = area.width as usize;
+    let mut head = w::Row::at(area.x + 1, area.y);
+    head.add(
+        w::clip_cells(&title, width.saturating_sub(2)),
+        styles::muted().bold(),
+    );
+    head.render(frame, Rect { height: 1, ..area });
+    for (i, r) in rows.iter().take(QUEUE_ROWS).enumerate() {
+        let y = area.y + 1 + i as u16;
+        let place = r
+            .position
+            .map_or_else(|| "-".to_string(), |p| format!("#{p}"));
+        let tone = match r.state.as_str() {
+            "head" | "checks" => styles::brand(),
+            "held" | "skipped" => styles::warn(),
+            _ => styles::fg(),
+        };
+        let mut line = w::Row::at(area.x + 2, y);
+        line.add(format!("{place:<3}"), styles::muted());
+        line.add(format!("{:<9}", r.label()), styles::fg());
+        line.add(format!("{:<13}", r.state_label()), tone);
+        let room = width.saturating_sub(2 + 3 + 9 + 13 + 1);
+        let text = if r.review.is_empty() {
+            r.reason.clone()
+        } else {
+            format!("[{}] {}", r.review, r.reason)
+        };
+        line.add(w::clip_cells(&text, room), styles::faint());
+        line.render(
+            frame,
+            Rect {
+                height: 1,
+                y,
+                ..area
+            },
+        );
     }
 }
 
@@ -711,6 +819,37 @@ mod tests {
         assert!(app.hits.iter().any(|(_, h)| *h == Hit::Help));
     }
 
+    fn pressured(level: &str) -> crate::board::PressureInfo {
+        crate::board::PressureInfo {
+            level: level.into(),
+            summary: Some("projects disk: 4.1 GB free of 500.0 GB (1%)".into()),
+            cause: Some("disk".into()),
+        }
+    }
+
+    #[test]
+    fn the_header_shows_host_pressure_and_the_chip_is_clickable() {
+        let mut app = busy_app();
+        let quiet = screen(&mut app, 160, 40);
+        assert!(!quiet.contains("free of"), "no chip while the host is fine");
+        assert!(!app.hits.iter().any(|(_, h)| *h == Hit::Pressure));
+
+        app.apply(BoardEvent::HostPressure(Some(pressured("warn"))));
+        let s = screen(&mut app, 160, 40);
+        let header = s.lines().take(3).collect::<Vec<_>>().join("\n");
+        assert!(
+            header.contains("⚠ projects disk: 4.1 GB free of 500.0 GB (1%)"),
+            "{header}"
+        );
+        assert!(app.hits.iter().any(|(_, h)| *h == Hit::Pressure));
+
+        app.apply(BoardEvent::HostPressure(Some(pressured("ok"))));
+        assert!(
+            !screen(&mut app, 160, 40).contains("free of"),
+            "clears again"
+        );
+    }
+
     #[test]
     fn a_narrow_board_falls_back_to_a_tab_strip() {
         let mut app = busy_app();
@@ -806,5 +945,63 @@ mod tests {
         let s = screen(&mut app, 100, 30);
         assert!(!s.contains("NEEDS YOU · "), "board should be hidden: {s}");
         assert!(s.contains("Overview"), "{s}");
+    }
+
+    fn queued(
+        n: u64,
+        state: &str,
+        position: Option<usize>,
+        reason: &str,
+    ) -> crate::queue_menu::QueueRow {
+        crate::queue_menu::QueueRow {
+            session_id: format!("s{n}"),
+            repo: "me/repo @ main".into(),
+            pr: Some(n),
+            position,
+            state: state.into(),
+            reason: reason.into(),
+            pushes: 0,
+            review: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_merge_queue_is_a_section_under_the_columns() {
+        let mut app = busy_app();
+        let plain = screen(&mut app, 130, 30);
+        assert!(
+            !plain.contains("Merge queue"),
+            "no queue, no section: {plain}"
+        );
+        app.apply(BoardEvent::Queue(vec![
+            queued(
+                7,
+                "head",
+                Some(1),
+                "waiting for checks on the updated branch",
+            ),
+            queued(8, "queued", Some(2), "#2 in the merge queue, behind PR #7"),
+            queued(9, "skipped", None, "conflicts in src/a.rs"),
+            queued(5, "merged", None, ""),
+        ]));
+        let s = screen(&mut app, 130, 30);
+        assert!(s.contains("Merge queue · 2 waiting · 1 handed back"), "{s}");
+        assert!(s.contains("PR #7") && s.contains("next to land"), "{s}");
+        assert!(
+            s.contains("behind PR #7") && s.contains("conflicts in src/a.rs"),
+            "{s}"
+        );
+        assert!(!s.contains("PR #5"), "merged PRs are not listed: {s}");
+        assert!(
+            s.contains("NEEDS YOU") || s.contains("Needs you"),
+            "the columns stay: {s}"
+        );
+        let short = screen(&mut app, 130, 12);
+        assert!(
+            !short.contains("Merge queue"),
+            "a short terminal keeps its height for cards: {short}"
+        );
+        app.apply(BoardEvent::Queue(Vec::new()));
+        assert!(!screen(&mut app, 130, 30).contains("Merge queue"));
     }
 }

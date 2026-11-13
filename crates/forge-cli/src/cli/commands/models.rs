@@ -133,6 +133,16 @@ fn discovery_status_line(status: &ProviderDiscoveryStatus) -> String {
             status.provider,
             status.detail.as_deref().unwrap_or("not listable")
         ),
+        DiscoveryStatusKind::Failed if discovery::key_rejection(status).is_some() => {
+            let (kind, reason) = discovery::key_rejection(status)
+                .unwrap_or((forge_provider::KeyFailure::Rejected, String::new()));
+            format!(
+                "  ✗ {:<18} {}: {reason} (`forge auth {}` to replace)",
+                status.provider,
+                kind.headline(),
+                status.provider
+            )
+        }
         DiscoveryStatusKind::Failed => format!(
             "  ⚠ {:<18} discovery failed: {}",
             status.provider,
@@ -428,6 +438,34 @@ pub(crate) async fn models(
             "\ntip: `forge models --probe` rechecks only the benched models (cheap); \
              add `--all` to re-ping every model (costs money on paid providers)."
         );
+    }
+    Ok(())
+}
+
+/// `forge models --report`: the per-model report card, from local counts only (no discovery, no
+/// network). Benchmark scores come from the cached catalog when there is one.
+pub(crate) fn model_report_cmd(repo: Option<String>, days: u32, json: bool) -> Result<()> {
+    let repo = repo
+        // A repo that no longer exists on disk can still have history, so fall back to the text.
+        .map(|path| {
+            std::fs::canonicalize(&path).map_or(path, |p| p.to_string_lossy().into_owned())
+        });
+    let catalog = load_cached_catalog_aged().map(|(catalog, _, _)| catalog);
+    let store = open_store()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    let report = crate::model_report::build(
+        &store,
+        &|model| catalog.as_ref().and_then(|c| c.benchmark_for(model)),
+        days,
+        repo.as_deref(),
+        now,
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        print!("{}", crate::model_report::render(&report));
     }
     Ok(())
 }
@@ -1058,9 +1096,22 @@ mod discovery_status_tests {
             provider: "openai".into(),
             kind: DiscoveryStatusKind::Failed,
             models: 0,
+            detail: Some("connection reset by peer".into()),
+        };
+        assert!(
+            discovery_status_line(&failed).contains("discovery failed: connection reset by peer")
+        );
+
+        // A refused key is a verdict the user can act on, not a generic discovery failure.
+        let refused = ProviderDiscoveryStatus {
+            provider: "openai".into(),
+            kind: DiscoveryStatusKind::Failed,
+            models: 0,
             detail: Some("unauthorized".into()),
         };
-        assert!(discovery_status_line(&failed).contains("discovery failed: unauthorized"));
+        let line = discovery_status_line(&refused);
+        assert!(!line.contains("discovery failed"), "{line}");
+        assert!(line.contains("`forge auth openai` to replace"), "{line}");
 
         let timed_out = ProviderDiscoveryStatus {
             provider: "nim".into(),

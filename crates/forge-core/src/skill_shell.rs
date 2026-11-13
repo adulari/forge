@@ -25,6 +25,12 @@ use crate::permission;
 
 const TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_OUTPUT_CHARS: usize = 40_000;
+/// Bytes kept from the command's output; the rest is drained and dropped so the child never
+/// blocks on a full pipe. Comfortably above `MAX_OUTPUT_CHARS` for multi-byte text.
+const MAX_CAPTURE_BYTES: usize = 4 * MAX_OUTPUT_CHARS;
+/// How long to wait for the output after the shell exits. Something it started in the
+/// background may still hold the pipe; its output so far is kept and the rest is not waited for.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What an injected command is checked against.
 #[derive(Debug, Clone)]
@@ -122,11 +128,25 @@ fn run(snippet: &ShellSnippet, cwd: &Path) -> Result<String, String> {
             )
         })?;
     let mut stdout = child.stdout.take().expect("stdout is piped");
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = stdout.read_to_end(&mut out);
-        out
-    });
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let captured = captured.clone();
+        std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut out = captured.lock().unwrap_or_else(|e| e.into_inner());
+                        let room = MAX_CAPTURE_BYTES.saturating_sub(out.len());
+                        out.extend_from_slice(&chunk[..n.min(room)]);
+                    }
+                }
+            }
+            let _ = done_tx.send(());
+        });
+    }
     let deadline = Instant::now() + TIMEOUT;
     let status = loop {
         match child.try_wait() {
@@ -149,7 +169,9 @@ fn run(snippet: &ShellSnippet, cwd: &Path) -> Result<String, String> {
             }
         }
     };
-    let output = clip(String::from_utf8_lossy(&reader.join().unwrap_or_default()).into_owned());
+    let _ = done_rx.recv_timeout(DRAIN_TIMEOUT);
+    let bytes = captured.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let output = clip(String::from_utf8_lossy(&bytes).into_owned());
     let code = status.code().unwrap_or(-1);
     if status.success() || (code == 1 && no_match_is_normal(&snippet.command)) {
         Ok(output)
@@ -220,6 +242,19 @@ mod tests {
         let p = policy(PermissionMode::Default, allow("Bash(echo *)"), true);
         let out = render("value: !`echo hi; echo err >&2`", &p).unwrap();
         assert_eq!(out, "value: hi\nerr");
+    }
+
+    #[test]
+    fn a_background_child_holding_the_pipe_does_not_hang_the_skill() {
+        let p = policy(PermissionMode::Bypass, Vec::new(), true);
+        let started = Instant::now();
+        let out = render("v: !`echo ready; (sleep 30 &)`", &p).unwrap();
+        assert_eq!(out, "v: ready");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

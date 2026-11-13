@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 
 mod adaptive_effort;
 pub mod advisor;
+pub mod ci_parity;
+pub mod expert;
+pub mod pr_watch;
 mod statusline_toggle;
 pub use statusline_toggle::WidgetToggle;
 mod agent_builtins;
@@ -23,9 +26,12 @@ pub mod cc_rules;
 pub mod chat;
 pub mod codemode;
 mod commit_policy;
+mod compact_checkpoint;
+pub use compact_checkpoint::CompactConfig;
 mod compact_model;
 mod config_diagnostics;
 mod harness;
+pub mod scouts;
 pub mod setting_sources;
 pub mod skill_usage;
 mod system_prompt_overrides;
@@ -57,6 +63,7 @@ pub mod oauth;
 mod paths;
 pub mod power;
 pub mod pr;
+pub mod pressure;
 pub mod preview;
 pub mod privacy;
 pub mod project_actions;
@@ -105,10 +112,11 @@ pub use oauth::{
 pub use paths::{
     claude_dir, codex_dir, config_dir, cursor_dir, data_dir, home_dir, is_global_worktree_path,
     mark_project_auto_setup_attempted, project_auto_setup_attempted, project_initialization,
-    ProjectInitialization,
+    ProjectInitCache, ProjectInitialization,
 };
 pub use progress_guard::ProgressGuardMode;
 pub use project_dirs::{project_resource_dirs, repo_top};
+pub use scouts::ScoutsMode;
 pub use vision_fallback::VisionFallback;
 pub use workspace_state::{
     adopt_legacy_state, legacy_state_subdir, prepare_workspace_state, state_subdir,
@@ -172,6 +180,9 @@ pub struct Config {
     /// Git integration settings (co-authoring, hook installation).
     #[serde(default)]
     pub git: GitConfig,
+    /// Checkpoint compaction at a landed slice (`[compact]`).
+    #[serde(default)]
+    pub compact: CompactConfig,
     /// LSP-backed live diagnostics fed back into the turn after edits (lsp.md). Off = inert.
     #[serde(default)]
     pub lsp: LspConfig,
@@ -181,6 +192,9 @@ pub struct Config {
     /// Assay-gated auto-review of write turns before they finish (assay-gate.md). Off = inert.
     #[serde(default)]
     pub assay: AssayConfig,
+    /// PR Watch: the independent review gate in front of every merge (pr-review-gate.md).
+    #[serde(default)]
+    pub pr_watch: pr_watch::PrWatchConfig,
     /// Per-turn recap: a one-line AI-generated summary after each completed turn. On by default;
     /// disable in /config if you find it noisy.
     #[serde(default)]
@@ -239,6 +253,9 @@ pub struct Config {
     /// Ceilings on what one daemon runs at once (`[host] max_active_sessions` and friends).
     #[serde(default)]
     pub host: host::HostConfig,
+    /// Disk and memory pressure thresholds for the daemon's host (`[pressure]`).
+    #[serde(default)]
+    pub pressure: pressure::PressureConfig,
     /// Which shell terminal tabs and the agent's shell tool use (`[terminal]`).
     #[serde(default)]
     pub terminal: terminal::TerminalConfig,
@@ -397,6 +414,12 @@ pub struct RemoteConfig {
     /// sessions read-only, as before.
     #[serde(default = "default_true")]
     pub interactive_local_sessions: bool,
+    /// Seconds a permission prompt or question may sit unanswered before its push is sent even
+    /// though a client is still attached (a desktop window left open all day would otherwise
+    /// swallow it for good). One more nudge follows at five times this delay if it is still
+    /// pending. `0` turns the escalation off: pushes then wait for the last client to detach.
+    #[serde(default = "default_push_escalate_secs")]
+    pub push_escalate_secs: u64,
     /// Extra `Host` header values the daemon accepts on its token routes (exact names, or
     /// `*.example.com`). IP literals, `localhost`, single-label names, `*.local`, `*.ts.net`, the
     /// well-known tunnel domains and `tunnel_hostname` are always accepted; any other name is
@@ -429,10 +452,15 @@ impl Default for RemoteConfig {
             publish_local_runs: default_true(),
             publish_local_sessions: default_true(),
             interactive_local_sessions: default_true(),
+            push_escalate_secs: default_push_escalate_secs(),
             allowed_hosts: Vec::new(),
             trusted_proxies: Vec::new(),
         }
     }
+}
+
+fn default_push_escalate_secs() -> u64 {
+    180
 }
 
 /// `[anywhere]` config block for the optional managed companion.
@@ -456,6 +484,13 @@ pub struct AnywhereConfig {
     /// category is per device and off by default.
     #[serde(default)]
     pub account_sync: AccountSyncConfig,
+    /// Let a paired device ship over the relay: commit a session's files, push, open the PR and
+    /// hand it to the merge queue (`POST /api/sessions/{id}/ship`, `POST /api/pr/watch`). Off by
+    /// default: commit and push from away from this machine is the owner's decision, and the
+    /// relay carries it with the owner's whole token, so it is switched here and never over the
+    /// relay itself.
+    #[serde(default)]
+    pub allow_ship_over_relay: bool,
 }
 
 /// `[anywhere.account_sync]`: per-device opt-ins for syncing setup across the account's machines.
@@ -505,6 +540,7 @@ impl Default for AnywhereConfig {
             sync: true,
             service_url: None,
             account_sync: AccountSyncConfig::default(),
+            allow_ship_over_relay: false,
         }
     }
 }
@@ -530,6 +566,7 @@ const ANYWHERE_KNOWN_KEYS: &[&str] = &[
     "sync",
     "service_url",
     "account_sync",
+    "allow_ship_over_relay",
 ];
 
 /// Unrecognized keys in `raw_toml`'s `[anywhere]` table, each paired with the closest known key
@@ -1931,6 +1968,20 @@ pub struct MeshConfig {
     /// immediately with the real error, same as a permanent error (pinned-outage-resilience §1).
     #[serde(default = "default_pin_outage_wait_secs")]
     pub pin_outage_wait_secs: u64,
+    /// How long (seconds) a turn keeps waiting for a DOWN provider after the hot backoff above is
+    /// spent, so an overnight run survives an outage of hours: the turn re-sends its own request
+    /// every 15s doubling to 5 min until the provider answers, then carries on where it was. A
+    /// pinned turn enters this after `pin_outage_wait_secs`; an unpinned one when every model of
+    /// its chain failed as an outage. Also bounded by a run's `--max-minutes` / `/goal` deadline.
+    /// Default 8h. `0` disables it: the turn ends when the hot backoff does, as before.
+    #[serde(default = "default_outage_wait_secs")]
+    pub outage_wait_secs: u64,
+    /// Let a headless `forge run` wait out a provider outage for `outage_wait_secs` like chat, the
+    /// daemon and `/goal` do. Off by default: a script or CI job that cannot reach its provider
+    /// should fail fast with `end_reason = "provider_down"`, not sit for hours. `forge run
+    /// --wait-for-outage` opts a single run in.
+    #[serde(default)]
+    pub headless_outage_wait: bool,
     /// Default bench duration (seconds) when a transient failure (rate-limit / 5xx) gives no
     /// server `Retry-After`. Kept short because free-tier rate limits typically reset per MINUTE
     /// (NVIDIA NIM, Groq, Gemini RPM) — a long bench would strand the best free models and push
@@ -2425,6 +2476,10 @@ fn default_rate_limit_wait_secs() -> u64 {
     75
 }
 
+fn default_outage_wait_secs() -> u64 {
+    8 * 60 * 60
+}
+
 fn default_pin_outage_wait_secs() -> u64 {
     // ~10 minutes: generous enough to ride out a real provider blip/redeploy without silently
     // switching a pinned model, short enough that a genuinely dead provider still fails the turn
@@ -2881,6 +2936,8 @@ impl Default for Config {
                 failover: default_failover(),
                 pin_failover: false,
                 pin_outage_wait_secs: default_pin_outage_wait_secs(),
+                outage_wait_secs: default_outage_wait_secs(),
+                headless_outage_wait: false,
                 failover_cooldown_secs: default_failover_cooldown_secs(),
                 rate_limit_wait_secs: default_rate_limit_wait_secs(),
                 stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
@@ -2940,9 +2997,11 @@ impl Default for Config {
             hooks: Vec::new(),
             stop_hook_max_blocks: default_stop_hook_max_blocks(),
             git: GitConfig::default(),
+            compact: CompactConfig::default(),
             lsp: LspConfig::default(),
             autofix: AutofixConfig::default(),
             assay: AssayConfig::default(),
+            pr_watch: pr_watch::PrWatchConfig::default(),
             recap: RecapConfig::default(),
             suggest: SuggestConfig::default(),
             project: ProjectConfig::default(),
@@ -2960,6 +3019,7 @@ impl Default for Config {
             preview: preview::PreviewConfig::default(),
             power: power::PowerConfig::default(),
             host: host::HostConfig::default(),
+            pressure: pressure::PressureConfig::default(),
             terminal: terminal::TerminalConfig::default(),
             actions: Vec::new(),
             codemode: codemode::CodemodeConfig::default(),
@@ -3603,6 +3663,8 @@ pub fn append_allow_rule(tool: &str) -> std::io::Result<()> {
 /// every call of `tool`). Shell must always be scoped: a bare `allow = "*"` for shell approves
 /// every later command in that project, which is how 40 such rules once ended up auto-approving
 /// everything under `$HOME`.
+pub const RUNTIME_ALWAYS_REASON: &str = "user answered 'always' at runtime prompt";
+
 pub fn append_allow_rule_in(
     root: &std::path::Path,
     tool: &str,
@@ -3628,7 +3690,7 @@ pub fn append_allow_rule_in(
                 allow: Some(allow),
                 ask: None,
                 deny: None,
-                reason: None,
+                reason: Some(RUNTIME_ALWAYS_REASON.into()),
             },
         );
     }
@@ -3640,7 +3702,9 @@ pub fn append_allow_rule_in(
         let quoted: Vec<String> = patterns.iter().map(|p| format!("{p:?}")).collect();
         format!("[{}]", quoted.join(", "))
     };
-    let entry = format!("\n[[permissions.rules]]\ntool = {tool:?}\nallow = {allow}\n");
+    let entry = format!(
+        "\n[[permissions.rules]]\ntool = {tool:?}\nallow = {allow}\nreason = {RUNTIME_ALWAYS_REASON:?}\n"
+    );
     use std::io::Write;
     std::fs::OpenOptions::new()
         .create(true)
@@ -4338,6 +4402,16 @@ models = {}
         .expect("a config without min_tier parses");
         assert_eq!(plain.mesh.min_tier, None);
         assert_eq!(Config::default().mesh.min_tier, None);
+    }
+
+    #[test]
+    fn push_escalation_defaults_to_three_minutes_and_zero_disables_it() {
+        let whole: Config =
+            toml::from_str("permission_mode = \"accept-edits\"\n[mesh]\nmodels = {}\n").unwrap();
+        assert_eq!(whole.remote.push_escalate_secs, 180);
+        assert_eq!(RemoteConfig::default().push_escalate_secs, 180);
+        let off: RemoteConfig = toml::from_str("push_escalate_secs = 0\n").unwrap();
+        assert_eq!(off.push_escalate_secs, 0);
     }
 
     #[test]

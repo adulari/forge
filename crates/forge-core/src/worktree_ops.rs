@@ -413,7 +413,14 @@ fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
     }
     let path_arg = path.display().to_string();
     let exists = branch_exists(ctx.current, &branch);
-    let base = req.base.as_deref().unwrap_or("HEAD");
+    // Carried changes are stashed against HEAD, so they only apply cleanly onto a HEAD-based tree.
+    let fresh = (req.base.is_none() && !exists && !req.carry_dirty)
+        .then(|| crate::worktree_base::fresh_base(ctx.current));
+    let base = match (&req.base, &fresh) {
+        (Some(base), _) => base.as_str(),
+        (None, Some(fresh)) => fresh.start_point.as_str(),
+        (None, None) => "HEAD",
+    };
     let carried = if req.carry_dirty {
         stash_dirty(ctx.current, &name)?
     } else {
@@ -440,6 +447,9 @@ fn create(req: &Request, ctx: &Context<'_>) -> Result<Outcome, String> {
         format!("new branch {branch} from {base}")
     };
     let mut text = format!("created worktree {} ({how})", path.display());
+    if let Some(fresh) = &fresh {
+        text.push_str(&format!("; {}", fresh.note));
+    }
     if let Some(stash) = &carried {
         match pop_stash(&path, stash, false) {
             Ok(_) => text.push_str("; moved your uncommitted changes into it"),

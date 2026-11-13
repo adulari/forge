@@ -220,7 +220,7 @@ fn decide_in_with(
     //    segment needs its own allow for the command to auto-approve, while an ask on any one
     //    segment is enough to prompt (restriction stays cheap, privilege stays earned).
     if is_shell_tool(tool_name) {
-        if let Some(decision) = decide_shell_segments(tool_name, args, rules) {
+        if let Some(decision) = decide_shell_segments(tool_name, args, rules, workspace) {
             return decision;
         }
         return mode_fallback(
@@ -350,10 +350,19 @@ pub fn rule_denial(tool_name: &str, rule: &PermissionRule, args: &Value) -> Stri
 /// Each effective segment picks its most-specific matching non-deny rule. `Some(Ask)` if any
 /// segment resolved to ask; `Some(Allow)` only when parsing succeeded and *every* segment
 /// resolved to allow; `None` (mode fallback) otherwise.
+/// Reason recorded on the in-session rule for "allow for this session" at the runtime prompt.
+pub(crate) const RUNTIME_SESSION_REASON: &str =
+    "user allowed it for this session at runtime prompt";
+
+fn is_runtime_grant(rule: &PermissionRule) -> bool {
+    matches!(rule.reason.as_deref(), Some(r) if r == forge_config::RUNTIME_ALWAYS_REASON || r == RUNTIME_SESSION_REASON)
+}
+
 fn decide_shell_segments(
     tool_name: &str,
     args: &Value,
     rules: &[PermissionRule],
+    workspace: Option<&Path>,
 ) -> Option<PermissionDecision> {
     use PermissionDecision::*;
     let cmd_text = forge_types::shell_command_text(args);
@@ -369,6 +378,14 @@ fn decide_shell_segments(
             .filter(|r| r.patterns.is_empty() || r.patterns.iter().any(|p| shell_match(p, seg)))
             .max_by_key(|r| specificity(r));
         match best.map(|r| r.decision) {
+            // A grant made at the prompt covers the kind of command the user saw, not its
+            // destructive variants: `git status` approved "always" must not wave `git push --force`
+            // through. Rules the user wrote in config are taken as written.
+            Some(Allow)
+                if best.is_some_and(is_runtime_grant) && shell_risk(seg, workspace).is_some() =>
+            {
+                all_allowed = false
+            }
             Some(Allow) => {}
             Some(Ask) => any_ask = true,
             _ => all_allowed = false,
@@ -487,7 +504,7 @@ pub fn shell_trust_hint(
         return None;
     }
     // A rule that settles this call (an `ask` on one segment, say) is not lifted by trust.
-    if decide_shell_segments(tool_name, args, rules).is_some() {
+    if decide_shell_segments(tool_name, args, rules, workspace).is_some() {
         return None;
     }
     ask_shell::trust_hint(args, rules, workspace)
@@ -503,6 +520,7 @@ pub use narrowing::{
 };
 pub use workspace_delete::out_of_bounds_delete;
 mod expose;
+pub mod learn;
 pub use expose::{
     always_asks as is_public_expose, confirm_call, confirm_label, EXPOSE_PROMPT_PREFIX,
 };
@@ -521,6 +539,7 @@ pub(crate) fn is_read_only_shell_call(args: &Value) -> bool {
             .is_some_and(readonly_shell::is_read_only_shell)
 }
 mod shell_commands;
+use auto::shell_risk;
 pub use auto::{accept_edits_risk, auto_risk, outside_workspace, AutoVerdict};
 pub(crate) use readonly_shell::{is_read_only_shell, plan_shell_denial, PLAN_SHELL_NOTE};
 use shell_commands::effective_commands;
@@ -641,6 +660,60 @@ mod tests {
     use super::*;
     use forge_types::PermissionDecision::*;
     use serde_json::json;
+
+    fn grant(reason: &str) -> PermissionRule {
+        PermissionRule {
+            tool: "shell".into(),
+            patterns: vec!["git *".into(), "git".into()],
+            decision: Allow,
+            source: RuleSource::Configured,
+            reason: Some(reason.into()),
+        }
+    }
+
+    #[test]
+    fn runtime_always_grant_keeps_destructive_variants_prompting() {
+        for reason in [forge_config::RUNTIME_ALWAYS_REASON, RUNTIME_SESSION_REASON] {
+            let rules = [grant(reason)];
+            // Auto-edit runs these without a grant too (its risk check is delete/write-scoped), so the
+            // grant changes nothing there; Ask is where it used to hand them over.
+            {
+                let mode = PermissionMode::Default;
+                let d = |c: &str| {
+                    decide_in(
+                        mode,
+                        SideEffect::Shell,
+                        "shell",
+                        &json!({ "command": c }),
+                        &rules,
+                        None,
+                    )
+                };
+                assert_eq!(d("git status -s"), Allow, "{mode:?}");
+                assert_eq!(d("git log"), Allow, "{mode:?}");
+                assert_eq!(d("git push --force"), Ask, "{mode:?}");
+                assert_eq!(d("git log --output=/etc/x"), Ask, "{mode:?}");
+                assert_eq!(d("git diff --ext-diff"), Ask, "{mode:?}");
+                assert_eq!(d("git show --textconv HEAD"), Ask, "{mode:?}");
+                assert_eq!(d("git reset --hard"), Ask, "{mode:?}");
+                assert_eq!(d("git status && git clean -fdx"), Ask, "{mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn config_written_allow_rule_is_taken_as_written() {
+        let rules = [grant("my own rule")];
+        let d = decide_in(
+            PermissionMode::Default,
+            SideEffect::Shell,
+            "shell",
+            &json!({ "command": "git push --force" }),
+            &rules,
+            None,
+        );
+        assert_eq!(d, Allow);
+    }
 
     // ---- mode-only behaviour (unchanged; was `decide`, now `decide_mode`) ----
 

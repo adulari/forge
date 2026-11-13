@@ -20,6 +20,12 @@ use super::service_report::{
     activation_report, running_daemon, wait_for_running_daemon, Activation,
 };
 
+#[path = "service_schtasks.rs"]
+mod schtasks;
+#[cfg(test)]
+use schtasks::{activate_schtasks, render_schtasks_create_args};
+use schtasks::{control_schtasks, install_schtasks, status_schtasks, uninstall_schtasks};
+
 pub(crate) fn service_cmd(cmd: ServiceCmd) -> Result<()> {
     match cmd {
         ServiceCmd::Install {
@@ -102,6 +108,26 @@ pub(crate) fn resolved_port(port: Option<u16>) -> u16 {
     port.unwrap_or_else(|| forge_config::load().unwrap_or_default().remote.serve_port())
 }
 
+/// The port the installed daemon actually uses: `forge service install --port N` bakes it into the
+/// unit, and a running daemon records it in serve-state.json. Config is only the fallback.
+pub(crate) fn daemon_port() -> u16 {
+    #[cfg(target_os = "linux")]
+    let unit_port = installed_unit_text()
+        .as_deref()
+        .and_then(crate::doctor_daemon::unit_port);
+    #[cfg(not(target_os = "linux"))]
+    let unit_port: Option<u16> = None;
+    unit_port
+        .or_else(|| {
+            crate::serve::read_state()
+                .ok()
+                .flatten()
+                .filter(|state| state.process_is_alive())
+                .map(|state| state.port)
+        })
+        .unwrap_or_else(|| resolved_port(None))
+}
+
 fn token_file_path() -> Option<std::path::PathBuf> {
     forge_config::config_dir().map(|d| d.join("serve-token"))
 }
@@ -171,7 +197,7 @@ fn uninstall_cmd() -> Result<()> {
 
 fn status_cmd(port: Option<u16>) -> Result<()> {
     let status = query_service_status()?;
-    let port = resolved_port(port);
+    let port = port.unwrap_or_else(daemon_port);
     let port_up = probe_port(port);
 
     println!("installed: {}", if status.installed { "yes" } else { "no" });
@@ -407,7 +433,7 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          # ignores it under [Service], which is where it was first written — the alarm looked\n\
          # installed and never fired.\n\
          OnFailure={}\n\n\
-         [Service]\nExecStart={forge_exe} serve {} --port {port}\nRestart=on-failure\n\
+         [Service]\nExecStart={} serve {} --port {port}\nRestart=on-failure\n\
          # A permanent failure (exit 78 = EX_CONFIG, e.g. a store this build cannot open) cannot be\n\
          # fixed by retrying. Without this the daemon restarts forever — 632 times in one observed\n\
          # case, with Anywhere down throughout and the unit still reporting `activating`. Stopping\n\
@@ -423,6 +449,7 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          [Install]\nWantedBy=default.target\n",
         env!("CARGO_PKG_VERSION"),
         super::service_alert::ALERT_UNIT_NAME,
+        super::schedule::quote_unit_arg(forge_exe),
         exposure.flag()
     )
 }
@@ -699,104 +726,6 @@ fn control_launchd(action: ServiceControl) -> Result<()> {
     }
 }
 
-// --- Task Scheduler (Windows) ---
-//
-// Not a real Windows Service (SCM): `forge serve` doesn't speak the Service Control Manager
-// protocol (SERVICE_STATUS reporting, control-code handling), and teaching it to would mean
-// either rewriting it as a Windows service (a large, Windows-only surface) or wrapping it with
-// an SCM shim like NSSM — an external dependency we won't require. A logon scheduled task gets
-// the same practical result (start automatically, run in the background, restart on failure via
-// `/RI` is not supported by schtasks — restart-on-crash is systemd/launchd-only) with zero extra
-// tooling.
-
-fn render_schtasks_create_args(forge_exe: &str, exposure: Exposure, port: u16) -> Vec<String> {
-    vec![
-        "/Create".to_string(),
-        "/TN".to_string(),
-        SCHTASKS_NAME.to_string(),
-        "/SC".to_string(),
-        "ONLOGON".to_string(),
-        "/TR".to_string(),
-        format!("\"{forge_exe}\" serve {} --port {port}", exposure.flag()),
-        "/F".to_string(),
-    ]
-}
-
-/// `/Create /F` replaces the task definition but never touches the instance already running it,
-/// and `/Run` on a running task is refused — so an upgrade needs an explicit `/End` first.
-fn activate_schtasks(
-    was_running: bool,
-    create_args: &[&str],
-    run: Runner<'_>,
-) -> Result<Activation> {
-    run(create_args)?;
-    if was_running {
-        run(&["/End", "/TN", SCHTASKS_NAME])?;
-    }
-    // Start it now too, rather than waiting for the next logon.
-    run(&["/Run", "/TN", SCHTASKS_NAME])?;
-    Ok(if was_running {
-        Activation::Restarted
-    } else {
-        Activation::Started
-    })
-}
-
-fn install_schtasks(
-    forge_exe: &str,
-    exposure: Exposure,
-    port: u16,
-    was_running: bool,
-) -> Result<InstallOutcome> {
-    let hint = "is Task Scheduler reachable? (`schtasks` requires an interactive logon session)";
-    let args = render_schtasks_create_args(forge_exe, exposure, port);
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let activation = activation_result(activate_schtasks(was_running, &arg_refs, &mut |a| {
-        run_checked("schtasks", a, hint)
-    }));
-    Ok(InstallOutcome {
-        backend_label: "Task Scheduler logon task",
-        unit_path: format!("Task Scheduler: \\{SCHTASKS_NAME}"),
-        note: None,
-        activation,
-    })
-}
-
-fn uninstall_schtasks() -> Result<()> {
-    let _ = run_checked("schtasks", &["/End", "/TN", SCHTASKS_NAME], "");
-    let _ = run_checked("schtasks", &["/Delete", "/TN", SCHTASKS_NAME, "/F"], "");
-    Ok(())
-}
-
-fn status_schtasks() -> Result<ServiceStatus> {
-    let (ok, stdout, _) = run_capture(
-        "schtasks",
-        &["/Query", "/TN", SCHTASKS_NAME, "/FO", "LIST", "/V"],
-    )?;
-    let running = stdout
-        .lines()
-        .find(|l| l.trim_start().starts_with("Status:"))
-        .map(|l| l.contains("Running"))
-        .unwrap_or(false);
-    Ok(ServiceStatus {
-        installed: ok,
-        running,
-        detail: stdout,
-    })
-}
-
-fn control_schtasks(action: ServiceControl) -> Result<()> {
-    let hint = "is the service installed? (`forge service install`)";
-    match action {
-        ServiceControl::Start => run_checked("schtasks", &["/Run", "/TN", SCHTASKS_NAME], hint),
-        ServiceControl::Stop => run_checked("schtasks", &["/End", "/TN", SCHTASKS_NAME], hint),
-        ServiceControl::Restart => {
-            let _ = run_checked("schtasks", &["/End", "/TN", SCHTASKS_NAME], hint);
-            run_checked("schtasks", &["/Run", "/TN", SCHTASKS_NAME], hint)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -812,7 +741,9 @@ mod tests {
     #[test]
     fn systemd_service_unit_contains_exec_and_restart_policy() {
         let unit = render_systemd_service("/usr/local/bin/forge", Exposure::Lan, 7420);
-        assert!(unit.contains("ExecStart=/usr/local/bin/forge serve --lan --port 7420"));
+        assert!(unit.contains("ExecStart=\"/usr/local/bin/forge\" serve --lan --port 7420"));
+        let spaced = render_systemd_service("/home/me/My Tools/forge", Exposure::Lan, 7420);
+        assert!(spaced.contains("ExecStart=\"/home/me/My Tools/forge\" serve --lan --port 7420"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("OOMPolicy=continue"));
         assert!(

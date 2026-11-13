@@ -31,6 +31,13 @@ pub enum LiveEvent {
         name: String,
         output: forge_types::ToolOutputRef,
     },
+    /// A running foreground call's rolling output tail (`PresenterEvent::ToolOutputDelta`). A
+    /// client too old to know this frame skips it and shows the spinner as before.
+    ToolOutputDelta {
+        name: String,
+        lines: Vec<String>,
+        elapsed_ms: u64,
+    },
     Routing {
         tier: String,
         model: String,
@@ -119,6 +126,15 @@ pub fn to_live_event(event: &PresenterEvent) -> Option<LiveEvent> {
         PresenterEvent::ToolOutput { name, output } => Some(LiveEvent::ToolOutput {
             name: name.clone(),
             output: output.clone(),
+        }),
+        PresenterEvent::ToolOutputDelta {
+            name,
+            lines,
+            elapsed_ms,
+        } => Some(LiveEvent::ToolOutputDelta {
+            name: name.clone(),
+            lines: lines.clone(),
+            elapsed_ms: *elapsed_ms,
         }),
         // The routed rung is deliberately not carried across this seam: `LiveEvent` is its own
         // versioned wire contract, and a remote observer showing no rung is honest degradation
@@ -228,6 +244,15 @@ pub fn live_event_to_presenter(event: LiveEvent) -> Option<PresenterEvent> {
             detail,
         }),
         LiveEvent::ToolOutput { name, output } => Some(PresenterEvent::ToolOutput { name, output }),
+        LiveEvent::ToolOutputDelta {
+            name,
+            lines,
+            elapsed_ms,
+        } => Some(PresenterEvent::ToolOutputDelta {
+            name,
+            lines,
+            elapsed_ms,
+        }),
         LiveEvent::Routing {
             tier,
             model,
@@ -322,6 +347,22 @@ mod tests {
         assert!(matches!(
             live_event_to_presenter(encoded),
             Some(PresenterEvent::AuxiliaryProgress { chars: 1_024 })
+        ));
+    }
+
+    #[test]
+    fn live_output_tail_survives_live_observer_round_trip() {
+        let delta = PresenterEvent::ToolOutputDelta {
+            name: "shell".into(),
+            lines: vec!["line 1".into()],
+            elapsed_ms: 1250,
+        };
+        let wire = serde_json::to_string(&to_live_event(&delta).unwrap()).unwrap();
+        let back: LiveEvent = serde_json::from_str(&wire).unwrap();
+        assert!(matches!(
+            live_event_to_presenter(back),
+            Some(PresenterEvent::ToolOutputDelta { name, lines, elapsed_ms: 1250 })
+                if name == "shell" && lines == ["line 1"]
         ));
     }
 

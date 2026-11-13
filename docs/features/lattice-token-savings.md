@@ -271,3 +271,7 @@ spending model calls.
 ## TypeScript and TSX
 
 `.ts`, `.mts`, `.cts` and `.tsx` files are indexed with the JavaScript tags query plus the typescript crate's own, with enums and type aliases added, so functions, classes, methods, interfaces, enums and type aliases all appear in `map` and `query`.
+
+## Watcher tests
+
+The watcher's inotify-budget test (`crates/forge-index/src/watch.rs`) now reads the process's watch count only after it has stopped changing, because a watcher dropped by an earlier test releases its inotify fd on notify's own thread shortly after `drop` returns. This is a test-only change: the watcher still takes one inotify watch per source directory and indexing behaviour is unchanged.

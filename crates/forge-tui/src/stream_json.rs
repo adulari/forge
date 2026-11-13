@@ -352,6 +352,25 @@ impl Presenter for StreamJsonPresenter {
                     );
                 }
             }
+            PresenterEvent::ProviderOutage {
+                model,
+                since,
+                next_try,
+                attempt,
+                until,
+                reason,
+            } => self.system(
+                "provider_outage",
+                json!({ "model": model, "since": since, "next_try": next_try,
+                        "attempt": attempt, "until": until, "reason": reason }),
+            ),
+            PresenterEvent::ProviderRecovered { model, down_secs } => self.system(
+                "provider_recovered",
+                json!({ "model": model, "down_secs": down_secs }),
+            ),
+            PresenterEvent::TurnStopped { reason, text } => {
+                self.system("turn_stopped", json!({ "reason": reason, "message": text }))
+            }
             PresenterEvent::Warning(msg) => self.system("warning", json!({ "message": msg })),
             PresenterEvent::Error(msg) => self.system("error", json!({ "message": msg })),
             PresenterEvent::Done {
@@ -468,6 +487,36 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn an_outage_wait_prints_one_system_line_per_event() {
+        let buf = Buf::default();
+        let mut p = StreamJsonPresenter::with_writer(Box::new(buf.clone()));
+        p.emit(PresenterEvent::ProviderOutage {
+            model: "inferhub::flash".into(),
+            since: 100,
+            next_try: 160,
+            attempt: 2,
+            until: 900,
+            reason: "503 no_capacity".into(),
+        });
+        p.emit(PresenterEvent::ProviderRecovered {
+            model: "inferhub::flash".into(),
+            down_secs: 300,
+        });
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            kinds(&lines),
+            ["system/provider_outage", "system/provider_recovered"]
+        );
+        assert_eq!(lines[0]["next_try"], 160);
+        assert_eq!(lines[0]["reason"], "503 no_capacity");
+        assert_eq!(lines[1]["down_secs"], 300);
     }
 
     #[test]

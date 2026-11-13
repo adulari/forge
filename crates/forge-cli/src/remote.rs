@@ -330,13 +330,15 @@ pub struct RemoteUrl {
 /// posture. `temper` remains the human-facing label for older clients.
 pub const PROTOCOL_VERSION: u32 = 10;
 
+pub(crate) mod ci;
 mod event_log;
-mod goal;
+pub(crate) mod goal;
 mod thread_error;
+pub use ci::SnapCi;
 use event_log::lock_event_log;
 pub use event_log::{EventLog, SnapshotFrame, EVENT_LOG_CAP};
 pub use goal::SnapGoal;
-pub use thread_error::{HistoryGap, ThreadError};
+pub use thread_error::{HistoryGap, LastTurnEnd, ThreadError};
 
 /// Hard cap on a single inbound WebSocket frame (a [`RemoteInput`]). Inputs are short prompts or
 /// answers; anything larger is dropped to bound memory + parse cost from a hostile/buggy client.
@@ -439,6 +441,17 @@ pub struct SnapTranscriptRow {
 pub struct SnapOption {
     pub label: String,
     pub description: String,
+}
+
+/// The repository an idle Home-scope session keeps working in ([`Snapshot::project_suggestion`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SnapProjectSuggestion {
+    /// Absolute path of the repository root: what [`RemoteInput::ProjectMove`] echoes back.
+    pub path: String,
+    /// The directory name, for the card's title.
+    pub name: String,
+    /// How many shell calls entered it.
+    pub calls: u32,
 }
 
 /// One row of the projected modal overlay ([`SnapOverlay::rows`]): an opaque `id` the page echoes
@@ -613,6 +626,10 @@ pub struct Snapshot {
     /// When the running turn started, Unix milliseconds; 0 when idle (additive).
     #[serde(default)]
     pub turn_started_at: u64,
+    /// The expert-on-call line, `expert: <model> · 1 consult · 2.1% of weekly window` (additive).
+    /// Absent until the session has consulted its expert (`[harness.expert]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expert: Option<String>,
     /// Recent finalized scrollback lines (plain text, newest last; bounded).
     pub transcript: Vec<String>,
     /// The same lines, each tagged with its provenance (v9) — see [`SnapTranscriptRow`]. Rides
@@ -635,6 +652,16 @@ pub struct Snapshot {
     pub queued: Vec<String>,
     /// A pending permission prompt, if the turn is blocked on a y/n.
     pub permission_prompt: Option<String>,
+    /// The standing rule the pending permission prompt offers (additive): this command shape was
+    /// allowed several times in the project and never refused. A client shows it as a secondary
+    /// button and answers `allow` with `scope: "rule"` to accept; absent from older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_suggestion: Option<forge_types::RuleSuggestion>,
+    /// The repository an idle Home-scope session keeps `cd`-ing into (additive): a client shows
+    /// "Move it there?" and answers with [`RemoteInput::ProjectMove`] or
+    /// [`RemoteInput::ProjectDismiss`]. Absent from older hosts and when nothing is offered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_suggestion: Option<SnapProjectSuggestion>,
     /// A pending AskUserQuestion, if the turn is blocked on a choice.
     pub question: Option<String>,
     /// The options for a pending AskUserQuestion (tappable buttons on the page).
@@ -696,6 +723,10 @@ pub struct Snapshot {
     /// Why the last turn failed, set from the turn's end until the next turn starts (additive).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_error: Option<ThreadError>,
+    /// How the last turn ended when it did not finish cleanly (additive): the reason it stopped
+    /// and a plain label, kept until the next turn ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_end: Option<LastTurnEnd>,
     /// Set on the one resync frame a reconnecting client gets when the host could not replay what
     /// it missed (additive). Per connection, never part of the shared broadcast frame.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -704,6 +735,45 @@ pub struct Snapshot {
     /// whose worktree needed no provisioning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree_setup: Option<SnapWorktreeSetup>,
+    /// One line saying what a worktree session was branched from and why, e.g. `based on
+    /// origin/main @1a2b3c4 (local main was 3 behind)` (additive). Absent for sessions that did
+    /// not create their worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_base: Option<String>,
+    /// The rolling output of the foreground tool call in flight (additive): the last few lines,
+    /// ANSI stripped, plus how long it has run. Absent when no call is reporting; a client that
+    /// does not know the key ignores it. Never part of the transcript or the model's context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_tail: Option<SnapLiveTail>,
+    /// Set while the turn waits out a provider outage (additive, `mesh.outage_wait_secs`): which
+    /// provider is down, since when, and when the next probe and the end of the wait are. A
+    /// client shows it as a banner on the session. Absent otherwise and from older hosts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outage: Option<SnapOutage>,
+    /// The local CI plan for the session's repository (additive): plan size, the run in flight,
+    /// the last run per step and the step holding a goal or push back. Absent until the
+    /// repository has had a run. The plan itself is `GET /api/sessions/{id}/ci`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ci: Option<SnapCi>,
+}
+
+/// A turn waiting out a provider outage. Times are unix seconds.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapOutage {
+    pub model: String,
+    pub provider: String,
+    pub since_unix: u64,
+    pub next_try_unix: u64,
+    pub until_unix: u64,
+    pub attempts: u32,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SnapLiveTail {
+    pub tool: String,
+    pub lines: Vec<String>,
+    pub elapsed_ms: u64,
 }
 
 /// `state` is `running`, `done` or `failed`; `message` is the summary or the failure with the
@@ -712,6 +782,49 @@ pub struct Snapshot {
 pub struct SnapWorktreeSetup {
     pub state: String,
     pub message: String,
+}
+
+/// Minimum gap between two frames that differ only in the streamed reply. A model emits tokens
+/// far faster than anyone reads; at the loop's tick rate every token was a full snapshot frame
+/// to every client (~33/s from the daemon, ~60/s from a remote-controlled TUI), which costs
+/// phones battery, data and JS time. Any other change still goes out on the next tick.
+pub(crate) const STREAM_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Paces frames that only move the streamed reply forward; see [`STREAM_FRAME_INTERVAL`].
+#[derive(Default)]
+pub(crate) struct StreamPacer {
+    last_sent: Option<std::time::Instant>,
+}
+
+impl StreamPacer {
+    /// Whether `next` should wait: it differs from the last sent frame only in the streamed
+    /// reply, and that frame went out less than [`STREAM_FRAME_INTERVAL`] ago. The caller keeps
+    /// rebuilding while busy, so the held text goes out on a later tick (or with the next real
+    /// change, whichever comes first).
+    pub(crate) fn hold(&self, prev: Option<&Snapshot>, next: &Snapshot) -> bool {
+        let recent = self
+            .last_sent
+            .is_some_and(|at| at.elapsed() < STREAM_FRAME_INTERVAL);
+        recent && prev.is_some_and(|prev| next.only_stream_differs(prev))
+    }
+
+    pub(crate) fn sent(&mut self) {
+        self.last_sent = Some(std::time::Instant::now());
+    }
+}
+
+impl Snapshot {
+    /// Whether `self` and `prev` differ only in the streamed reply text and its offset (the
+    /// revision is ignored too: candidates carry the last one until they are sent).
+    fn only_stream_differs(&self, prev: &Snapshot) -> bool {
+        let aligned = Snapshot {
+            streaming: prev.streaming.clone(),
+            streaming_offset: prev.streaming_offset,
+            revision: prev.revision,
+            ..self.clone()
+        };
+        aligned == *prev
+    }
 }
 
 impl Default for Snapshot {
@@ -743,6 +856,7 @@ impl Default for Snapshot {
             streaming_offset: 0,
             activity: String::new(),
             turn_started_at: 0,
+            expert: None,
             transcript: Vec::new(),
             transcript_rows: Vec::new(),
             transcript_total: 0,
@@ -750,6 +864,8 @@ impl Default for Snapshot {
             subagents: Vec::new(),
             queued: Vec::new(),
             permission_prompt: None,
+            permission_suggestion: None,
+            project_suggestion: None,
             question: None,
             question_options: Vec::new(),
             question_allow_other: false,
@@ -769,8 +885,13 @@ impl Default for Snapshot {
             closed: false,
             parent: None,
             thread_error: None,
+            last_turn_end: None,
             history_gap: None,
             worktree_setup: None,
+            worktree_base: None,
+            live_tail: None,
+            outage: None,
+            ci: None,
         }
     }
 }
@@ -842,15 +963,16 @@ pub enum RemoteInput {
     ///
     /// `attachments` (added v7.1) is the message-correlated, client-computed list of uploads
     /// that ride THIS specific prompt — e.g. the mobile composer's tray at send time. When
-    /// non-empty it is authoritative for this turn and any stale ambient `Attach` state (from an
-    /// unrelated upload for an adjacent message) is discarded instead of used. `#[serde(default)]`
-    /// keeps a bare `{"kind":"prompt","text":"..."}` (older clients, or the local TUI's own
-    /// ambient `/image <path>` flow) parsing fine — an empty list falls back to exactly the old
-    /// ambient `Attach`-then-`Prompt` behavior.
+    /// present (`Some`, even an empty list) it is authoritative for this turn: exactly those
+    /// uploads ride it and any ambient `Attach` state (an upload the user later removed from the
+    /// tray, or one for an adjacent message) is discarded. `#[serde(default)]` keeps a bare
+    /// `{"kind":"prompt","text":"..."}` (older clients, or the local TUI's own ambient
+    /// `/image <path>` flow) parsing as `None`, which keeps the old ambient
+    /// `Attach`-then-`Prompt` behavior.
     Prompt {
         text: String,
         #[serde(default)]
-        attachments: Vec<PromptAttachment>,
+        attachments: Option<Vec<PromptAttachment>>,
     },
     /// Answer a pending permission prompt: `true` = allow (y), `false` = deny (n). `seq` echoes
     /// the [`Snapshot::prompt_seq`] the page rendered its buttons from; the drain ignores a
@@ -859,12 +981,26 @@ pub enum RemoteInput {
     ///
     /// `note` is the optional one-line reason (on a deny) or instruction (on an allow) the user
     /// typed; it reaches the model with the tool result. Absent from older clients.
+    ///
+    /// `scope` widens an allow: `"session"` is the TUI's "allow for this session" (a grant scoped
+    /// to what the prompt showed, not saved); `"rule"` accepts the rule the snapshot's
+    /// `permission_suggestion` offered (a project-scoped always-allow). Absent or unknown means
+    /// allow once, so an older client or daemon degrades to the plain allow.
     Allow {
         yes: bool,
         seq: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         note: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
     },
+    /// Accept the snapshot's `project_suggestion`: re-root the session into that repository, as
+    /// `/project` does. `path` echoes the suggestion the client rendered; one that no longer
+    /// matches (the offer changed or was already answered) is dropped with a note.
+    ProjectMove { path: String },
+    /// Decline the snapshot's `project_suggestion`: it is not offered again for that repository in
+    /// this session. `path` echoes the suggestion as on [`RemoteInput::ProjectMove`].
+    ProjectDismiss { path: String },
     /// Answer a pending AskUserQuestion with a free-text line (a number picks an option). `seq`
     /// as on [`RemoteInput::Allow`].
     Answer { text: String, seq: u64 },
@@ -915,7 +1051,7 @@ pub enum RemoteInput {
     Queue {
         text: String,
         #[serde(default)]
-        attachments: Vec<PromptAttachment>,
+        attachments: Option<Vec<PromptAttachment>>,
     },
     /// Move ONE queued prompt to position `to` in [`Snapshot::queued`]. `index` + `text` echo the
     /// row the client rendered, so a queue that shifted under the tap is detected and dropped.
@@ -969,12 +1105,27 @@ const MAX_REMOTE_NOTE_CHARS: usize = 500;
 
 /// The confirm reply a remote [`RemoteInput::Allow`] resolves to: the allow/deny outcome plus the
 /// optional one-line note, bounded, which the model reads next to the tool result.
-pub fn allow_reply(yes: bool, note: Option<&str>) -> forge_types::ConfirmReply {
-    let outcome = if yes {
+pub fn allow_reply(
+    yes: bool,
+    note: Option<&str>,
+    scope: Option<&str>,
+) -> forge_types::ConfirmReply {
+    if yes && scope == Some("rule") {
+        let mut reply = forge_types::ConfirmReply::accepting_rule();
+        reply.note = bounded_note(note);
+        return reply;
+    }
+    let outcome = if yes && scope == Some("session") {
+        forge_types::ConfirmOutcome::AllowSession
+    } else if yes {
         forge_types::ConfirmOutcome::Allow
     } else {
         forge_types::ConfirmOutcome::Deny
     };
+    forge_types::ConfirmReply::with_note(outcome, &bounded_note(note).unwrap_or_default())
+}
+
+fn bounded_note(note: Option<&str>) -> Option<String> {
     let note: String = note
         .unwrap_or("")
         .lines()
@@ -983,7 +1134,8 @@ pub fn allow_reply(yes: bool, note: Option<&str>) -> forge_types::ConfirmReply {
         .chars()
         .take(MAX_REMOTE_NOTE_CHARS)
         .collect();
-    forge_types::ConfirmReply::with_note(outcome, &note)
+    let note = note.trim();
+    (!note.is_empty()).then(|| note.to_string())
 }
 
 /// True when a remote Allow/Answer's echoed `seq` targets the prompt that is pending NOW (see
@@ -1634,7 +1786,17 @@ pub(crate) async fn pump_ws(
     input_tx: mpsc::Sender<RemoteInput>,
     since: u64,
 ) {
-    pump_ws_draining(socket, snapshot_rx, events, input_tx, since, None, None).await;
+    pump_ws_draining(
+        socket,
+        snapshot_rx,
+        events,
+        input_tx,
+        since,
+        None,
+        None,
+        WsLiveness::DEFAULT,
+    )
+    .await;
 }
 
 /// The close frame a daemon sends when it is about to restart: code 1001 ("going away") with a
@@ -1663,7 +1825,24 @@ async fn host_going_away(going_away: &mut Option<watch::Receiver<bool>>) {
     }
 }
 
+/// How a socket tells a vanished client from a quiet one. Phones leave networks without a FIN,
+/// so the kernel keeps the connection (and the "a client is attached" state that suppresses
+/// pushes) for ~15 minutes; the server pings, and any frame from the client counts as alive.
+#[derive(Clone, Copy)]
+pub(crate) struct WsLiveness {
+    pub(crate) ping_every: std::time::Duration,
+    pub(crate) idle: std::time::Duration,
+}
+
+impl WsLiveness {
+    pub(crate) const DEFAULT: Self = Self {
+        ping_every: std::time::Duration::from_secs(20),
+        idle: std::time::Duration::from_secs(60),
+    };
+}
+
 /// [`pump_ws`] that also announces a daemon shutdown to the client with a 1001 close frame.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn pump_ws_draining(
     socket: WebSocket,
     snapshot_rx: watch::Receiver<Arc<SnapshotFrame>>,
@@ -1672,6 +1851,7 @@ pub(crate) async fn pump_ws_draining(
     since: u64,
     mut going_away: Option<watch::Receiver<bool>>,
     gate: Option<crate::serve_access::InputGate>,
+    liveness: WsLiveness,
 ) {
     use futures::stream::StreamExt;
     use futures::SinkExt;
@@ -1748,7 +1928,7 @@ pub(crate) async fn pump_ws_draining(
 
     let (note_tx, mut note_rx) = mpsc::unbounded_channel::<String>();
     let mut forward = tokio::spawn(async move {
-        let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(20));
+        let mut keepalive = tokio::time::interval(liveness.ping_every);
         keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_sent = last_sent;
         loop {
@@ -1775,6 +1955,9 @@ pub(crate) async fn pump_ws_draining(
                     if tx.send(Message::Text(r#"{"keepalive":true}"#.into())).await.is_err() {
                         break;
                     }
+                    if tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
                 }
                 _ = host_going_away(&mut going_away) => {
                     let _ = tx.send(host_restarting_close()).await;
@@ -1795,7 +1978,7 @@ pub(crate) async fn pump_ws_draining(
     // Receive inputs from the browser; forward each to the render loop's channel.
     let dedupe_events = events.clone();
     let mut receive = tokio::spawn(async move {
-        while let Some(Ok(msg)) = rx.next().await {
+        while let Ok(Some(Ok(msg))) = tokio::time::timeout(liveness.idle, rx.next()).await {
             let text = match msg {
                 Message::Text(t) => t.to_string(),
                 Message::Binary(b) => match String::from_utf8(b.to_vec()) {
@@ -1914,6 +2097,83 @@ pub(crate) fn manifest_json(base: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_base_is_an_optional_additive_wire_field() {
+        let plain = serde_json::to_value(Snapshot::default()).unwrap();
+        assert!(plain.get("worktree_base").is_none());
+        let based = Snapshot {
+            worktree_base: Some("based on origin/main @1a2b3c4 (local main was 3 behind)".into()),
+            ..Snapshot::default()
+        };
+        let wire = serde_json::to_value(based).unwrap();
+        assert_eq!(
+            wire["worktree_base"],
+            "based on origin/main @1a2b3c4 (local main was 3 behind)"
+        );
+    }
+
+    #[test]
+    fn live_tail_is_an_optional_additive_wire_field() {
+        let idle = serde_json::to_value(Snapshot::default()).unwrap();
+        assert!(
+            idle.get("live_tail").is_none(),
+            "absent when nothing reports"
+        );
+        let running = Snapshot {
+            live_tail: Some(SnapLiveTail {
+                tool: "shell".into(),
+                lines: vec!["line 1".into()],
+                elapsed_ms: 1200,
+            }),
+            ..Snapshot::default()
+        };
+        let wire = serde_json::to_value(&running).unwrap();
+        assert_eq!(wire["live_tail"]["lines"][0], "line 1");
+        assert_eq!(wire["live_tail"]["elapsed_ms"], 1200);
+    }
+
+    #[test]
+    fn stream_pacer_holds_only_token_frames_inside_the_interval() {
+        let sent = Snapshot {
+            busy: true,
+            streaming: "Hel".into(),
+            revision: 4,
+            ..Snapshot::default()
+        };
+        let mut pacer = StreamPacer::default();
+        let token = Snapshot {
+            streaming: "Hello".into(),
+            ..sent.clone()
+        };
+        assert!(!pacer.hold(Some(&sent), &token), "nothing sent yet: send");
+        pacer.sent();
+        assert!(
+            pacer.hold(Some(&sent), &token),
+            "a token right after a frame waits"
+        );
+        let prompt = Snapshot {
+            permission_prompt: Some("run make?".into()),
+            ..token.clone()
+        };
+        assert!(
+            !pacer.hold(Some(&sent), &prompt),
+            "a real change never waits"
+        );
+        let finished = Snapshot {
+            busy: false,
+            ..token.clone()
+        };
+        assert!(
+            !pacer.hold(Some(&sent), &finished),
+            "the turn ending never waits"
+        );
+        pacer.last_sent = Some(std::time::Instant::now() - STREAM_FRAME_INTERVAL);
+        assert!(
+            !pacer.hold(Some(&sent), &token),
+            "after the interval the text goes out"
+        );
+    }
 
     #[test]
     fn snapshot_serializes_to_json_with_all_fields() {
@@ -2405,7 +2665,7 @@ mod tests {
             serde_json::from_str::<RemoteInput>(r#"{"kind":"prompt","text":"fix it"}"#).unwrap(),
             RemoteInput::Prompt {
                 text: "fix it".into(),
-                attachments: Vec::new(),
+                attachments: None,
             }
         );
         assert_eq!(
@@ -2413,7 +2673,8 @@ mod tests {
             RemoteInput::Allow {
                 yes: true,
                 seq: 3,
-                note: None
+                note: None,
+                scope: None
             }
         );
         assert_eq!(
@@ -2536,7 +2797,7 @@ mod tests {
             .unwrap(),
             RemoteInput::Prompt {
                 text: "look at this".into(),
-                attachments: vec![
+                attachments: Some(vec![
                     PromptAttachment {
                         path: "/tmp/x/.forge/uploads/s1/1-shot.png".into(),
                         image: true,
@@ -2545,8 +2806,43 @@ mod tests {
                         path: "/tmp/x/.forge/uploads/s1/2-notes.txt".into(),
                         image: false,
                     },
-                ],
+                ]),
             }
+        );
+    }
+
+    #[test]
+    fn prompt_attachments_distinguish_absent_from_empty() {
+        let parse = |json: &str| serde_json::from_str::<RemoteInput>(json).unwrap();
+        assert_eq!(
+            parse(r#"{"kind":"prompt","text":"hi"}"#),
+            RemoteInput::Prompt {
+                text: "hi".into(),
+                attachments: None
+            },
+            "older clients keep the ambient behavior"
+        );
+        assert_eq!(
+            parse(r#"{"kind":"prompt","text":"hi","attachments":[]}"#),
+            RemoteInput::Prompt {
+                text: "hi".into(),
+                attachments: Some(Vec::new())
+            },
+            "an empty list is authoritative: nothing rides this prompt"
+        );
+        assert_eq!(
+            parse(r#"{"kind":"queue","text":"hi","attachments":[],"client_msg_id":"m"}"#),
+            RemoteInput::Queue {
+                text: "hi".into(),
+                attachments: Some(Vec::new())
+            },
+        );
+        assert_eq!(
+            parse(r#"{"kind":"queue","text":"hi"}"#),
+            RemoteInput::Queue {
+                text: "hi".into(),
+                attachments: None
+            },
         );
     }
 
@@ -2725,7 +3021,7 @@ mod tests {
             serde_json::from_str::<RemoteInput>(r#"{"kind":"queue","text":"later"}"#).unwrap(),
             RemoteInput::Queue {
                 text: "later".into(),
-                attachments: Vec::new()
+                attachments: None
             }
         );
         assert_eq!(
@@ -3142,6 +3438,9 @@ mod tests {
                 .expect("a frame arrives")
                 .expect("stream open")
                 .expect("text frame");
+            if !frame.is_text() {
+                continue;
+            }
             let text = frame.into_text().expect("text frame");
             let v: serde_json::Value = serde_json::from_str(&text).expect("frame is JSON");
             if v.get("keepalive").is_some() {
@@ -3149,6 +3448,69 @@ mod tests {
             }
             return v;
         }
+    }
+
+    /// A client that stops answering (a phone off its network, no FIN) must stop counting as
+    /// attached, or pushes stay suppressed until the kernel gives up on the connection.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn silent_client_is_dropped_after_the_idle_deadline() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let clients = Arc::new(AtomicUsize::new(0));
+        let (_snapshot_tx, snapshot_rx) =
+            watch::channel(Arc::new(SnapshotFrame::new(Snapshot::default())));
+        let (input_tx, _input_rx) = mpsc::channel::<RemoteInput>(4);
+        let events = Arc::new(std::sync::Mutex::new(EventLog::new(EVENT_LOG_CAP)));
+        let liveness = WsLiveness {
+            ping_every: std::time::Duration::from_millis(50),
+            idle: std::time::Duration::from_millis(300),
+        };
+        let counter = clients.clone();
+        let app = Router::new().route(
+            "/ws",
+            get(move |ws: axum::extract::WebSocketUpgrade| async move {
+                ws.on_upgrade(move |socket| async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    pump_ws_draining(
+                        socket,
+                        snapshot_rx,
+                        events,
+                        input_tx,
+                        0,
+                        None,
+                        None,
+                        liveness,
+                    )
+                    .await;
+                    counter.fetch_sub(1, Ordering::SeqCst);
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let (silent, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+            .await
+            .expect("WS handshake");
+        let wait_for = |want: usize| {
+            let clients = clients.clone();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while clients.load(Ordering::SeqCst) != want {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok()
+            }
+        };
+        assert!(wait_for(1).await, "client counted as attached");
+        assert!(
+            wait_for(0).await,
+            "a client that never answers is dropped after the idle deadline"
+        );
+        drop(silent);
+        server.abort();
     }
 
     /// `start()` binds a real port + spawns the server task. This is the real round-trip smoke:
@@ -3604,13 +3966,20 @@ mod tests {
 
     #[test]
     fn allow_reply_carries_a_bounded_one_line_note() {
-        let deny = allow_reply(false, Some("  use the staging db instead\nsecond line "));
+        let deny = allow_reply(
+            false,
+            Some("  use the staging db instead\nsecond line "),
+            None,
+        );
         assert_eq!(deny.outcome, forge_types::ConfirmOutcome::Deny);
         assert_eq!(deny.note.as_deref(), Some("use the staging db instead"));
-        assert_eq!(allow_reply(true, None).note, None);
-        assert_eq!(allow_reply(true, Some("   ")).note, None);
+        assert_eq!(allow_reply(true, None, None).note, None);
+        assert_eq!(allow_reply(true, Some("   "), None).note, None);
         let long = "x".repeat(2000);
-        assert_eq!(allow_reply(false, Some(&long)).note.unwrap().len(), 500);
+        assert_eq!(
+            allow_reply(false, Some(&long), None).note.unwrap().len(),
+            500
+        );
     }
 
     #[test]
@@ -3622,8 +3991,97 @@ mod tests {
             RemoteInput::Allow {
                 yes: false,
                 seq: 4,
-                note: None
+                note: None,
+                scope: None
             }
+        );
+    }
+
+    #[test]
+    fn remote_allow_scope_session_parses_and_maps_to_a_session_grant() {
+        let input: RemoteInput =
+            serde_json::from_str(r#"{"kind":"allow","yes":true,"seq":5,"scope":"session"}"#)
+                .unwrap();
+        assert_eq!(
+            input,
+            RemoteInput::Allow {
+                yes: true,
+                seq: 5,
+                note: None,
+                scope: Some("session".into())
+            }
+        );
+        let outcome = |yes, scope| allow_reply(yes, None, scope).outcome;
+        assert_eq!(
+            outcome(true, Some("session")),
+            forge_types::ConfirmOutcome::AllowSession
+        );
+        assert_eq!(
+            outcome(true, Some("always")),
+            forge_types::ConfirmOutcome::Allow
+        );
+        assert_eq!(outcome(true, None), forge_types::ConfirmOutcome::Allow);
+        assert_eq!(
+            outcome(false, Some("session")),
+            forge_types::ConfirmOutcome::Deny
+        );
+    }
+
+    #[test]
+    fn the_rule_scope_accepts_the_offered_rule_only_on_an_allow() {
+        let accepted = allow_reply(true, Some("ship it"), Some("rule"));
+        assert!(accepted.accept_rule);
+        assert_eq!(accepted.outcome, forge_types::ConfirmOutcome::Allow);
+        assert_eq!(accepted.note.as_deref(), Some("ship it"));
+        assert!(!allow_reply(false, None, Some("rule")).accept_rule);
+        assert!(!allow_reply(true, None, Some("session")).accept_rule);
+        assert!(!allow_reply(true, None, None).accept_rule);
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_suggestion_only_when_there_is_one() {
+        let mut snap = Snapshot::default();
+        assert!(serde_json::to_value(&snap)
+            .unwrap()
+            .get("permission_suggestion")
+            .is_none());
+        snap.permission_suggestion = Some(forge_types::RuleSuggestion {
+            rule: "cargo test *".into(),
+            allows: 3,
+        });
+        let v = serde_json::to_value(&snap).unwrap();
+        assert_eq!(v["permission_suggestion"]["rule"], "cargo test *");
+        assert_eq!(v["permission_suggestion"]["allows"], 3);
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_project_suggestion_only_when_there_is_one() {
+        let mut snap = Snapshot::default();
+        assert!(serde_json::to_value(&snap)
+            .unwrap()
+            .get("project_suggestion")
+            .is_none());
+        snap.project_suggestion = Some(SnapProjectSuggestion {
+            path: "/home/u/code/forge".into(),
+            name: "forge".into(),
+            calls: 3,
+        });
+        let v = serde_json::to_value(&snap).unwrap();
+        assert_eq!(v["project_suggestion"]["path"], "/home/u/code/forge");
+        assert_eq!(v["project_suggestion"]["name"], "forge");
+        assert_eq!(v["project_suggestion"]["calls"], 3);
+    }
+
+    #[test]
+    fn project_offer_answers_parse() {
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"project_move","path":"/p"}"#).unwrap(),
+            RemoteInput::ProjectMove { path: "/p".into() }
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteInput>(r#"{"kind":"project_dismiss","path":"/p"}"#)
+                .unwrap(),
+            RemoteInput::ProjectDismiss { path: "/p".into() }
         );
     }
 }

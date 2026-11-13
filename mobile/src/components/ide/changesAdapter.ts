@@ -24,9 +24,22 @@ export interface SessionChanges {
 
 const STATUS_LETTER: Record<GitDiffFile["kind"], string> = { created: "A", modified: "M", deleted: "D", renamed: "R" };
 
+/** The file's verdict from its hunks' (daemon-computed) risk; nothing when the daemon predates it. */
+function riskOfFile(file: GitDiffFile): Pick<ChangedFile, "risk" | "riskReason" | "lookHunks" | "routineHunks"> {
+  if (file.hunks.length === 0 || file.hunks.some((hunk) => hunk.risk === undefined)) return {};
+  const look = file.hunks.filter((hunk) => hunk.risk === "look");
+  return {
+    risk: look.length > 0 ? "look" : "routine",
+    riskReason: (look[0] ?? file.hunks[0]).reason,
+    lookHunks: look.length,
+    routineHunks: file.hunks.length - look.length,
+  };
+}
+
 /** A worktree session's diff carries the hunks, so the hash is the real content. */
 export function filesFromSessionDiff(files: readonly GitDiffFile[]): IdeChangedFile[] {
   return files.map((file) => ({
+    ...riskOfFile(file),
     path: file.path,
     status: STATUS_LETTER[file.kind] ?? "M",
     adds: file.adds,

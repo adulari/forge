@@ -81,7 +81,17 @@ pub(crate) async fn fleet_ws_handler(
     let attached = FleetClient::attach(&state.registry.signals.fleet_clients);
     crate::serve_access::upgrade_until_revoked(ws, auth, move |socket| async move {
         let _attached = attached;
-        pump_fleet_ws(socket, fleet_rx, notes_rx, going_away).await;
+        pump_fleet_ws(
+            socket,
+            fleet_rx,
+            notes_rx,
+            going_away,
+            remote::WsLiveness {
+                ping_every: std::time::Duration::from_secs(25),
+                idle: remote::WsLiveness::DEFAULT.idle,
+            },
+        )
+        .await;
     })
 }
 
@@ -90,6 +100,7 @@ async fn pump_fleet_ws(
     mut fleet_rx: tokio::sync::watch::Receiver<u64>,
     mut notes_rx: tokio::sync::watch::Receiver<u64>,
     mut going_away: tokio::sync::watch::Receiver<bool>,
+    liveness: remote::WsLiveness,
 ) {
     let initial = *fleet_rx.borrow();
     if socket
@@ -103,8 +114,9 @@ async fn pump_fleet_ws(
     {
         return;
     }
-    let mut keepalive = tokio::time::interval(std::time::Duration::from_secs(25));
+    let mut keepalive = tokio::time::interval(liveness.ping_every);
     keepalive.tick().await;
+    let mut last_heard = tokio::time::Instant::now();
     loop {
         tokio::select! {
             changed = fleet_rx.changed() => {
@@ -126,13 +138,69 @@ async fn pump_fleet_ws(
                 let _ = socket.send(remote::host_restarting_close()).await;
                 break;
             }
+            _ = tokio::time::sleep_until(last_heard + liveness.idle) => break,
             // A fleet socket only receives, so without reading it a vanished client would go
             // unnoticed until the next change or ping.
             incoming = socket.recv() => {
                 if matches!(incoming, None | Some(Err(_)) | Some(Ok(WsMessage::Close(_)))) {
                     break;
                 }
+                last_heard = tokio::time::Instant::now();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn silent_fleet_client_is_dropped_after_the_idle_deadline() {
+        let clients = Arc::new(AtomicUsize::new(0));
+        let (_fleet_tx, fleet_rx) = tokio::sync::watch::channel(0u64);
+        let (_notes_tx, notes_rx) = tokio::sync::watch::channel(0u64);
+        let (_away_tx, away_rx) = tokio::sync::watch::channel(false);
+        let liveness = remote::WsLiveness {
+            ping_every: std::time::Duration::from_millis(50),
+            idle: std::time::Duration::from_millis(300),
+        };
+        let counter = clients.clone();
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get(move |ws: WebSocketUpgrade| async move {
+                ws.on_upgrade(move |socket| async move {
+                    let _attached = FleetClient::attach(&counter);
+                    pump_fleet_ws(socket, fleet_rx, notes_rx, away_rx, liveness).await;
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+
+        let (silent, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/ws"))
+            .await
+            .expect("WS handshake");
+        let wait_for = |want: usize| {
+            let clients = clients.clone();
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while clients.load(Ordering::SeqCst) != want {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .is_ok()
+            }
+        };
+        assert!(wait_for(1).await, "client counted as attached");
+        assert!(
+            wait_for(0).await,
+            "a client that never answers is dropped after the idle deadline"
+        );
+        drop(silent);
+        server.abort();
     }
 }

@@ -247,3 +247,268 @@ fn auto_profile_pre_authorises_a_plain_push_and_flags_a_forced_one() {
         AutoVerdict::Risky(_)
     ));
 }
+
+#[tokio::test]
+async fn fix_mode_announces_green_once_and_again_only_after_it_turned_red() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut watch = Watch::new("s1", Mode::Fix, "squash", 0);
+
+    view(dir.path(), "OPEN", PENDING, "BLOCKED", "");
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    assert_eq!(
+        settle_push(&mut watch, out.green),
+        None,
+        "pending is silent"
+    );
+
+    view(dir.path(), "OPEN", GREEN, "CLEAN", "");
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    let first = settle_push(&mut watch, out.green).expect("green is announced");
+    assert_eq!(
+        first.message,
+        "PR #7 is green \u{2014} waiting for your merge"
+    );
+    assert!(!first.high);
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 90).await;
+    assert_eq!(
+        settle_push(&mut watch, out.green),
+        None,
+        "same state, no repeat"
+    );
+
+    let missing = Gh::with_program(dir.path().join("nope"));
+    let out = poll_once(&missing, dir.path(), &mut watch, true, 130).await;
+    assert_eq!(settle_push(&mut watch, out.green), None);
+    view(dir.path(), "OPEN", GREEN, "CLEAN", "");
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 170).await;
+    assert_eq!(
+        settle_push(&mut watch, out.green),
+        None,
+        "a gh hiccup is not a transition"
+    );
+
+    view(dir.path(), "OPEN", FAILING, "BLOCKED", "");
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 210).await;
+    assert_eq!(
+        settle_push(&mut watch, out.green),
+        None,
+        "red is not announced"
+    );
+    view(dir.path(), "OPEN", GREEN, "CLEAN", "");
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 250).await;
+    assert!(
+        settle_push(&mut watch, out.green).is_some(),
+        "green again after red"
+    );
+}
+
+#[tokio::test]
+async fn merge_mode_announces_the_merge_and_never_green() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut watch = Watch::new("s1", Mode::Merge, "squash", 0);
+    view(dir.path(), "OPEN", GREEN, "CLEAN", "");
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    assert!(out.merged && !out.green);
+    let a = settle_push(&mut watch, out.green).expect("merge is announced");
+    assert_eq!(a.message, "PR #7 merged");
+    assert_eq!(settle_push(&mut watch, false), None, "once per transition");
+}
+
+#[tokio::test]
+async fn a_manual_merge_and_a_closed_pr_each_push_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut merged = Watch::new("s1", Mode::Fix, "squash", 0);
+    view(dir.path(), "MERGED", GREEN, "CLEAN", "");
+    let out = poll_once(&gh, dir.path(), &mut merged, true, 10).await;
+    assert_eq!(
+        settle_push(&mut merged, out.green).unwrap().message,
+        "PR #7 merged"
+    );
+
+    let mut closed = Watch::new("s2", Mode::Fix, "squash", 0);
+    view(dir.path(), "CLOSED", GREEN, "CLEAN", "");
+    let out = poll_once(&gh, dir.path(), &mut closed, true, 10).await;
+    let a = settle_push(&mut closed, out.green).unwrap();
+    assert_eq!(
+        a.message,
+        "PR #7 blocked: the PR was closed without merging"
+    );
+    assert!(a.high);
+    assert_eq!(settle_push(&mut closed, false), None);
+}
+
+#[tokio::test]
+async fn giving_up_pushes_the_reason_and_the_pushed_state_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    view(dir.path(), "OPEN", FAILING, "BLOCKED", "");
+    let mut watch = Watch::new("s1", Mode::Fix, "squash", 0);
+    watch.fix_turns = MAX_FIX_TURNS;
+    let out = poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    let a = settle_push(&mut watch, out.green).expect("gave up is announced");
+    assert!(a.message.starts_with("PR #7 blocked: gave up after"));
+
+    let path = dir.path().join("w.json");
+    let reg = Registry::new(Some(path.clone()));
+    reg.arm("s1", Mode::Fix, "squash", 5);
+    reg.update("s1", |w| *w = watch.clone());
+    let mut restored = Registry::new(Some(path)).get("s1").unwrap();
+    assert_eq!(
+        settle_push(&mut restored, false),
+        None,
+        "restart must not re-push"
+    );
+}
+
+fn view_at(dir: &Path, sha: &str, checks: &str, merge_state: &str, extra: &str) {
+    view(dir, "OPEN", checks, merge_state, extra);
+    let path = dir.join("view.json");
+    let body = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(path, body.replace("abcdef1234567", sha)).unwrap();
+}
+
+const ARMED: &str = r#","autoMergeRequest":{"enabledAt":"2026-11-06T00:00:00Z"}"#;
+
+#[tokio::test]
+async fn auto_merge_is_turned_off_before_a_fix_turn_and_rearmed_only_on_the_next_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
+    view_at(dir.path(), "h1", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    assert!(watch.auto_armed);
+
+    view_at(dir.path(), "h1", FAILING, "BLOCKED", ARMED);
+    let fix = poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    assert!(
+        fix.prompt.is_some(),
+        "the failing check goes to the session"
+    );
+    assert!(
+        calls(dir.path()).contains("pr merge 7 --disable-auto"),
+        "GitHub must not merge whatever the fix turn pushes: {}",
+        calls(dir.path())
+    );
+    assert!(!watch.auto_armed);
+
+    poll_once(&gh, dir.path(), &mut watch, true, 90).await;
+    assert_eq!(
+        calls(dir.path()).matches("--auto --squash").count(),
+        1,
+        "no re-arm while the fix is owed"
+    );
+
+    view_at(dir.path(), "h2", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 130).await;
+    assert!(calls(dir.path()).contains("--auto --squash --match-head-commit h2"));
+    assert_eq!(watch.armed_head.as_deref(), Some("h2"));
+}
+
+#[tokio::test]
+async fn auto_merge_is_turned_off_when_the_head_moves_or_the_queue_holds_the_pr() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
+    view_at(dir.path(), "h1", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+
+    view_at(dir.path(), "h2", PENDING, "BLOCKED", ARMED);
+    poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    let log = calls(dir.path());
+    let off = log
+        .find("--disable-auto")
+        .expect("an owner push is not vouched for");
+    let rearm = log
+        .find("--match-head-commit h2")
+        .expect("h2 is gated and armed");
+    assert!(off < rearm, "{log}");
+
+    watch.hold = Some("out of the merge queue: verify failed".into());
+    poll_once(&gh, dir.path(), &mut watch, true, 90).await;
+    assert_eq!(calls(dir.path()).matches("--disable-auto").count(), 2);
+    assert!(!watch.auto_armed);
+    assert!(watch
+        .blocked_reason
+        .as_deref()
+        .unwrap()
+        .contains("verify failed"));
+}
+
+#[tokio::test]
+async fn auto_merge_github_already_dropped_is_cleared_without_a_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
+    view_at(dir.path(), "h1", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+    watch.hold = Some("held by the owner".into());
+    view_at(
+        dir.path(),
+        "h1",
+        PENDING,
+        "BLOCKED",
+        r#","autoMergeRequest":null"#,
+    );
+    poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    assert!(!watch.auto_armed);
+    assert!(!calls(dir.path()).contains("--disable-auto"));
+}
+
+#[tokio::test]
+async fn a_fix_turn_waits_while_auto_merge_cannot_be_turned_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gh");
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2\" in\n  view) cat {view} ;;\n  merge) [ \"$4\" = --disable-auto ] && [ -e {deny} ] && exit 1; exit 0 ;;\nesac\n",
+        log = dir.path().join("calls.log").display(),
+        view = dir.path().join("view.json").display(),
+        deny = dir.path().join("deny").display(),
+    );
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let gh = Gh::with_program(path);
+    let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
+    view_at(dir.path(), "h1", PENDING, "BLOCKED", "");
+    poll_once(&gh, dir.path(), &mut watch, true, 10).await;
+
+    std::fs::write(dir.path().join("deny"), "").unwrap();
+    view_at(dir.path(), "h1", FAILING, "BLOCKED", ARMED);
+    let held = poll_once(&gh, dir.path(), &mut watch, true, 50).await;
+    assert!(
+        held.prompt.is_none(),
+        "no new code while GitHub may merge it"
+    );
+    assert!(watch.auto_armed && watch.fix_turns == 0);
+    assert!(watch
+        .blocked_reason
+        .as_deref()
+        .unwrap()
+        .contains("could not turn off GitHub auto-merge"));
+
+    std::fs::remove_file(dir.path().join("deny")).unwrap();
+    let fix = poll_once(&gh, dir.path(), &mut watch, true, 90).await;
+    assert!(fix.prompt.is_some() && !watch.auto_armed);
+}
+
+#[tokio::test]
+async fn an_owner_rearm_during_a_sweep_is_not_undone_and_blocks_the_merge() {
+    let id = "rearm-during-sweep";
+    registry().arm(id, Mode::Merge, "squash", 1);
+    let mut stale = registry().get(id).unwrap();
+    registry().arm(id, Mode::Fix, "squash", 2);
+
+    let dir = tempfile::tempdir().unwrap();
+    let gh = fake_gh(dir.path());
+    view(dir.path(), "OPEN", GREEN, "CLEAN", "");
+    let outcome = poll_once(&gh, dir.path(), &mut stale, true, 10).await;
+    assert!(!outcome.merged);
+    assert!(!calls(dir.path()).contains("pr merge"));
+
+    registry().store(id, stale);
+    let live = registry().get(id).unwrap();
+    assert_eq!(live.mode, Mode::Fix);
+    registry().arm(id, Mode::Off, "squash", 3);
+}

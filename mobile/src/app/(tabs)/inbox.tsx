@@ -17,7 +17,12 @@ import { EmptyState } from "../../components/ds/EmptyState";
 import { Screen } from "../../components/ds/Screen";
 import { Skeleton } from "../../components/ds/Skeleton";
 import { ApiError, type SessionRow } from "../../lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import { waitingScoped } from "../../lib/allHostRows";
+import { ServerScope } from "../../lib/auth";
 import { useSessions } from "../../lib/queries";
+import { useAllHostRows } from "../../lib/useAllHostRows";
+import type { ScopedSessionRow } from "../../lib/useScopedFleet";
 import { activeWorkspaceProjects, useShellPrefs } from "../../lib/shellPrefs";
 import { projectName } from "../../lib/sidebarModel";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -54,23 +59,33 @@ function InboxHeader({ count }: { count: number }) {
 export function InboxScreen() {
   const tokens = useTokens();
   const query = useSessions();
-  const pull = usePullRefresh(query.refetch);
+  const queryClient = useQueryClient();
+  const refreshAll = useCallback(() => queryClient.invalidateQueries({ queryKey: ["sessions"] }), [queryClient]);
+  const pull = usePullRefresh(refreshAll);
   const prefs = useShellPrefs();
   const workspaceProjects = activeWorkspaceProjects(prefs);
+  const allRows = useAllHostRows();
   const rows = useMemo(
-    () => (query.data ?? []).filter((s) => s.waiting && (!workspaceProjects || workspaceProjects.has(projectName(s.cwd)))),
-    [query.data, workspaceProjects],
+    () => waitingScoped(allRows).filter((s) => !workspaceProjects || workspaceProjects.has(projectName(s.row.cwd))),
+    [allRows, workspaceProjects],
   );
-  const [peekSessionId, setPeekSessionId] = useState<string | null>(null);
+  const [peek, setPeek] = useState<{ sessionId: string; serverId: string } | null>(null);
 
-  const onPeek = useCallback((row: SessionRow) => setPeekSessionId(row.id), []);
-  const closePeek = useCallback(() => setPeekSessionId(null), []);
+  const onPeek = useCallback(
+    (row: SessionRow) => setPeek({ sessionId: row.id, serverId: allRows.find((item) => item.row.id === row.id)?.serverId ?? "" }),
+    [allRows],
+  );
+  const closePeek = useCallback(() => setPeek(null), []);
 
   const renderItem = useCallback(
-    ({ item, index }: { item: SessionRow; index: number }) => <DecisionCard row={item} index={index} onPeek={onPeek} />,
+    ({ item, index }: { item: ScopedSessionRow; index: number }) => (
+      <ServerScope serverId={item.serverId}>
+        <DecisionCard row={item.row} index={index} onPeek={onPeek} />
+      </ServerScope>
+    ),
     [onPeek],
   );
-  const keyExtractor = useCallback((item: SessionRow) => item.id, []);
+  const keyExtractor = useCallback((item: ScopedSessionRow) => `${item.serverId}:${item.row.id}`, []);
 
   if (query.isLoading) {
     return (
@@ -111,7 +126,9 @@ export function InboxScreen() {
         onRefresh={pull.onRefresh}
         contentContainerStyle={styles.listPad}
       />
-      <DecisionPeek sessionId={peekSessionId} visible={peekSessionId != null} onClose={closePeek} />
+      <ServerScope serverId={peek?.serverId ?? ""}>
+        <DecisionPeek sessionId={peek?.sessionId ?? null} visible={peek != null} onClose={closePeek} />
+      </ServerScope>
     </Screen>
   );
 }

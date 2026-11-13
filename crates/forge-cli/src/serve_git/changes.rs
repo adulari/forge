@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 
+use super::risk;
 use super::status::{parse_numstat_z, parse_status_z};
 use super::*;
 
@@ -42,6 +43,81 @@ pub(crate) struct ChangedFile {
     adds: usize,
     dels: usize,
     content_hash: String,
+    /// `"routine"` when every hunk is safe to accept in bulk, else `"look"`.
+    risk: &'static str,
+    /// One line for the first hunk that decided `risk`.
+    risk_reason: String,
+    look_hunks: usize,
+    routine_hunks: usize,
+}
+
+impl ChangedFile {
+    fn set_risk(&mut self, diff: Option<&GitDiffFile>) {
+        let (risk, reason, look, routine) = match diff {
+            Some(diff) => file_risk(diff),
+            None => (risk::LOOK, "not checked".to_string(), 0, 0),
+        };
+        self.risk = risk;
+        self.risk_reason = reason;
+        self.look_hunks = look;
+        self.routine_hunks = routine;
+    }
+}
+
+/// `(risk, reason, look hunks, routine hunks)` of one parsed file diff.
+fn file_risk(diff: &GitDiffFile) -> (&'static str, String, usize, usize) {
+    if diff.hunks.is_empty() {
+        let reason = if diff.binary {
+            "binary file"
+        } else if diff.kind == "deleted" {
+            "deletes a file"
+        } else if diff.kind == "renamed" {
+            "renamed file"
+        } else {
+            "no text changes"
+        };
+        return (risk::LOOK, reason.to_string(), 0, 0);
+    }
+    let look = diff.hunks.iter().filter(|h| h.risk == risk::LOOK).count();
+    let routine = diff.hunks.len() - look;
+    let decisive = diff
+        .hunks
+        .iter()
+        .find(|h| look > 0 && h.risk == risk::LOOK || look == 0)
+        .map_or(String::new(), |h| h.reason.clone());
+    let verdict = if look > 0 { risk::LOOK } else { risk::ROUTINE };
+    (verdict, decisive, look, routine)
+}
+
+/// Risk for the dirty files of a shared checkout: the working tree against the index (what is
+/// still waiting for a decision), parsed and classified once, plus untracked files read the way
+/// the diff route renders them. A file whose changes are all staged has been accepted: it is
+/// listed as `routine` with nothing left to look at.
+fn annotate_tree_risk(root: &Path, files: &mut [ChangedFile]) {
+    const MAX_RAW: usize = 32 * 1024 * 1024;
+    let raw = git_raw(
+        root,
+        &["-c", "core.quotePath=false", "diff", "--find-renames", "--"],
+    )
+    .ok()
+    .filter(|raw| raw.len() <= MAX_RAW)
+    .map(|raw| String::from_utf8_lossy(&raw).into_owned())
+    .unwrap_or_default();
+    let parsed: BTreeMap<String, GitDiffFile> = super::diff::parse_unified_diff(&raw)
+        .into_iter()
+        .map(|file| (file.path.clone(), file))
+        .collect();
+    for file in files {
+        if let Some(diff) = parsed.get(&file.path) {
+            file.set_risk(Some(diff));
+        } else if super::diff::is_untracked(root, &file.path) {
+            let diff = super::diff::untracked_diff(root, &file.path, 0, super::MAX_DIFF_LINES);
+            file.set_risk(diff.ok().as_ref());
+        } else {
+            file.risk = risk::ROUTINE;
+            file.risk_reason = "staged".to_string();
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -76,7 +152,7 @@ pub(super) struct LiveSession {
     pub(super) waiting: bool,
 }
 
-async fn live_sessions(state: &DaemonState) -> Vec<LiveSession> {
+pub(super) async fn live_sessions(state: &DaemonState) -> Vec<LiveSession> {
     let mut rows = Vec::new();
     let mut driven = BTreeSet::new();
     for handle in state.registry.all().await {
@@ -85,7 +161,7 @@ async fn live_sessions(state: &DaemonState) -> Vec<LiveSession> {
         rows.push(LiveSession {
             id: handle.session_id.clone(),
             title: handle.title(),
-            cwd: handle.cwd.clone(),
+            cwd: handle.cwd(),
             worktree: handle.worktree.clone(),
             busy: snap.busy,
             waiting: snap.permission_prompt.is_some() || snap.question.is_some(),
@@ -186,12 +262,20 @@ fn worktree_session_changes(session: LiveSession, worktree: &str) -> SessionChan
             let files = diff
                 .files
                 .iter()
-                .map(|file| ChangedFile {
-                    path: file.path.clone(),
-                    kind: file.kind.clone(),
-                    adds: file.adds,
-                    dels: file.dels,
-                    content_hash: content_hash(&Path::new(worktree).join(&file.path)),
+                .map(|file| {
+                    let mut row = ChangedFile {
+                        path: file.path.clone(),
+                        kind: file.kind.clone(),
+                        adds: file.adds,
+                        dels: file.dels,
+                        content_hash: content_hash(&Path::new(worktree).join(&file.path)),
+                        risk: risk::LOOK,
+                        risk_reason: String::new(),
+                        look_hunks: 0,
+                        routine_hunks: 0,
+                    };
+                    row.set_risk(Some(file));
+                    row
                 })
                 .collect::<Vec<_>>();
             (diff.branch, files)
@@ -229,13 +313,10 @@ fn shared_tree_changes(
     members: Vec<LiveSession>,
 ) -> Vec<SessionChanges> {
     let branch = git_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
-    let dirty = tree_files(root);
-    let since = git_stdout(root, &["log", "-1", "--format=%ct"])
-        .ok()
-        .and_then(|secs| secs.parse::<i64>().ok())
-        .unwrap_or(0);
+    let mut dirty = tree_files(root);
+    annotate_tree_risk(root, &mut dirty);
     let ids: Vec<String> = members.iter().map(|s| s.id.clone()).collect();
-    let editors = editors_by_path(store, root, &ids, since);
+    let editors = editors_by_path(store, root, &ids, &dirty);
 
     let mut per_session: BTreeMap<String, Vec<ChangedFile>> = BTreeMap::new();
     let mut unattributed = Vec::new();
@@ -273,18 +354,95 @@ fn shared_tree_changes(
     rows
 }
 
-/// `relative path → sessions that edited it since `since``.
+/// How one shared checkout's dirty files split for a session that wants to commit its own.
+pub(super) struct TreeSplit {
+    /// `(path, kind)` of the files attributed to the session alone.
+    pub(super) mine: Vec<(String, String)>,
+    /// Files the session edited that another session edited too.
+    pub(super) contested: Vec<String>,
+    /// Dirty files left alone: other sessions' and unattributed ones.
+    pub(super) others: Vec<String>,
+    /// The session has more files than the queue lists.
+    pub(super) truncated: bool,
+}
+
+/// Attribute the checkout at `root` and keep what `session` changed. `live` is every session the
+/// daemon knows; `session` itself need not be among them.
+pub(super) fn split_shared_tree(
+    store: &forge_store::Store,
+    root: &Path,
+    session: &str,
+    live: Vec<LiveSession>,
+) -> TreeSplit {
+    let mut members: Vec<LiveSession> = live
+        .into_iter()
+        .filter(|s| s.worktree.is_none() && project_root_of(s).as_deref() == Some(root))
+        .collect();
+    if !members.iter().any(|s| s.id == session) {
+        members.push(LiveSession {
+            id: session.to_string(),
+            title: String::new(),
+            cwd: root.to_string_lossy().into_owned(),
+            worktree: None,
+            busy: false,
+            waiting: false,
+        });
+    }
+    let rows = shared_tree_changes(store, root, members);
+    let mut split = TreeSplit {
+        mine: Vec::new(),
+        contested: Vec::new(),
+        others: Vec::new(),
+        truncated: false,
+    };
+    let mine: BTreeSet<&str> = rows
+        .iter()
+        .filter(|row| row.session_id == session)
+        .flat_map(|row| row.files.iter().map(|f| f.path.as_str()))
+        .collect();
+    for row in &rows {
+        if row.session_id == session {
+            split.truncated |= row.truncated > 0;
+            split
+                .mine
+                .extend(row.files.iter().map(|f| (f.path.clone(), f.kind.clone())));
+            continue;
+        }
+        for file in &row.files {
+            if mine.contains(file.path.as_str()) {
+                split.contested.push(file.path.clone());
+            } else {
+                split.others.push(file.path.clone());
+            }
+        }
+    }
+    split.mine.sort();
+    split.contested.sort();
+    split.contested.dedup();
+    split.others.sort();
+    split.others.dedup();
+    split
+}
+
+/// Most dirty paths the per-file commit lookup passes to one `git log`; past it, files fall
+/// back to the last commit of the whole tree as their cutoff.
+const MAX_CUTOFF_PATHS: usize = 500;
+
+/// `relative path → sessions whose edits to it are still uncommitted`: an edit counts when it is
+/// newer than the last commit that touched that file. (The last commit of the whole tree is the
+/// wrong cutoff: committing one file would orphan every other session edit still in the tree.)
 fn editors_by_path(
     store: &forge_store::Store,
     root: &Path,
     session_ids: &[String],
-    since: i64,
+    dirty: &[ChangedFile],
 ) -> BTreeMap<String, BTreeSet<String>> {
-    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    let events = store
-        .session_edit_events(session_ids, since)
-        .unwrap_or_default();
-    for event in events {
+    let dirty_paths: BTreeSet<&str> = dirty.iter().map(|f| f.path.as_str()).collect();
+    let mut edits: Vec<(String, String, i64)> = Vec::new();
+    for event in store
+        .session_edit_events(session_ids, 0)
+        .unwrap_or_default()
+    {
         let resolved = crate::blame::resolve_edit_path(&event.base_dir, &event.path);
         let Ok(relative) = normalize(&resolved)
             .strip_prefix(root)
@@ -292,11 +450,61 @@ fn editors_by_path(
         else {
             continue;
         };
-        map.entry(relative.to_string_lossy().replace('\\', "/"))
-            .or_default()
-            .insert(event.session_id);
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        if dirty_paths.contains(relative.as_str()) {
+            edits.push((relative, event.session_id, event.created_at));
+        }
+    }
+    let cutoffs = last_commit_times(root, &edits);
+    let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for (path, session, at) in edits {
+        if at >= cutoffs.get(&path).copied().unwrap_or(0) {
+            map.entry(path).or_default().insert(session);
+        }
     }
     map
+}
+
+/// When each edited path was last committed, from one `git log` that only walks commits newer
+/// than the oldest edit (older commits cannot outdate any of them). A path missing from the
+/// result has no commit since its edits.
+fn last_commit_times(root: &Path, edits: &[(String, String, i64)]) -> BTreeMap<String, i64> {
+    let mut times = BTreeMap::new();
+    let Some(oldest) = edits.iter().map(|(_, _, at)| *at).min() else {
+        return times;
+    };
+    let paths: BTreeSet<&str> = edits.iter().map(|(path, _, _)| path.as_str()).collect();
+    if paths.len() > MAX_CUTOFF_PATHS {
+        let head = git_stdout(root, &["log", "-1", "--format=%ct"])
+            .ok()
+            .and_then(|secs| secs.parse::<i64>().ok())
+            .unwrap_or(0);
+        return paths.into_iter().map(|p| (p.to_string(), head)).collect();
+    }
+    let since = format!("--since=@{oldest}");
+    let mut args = vec![
+        "-c",
+        "core.quotePath=false",
+        "log",
+        since.as_str(),
+        "--format=%x01%ct",
+        "--name-only",
+        "--",
+    ];
+    args.extend(paths.iter().copied());
+    let Ok(raw) = git_raw(root, &args) else {
+        return times;
+    };
+    let mut current = 0i64;
+    // Newest first, so the first time a path shows up is its last commit.
+    for line in String::from_utf8_lossy(&raw).lines() {
+        if let Some(secs) = line.strip_prefix('\u{1}') {
+            current = secs.trim().parse().unwrap_or(0);
+        } else if !line.is_empty() {
+            times.entry(line.to_string()).or_insert(current);
+        }
+    }
+    times
 }
 
 /// Canonicalize, tolerating a file that no longer exists (a deleted file still has an edit record).
@@ -353,9 +561,43 @@ fn tree_files(root: &Path) -> Vec<ChangedFile> {
             kind: kind.to_string(),
             adds,
             dels,
+            risk: risk::LOOK,
+            risk_reason: String::new(),
+            look_hunks: 0,
+            routine_hunks: 0,
         });
     }
     files
+}
+
+type HashCache = std::collections::HashMap<PathBuf, ((u64, u128), String)>;
+
+static HASH_CACHE: std::sync::Mutex<Option<HashCache>> = std::sync::Mutex::new(None);
+const HASH_CACHE_MAX: usize = 8192;
+/// A file touched this recently may still change within the same mtime tick, so it is re-read.
+const HASH_SETTLE_NANOS: u128 = 2_000_000_000;
+
+fn cached_hash(path: &Path, stamp: (u64, u128)) -> Option<String> {
+    let guard = HASH_CACHE.lock().ok()?;
+    let (seen, hash) = guard.as_ref()?.get(path)?;
+    (*seen == stamp).then(|| hash.clone())
+}
+
+fn remember_hash(path: &Path, stamp: (u64, u128), hash: &str) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    if now.saturating_sub(stamp.1) < HASH_SETTLE_NANOS {
+        return;
+    }
+    let Ok(mut guard) = HASH_CACHE.lock() else {
+        return;
+    };
+    let cache = guard.get_or_insert_with(HashCache::new);
+    if cache.len() >= HASH_CACHE_MAX {
+        cache.clear();
+    }
+    cache.insert(path.to_path_buf(), (stamp, hash.to_string()));
 }
 
 /// A short, stable digest of what is at `path` right now. `deleted` when nothing is.
@@ -370,10 +612,23 @@ pub(super) fn content_hash(path: &Path) -> String {
             hasher.update(target.to_string_lossy().as_bytes());
         }
     } else if meta.is_file() && meta.len() <= MAX_HASHED_BYTES {
+        let stamp = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| (meta.len(), d.as_nanos()));
+        if let Some(hit) = stamp.and_then(|s| cached_hash(path, s)) {
+            return hit;
+        }
         match std::fs::read(path) {
             Ok(bytes) => hasher.update(&bytes),
             Err(_) => return "unreadable".to_string(),
         }
+        let hash = hex::encode(&hasher.finalize()[..8]);
+        if let Some(stamp) = stamp {
+            remember_hash(path, stamp, &hash);
+        }
+        return hash;
     } else {
         let modified = meta
             .modified()

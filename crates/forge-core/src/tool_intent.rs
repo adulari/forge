@@ -66,6 +66,13 @@ const INTENT_WORDS: &[&str] = &[
     "delegate",
     "parallel",
     "workflow",
+    // A question about the session's own earlier work: after a compaction the answer is behind
+    // the `recall` tool.
+    "recall",
+    "earlier",
+    "previously",
+    "discussed",
+    "decide",
 ];
 
 /// Extensions that make a bare word a file name (`limits.py`, `src/lib.rs`, `Cargo.toml`).

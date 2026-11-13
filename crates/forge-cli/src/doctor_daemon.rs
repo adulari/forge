@@ -38,11 +38,32 @@ impl DaemonVersion {
     }
 }
 
+/// The `--port` the unit's `ExecStart` passes, if any.
+pub(crate) fn unit_port(unit: &str) -> Option<u16> {
+    let cmd = unit
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ExecStart="))?;
+    let mut words = cmd.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "--port" {
+            return words.next()?.trim_matches('"').parse().ok();
+        }
+        if let Some(port) = word.strip_prefix("--port=") {
+            return port.trim_matches('"').parse().ok();
+        }
+    }
+    None
+}
+
 /// The absolute path `ExecStart` launches, if the unit names one.
 fn unit_exec_start(unit: &str) -> &str {
     unit.lines()
         .find_map(|l| l.trim().strip_prefix("ExecStart="))
-        .and_then(|cmd| cmd.split_whitespace().next())
+        .and_then(|cmd| match cmd.strip_prefix('"') {
+            // Units written since the path is quoted (it may contain spaces).
+            Some(quoted) => quoted.split('"').next(),
+            None => cmd.split_whitespace().next(),
+        })
         .unwrap_or_default()
 }
 
@@ -235,6 +256,30 @@ mod tests {
         assert!(guard.fix.is_some(), "must say how to fix it");
         // Same binary path, so only the guard should be reported — not a spurious binary mismatch.
         assert!(out.iter().all(|c| c.label != "daemon binary"));
+    }
+
+    #[test]
+    fn the_unit_port_is_read_from_exec_start() {
+        let unit = "[Service]\nExecStart=\"/home/me/My Tools/forge\" serve --lan --port 9000\n";
+        assert_eq!(super::unit_port(unit), Some(9000));
+        assert_eq!(
+            super::unit_port("[Service]\nExecStart=/usr/bin/forge serve --port=7500\n"),
+            Some(7500)
+        );
+        assert_eq!(
+            super::unit_port("[Service]\nExecStart=/usr/bin/forge serve\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_quoted_exec_start_path_is_read_whole() {
+        let unit = "[Service]\nExecStart=\"/home/me/My Tools/forge\" serve --port 7420\n";
+        assert_eq!(super::unit_exec_start(unit), "/home/me/My Tools/forge");
+        assert_eq!(
+            super::unit_exec_start("[Service]\nExecStart=/usr/bin/forge serve\n"),
+            "/usr/bin/forge"
+        );
     }
 
     #[test]

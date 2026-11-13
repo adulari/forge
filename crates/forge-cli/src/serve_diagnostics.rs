@@ -239,6 +239,23 @@ fn power_check() -> DiagnosticCheck {
     )
 }
 
+fn pressure_check() -> Option<DiagnosticCheck> {
+    let pressure = crate::host_pressure::current()?;
+    Some(match pressure.summary {
+        Some(summary) => DiagnosticCheck::warn(
+            "host_pressure",
+            "Host disk and memory",
+            summary,
+            "run `forge worktree reclaim --artifacts` on the host to free worktree space",
+        ),
+        None => DiagnosticCheck::ok(
+            "host_pressure",
+            "Host disk and memory",
+            "enough free space and memory",
+        ),
+    })
+}
+
 pub(crate) async fn diagnostics(
     State(state): State<Arc<DaemonState>>,
 ) -> axum::Json<DiagnosticsResponse> {
@@ -279,6 +296,7 @@ pub(crate) async fn diagnostics(
         )
     });
     checks.push(power_check());
+    checks.extend(pressure_check());
     if let Some(check) = tokio::task::spawn_blocking(store_recovery_check)
         .await
         .ok()

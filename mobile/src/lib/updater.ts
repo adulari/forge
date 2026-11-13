@@ -166,7 +166,15 @@ export function installDesktopUpdate(): Promise<void> {
   publish({ ...snapshot, phase: "installing", message: null });
   installing = (async () => {
     try {
-      await installable?.downloadAndInstall();
+      // The native shell may already be writing (or have written) this release in the
+      // background; installing it again here would overwrite the same AppImage at once.
+      const { invoke } = await import("@tauri-apps/api/core");
+      const [onDisk, busy] = await Promise.all([
+        invoke<string | null>("desktop_update_installed_version").catch(() => null),
+        invoke<boolean>("desktop_update_installing").catch(() => false),
+      ]);
+      if (busy) throw new Error("Forge is already installing this update in the background. Restart once it finishes.");
+      if (onDisk !== installable?.version) await installable?.downloadAndInstall();
       const { relaunch } = await import("@tauri-apps/plugin-process");
       await relaunch();
     } catch (error) {

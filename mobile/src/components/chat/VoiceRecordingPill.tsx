@@ -3,13 +3,14 @@
 // amplitude-bar re-renders scoped to this component instead of the whole composer.
 import { Check, X } from "lucide-react-native";
 import Animated, { useAnimatedStyle, useReducedMotion, useSharedValue, withSequence, withTiming } from "react-native-reanimated";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useReducer, useRef, useState } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 
 import { haptics } from "../../lib/haptics";
 import { useTranscribe } from "../../lib/queries";
 import { chordHold, PUSH_TO_TALK_MIN_MS } from "../../lib/voice/chordHold";
 import { canOpenMicSettings, isMicDenied, MIC_DENIED_MESSAGE, MIC_WEB_INSTRUCTIONS, openMicSettings } from "../../lib/voice/micAccess";
+import { initialPillState, MAX_RECORDING_SECONDS, pillReducer, recordingCapReached } from "../../lib/voice/pillState";
 import { voice } from "../../lib/voice/voice";
 import { useThermalPulse } from "../../theme/motion";
 import { useTokens } from "../../theme/ThemeProvider";
@@ -48,13 +49,14 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
   const tokens = useTokens();
   const reduced = useReducedMotion();
   const transcribe = useTranscribe();
-  const [phase, setPhase] = useState<"recording" | "transcribing" | "error">("recording");
+  const [{ phase, error, retryable }, dispatch] = useReducer(pillReducer, initialPillState);
+  const [capHit, setCapHit] = useState(false);
   const [levels, setLevels] = useState<number[]>(() => Array(MIN_BAR_COUNT).fill(0));
   const [elapsed, setElapsed] = useState(0);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [micDenied, setMicDenied] = useState(false);
   const startedAt = useRef(0);
   const closedRef = useRef(false);
+  const recordingRef = useRef<{ blobOrFile: unknown; name: string } | null>(null);
 
   const shakeX = useSharedValue(0);
   const shakeStyle = useAnimatedStyle(() => ({ transform: [{ translateX: shakeX.value }] }));
@@ -77,23 +79,28 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
       .then(() => haptics.select())
       .catch((err: unknown) => {
         if (cancelled) return;
-        setPhase("error");
-        if (isMicDenied(err)) {
-          setMicDenied(true);
-          setErrorMsg(MIC_DENIED_MESSAGE);
-          return;
-        }
-        setErrorMsg(err instanceof Error ? err.message : "couldn't start recording");
+        const message = err instanceof Error ? err.message : "couldn't start recording";
+        dispatch({ type: "failed", message: isMicDenied(err) ? MIC_DENIED_MESSAGE : message, retryable: false });
+        if (isMicDenied(err)) setMicDenied(true);
       });
     return () => {
       cancelled = true;
+      voice.dispose();
     };
   }, []);
 
   useEffect(() => {
     if (phase !== "recording") return;
-    const id = setInterval(() => setElapsed(Math.floor((Date.now() - startedAt.current) / 1000)), 500);
+    const id = setInterval(() => {
+      const seconds = Math.floor((Date.now() - startedAt.current) / 1000);
+      setElapsed(seconds);
+      if (recordingCapReached(seconds)) {
+        setCapHit(true);
+        void handleAccept();
+      }
+    }, 500);
     return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
   useEffect(() => {
@@ -106,7 +113,7 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
           withTiming(-SHAKE_DISTANCE, { duration: 60 }),
           withTiming(0, { duration: 60 }),
         );
-    if (micDenied) return;
+    if (micDenied || retryable) return;
     const t = setTimeout(close, ERROR_CLEAR_MS);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -119,37 +126,58 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
     close();
   };
 
-  const handleAccept = async () => {
-    haptics.allow();
-    setPhase("transcribing");
+  const upload = async (rec: { blobOrFile: unknown; name: string }) => {
+    const form = new FormData();
+    // Mirrors attach.ts's native/web split: RN's `{uri,name,type}` shorthand only means
+    // anything through React Native's own networking layer, while a real web `Blob` needs
+    // the explicit filename as FormData's third argument.
+    if (Platform.OS === "web") {
+      form.append("file", rec.blobOrFile as Blob, rec.name);
+    } else {
+      form.append("file", rec.blobOrFile as unknown as Blob);
+    }
     try {
-      const { blobOrFile, name } = await voice.stop();
-      const form = new FormData();
-      // Mirrors attach.ts's native/web split: RN's `{uri,name,type}` shorthand only means
-      // anything through React Native's own networking layer, while a real web `Blob` needs
-      // the explicit filename as FormData's third argument.
-      if (Platform.OS === "web") {
-        form.append("file", blobOrFile as Blob, name);
-      } else {
-        form.append("file", blobOrFile as unknown as Blob);
-      }
       const res = await transcribe.mutateAsync({ form });
       if (!res.text.trim()) {
-        setPhase("error");
-        setErrorMsg("no speech detected");
+        dispatch({ type: "failed", message: "no speech detected", retryable: false });
+        voice.dispose();
         return;
       }
       onAppend(res.text);
+      voice.dispose();
       close();
     } catch (err) {
-      setPhase("error");
-      setErrorMsg(err instanceof Error ? err.message : "transcription failed");
+      // The recorder stays alive (uri readable) so Retry can re-upload the same file; it is
+      // released on success, Discard, or unmount.
+      dispatch({ type: "failed", message: err instanceof Error ? err.message : "transcription failed", retryable: true });
       haptics.mergeConflict();
-    } finally {
-      // The recorder must stay alive (uri readable) until the upload above has settled —
-      // only release it now, win or lose.
-      voice.dispose();
     }
+  };
+
+  const handleAccept = async () => {
+    haptics.allow();
+    dispatch({ type: "accept" });
+    try {
+      recordingRef.current = await voice.stop();
+    } catch (err) {
+      dispatch({ type: "failed", message: err instanceof Error ? err.message : "transcription failed", retryable: false });
+      haptics.mergeConflict();
+      voice.dispose();
+      return;
+    }
+    await upload(recordingRef.current);
+  };
+
+  const handleRetry = () => {
+    if (!recordingRef.current) return;
+    haptics.allow();
+    dispatch({ type: "retry" });
+    void upload(recordingRef.current);
+  };
+
+  const handleDiscard = () => {
+    voice.dispose();
+    close();
   };
 
   // Web/desktop: Escape cancels, Enter stops+transcribes, and Ctrl/Cmd+Shift+V (the same combo
@@ -245,9 +273,22 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
           />
         </>
       ) : phase === "error" ? (
-        <Text style={[type.meta, styles.errorText, { color: tokens.danger }]} numberOfLines={1}>
-          {errorMsg ?? "something went wrong"}
-        </Text>
+        <>
+          <Text style={[type.meta, styles.errorText, { color: tokens.danger }]} numberOfLines={retryable ? 2 : 1}>
+            {error ?? "something went wrong"}
+          </Text>
+          {retryable ? (
+            <>
+              <Button label="Retry" variant="secondary" onPress={handleRetry} accessibilityLabel="retry transcription" />
+              <IconButton
+                icon={<X size={18} strokeWidth={2} color={tokens.ink2} />}
+                onPress={handleDiscard}
+                accessibilityLabel="discard recording"
+                testID="voice-discard"
+              />
+            </>
+          ) : null}
+        </>
       ) : (
         <>
           <StatusDot
@@ -277,7 +318,7 @@ export function VoiceRecordingPill({ onAppend, onClose }: VoiceRecordingPillProp
             </View>
           ) : (
             <Animated.Text style={[type.meta, styles.bars, transcribingPulse, { color: tokens.ink2 }]}>
-              transcribing…
+              {capHit ? `${MAX_RECORDING_SECONDS / 60} min limit reached · transcribing…` : "transcribing…"}
             </Animated.Text>
           )}
           <Text style={[type.meta, tabularNums, { color: tokens.ink3, fontFamily: monoFamily.regular }]}>

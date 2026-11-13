@@ -16,9 +16,25 @@ use std::path::Path;
 
 use crate::ToolError;
 
-/// Write `bytes` to `path`, lifting an owner-read-only bit for the duration of the write when that
-/// is what stands in the way. The mode is restored afterwards.
+/// Write `bytes` to `path` without ever leaving it truncated: the content goes to a temp file in the
+/// same directory, is fsynced, and is renamed over the target, so a full disk, an I/O error or a
+/// kill mid-write leaves the original untouched. A symlink is written through (the link stays and
+/// its target is replaced) and the original mode is kept. When the directory itself cannot take a
+/// new file, or the file is an owner-read-only one the rename cannot replace, it falls back to an
+/// in-place write, lifting an owner-read-only bit for the duration of it. The mode is restored.
 pub fn write_through(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let atomic = if keeps_identity_in_place(path) {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    } else {
+        write_atomic(path, bytes)
+    };
+    let error = match atomic {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if !is_blocked(&error) && !rename_unsupported(&error) {
+        return Err(error);
+    }
     match std::fs::write(path, bytes) {
         Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
             write_owner_readonly(path, bytes).map_err(|_| error)
@@ -27,27 +43,133 @@ pub fn write_through(path: &Path, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
-/// The tool-facing write: the plain write, then the owner-read-only retry, and an error that names
-/// the path and what blocks it instead of a bare `Permission denied (os error 13)`.
+/// The tool-facing write: [`write_through`] off the async runtime, and an error that names the path
+/// and what blocks it instead of a bare `Permission denied (os error 13)`.
 pub(crate) async fn write(
     path: impl AsRef<Path>,
     bytes: impl AsRef<[u8]>,
 ) -> Result<(), ToolError> {
-    let (path, bytes) = (path.as_ref(), bytes.as_ref());
-    let error = match tokio::fs::write(path, bytes).await {
-        Ok(()) => return Ok(()),
-        Err(error) => error,
-    };
-    if !is_blocked(&error) {
-        return Err(error.into());
-    }
-    let (owned_path, owned_bytes) = (path.to_path_buf(), bytes.to_vec());
-    let retried =
-        tokio::task::spawn_blocking(move || write_owner_readonly(&owned_path, &owned_bytes)).await;
-    match retried {
+    let (path, bytes) = (path.as_ref().to_path_buf(), bytes.as_ref().to_vec());
+    let outcome = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || write_through(&path, &bytes)
+    })
+    .await;
+    match outcome {
         Ok(Ok(())) => Ok(()),
-        _ => Err(ToolError::Failed(explain_denied(path, &error))),
+        Ok(Err(error)) if is_blocked(&error) => {
+            Err(ToolError::Failed(explain_denied(&path, &error)))
+        }
+        Ok(Err(error)) => Err(error.into()),
+        Err(join) => Err(ToolError::Failed(format!("write task failed: {join}"))),
     }
+}
+
+/// Where a write to `path` lands: the end of a symlink chain, including a dangling link whose
+/// target does not exist yet (which a plain write would create).
+fn resolve_target(path: &Path) -> io::Result<std::path::PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let link = std::fs::read_link(&current)?;
+                current = match current.parent() {
+                    Some(parent) => parent.join(link),
+                    None => link,
+                };
+            }
+            Ok(_) => return std::fs::canonicalize(&current),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(current),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::other("too many levels of symbolic links"))
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    write_atomic_with(path, bytes, |file, bytes| {
+        use std::io::Write as _;
+        file.write_all(bytes)
+    })
+}
+
+fn write_atomic_with(
+    path: &Path,
+    bytes: &[u8],
+    fill: impl FnOnce(&mut std::fs::File, &[u8]) -> io::Result<()>,
+) -> io::Result<()> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let target = resolve_target(path)?;
+    let existing = match std::fs::metadata(&target) {
+        Ok(meta) if meta.is_file() => Some(meta),
+        // A device, FIFO or directory is not ours to replace; the plain write decides.
+        Ok(_) => return std::fs::write(&target, bytes),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
+    let Some(name) = target.file_name() else {
+        return std::fs::write(&target, bytes);
+    };
+    let dir = match target.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(name);
+    temp_name.push(format!(
+        ".forge-tmp-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let temp = dir.join(temp_name);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let finish = (|| {
+        #[cfg(unix)]
+        if let Some(meta) = &existing {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(
+                meta.permissions().mode() & 0o7777,
+            ))?;
+        }
+        fill(&mut file, bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, &target)
+    })();
+    if finish.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    finish
+}
+
+/// A file whose identity a rename would change in a way the user can see: hard links would split
+/// into a separate copy, and a file owned by someone else would become ours. Those keep the old
+/// in-place write.
+fn keeps_identity_in_place(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let me = unsafe { libc::geteuid() };
+            return meta.is_file() && (meta.nlink() > 1 || meta.uid() != me);
+        }
+    }
+    let _ = path;
+    false
+}
+
+/// Renames some places refuse (a bind-mounted single file, filesystems without rename-over):
+/// the in-place write still works there, as it did before writes became atomic.
+fn rename_unsupported(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ResourceBusy | io::ErrorKind::Unsupported | io::ErrorKind::CrossesDevices
+    )
 }
 
 fn is_blocked(error: &io::Error) -> bool {
@@ -201,24 +323,101 @@ mod tests {
     }
 
     #[test]
-    fn writing_through_keeps_the_inode_and_follows_a_symlink() {
+    fn writing_through_follows_a_symlink() {
         if running_as_root() {
             return;
         }
-        use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
         let target = read_only_file(dir.path(), "old");
         let link = dir.path().join("link.conf");
         std::os::unix::fs::symlink(&target, &link).unwrap();
-        let inode = std::fs::metadata(&target).unwrap().ino();
         write_through(&link, b"new").unwrap();
         assert!(std::fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
             .is_symlink());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
-        assert_eq!(std::fs::metadata(&target).unwrap().ino(), inode);
         assert_eq!(mode(&target), 0o444);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hard_linked_file_is_updated_in_place_so_its_links_stay_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        let link = dir.path().join("b.txt");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::hard_link(&file, &link).unwrap();
+        write_through(&file, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&link).unwrap(), "new");
+    }
+
+    #[test]
+    fn a_dangling_symlink_gets_its_target_created() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("made.txt");
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink("made.txt", &link).unwrap();
+        write_through(&link, b"hi").unwrap();
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "hi");
+    }
+
+    #[test]
+    fn a_new_file_is_created_and_leaves_no_temp_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new.txt");
+        write_through(&path, b"x").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_write_that_dies_midway_leaves_the_original_and_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("src.rs");
+        std::fs::write(&path, "original").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let result = write_atomic_with(&path, b"replacement", |file, bytes| {
+            use std::io::Write as _;
+            file.write_all(&bytes[..4])?;
+            Err(io::Error::from_raw_os_error(libc::ENOSPC))
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        assert_eq!(mode(&path), 0o640);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn a_successful_write_keeps_the_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run.sh");
+        std::fs::write(&path, "a").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        write_through(&path, b"b").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "b");
+        assert_eq!(mode(&path), 0o750);
+    }
+
+    #[test]
+    fn a_read_only_directory_still_takes_an_in_place_write_to_a_writable_file() {
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let path = locked.join("f.txt");
+        std::fs::write(&path, "old").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = write_through(&path, b"new");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
     }
 
     #[test]

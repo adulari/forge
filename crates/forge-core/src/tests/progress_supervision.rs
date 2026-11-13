@@ -240,6 +240,27 @@ async fn an_attended_read_only_investigation_is_nudged_but_never_stopped() {
 }
 
 #[tokio::test]
+async fn a_headless_stall_leaves_its_reason_in_the_stored_history() {
+    let provider = Scripted::new(Box::new(|n| Some(novel_read(n))));
+    let mut h = Harness::new(provider, PermissionMode::Bypass, false, |config| {
+        config.mesh.idle_nudge_steps = 6;
+        config.mesh.idle_stop_steps = 12;
+    });
+    write_novel_file(h.dir.path());
+    h.session.run_turn("read everything").await.unwrap();
+    let stored = h.session.store.load_all_messages(&h.session.id).unwrap();
+    let last = stored.last().expect("history is not empty");
+    assert!(
+        last.role == Role::Assistant
+            && last
+                .content
+                .contains("Stopped: no file change or finished task for 12 steps"),
+        "the session must not end on a bare tool result: {:?}",
+        (last.role, &last.content)
+    );
+}
+
+#[tokio::test]
 async fn a_headless_read_only_turn_is_stopped_with_a_stalled_outcome_and_a_way_back() {
     let provider = Scripted::new(Box::new(|n| Some(novel_read(n))));
     let mut h = Harness::new(provider, PermissionMode::Bypass, false, |config| {

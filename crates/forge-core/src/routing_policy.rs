@@ -260,6 +260,9 @@ impl Session {
         let env = format!("<env>\nworking_directory: {cwd}\nplatform: {os}\n</env>");
         let base = crate::commit_policy::apply(FORGE_SYSTEM, self.commit_policy());
         let mut base = base.into_owned();
+        if !self.task_tool_on() {
+            base = crate::strip_task_bullet(&base);
+        }
         if self.harness_flags.completion_contract {
             base.push_str(crate::stop_guards::COMPLETION_CONTRACT);
         }
@@ -310,6 +313,9 @@ impl Session {
         // must not be told to edit by line anchor.
         if !forge_provider::is_cli_bridge(model) {
             preamble[0].content.push_str(self.edit_mode_note());
+            if specs.iter().any(|s| s.name == crate::recall::RECALL_TOOL) {
+                preamble[0].content.push_str(crate::recall::SYSTEM_LINE);
+            }
         }
         // Codemode guidance rides with the tool itself: present exactly when `run_code` is
         // advertised, static text so the cached prefix stays stable. A bridge is handed the
@@ -496,6 +502,7 @@ Rules:\n\
             "auto-classify" => Some(64),
             "memory" | "shell-diagnose" => Some(256),
             "btw" | crate::goal_evaluator::GOAL_EVALUATOR_PURPOSE => Some(2_048),
+            crate::goal_contract::GOAL_CONTRACT_PURPOSE => Some(4_096),
             "vision-describe" => Some(1_500),
             _ => None,
         };

@@ -36,6 +36,9 @@ vi.mock("../../lib/haptics", () => ({ haptics: { select: vi.fn(), deny: vi.fn() 
 vi.mock("../../theme/ThemeProvider", () => ({
   useTokens: () => ({ ink: "ink", ink2: "ink2", ink3: "ink3", accent: "accent", danger: "danger", success: "success", border: "border", bg3: "bg3" }),
 }));
+vi.mock("../chat/ScreenshotThumb", () => ({
+  ScreenshotThumb: ({ path }: { path: string }) => React.createElement("img", { alt: path }),
+}));
 vi.mock("../chat/MiniPressable", () => ({
   MiniPressable: (props: Props & { testID?: string; onPress?: () => void }) => {
     if (props.testID && props.onPress) buttons.set(props.testID, props.onPress);
@@ -94,6 +97,145 @@ describe("GoalBanner", () => {
       { kind: "prompt", text: "/goal resume" },
       { kind: "prompt", text: "/goal clear" },
     ]);
+  });
+
+  it("draws the spend envelope with its meter line", () => {
+    const envelope = { unit: "percent" as const, used: 12, slice: 20, label: "claude weekly", meter: "envelope 12/20% claude weekly", spent: false, unverified: false, resets_at: null };
+    const { html } = render(snapshot({ goal: goal({ envelope }) }));
+    expect(html).toContain("envelope 12/20% claude weekly");
+    expect(html).not.toContain("unverified");
+  });
+
+  it("shows why a goal paused at its envelope cap and offers resume", () => {
+    const envelope = { unit: "percent" as const, used: 20, slice: 20, label: "claude weekly", meter: "envelope 20/20% claude weekly", spent: true, unverified: false, resets_at: 1_800_000_000 };
+    const reason = "Envelope spent (20% of Claude weekly). The window resets at Thu 09:00, then /goal resume";
+    const { html } = render(snapshot({ goal: goal({ state: "paused", reason, envelope }) }));
+    expect(html).toContain("Envelope spent (20% of Claude weekly)");
+    expect(html).toContain("envelope 20/20% claude weekly");
+    expect(buttons.has("goal-resume")).toBe(true);
+  });
+
+  it("shows a QA behaviour row with its probe proof and screenshot", () => {
+    const contract = {
+      headline: "0/1 pass",
+      approved: true,
+      rounds: 1,
+      passed: 0,
+      total: 1,
+      checked_at: 1_700_000_000,
+      assertions: [
+        {
+          id: 1,
+          text: "/health says ok v2",
+          command: "behaviour: run `server`, probe `GET /health`",
+          expect: "ok v2",
+          state: "fail" as const,
+          reason: 'probe output does not contain "ok v2"',
+          proof: "probe: GET /health\nHTTP 200\nok v1",
+          artifact: "/ev/qa-1.png",
+          behaviour: true,
+        },
+      ],
+    };
+    const { html } = render(snapshot({ goal: goal({ contract }) }));
+    expect(html).toContain("ok v1");
+    expect(html).toContain("/ev/qa-1.png");
+  });
+
+  it("marks an assertion whose probe could not run as unverified, not passed", () => {
+    const contract = {
+      headline: "1/1 pass (1 unverified)",
+      approved: true,
+      rounds: 1,
+      passed: 1,
+      total: 1,
+      checked_at: 1_700_000_000,
+      assertions: [
+        {
+          id: 1,
+          text: "page shows the button",
+          command: "behaviour: run `x`, probe `screenshot u`",
+          expect: "",
+          state: "unverified" as const,
+          reason: "unverified: the browser tool is not available",
+          proof: "skipped: the browser tool is not available",
+          behaviour: true,
+        },
+      ],
+    };
+    const { html } = render(snapshot({ goal: goal({ contract }) }));
+    expect(html).toContain("unverified: the browser tool is not available");
+    expect(html).toContain("?");
+    expect(html).not.toContain("✓");
+  });
+
+  it("draws the contract table with a mark, the check and the proof per assertion", () => {
+    const contract = {
+      headline: "1/2 pass",
+      approved: true,
+      rounds: 1,
+      passed: 1,
+      total: 2,
+      checked_at: 1_700_000_000,
+      assertions: [
+        { id: 1, text: "a exists", command: "test -f a.txt", expect: "", state: "pass" as const, reason: "", proof: "" },
+        { id: 2, text: "b says ready", command: "cat b.txt", expect: "", state: "fail" as const, reason: "exit 1", proof: "cat: b.txt: No such file" },
+      ],
+    };
+    const { html } = render(snapshot({ goal: goal({ contract }) }));
+    expect(html).toContain("Contract · 1/2 pass");
+    expect(html).toContain("1. a exists");
+    expect(html).toContain("2. b says ready");
+    expect(html).toContain("cat b.txt");
+    expect(html).toContain("exit 1 · cat: b.txt: No such file");
+    expect(html).toContain("✓");
+    expect(html).toContain("✗");
+  });
+
+  it("groups a mission's assertions under their milestone with the progress line", () => {
+    const row = (id: number, state: "pass" | "fail" | "pending") => ({
+      id,
+      text: `fact ${id}`,
+      command: `test -f f${id}`,
+      expect: "",
+      state,
+      reason: state === "fail" ? "exit 1" : "",
+      proof: "",
+    });
+    const contract = {
+      headline: "milestone 2/3: 1/2 pass",
+      approved: true,
+      rounds: 2,
+      passed: 3,
+      total: 6,
+      checked_at: 1_700_000_000,
+      assertions: [row(1, "pass"), row(2, "pass"), row(3, "pass"), row(4, "fail"), row(5, "pending"), row(6, "pending")],
+      mission: {
+        current: 2,
+        total: 3,
+        progress: "milestone 2/3: 1/2 pass",
+        milestones: [
+          { index: 1, title: "lexer", state: "done" as const, passed: 2, total: 2, assertion_ids: [1, 2] },
+          { index: 2, title: "parser", state: "active" as const, passed: 1, total: 2, assertion_ids: [3, 4] },
+          { index: 3, title: "cli", state: "upcoming" as const, passed: 0, total: 2, assertion_ids: [5, 6] },
+        ],
+      },
+    };
+    const { html } = render(snapshot({ goal: goal({ contract }) }));
+    expect(html).toContain("Mission · milestone 2/3: 1/2 pass");
+    expect(html).toContain("Milestone 1 · lexer · done 2/2");
+    expect(html).toContain("Milestone 2 · parser · current 1/2 pass");
+    expect(html).toContain("Milestone 3 · cli · upcoming, 2 assertions");
+    expect(html.indexOf("Milestone 2 ·")).toBeLessThan(html.indexOf("4. fact 4"));
+    expect(html.indexOf("4. fact 4")).toBeLessThan(html.indexOf("Milestone 3 ·"));
+  });
+
+  it("omits the contract table for a goal without one", () => {
+    expect(render(snapshot({ goal: goal() })).html).not.toContain("Contract");
+  });
+
+  it("omits the envelope row for a goal without one", () => {
+    expect(render(snapshot({ goal: goal() })).html).not.toContain("envelope");
   });
 
   it("says a pause is pending and leaves only stop", () => {

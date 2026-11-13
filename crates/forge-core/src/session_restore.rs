@@ -41,7 +41,10 @@ impl Session {
 /// for blank input.
 pub(crate) fn prompt_title(original: &str) -> Option<String> {
     const MAX: usize = 64;
-    let collapsed: String = original.split_whitespace().collect::<Vec<_>>().join(" ");
+    let collapsed: String = without_upload_mentions(original)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if collapsed.is_empty() {
         return None;
     }
@@ -52,6 +55,26 @@ pub(crate) fn prompt_title(original: &str) -> Option<String> {
         ))
     } else {
         Some(collapsed)
+    }
+}
+
+/// `text` without the leading `@…/.forge/uploads/…` mentions a phone or desktop attachment puts in
+/// front of the typed prompt (braced when the path has whitespace): a title is what was asked,
+/// not where the attachment was saved.
+fn without_upload_mentions(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    loop {
+        let mention_end = if let Some(braced) = rest.strip_prefix("@{") {
+            braced.find('}').map(|end| end + 3)
+        } else if rest.starts_with('@') {
+            Some(rest.find(char::is_whitespace).unwrap_or(rest.len()))
+        } else {
+            None
+        };
+        match mention_end {
+            Some(end) if rest[..end].contains(".forge/uploads/") => rest = rest[end..].trim_start(),
+            _ => return rest,
+        }
     }
 }
 
@@ -66,6 +89,14 @@ mod prompt_title_tests {
             Some("fix the parser".into())
         );
         assert_eq!(prompt_title("   \n"), None);
+        assert_eq!(
+            prompt_title("@/r/.forge/uploads/s/1-a.txt @{/home/f/Trading Bots/.forge/uploads/s/2-b.txt}\nsummarize these"),
+            Some("summarize these".into())
+        );
+        assert_eq!(
+            prompt_title("@alice please review"),
+            Some("@alice please review".into())
+        );
         let long = "x".repeat(200);
         assert_eq!(prompt_title(&long).unwrap().chars().count(), 64);
     }

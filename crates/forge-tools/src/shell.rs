@@ -44,7 +44,9 @@ mod group;
 mod inline;
 mod job_view;
 mod job_wait;
+mod live;
 pub use job_view::{job_tail, job_views, stop_job, JobView};
+pub use live::{scope_live_tail, LiveTail, LIVE_TAIL_LINES};
 mod poll;
 mod proc_util;
 mod wait;
@@ -65,7 +67,7 @@ pub use rtk::RtkRewriter;
 mod batch;
 mod capture;
 pub(crate) mod output;
-use capture::read_capped;
+use capture::{read_capped, SharedCapture};
 pub(crate) use group::{kill_process_group, put_in_own_process_group};
 use group::{terminate, GroupKillOnDrop};
 use output::{render_streams, stream_text, truncate_for_model};
@@ -481,8 +483,11 @@ async fn run_command_inner(
             None,
         );
     };
-    let out_task = tokio::spawn(read_capped(stdout));
-    let err_task = tokio::spawn(read_capped(stderr));
+    let out_capture = SharedCapture::default();
+    let err_capture = SharedCapture::default();
+    let live = live::current();
+    let out_task = tokio::spawn(read_capped(stdout, out_capture.clone(), live.clone()));
+    let err_task = tokio::spawn(read_capped(stderr, err_capture.clone(), live));
 
     let (status_line, exit_code, timed_out) =
         match tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait()).await {
@@ -533,8 +538,10 @@ async fn run_command_inner(
     // Bound the reader joins: even after the group kill, a process that escaped the group could
     // still hold a pipe open. A short timeout guarantees a leaked pipe can never stall the turn;
     // we take whatever was captured so far. Mirrors the PTY path's reader-drain guard.
-    let (out_bytes, out_capped, out_error) = drain_reader(out_task).await;
-    let (err_bytes, err_capped, err_error) = drain_reader(err_task).await;
+    let ((out_bytes, out_capped, out_error), (err_bytes, err_capped, err_error)) = tokio::join!(
+        drain_reader(out_task, &out_capture),
+        drain_reader(err_task, &err_capture)
+    );
     let duration_ms = start.elapsed().as_millis();
 
     let rendered = render_streams(&out_bytes, &err_bytes);
@@ -575,14 +582,23 @@ const PIPE_HELD_HINT: &str =
      this command started has detached and inherited it (a browser, server, or daemon). Redirect \
      it away from the pipe, e.g. `cmd >/dev/null 2>&1 &`, or run it under `setsid`";
 
+/// Wait a bounded time for a reader to hit EOF, then return what it captured. A reader still
+/// blocked on a pipe something detached is holding is stopped; its output so far is kept.
 async fn drain_reader(
-    task: tokio::task::JoinHandle<(Vec<u8>, bool)>,
+    task: tokio::task::JoinHandle<()>,
+    captured: &SharedCapture,
 ) -> (Vec<u8>, bool, Option<String>) {
-    match tokio::time::timeout(READER_DRAIN_TIMEOUT, task).await {
-        Ok(Ok((bytes, capped))) => (bytes, capped, None),
-        Ok(Err(error)) => (Vec::new(), false, Some(error.to_string())),
-        Err(_) => (Vec::new(), false, Some(PIPE_HELD_HINT.to_string())),
-    }
+    let abort = task.abort_handle();
+    let error = match tokio::time::timeout(READER_DRAIN_TIMEOUT, task).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error.to_string()),
+        Err(_) => {
+            abort.abort();
+            Some(PIPE_HELD_HINT.to_string())
+        }
+    };
+    let (bytes, capped) = capture::lock(captured).snapshot();
+    (bytes, capped, error)
 }
 
 /// Kill a child process by PID after a PTY timeout.
@@ -956,6 +972,20 @@ mod tests {
             assert!(watched_jobs("test -f done", Some(dir.path()), &cwd).is_empty());
         }
 
+        #[cfg(target_os = "linux")]
+        #[tokio::test]
+        async fn output_survives_a_detached_process_holding_the_pipe() {
+            let out = run_command(
+                "echo 'tests: 3 passed'; setsid sleep 8 & echo done",
+                ".",
+                30,
+                &no_sandbox(),
+            )
+            .await;
+            assert!(out.contains("tests: 3 passed"), "{out}");
+            assert!(out.contains("output pipe still open"), "{out}");
+        }
+
         #[tokio::test]
         async fn runs_and_captures_stdout_and_exit() {
             let out = run_command("echo hello", ".", 30, &no_sandbox()).await;
@@ -1072,13 +1102,16 @@ mod tests {
         /// feature, which is not worth adding to the workspace for one assertion about wording.
         #[tokio::test]
         async fn a_stuck_reader_is_explained_not_just_timed_out() {
-            let never = tokio::spawn(async {
-                std::future::pending::<()>().await;
-                unreachable!()
-            });
-            let (bytes, capped, error) = drain_reader(never).await;
+            let captured = SharedCapture::default();
+            capture::lock(&captured).push(b"3 passed, 1 failed\n");
+            let never = tokio::spawn(std::future::pending::<()>());
+            let (bytes, capped, error) = drain_reader(never, &captured).await;
 
-            assert!(bytes.is_empty() && !capped);
+            assert_eq!(
+                bytes, b"3 passed, 1 failed\n",
+                "output read before the stall is kept"
+            );
+            assert!(!capped);
             let error = error.expect("a stuck reader must report something");
             assert!(
                 error.contains("output pipe still open"),

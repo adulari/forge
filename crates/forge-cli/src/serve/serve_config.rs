@@ -19,6 +19,29 @@ pub(super) fn mutation_lock() -> &'static Mutex<()> {
 #[derive(serde::Serialize)]
 struct ConfigResponse {
     fields: Vec<ConfigField>,
+    /// A setting that is saved but cannot work yet, shown under the field it belongs to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<ConfigWarning>,
+}
+
+#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+struct ConfigWarning {
+    key: String,
+    text: String,
+}
+
+/// `[harness.expert]` problems, on the model and the budget row: either may be the one to fix.
+fn expert_warnings(config: &forge_config::Config) -> Vec<ConfigWarning> {
+    let Some(text) = forge_core::expert_config_problem(config) else {
+        return Vec::new();
+    };
+    ["harness.expert.model", "harness.expert.budget"]
+        .into_iter()
+        .map(|key| ConfigWarning {
+            key: key.to_string(),
+            text: text.clone(),
+        })
+        .collect()
 }
 
 #[derive(serde::Serialize)]
@@ -94,6 +117,7 @@ const DIRECT_ONLY_SECTIONS: &[&str] = &[
     "codemode",
     "preview",
     "host",
+    "pressure",
     "pr",
     "self_mcp",
     "anywhere",
@@ -199,6 +223,9 @@ fn setting_kind(kind: forge_config::SettingKind) -> (&'static str, Vec<String>) 
 
 fn config_response() -> ConfigResponse {
     ConfigResponse {
+        warnings: forge_config::load()
+            .map(|config| expert_warnings(&config))
+            .unwrap_or_default(),
         fields: forge_config::config_descriptors()
             .into_iter()
             .map(|descriptor| {
@@ -222,7 +249,20 @@ fn config_response() -> ConfigResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_response, setting_kind};
+    use super::{config_response, expert_warnings, setting_kind};
+
+    #[test]
+    fn an_unusable_expert_is_a_warning_on_its_model_and_budget_rows() {
+        let mut config = forge_config::Config::default();
+        assert!(expert_warnings(&config).is_empty());
+        config.harness.expert.model = "codex-oauth::gpt-5.6-sol".into();
+        let warnings = expert_warnings(&config);
+        let keys: Vec<&str> = warnings.iter().map(|w| w.key.as_str()).collect();
+        assert_eq!(keys, ["harness.expert.model", "harness.expert.budget"]);
+        assert!(warnings[0].text.contains("set harness.expert.budget"));
+        config.harness.expert.budget = "codex:5%w".into();
+        assert!(expert_warnings(&config).is_empty());
+    }
 
     #[test]
     fn every_descriptor_is_projected_once_with_its_writable_key() {

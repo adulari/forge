@@ -7,6 +7,8 @@ import { parseReasoning } from "../../lib/reasoning";
 import type { StreamStore } from "../../lib/streamStore";
 import { useStreamText } from "../../lib/useStreamText";
 import { space } from "../../theme/tokens";
+import type { SnapshotLiveTail } from "../../lib/ws";
+import { LiveToolTail } from "./LiveToolTail";
 import { StreamingAnswer, TurnActivity } from "./LiveTurn";
 import { SpeakerTag } from "./MessageRow";
 import { ReasoningDisclosure } from "./ReasoningDisclosure";
@@ -20,9 +22,11 @@ export interface StreamingRowProps {
   activity: string | undefined;
   toolLine: string | null;
   startedAt: number;
+  /** The running call's rolling output, shown under the activity line. */
+  liveTail?: SnapshotLiveTail | null;
 }
 
-function StreamingRowImpl({ store, fallbackText, streaming, busy, activity, toolLine, startedAt }: StreamingRowProps) {
+function StreamingRowImpl({ store, fallbackText, streaming, busy, activity, toolLine, startedAt, liveTail }: StreamingRowProps) {
   const live = useStreamText(store);
   const text = (busy ? live : "") || fallbackText;
   // Split inline `<think>…</think>` out of the live text: reasoning goes to the collapsed
@@ -39,6 +43,7 @@ function StreamingRowImpl({ store, fallbackText, streaming, busy, activity, tool
       {hasReasoning ? <ReasoningDisclosure reasoning={parsed.reasoning} active={parsed.thinking && streaming} /> : null}
       {parsed.answer ? <StreamingAnswer text={parsed.answer} streaming={streaming && !showActivity} /> : null}
       {showActivity ? <TurnActivity activity={activity} toolLine={toolLine} startedAt={startedAt} /> : null}
+      {showActivity && liveTail ? <LiveToolTail tail={liveTail} /> : null}
     </View>
   );
 }

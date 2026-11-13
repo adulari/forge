@@ -30,7 +30,13 @@ import {
   type WorkflowRow,
   getWorkflows,
   type ModelsResponse,
+  type ModelReportResponse,
   getModels,
+  getModelReport,
+  type SessionTurnsResponse,
+  type TurnsSummaryResponse,
+  getSessionTurns,
+  getTurnsSummary,
   type ProvidersResponse,
   type StoreProviderKeyRequest,
   type SetProviderEnabledRequest,
@@ -85,6 +91,8 @@ import {
   getJobTail,
   getProjectChanges,
   getSessionJobs,
+  searchSessionHistory,
+  type HistorySearchResponse,
   getGitDiff,
   type GitPathsRequest,
   type GitCommitRequest,
@@ -127,6 +135,8 @@ import {
   type DiagnosticsResponse,
   getDiagnostics,
   getIdentity,
+  getReclaimPreview,
+  reclaimHostSpace,
   type AccountSyncStatus,
   getAccountSync,
   updateAccountSync,
@@ -171,6 +181,7 @@ import { pastSessionsRefetchPolicy, sessionsRefetchPolicy, sessionsRetryPolicy }
 import { peekFleetRows, rememberFleetRows } from "./anywhere/fleetRowCache";
 import { markColdStart } from "./anywhere/relayMetrics";
 import { supportsDirectDaemonEndpoints } from "./transport";
+import { supportsFleetInvalidationSocket } from "./fleetTransport";
 import type { Snapshot } from "./ws";
 import { syncWidgetSessions } from "./widgetData";
 import {
@@ -183,6 +194,7 @@ import {
 import { historyPageSize } from "./historyPaging";
 import { formatCwd } from "../theme/typography";
 import { usageRefetchInterval, useDesktopShellPrefs } from "./desktopShellPrefs";
+import type { HostPressure } from "./hostPressure";
 
 // FleetWatcher receives immediate daemon invalidations over /ws/fleet. This slow poll is only a
 // recovery net for proxies/platforms that cannot keep a WebSocket alive.
@@ -215,6 +227,9 @@ function keys(baseUrl: string | null) {
     skills: ["skills", baseUrl] as const,
     workflows: (sessionId?: string) => ["workflows", baseUrl, sessionId ?? null] as const,
     models: ["models", baseUrl] as const,
+    modelReport: (days: number) => ["models", "report", baseUrl, days] as const,
+    sessionTurns: (sessionId: string) => ["sessions", "turns", baseUrl, sessionId] as const,
+    turnsSummary: (days: number) => ["turns", "summary", baseUrl, days] as const,
     providers: ["providers", baseUrl] as const,
     hooks: ["hooks", baseUrl] as const,
     crews: ["crews", baseUrl] as const,
@@ -243,6 +258,7 @@ function keys(baseUrl: string | null) {
     diagnostics: ["diagnostics", baseUrl] as const,
     daemonUpdate: ["daemon-update", baseUrl] as const,
     identity: ["identity", baseUrl] as const,
+    hostPressure: ["host-pressure", baseUrl] as const,
   };
 }
 
@@ -296,6 +312,47 @@ export function useIdentityUpdateHint(enabled = true) {
     staleTime: SIX_HOURS_MS,
     refetchInterval: SIX_HOURS_MS,
     retry: false,
+  });
+}
+
+const PRESSURE_REFRESH_MS = 60_000;
+
+/** The host's disk and memory pressure, from `/api/identity` (bridged, so a relayed phone sees it). */
+export function useHostPressure(enabled = true) {
+  const { baseUrl } = useAuth();
+  return useQuery<HostPressure | null>({
+    queryKey: keys(baseUrl).hostPressure,
+    queryFn: async () => (await getIdentity(baseUrl as string)).pressure ?? null,
+    enabled: enabled && baseUrl != null,
+    staleTime: PRESSURE_REFRESH_MS / 2,
+    refetchInterval: PRESSURE_REFRESH_MS,
+    retry: false,
+  });
+}
+
+/** What Reclaim would free, fetched while the confirmation is open. */
+export function useReclaimPreview(enabled: boolean) {
+  const { baseUrl } = useAuth();
+  return useQuery({
+    queryKey: [...keys(baseUrl).hostPressure, "reclaim-preview"],
+    queryFn: async () => (await getReclaimPreview(baseUrl as string)).reclaimable_bytes ?? null,
+    enabled: enabled && baseUrl != null,
+    staleTime: 0,
+    gcTime: 0,
+    retry: false,
+  });
+}
+
+/** Reclaim worktree space on the host; direct connections only (see `canReclaimFrom`). */
+export function useReclaimHostSpace() {
+  const { baseUrl } = useAuth();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (cwd?: string) => reclaimHostSpace(baseUrl as string, cwd),
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).hostPressure });
+      queryClient.invalidateQueries({ queryKey: keys(baseUrl).diagnostics });
+    },
   });
 }
 
@@ -373,7 +430,7 @@ export function useSessions() {
     ...sessionsRetryPolicy,
     enabled: baseUrl != null,
     refetchIntervalInBackground: false,
-    ...sessionsRefetchPolicy({ peeking, isFocused }),
+    ...sessionsRefetchPolicy({ peeking, isFocused, hasFleetSocket: baseUrl == null || supportsFleetInvalidationSocket(baseUrl) }),
   });
   useEffect(() => {
     // The widget mirrors what the user is looking at, not what slid past under a thumb.
@@ -420,7 +477,7 @@ function useRoutedModelCatalogSync(sessions: SessionRow[] | undefined) {
 }
 
 /** Per-server fleet probes for the Settings server switcher. */
-export function useServerFleets(servers: { id: string; baseUrl: string; disabled?: boolean }[]) {
+export function useServerFleets(servers: { id: string; baseUrl: string; disabled?: boolean }[], pollMs = SERVER_FLEET_POLL_MS) {
   const isFocused = useIsFocused();
   return useQueries({
     queries: servers.map((server) => ({
@@ -432,7 +489,7 @@ export function useServerFleets(servers: { id: string; baseUrl: string; disabled
       enabled: !server.disabled,
       refetchInterval: isFocused
         ? (query: { state: { error: unknown } }) =>
-            query.state.error ? SERVER_FLEET_BACKOFF_MS : SERVER_FLEET_POLL_MS
+            query.state.error ? Math.max(SERVER_FLEET_BACKOFF_MS, pollMs) : pollMs
         : false,
       refetchIntervalInBackground: false,
       retry: false,
@@ -618,6 +675,44 @@ export function useModels() {
     refetchOnMount: true,
     refetchOnReconnect: true,
     refetchOnWindowFocus: isFocused,
+  });
+}
+
+/** Per-model report card. Older hosts answer an error, which the Models page treats as "no data". */
+export function useModelReport(days: number) {
+  const { baseUrl } = useAuth();
+  const isFocused = useIsFocused();
+  return useQuery<ModelReportResponse>({
+    queryKey: keys(baseUrl).modelReport(days),
+    queryFn: () => getModelReport(baseUrl as string, days),
+    enabled: baseUrl != null,
+    staleTime: 60_000,
+    retry: false,
+    refetchOnWindowFocus: isFocused,
+  });
+}
+
+/** How one session's recent turns ended (the "Turn endings" sheet). Only fetched while it is open. */
+export function useSessionTurns(sessionId: string, enabled: boolean) {
+  const { baseUrl } = useAuth();
+  return useQuery<SessionTurnsResponse>({
+    queryKey: keys(baseUrl).sessionTurns(sessionId),
+    queryFn: () => getSessionTurns(baseUrl as string, sessionId),
+    enabled: baseUrl != null && enabled,
+    staleTime: 0,
+    retry: false,
+  });
+}
+
+/** Turn endings across the host's sessions over the last `days` days. */
+export function useTurnsSummary(days: number, enabled: boolean) {
+  const { baseUrl } = useAuth();
+  return useQuery<TurnsSummaryResponse>({
+    queryKey: keys(baseUrl).turnsSummary(days),
+    queryFn: () => getTurnsSummary(baseUrl as string, days),
+    enabled: baseUrl != null && enabled,
+    staleTime: 0,
+    retry: false,
   });
 }
 
@@ -1486,6 +1581,24 @@ export function useSessionJobs(sessionId: string | null, enabled = true, pollMs:
     queryFn: () => getSessionJobs(baseUrl as string, sessionId as string),
     enabled: enabled && baseUrl != null && sessionId != null,
     refetchInterval: enabled ? pollMs : false,
+    retry: false,
+  });
+}
+
+/** Ranked word search over one session's whole history; waits for a settled query of 2+ chars. */
+export function useHistorySearch(sessionId: string | null, query: string, enabled = true) {
+  const { baseUrl } = useAuth();
+  const normalized = query.trim();
+  const [settled, setSettled] = useState(normalized);
+  useEffect(() => {
+    const timer = setTimeout(() => setSettled(normalized), 200);
+    return () => clearTimeout(timer);
+  }, [normalized]);
+  return useQuery<HistorySearchResponse>({
+    queryKey: ["history-search", baseUrl, sessionId ?? "", settled],
+    queryFn: () => searchSessionHistory(baseUrl as string, sessionId as string, settled),
+    enabled: enabled && baseUrl != null && sessionId != null && settled.length >= 2,
+    staleTime: 15_000,
     retry: false,
   });
 }

@@ -46,6 +46,7 @@ function project(row: SessionRow): SessionRow {
     ...(row.terminal !== undefined ? { terminal: row.terminal } : {}),
     ...(row.last_turn_outcome !== undefined ? { last_turn_outcome: row.last_turn_outcome } : {}),
     ...(row.last_stop_reason !== undefined ? { last_stop_reason: row.last_stop_reason } : {}),
+    ...(row.outage !== undefined ? { outage: row.outage } : {}),
     ...(row.provider !== undefined ? { provider: row.provider } : {}),
     ...(row.parent_id !== undefined ? { parent_id: row.parent_id } : {}),
     ...(row.diff_added !== undefined ? { diff_added: row.diff_added } : {}),

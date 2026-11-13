@@ -126,6 +126,13 @@ The normative envelope and API contract is
 [`licensing boundary`](../../protocol/anywhere-licensing-boundary.md) for the complete trust and
 source-code boundaries.
 
+## Ship from the phone
+
+The relay bridges the PR reads (list, detail, diff, status, PR Watch read) and the merge queue
+always. Ship and arming PR Watch commit, push and queue a merge on the host, so they are refused
+unless the owner set `[anywhere] allow_ship_over_relay = true` on that host (default `false`). See
+[Ship over Anywhere](ship.md#ship-over-anywhere) for what it does and the risk it accepts.
+
 ## Recovery, device loss, and revocation
 
 - **One device lost, another remains:** list devices from an authorized endpoint and revoke the

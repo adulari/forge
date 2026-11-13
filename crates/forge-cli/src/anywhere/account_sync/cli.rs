@@ -63,13 +63,10 @@ fn confirm_keys() -> Result<bool> {
 }
 
 async fn now() -> Result<()> {
-    let config = forge_config::load()?;
-    let port = config.remote.serve_port();
-    let token = crate::serve::daemon_token(false)?;
-    let response = reqwest::Client::new()
-        .post(format!(
-            "http://127.0.0.1:{port}/{token}/api/anywhere/sync/now"
-        ))
+    let base = crate::attach::resolve_base_url(None);
+    let token = crate::serve::read_daemon_token()?;
+    let response = crate::attach::local_http_client(&base)
+        .post(format!("{base}/{token}/api/anywhere/sync/now"))
         .send()
         .await
         .context(

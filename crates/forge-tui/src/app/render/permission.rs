@@ -485,6 +485,15 @@ pub(super) fn permission_block(app: &App, width: u16) -> Decision {
         rows.push(choice_row(i == p.focus, i + 1, label, keys, w));
     }
     debug_assert_eq!(labels.len(), PERMISSION_CHOICES.len());
+    if let Some(s) = &app.interaction_ui.suggestion {
+        let long = format!(
+            "You've allowed `{}` {}× here. Always allow in this project? (saved to .forge/config.toml)",
+            s.rule, s.allows
+        );
+        let short = format!("Always allow `{}` in this project", s.rule);
+        let label = if long.width() + 12 <= w { long } else { short };
+        rows.push(choice_row(false, 5, &label, "r", w));
+    }
     if let Some(note) = &p.note {
         rows.push(note_row(note, w));
     }
@@ -537,12 +546,16 @@ fn choice_hints(app: &App) -> Vec<Hint> {
             hint("Esc", "drop note"),
         ];
     }
+    let suggested = app.interaction_ui.suggestion.is_some();
     let mut hints = vec![
         hint("↑↓", "choose"),
         hint("Enter", "confirm"),
         hint("1-4", "pick"),
-        hint("Tab", "add note"),
     ];
+    if suggested {
+        hints.push(hint("r", "always allow this rule"));
+    }
+    hints.push(hint("Tab", "add note"));
     // Ctrl+T expands a tool card; inline has none (the diff is already in the scrollback).
     if app.fullscreen {
         hints.push(hint("Ctrl+T", "show diff"));
@@ -577,10 +590,11 @@ fn block(app: &App, width: u16) -> Option<Decision> {
     }
     app.prompt.as_ref()?;
     let note_rows = usize::from(app.permission_note().is_some());
+    let suggestion_rows = usize::from(app.interaction_ui.suggestion.is_some());
     Some(clamp(
         permission_block(app, width),
         row_budget(app),
-        PERMISSION_CHOICES.len() + note_rows,
+        PERMISSION_CHOICES.len() + note_rows + suggestion_rows,
     ))
 }
 

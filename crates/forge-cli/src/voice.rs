@@ -25,9 +25,21 @@ type LoadedModel = (PathBuf, Arc<Transcriber>);
 
 /// `Clone` is shallow (an `Arc` bump) so the cache stays shared when `ServerState` (remote.rs)
 /// is cloned — `DaemonState` (serve.rs) is never cloned, only shared via `Arc<DaemonState>`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct VoiceState {
     loaded: Arc<Mutex<Option<LoadedModel>>>,
+    /// One transcription at a time: each runs whisper on every core, so concurrent uploads (two
+    /// devices, or one client retrying) only slow each other down and pile up memory.
+    running: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for VoiceState {
+    fn default() -> Self {
+        Self {
+            loaded: Arc::default(),
+            running: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
 }
 
 impl VoiceState {
@@ -71,6 +83,22 @@ pub(crate) async fn transcribe_upload(
         .model
         .parse()
         .map_err(|e: forge_voice::VoiceError| anyhow::anyhow!("{e}"))?;
+    // The first dictation on a host needs the whisper model (~75-1500 MB). Downloading it inside
+    // this request outlasted the phone's upload timeout, and every retry started over. Fetch it
+    // in the background and answer now; the phone keeps the recording for a retry.
+    if !models_dir.join(kind.file_name()).exists() {
+        start_model_download(kind, models_dir.to_path_buf());
+        anyhow::bail!(
+            "the {} voice model is downloading on the Forge host for its first dictation; \
+             try again in a minute (the recording is kept)",
+            kind.as_str()
+        );
+    }
+    let _turn = state
+        .running
+        .acquire()
+        .await
+        .context("voice transcription is shutting down")?;
     let samples =
         tokio::task::spawn_blocking(move || forge_voice::decode_audio(&bytes, hint.as_deref()))
             .await
@@ -90,6 +118,22 @@ pub(crate) async fn transcribe_upload(
             .context("transcribe task panicked")?
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(text)
+}
+
+/// Download `kind` in the background, once at a time; a failure is logged and the next
+/// transcription request starts another attempt.
+fn start_model_download(kind: ModelKind, dir: PathBuf) {
+    static DOWNLOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering;
+    if DOWNLOADING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    tokio::spawn(async move {
+        if let Err(error) = forge_voice::ensure_model(kind, &dir, |_, _| {}).await {
+            tracing::warn!("voice model download failed: {error}");
+        }
+        DOWNLOADING.store(false, Ordering::Release);
+    });
 }
 
 /// `{data_dir}/models/whisper` — where downloaded GGML models live (voice.md).

@@ -1898,6 +1898,20 @@ impl CliProvider {
         effort: Option<EffortLevel>,
         on_event: &mut EventSink<'_>,
     ) -> Result<ModelResponse, ProviderError> {
+        self.complete_routed_inner(model, messages, tools, checkpoint, effort, on_event)
+            .await
+            .map_err(|e| with_login_hint(self.kind, e))
+    }
+
+    async fn complete_routed_inner(
+        &self,
+        model: &str,
+        messages: &[Message],
+        tools: &[ToolSpec],
+        checkpoint: Option<&CheckpointContext>,
+        effort: Option<EffortLevel>,
+        on_event: &mut EventSink<'_>,
+    ) -> Result<ModelResponse, ProviderError> {
         // P1 persistent transport (claude only, opt-out): drive the turn on a long-lived
         // `--input-format stream-json` process. `Fallback` means the live session couldn't be
         // established BEFORE any turn output ran, so retrying as one-shot can't double-execute a
@@ -2196,6 +2210,7 @@ impl CliProvider {
         let idle = self.timeout;
         let mut stalled = false;
         let mut interactive_auth = false;
+        let mut login_failed = false;
         let read = async {
             let mut lines = BufReader::new(stdout).lines();
             loop {
@@ -2287,8 +2302,14 @@ impl CliProvider {
                                 }
                                 Parsed::Thread(id) => codex_thread = Some(id),
                                 Parsed::Final(f) => final_text = Some(f),
-                                Parsed::Error(e) => in_band_error = Some(e),
+                                Parsed::Error(e) => {
+                                    login_failed |= is_login_failure(&self.binary, &e);
+                                    in_band_error = Some(e);
+                                }
                             }
+                        }
+                        if login_failed {
+                            break;
                         }
                     }
                 }
@@ -2320,6 +2341,21 @@ impl CliProvider {
             self.reset_session();
         }
 
+        if login_failed {
+            terminate(&mut child, pgid).await;
+            let stderr_text = err_task.await.unwrap_or_default();
+            let evidence = in_band_error.unwrap_or_default();
+            // Deliberately no `note_unauthenticated` here: a mid-turn 401/403 can be transient, and
+            // the process-lifetime verdict would outlive the user running the hinted login command.
+            tracing::debug!(
+                "{} turn hit a login failure: {evidence}",
+                self.kind.prefix()
+            );
+            return Err(ProviderError::Auth(format!(
+                "{evidence}{}",
+                stderr_suffix_for(&self.binary, &stderr_text)
+            )));
+        }
         if interactive_auth {
             terminate(&mut child, pgid).await;
             let stderr_text = err_task.await.unwrap_or_default();
@@ -2593,6 +2629,34 @@ fn is_cli_auth_instruction(text: &str) -> bool {
     lower.contains("not logged in") && (lower.contains("/login") || lower.contains("log in"))
 }
 
+/// Turn any bridge `Auth` failure into the one message that tells the user what to do and where:
+/// the CLI's own wording stays as evidence after it.
+fn with_login_hint(kind: CliKind, error: ProviderError) -> ProviderError {
+    match error {
+        ProviderError::Auth(evidence) if !evidence.contains("Log in on") => {
+            let evidence = evidence.trim();
+            let evidence: String = evidence.chars().take(200).collect();
+            let message = sign_in::logged_out_message(kind);
+            ProviderError::Auth(if evidence.is_empty() {
+                message
+            } else {
+                format!("{message} ({evidence})")
+            })
+        }
+        other => other,
+    }
+}
+
+/// An in-band error that means the login is dead. Waiting on the CLI after one only burns its
+/// own retry schedule (claude: ten attempts with backoff; codex: five reconnects): the owner's
+/// logged-out bridges took 863 s on average to say so.
+fn is_login_failure(binary: &str, error: &str) -> bool {
+    matches!(
+        classify_in_band_error(binary, error),
+        ProviderError::Auth(_)
+    )
+}
+
 fn classify_in_band_error(binary: &str, e: &str) -> ProviderError {
     let msg = format!("{binary} error: {e}");
     classify_in_band_error_with_message(binary, e, msg)
@@ -2691,6 +2755,8 @@ enum TurnError {
         /// otherwise replaying could repeat an irreversible side effect.
         tool_ran: bool,
     },
+    /// The CLI reported a dead login mid-turn; its own retries would only delay the verdict.
+    LoggedOut(String),
     /// stdout read errored.
     Read(std::io::Error),
     /// The process closed stdout before emitting the turn's `result`.
@@ -2709,6 +2775,7 @@ fn turn_error_to_provider(binary: &str, idle: Duration, e: TurnError) -> Provide
             "`{binary}` produced no output for {}s — killed (stalled, persistent)",
             idle.as_secs()
         )),
+        TurnError::LoggedOut(evidence) => ProviderError::Auth(evidence),
         TurnError::Read(io) => {
             ProviderError::Request(format!("reading `{binary}` output failed: {io}"))
         }
@@ -7724,6 +7791,151 @@ fi
             matches!(err, ProviderError::Auth(ref msg) if msg.contains("authentication required")),
             "CLI login failures must exclude the whole provider; got {err:?}"
         );
+    }
+
+    /// How long a logged-out bridge keeps its turn open: the fake CLI below retries for `RETRY_SECS`
+    /// with a line every half second (claude's `api_retry`, codex's reconnects, agy's prompt),
+    /// each of which used to count as liveness. The assertion is the time to the verdict.
+    #[cfg(unix)]
+    async fn logged_out_verdict(
+        kind: CliKind,
+        model: &str,
+        script: &str,
+    ) -> (ProviderError, Duration) {
+        let fake = install_fake_cli("forge-fake-logged-out", script);
+        let provider = CliProvider::new(kind).with_binary(&fake);
+        let mut on_event = |_: StreamEvent| {};
+        let started = std::time::Instant::now();
+        let err = provider
+            .complete(model, &[Message::user("hi")], &[], &mut on_event)
+            .await
+            .expect_err("a logged-out bridge must fail the call");
+        (err, started.elapsed())
+    }
+
+    #[cfg(unix)]
+    const RETRY_LOOP: &str =
+        "i=0; while [ $i -lt 16 ]; do echo '%LINE%'; sleep 0.5; i=$((i+1)); done\n";
+
+    #[cfg(unix)]
+    fn retry_script(line: &str) -> String {
+        format!("#!/bin/sh\n{}", RETRY_LOOP.replace("%LINE%", line))
+    }
+
+    #[cfg(unix)]
+    fn assert_login_hint(err: &ProviderError, command: &str) {
+        let ProviderError::Auth(msg) = err else {
+            panic!("expected a permanent auth failure, got {err:?}");
+        };
+        assert!(err.is_permanent());
+        assert!(msg.contains("Log in on "), "{msg}");
+        assert!(msg.contains(&format!("run `{command}`")), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn claude_retrying_a_rejected_login_fails_in_seconds_with_the_login_hint() {
+        let line = r#"{"type":"system","subtype":"api_retry","attempt":1,"max_retries":10,"retry_delay_ms":500,"error_status":401,"error":"authentication_failed"}"#;
+        let (err, took) =
+            logged_out_verdict(CliKind::ClaudeCode, "claude-cli::opus", &retry_script(line)).await;
+        assert_login_hint(&err, "claude setup-token");
+        assert!(
+            took < Duration::from_secs(3),
+            "took {took:?}; the fake retries for 8s"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn codex_reconnecting_on_a_401_fails_in_seconds_with_the_login_hint() {
+        let line = r#"{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: Missing bearer or basic authentication)"}"#;
+        let (err, took) =
+            logged_out_verdict(CliKind::Codex, "codex-cli::gpt-5.5", &retry_script(line)).await;
+        assert_login_hint(&err, "codex login");
+        assert!(
+            took < Duration::from_secs(3),
+            "took {took:?}; the fake retries for 8s"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn agy_asking_to_sign_in_fails_in_seconds_with_the_login_hint() {
+        let line =
+            "Please sign in to view available models. Launch the CLI without arguments to sign in.";
+        let (err, took) = logged_out_verdict(
+            CliKind::Antigravity,
+            "agy-cli::gemini-3.1-pro",
+            &retry_script(line),
+        )
+        .await;
+        assert_login_hint(&err, "agy login");
+        assert!(
+            took < Duration::from_secs(3),
+            "took {took:?}; the fake retries for 8s"
+        );
+    }
+
+    /// The fast fail names the login command; running it must work without a daemon restart, so
+    /// the turn path may not leave a process-lifetime "logged out" verdict behind.
+    #[cfg(unix)]
+    #[test]
+    fn a_mid_turn_login_failure_does_not_unroute_the_bridge() {
+        let _guard = credentials::test_guard();
+        credentials::reset_live_verdicts();
+        let kind = CliKind::Antigravity;
+        let line =
+            "Please sign in to view available models. Launch the CLI without arguments to sign in.";
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (err, _) = rt.block_on(logged_out_verdict(
+            kind,
+            "agy-cli::gemini-3.1-pro",
+            &retry_script(line),
+        ));
+        assert_login_hint(&err, "agy login");
+        assert_ne!(
+            credentials::credentials(kind),
+            credentials::CliCredentials::Absent,
+            "the next call after the user logs in must reach the CLI again"
+        );
+        credentials::reset_live_verdicts();
+    }
+
+    /// The same shape for an OVERLOAD must stay a patient retry: only a rejected credential is a
+    /// verdict.
+    #[test]
+    fn an_overload_retry_is_not_a_login_failure() {
+        let overloaded = r#"{"type":"system","subtype":"api_retry","attempt":1,"error_status":529,"error":"server_error"}"#;
+        assert_eq!(parse_claude_line(overloaded), vec![Parsed::Activity]);
+        assert!(!is_login_failure("claude", "overloaded (529)"));
+        assert!(is_login_failure(
+            "claude",
+            "authentication_failed: 401 Not logged in"
+        ));
+    }
+
+    #[test]
+    fn the_login_hint_is_added_once_and_keeps_the_evidence() {
+        let first = with_login_hint(
+            CliKind::Codex,
+            ProviderError::Auth("401 Unauthorized".into()),
+        );
+        let ProviderError::Auth(msg) = &first else {
+            panic!("{first:?}")
+        };
+        assert!(
+            msg.contains("run `codex login`") && msg.contains("401 Unauthorized"),
+            "{msg}"
+        );
+        let twice = with_login_hint(CliKind::Codex, ProviderError::Auth(msg.clone()));
+        assert_eq!(format!("{twice:?}"), format!("{first:?}"));
+        assert!(matches!(
+            with_login_hint(CliKind::Codex, ProviderError::Unavailable("503".into())),
+            ProviderError::Unavailable(_)
+        ));
     }
 
     #[cfg(unix)]

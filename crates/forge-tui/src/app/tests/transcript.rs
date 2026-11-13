@@ -508,6 +508,75 @@ fn model_search_shows_one_indicator_and_clears_on_output() {
 }
 
 #[test]
+fn a_provider_outage_shows_its_times_in_the_status_bar_and_clears_on_recovery() {
+    let mut app = App {
+        busy: true,
+        ..Default::default()
+    };
+    app.apply(PresenterEvent::ProviderOutage {
+        model: "inferhub::deepseek-v4.1-flash".into(),
+        since: 1_762_420_680,
+        next_try: 1_762_422_180,
+        attempt: 3,
+        until: 1_762_449_480,
+        reason: "503 no_capacity".into(),
+    });
+    let line = app.provider_outage.as_ref().unwrap().status_line();
+    assert!(
+        line.starts_with("inferhub down since ") && line.ends_with(" · Esc stops"),
+        "{line}"
+    );
+    assert!(
+        line.contains(" · next try ") && line.contains(" · until "),
+        "{line}"
+    );
+    assert!(
+        screen(&app).contains("inferhub down since"),
+        "{}",
+        screen(&app)
+    );
+    assert_eq!(app.remote_snapshot().activity, "provider down — waiting");
+    // The core re-sends the request next, which raises the ordinary retry indicator: the outage
+    // line must stay on top of it.
+    app.apply(PresenterEvent::ModelSearch {
+        model: "inferhub::deepseek-v4.1-flash".into(),
+        retrying: true,
+    });
+    assert!(screen(&app).contains("inferhub down since"));
+
+    app.apply(PresenterEvent::ProviderRecovered {
+        model: "inferhub::deepseek-v4.1-flash".into(),
+        down_secs: 15_000,
+    });
+    assert!(app.provider_outage.is_none());
+    assert!(!screen(&app).contains("down since"));
+}
+
+#[test]
+fn an_outage_also_clears_when_the_turn_ends_or_output_arrives() {
+    for ending in [
+        PresenterEvent::AssistantDelta("hi".into()),
+        PresenterEvent::Done {
+            final_text: String::new(),
+            stop_reason: forge_types::StopReason::Interrupted,
+        },
+    ] {
+        let mut app = App::default();
+        app.apply(PresenterEvent::ProviderOutage {
+            model: "inferhub::flash".into(),
+            since: 1,
+            next_try: 2,
+            attempt: 1,
+            until: 3,
+            reason: "unreachable".into(),
+        });
+        assert!(app.provider_outage.is_some());
+        app.apply(ending);
+        assert!(app.provider_outage.is_none());
+    }
+}
+
+#[test]
 fn assistant_markdown_is_rendered_not_literal() {
     let mut app = App::default();
     app.apply(PresenterEvent::AssistantDelta(

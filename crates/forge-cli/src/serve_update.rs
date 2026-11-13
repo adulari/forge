@@ -369,7 +369,7 @@ async fn restart_when_idle(registry: Arc<SessionRegistry>) {
 pub(crate) async fn restart_service_when_idle() -> Result<(), String> {
     let base = crate::attach::resolve_base_url(None);
     let token = crate::attach::resolve_token(None).map_err(|e| format!("{e:#}"))?;
-    let http = forge_provider::bundled_http_client();
+    let http = crate::attach::local_http_client(&base);
     let sessions = crate::attach::fetch_sessions(&http, &base, &token)
         .await
         .map_err(|e| format!("{e:#}"))?;

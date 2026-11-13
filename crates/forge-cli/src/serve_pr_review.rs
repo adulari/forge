@@ -1,0 +1,533 @@
+//! The review gate in front of PR Watch's merge (docs/features/pr-review-gate.md).
+//!
+//! When a merge-mode watch is about to merge (`Decision::Merge`, which includes GitHub's
+//! auto-merge method and the merge queue's head), the PR's diff goes to an independent reviewer
+//! once per head SHA. Confirmed findings at or above the configured severity block the merge and
+//! return to the PR's session as one fix turn; the review runs again on the head the session
+//! pushes. A clean review lets the merge proceed. The verdict lives on the watch record
+//! (`pr-watch.json`), so every surface that shows a watch shows the review too.
+//!
+//! Reviews run as background jobs (`jobs`), so a slow reviewer never delays other watches' polls;
+//! the owner can override a held merge or dismiss a finding (`owner`).
+//!
+//! Routes: `GET /api/pr/review?pr=|session=` the stored review with every finding;
+//! `POST /api/pr/review/action` `{session | pr, action: merge_anyway|dismiss, finding?, by?}`.
+
+mod assay_reviewer;
+mod dedupe;
+pub(crate) mod jobs;
+mod owner;
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
+
+use axum::extract::{Query, State};
+use axum::response::Response;
+use axum::routing::{get, post};
+use axum::Router;
+use serde::{Deserialize, Serialize};
+
+use crate::serve::{err_response, json_response, DaemonState};
+use crate::serve_pr::{Gh, PrSummary};
+use crate::serve_pr_watch::{registry, Announcement, Watch};
+use assay_reviewer::AssayReviewer;
+use jobs::{jobs, Poll};
+pub(crate) use owner::{carry_owner_edits, Owner};
+
+const MAX_DIFF_BYTES: usize = 150_000;
+/// A failed review is not retried sooner than this.
+const RETRY_SECS: i64 = 300;
+/// Failed reviews of one head in a row before the watch stops spending and blocks.
+const MAX_ERRORS: u32 = 3;
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Verdict {
+    /// A background job is reviewing this head (or is queued for a slot).
+    Running,
+    Clean,
+    Findings,
+    Error,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewFinding {
+    pub(crate) severity: String,
+    pub(crate) file: String,
+    pub(crate) line: Option<u32>,
+    pub(crate) title: String,
+    pub(crate) why: String,
+    #[serde(default)]
+    pub(crate) fix: String,
+    /// At or above the configured severity: this one holds the merge.
+    pub(crate) blocking: bool,
+    /// The owner dismissed this finding; it no longer blocks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dismissed: Option<Owner>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ReviewState {
+    pub(crate) head_sha: String,
+    pub(crate) verdict: Verdict,
+    pub(crate) findings: Vec<ReviewFinding>,
+    pub(crate) model: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) reviewed_at: i64,
+    /// The fix turn for this head's findings has been sent.
+    pub(crate) fix_sent: bool,
+    /// Fix rounds sent so far, across heads.
+    pub(crate) rounds: u32,
+    /// The push for this head's findings has been delivered.
+    #[serde(default)]
+    pub(crate) announced: bool,
+    /// The owner let this head merge without waiting for the review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) merge_anyway: Option<Owner>,
+    /// Failed reviews of this head in a row.
+    #[serde(default)]
+    pub(crate) errors: u32,
+}
+
+impl ReviewState {
+    fn started(head_sha: &str, rounds: u32, now: i64) -> Self {
+        Self {
+            head_sha: head_sha.to_string(),
+            verdict: Verdict::Running,
+            findings: Vec::new(),
+            model: None,
+            error: None,
+            reviewed_at: now,
+            fix_sent: false,
+            rounds,
+            announced: false,
+            merge_anyway: None,
+            errors: 0,
+        }
+    }
+
+    pub(crate) fn confirmed(&self) -> usize {
+        self.findings.iter().filter(|f| f.blocking).count()
+    }
+
+    /// The row text: `review clean`, `review: 2 confirmed, fixing`.
+    pub(crate) fn summary(&self) -> String {
+        if let Some(owner) = &self.merge_anyway {
+            return format!("review overridden by {}", owner.by);
+        }
+        let dismissed = self
+            .findings
+            .iter()
+            .filter(|f| f.dismissed.is_some())
+            .count();
+        let base = self.verdict_text();
+        if dismissed > 0 && self.verdict != Verdict::Running {
+            return format!("{base} ({dismissed} dismissed)");
+        }
+        base
+    }
+
+    fn verdict_text(&self) -> String {
+        match self.verdict {
+            Verdict::Running => "review running".into(),
+            Verdict::Clean => "review clean".into(),
+            Verdict::Error => "review failed, will retry".into(),
+            Verdict::Findings if self.fix_sent => {
+                format!("review: {} confirmed, fixing", self.confirmed())
+            }
+            Verdict::Findings => format!("review: {} confirmed", self.confirmed()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct Settings {
+    pub(crate) enabled: bool,
+    pub(crate) max_findings: usize,
+    pub(crate) threshold: forge_types::Severity,
+    pub(crate) merge_on_error: bool,
+    pub(crate) max_rounds: u32,
+}
+
+impl Settings {
+    #[cfg_attr(test, allow(dead_code))]
+    fn from_config(config: &forge_config::Config) -> Self {
+        let c = &config.pr_watch;
+        Self {
+            enabled: c.review_enabled(),
+            max_findings: c.review_max_findings.max(1) as usize,
+            threshold: forge_types::Severity::parse(&c.review_severity)
+                .unwrap_or(forge_types::Severity::High),
+            merge_on_error: c.merge_on_review_error(),
+            max_rounds: c.review_max_rounds,
+        }
+    }
+}
+
+pub(crate) struct ReviewRequest<'a> {
+    pub(crate) session_id: &'a str,
+    pub(crate) pr_number: u64,
+    pub(crate) head_sha: &'a str,
+    pub(crate) diff: &'a str,
+}
+
+/// An independent review of one PR diff. Implementations return only findings that survived
+/// verification; the gate applies the severity threshold and the cap.
+#[async_trait::async_trait]
+pub(crate) trait Reviewer: Send + Sync {
+    async fn review(&self, request: &ReviewRequest<'_>) -> Result<Reviewed, String>;
+}
+
+#[derive(Debug)]
+pub(crate) struct Reviewed {
+    pub(crate) findings: Vec<ReviewFinding>,
+    pub(crate) model: Option<String>,
+}
+
+static REVIEWER: OnceLock<Arc<dyn Reviewer>> = OnceLock::new();
+
+/// Called once by the daemon: PR reviews run through Assay with the daemon's store.
+pub(crate) fn install(state: &Arc<DaemonState>) {
+    let _ = REVIEWER.set(Arc::new(AssayReviewer::new(state.store.clone())));
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_HOOK: std::cell::RefCell<Option<(Arc<dyn Reviewer>, Settings)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn active() -> Option<(Arc<dyn Reviewer>, Settings)> {
+    TEST_HOOK.with(|h| h.borrow().clone())
+}
+
+#[cfg(not(test))]
+fn active() -> Option<(Arc<dyn Reviewer>, Settings)> {
+    let reviewer = REVIEWER.get()?.clone();
+    let config = forge_config::load().ok()?;
+    Some((reviewer, Settings::from_config(&config)))
+}
+
+/// What the gate tells PR Watch to do instead of merging.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Gate {
+    Pass,
+    Wait(String),
+    Block(String),
+    /// One fix turn for the session.
+    Fix(String),
+}
+
+pub(crate) async fn gate(
+    gh: &Gh,
+    root: &Path,
+    watch: &mut Watch,
+    pr: &PrSummary,
+    free: bool,
+    now: i64,
+) -> Gate {
+    let Some((reviewer, settings)) = active() else {
+        return Gate::Pass;
+    };
+    if !settings.enabled {
+        return Gate::Pass;
+    }
+    let jobs = jobs();
+    jobs.forget_other_heads(&watch.session_id, &pr.head_sha);
+    let rounds = watch.review.as_ref().map_or(0, |r| r.rounds);
+    let current = watch
+        .review
+        .as_ref()
+        .filter(|r| r.head_sha == pr.head_sha)
+        .cloned();
+    let errors = current.as_ref().map_or(0, |r| r.errors);
+    if current.as_ref().is_some_and(|r| r.merge_anyway.is_some()) {
+        return Gate::Pass;
+    }
+    let spawn = |watch: &mut Watch| {
+        let job = Job {
+            reviewer: reviewer.clone(),
+            settings: settings.clone(),
+            gh: gh.clone(),
+            root: root.to_path_buf(),
+            session_id: watch.session_id.clone(),
+            pr_number: pr.number,
+            head_sha: pr.head_sha.clone(),
+            rounds,
+            now,
+        };
+        let mut running = ReviewState::started(&pr.head_sha, rounds, now);
+        running.errors = errors;
+        watch.review = Some(running);
+        jobs.start(&watch.session_id, &pr.head_sha, job.run(), |session| {
+            registry().poll_soon(session)
+        });
+        Gate::Wait("review running".into())
+    };
+    let state = match current {
+        None => return spawn(watch),
+        Some(r)
+            if r.verdict == Verdict::Error
+                && r.errors < MAX_ERRORS
+                && now - r.reviewed_at >= RETRY_SECS =>
+        {
+            return spawn(watch)
+        }
+        Some(r) if r.verdict == Verdict::Running => {
+            match jobs.poll(&watch.session_id, &pr.head_sha) {
+                Poll::Running => return Gate::Wait("review running".into()),
+                Poll::Missing => return spawn(watch),
+                Poll::Done(done) => {
+                    // The back-off counts from when the result arrived: a review that ran into
+                    // its timeout is not retried at once.
+                    let mut done = *done;
+                    done.reviewed_at = now;
+                    done.errors = if done.verdict == Verdict::Error {
+                        errors + 1
+                    } else {
+                        0
+                    };
+                    done
+                }
+            }
+        }
+        Some(r) => r,
+    };
+    let verdict = state.verdict;
+    watch.review = Some(state);
+    match verdict {
+        Verdict::Clean | Verdict::Running => Gate::Pass,
+        Verdict::Error => {
+            let why = watch
+                .review
+                .as_ref()
+                .and_then(|r| r.error.clone())
+                .unwrap_or_default();
+            if settings.merge_on_error {
+                watch.last_action = Some(format!("review failed ({why}); merging anyway"));
+                Gate::Pass
+            } else if watch
+                .review
+                .as_ref()
+                .is_some_and(|r| r.errors >= MAX_ERRORS)
+            {
+                Gate::Block(format!(
+                    "review failed {MAX_ERRORS} times on this head ({why}); not retrying. Set \
+                     review_model or review_budget, or arm the watch again to retry"
+                ))
+            } else {
+                Gate::Wait(format!("review failed ({why}); not merging, will retry"))
+            }
+        }
+        Verdict::Findings => findings_gate(watch, pr, &settings, free),
+    }
+}
+
+fn findings_gate(watch: &mut Watch, pr: &PrSummary, settings: &Settings, free: bool) -> Gate {
+    let review = watch.review.as_mut().expect("set by the caller");
+    let confirmed = review.confirmed();
+    if confirmed == 0 {
+        review.verdict = Verdict::Clean;
+        return Gate::Pass;
+    }
+    if review.fix_sent {
+        return Gate::Wait(format!(
+            "review: {confirmed} confirmed; waiting for the session to push"
+        ));
+    }
+    if review.rounds >= settings.max_rounds {
+        return Gate::Block(format!(
+            "review findings unresolved after {} fix rounds ({confirmed} confirmed)",
+            review.rounds
+        ));
+    }
+    if !free {
+        return Gate::Wait(format!("review: {confirmed} confirmed; session is busy"));
+    }
+    review.fix_sent = true;
+    review.rounds += 1;
+    watch.last_action = Some(format!("review fix turn {} sent", review.rounds));
+    Gate::Fix(fix_prompt(pr, &review.findings))
+}
+
+/// Everything one background review needs, owned so it outlives the poll that started it.
+struct Job {
+    reviewer: Arc<dyn Reviewer>,
+    settings: Settings,
+    gh: Gh,
+    root: PathBuf,
+    session_id: String,
+    pr_number: u64,
+    head_sha: String,
+    rounds: u32,
+    now: i64,
+}
+
+impl Job {
+    async fn run(self) -> ReviewState {
+        let mut state = ReviewState::started(&self.head_sha, self.rounds, self.now);
+        state.verdict = Verdict::Clean;
+        let number = self.pr_number.to_string();
+        let diff = match self
+            .gh
+            .run(&self.root, &["pr", "diff", &number], None)
+            .await
+        {
+            Ok(diff) => clip(diff),
+            Err(e) => {
+                return failed(
+                    state,
+                    format!("could not read the PR diff: {}", e.message()),
+                )
+            }
+        };
+        if diff.trim().is_empty() {
+            return state;
+        }
+        let request = ReviewRequest {
+            session_id: &self.session_id,
+            pr_number: self.pr_number,
+            head_sha: &self.head_sha,
+            diff: &diff,
+        };
+        match self.reviewer.review(&request).await {
+            Err(e) => failed(state, e),
+            Ok(reviewed) => {
+                let mut findings = dedupe::dedupe(reviewed.findings);
+                findings.sort_by_key(|f| std::cmp::Reverse(rank(&f.severity)));
+                findings.truncate(self.settings.max_findings);
+                for f in &mut findings {
+                    f.blocking = rank(&f.severity) >= self.settings.threshold.weight();
+                }
+                state.model = reviewed.model;
+                if findings.iter().any(|f| f.blocking) {
+                    state.verdict = Verdict::Findings;
+                }
+                state.findings = findings;
+                state
+            }
+        }
+    }
+}
+
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+fn failed(mut state: ReviewState, why: String) -> ReviewState {
+    state.verdict = Verdict::Error;
+    state.error = Some(why);
+    state
+}
+
+fn rank(severity: &str) -> u8 {
+    forge_types::Severity::parse(severity).map_or(0, |s| s.weight())
+}
+
+fn clip(mut diff: String) -> String {
+    if diff.len() > MAX_DIFF_BYTES {
+        let mut end = MAX_DIFF_BYTES;
+        while !diff.is_char_boundary(end) {
+            end -= 1;
+        }
+        diff.truncate(end);
+        diff.push_str("\n[diff truncated]\n");
+    }
+    diff
+}
+
+fn fix_prompt(pr: &PrSummary, findings: &[ReviewFinding]) -> String {
+    let mut text = format!(
+        "PR Watch: an independent review of pull request #{} ({}) confirmed defects that must be \
+         fixed before it can merge.\n\nConfirmed findings:\n",
+        pr.number, pr.url
+    );
+    for f in findings.iter().filter(|f| f.blocking) {
+        let place = f
+            .line
+            .map_or_else(|| f.file.clone(), |l| format!("{}:{l}", f.file));
+        text.push_str(&format!(
+            "- [{}] {place}: {}\n  why: {}\n",
+            f.severity, f.title, f.why
+        ));
+        if !f.fix.is_empty() {
+            text.push_str(&format!("  suggested fix: {}\n", f.fix));
+        }
+    }
+    text.push_str(
+        "\nCheck each one against the code first; if a finding is wrong, say why in the commit \
+         message. Fix the real ones in this worktree, add a test that fails without the fix, run \
+         the relevant checks locally, commit, and push with a normal `git push`. Never \
+         force-push, never rewrite history, never delete the branch. The review runs again on \
+         the new head.",
+    );
+    text
+}
+
+/// The push owed for a freshly confirmed set of findings; at most once per head.
+pub(crate) fn review_push(watch: &mut Watch) -> Option<Announcement> {
+    let pr = watch
+        .pr_number
+        .map_or_else(|| "PR".to_string(), |n| format!("PR #{n}"));
+    let review = watch.review.as_mut()?;
+    if review.verdict != Verdict::Findings || review.announced || review.confirmed() == 0 {
+        return None;
+    }
+    review.announced = true;
+    Some(Announcement::new(
+        "review",
+        format!(
+            "{pr} blocked by review: {} confirmed defect(s)",
+            review.confirmed()
+        ),
+        true,
+    ))
+}
+
+pub(crate) fn routes(base: &str) -> Router<Arc<DaemonState>> {
+    Router::new()
+        .route(&format!("{base}/api/pr/review"), get(review_get))
+        .route(
+            &format!("{base}/api/pr/review/action"),
+            post(owner::review_action),
+        )
+}
+
+#[derive(Deserialize)]
+struct ReviewQuery {
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    pr: Option<u64>,
+}
+
+async fn review_get(State(_): State<Arc<DaemonState>>, Query(q): Query<ReviewQuery>) -> Response {
+    let all = registry().all();
+    let mut hits = all.iter().filter(|w| match (&q.session, q.pr) {
+        (Some(s), _) => &w.session_id == s,
+        (None, Some(n)) => w.pr_number == Some(n),
+        (None, None) => false,
+    });
+    let Some(watch) = hits.next() else {
+        return err_response(axum::http::StatusCode::NOT_FOUND, "no PR watch matches");
+    };
+    if hits.next().is_some() {
+        return err_response(
+            axum::http::StatusCode::CONFLICT,
+            "that PR is watched in more than one repository; name the session",
+        );
+    }
+    json_response(&serde_json::json!({
+        "session_id": watch.session_id,
+        "pr_number": watch.pr_number,
+        "pr_url": watch.pr_url,
+        "summary": watch.review.as_ref().map(ReviewState::summary),
+        "review": watch.review,
+    }))
+}
+
+#[cfg(test)]
+mod tests;

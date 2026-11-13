@@ -22,6 +22,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             output_format,
             publish_to_fleet,
             no_publish_to_fleet,
+            wait_for_outage,
             usage_json,
             claude,
             session,
@@ -87,6 +88,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
                     || claude.needs_local_session()
                     || session.needs_local_session(),
                 usage_json,
+                wait_for_outage,
                 print: claude.print,
                 verbose: claude.verbose,
                 quiet: claude.quiet,
@@ -147,6 +149,12 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Dispatch { cmd, url, token } => {
             crate::cli::commands::dispatch::dispatch_cmd(cmd, url, token).await
         }
+        Command::Brief {
+            since,
+            json,
+            url,
+            token,
+        } => crate::cli::commands::brief::brief_cmd(since, json, url, token).await,
         Command::Send {
             target,
             message,
@@ -156,6 +164,51 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             url,
             token,
         } => crate::cli::commands::send::send_cmd(target, message, steer, url, token).await,
+        Command::Ship {
+            session,
+            title,
+            message,
+            base,
+            draft,
+            method,
+            url,
+            token,
+        } => {
+            crate::cli::commands::ship::ship_cmd(
+                session, title, message, base, draft, method, url, token,
+            )
+            .await
+        }
+        Command::Issues {
+            start,
+            no_worktree,
+            watch,
+            method,
+            state,
+            drain,
+            parallel,
+            budget,
+            drain_status,
+            cancel_drain,
+            url,
+            token,
+        } => {
+            crate::cli::commands::issues::issues_cmd(crate::cli::commands::issues::IssuesOpts {
+                start,
+                no_worktree,
+                watch,
+                method,
+                state,
+                drain,
+                parallel: parallel.map(usize::from),
+                budget,
+                drain_status,
+                cancel_drain,
+                url,
+                token,
+            })
+            .await
+        }
         Command::Api {
             host,
             port,
@@ -224,8 +277,11 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             html,
             rerun,
             no_redact,
+            search,
         } => {
-            if rerun {
+            if let Some(query) = search {
+                replay_search_cmd(&ids, &query, json, !no_redact)
+            } else if rerun {
                 replay_rerun_cmd(&ids).await
             } else {
                 replay_cmd(&ids, json, html.as_deref(), !no_redact)
@@ -354,7 +410,17 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             clear,
             disable,
             enable,
-        } => models(probe, all, clear, disable, enable).await,
+            report,
+            repo,
+            days,
+            json,
+        } => {
+            if report {
+                crate::cli::commands::models::model_report_cmd(repo, days, json)
+            } else {
+                models(probe, all, clear, disable, enable).await
+            }
+        }
         Command::Mesh {
             prompt,
             json,
@@ -425,6 +491,7 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
             mcp_serve::run(http, bind).await
         }
         Command::Browser(op) => crate::cli::commands::browser::browser_cmd(op).await,
+        Command::Prs { op } => crate::cli::commands::prs::prs_cmd(op).await,
         Command::Worktree { op } => crate::cli::commands::worktree::worktree_cmd(op),
         Command::Lattice { op } => lattice_cmd(op).await,
         Command::Import { source } => import_cmd(source),
@@ -436,11 +503,32 @@ pub(crate) async fn dispatch(command: Command) -> Result<()> {
         Command::Plugin { cmd } => plugin_cmd(cmd).await,
         Command::SelfMcp { action } => self_mcp_cmd(action),
         Command::Schedule { cmd } => schedule_cmd(cmd),
+        Command::Ci(a) => crate::cli::commands::ci::ci_cmd(a.cmd),
         Command::Notes { cmd } => crate::cli::commands::notes::notes_cmd(cmd),
         Command::Service { cmd } => service_cmd(cmd),
         Command::Queue { cmd } => queue_cmd(cmd),
+        Command::Goal { cmd } => match cmd {
+            GoalCmd::Show { session, json } => {
+                crate::cli::commands::run::goal_show::goal_show_cmd(session.as_deref(), json)
+            }
+        },
         Command::Scoreboard => scoreboard_cmd(),
         Command::Stats { cmd } => stats_cmd(cmd),
+        Command::Turns {
+            since,
+            session,
+            limit,
+            json,
+            backfill,
+            write,
+        } => turns_cmd(crate::cli::commands::turns::TurnsArgs {
+            since,
+            session,
+            limit,
+            json,
+            backfill,
+            write,
+        }),
         Command::Tour { demo } => tour_cmd(demo),
         Command::Trust { path, revoke, list } => {
             crate::cli::commands::trust::trust_cmd(path, revoke, list)

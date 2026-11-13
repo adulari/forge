@@ -185,6 +185,14 @@ pub enum PresenterEvent {
         model: String,
         purpose: String,
     },
+    /// A stronger expert model was consulted (`[harness.expert]`). `status` is the ready-to-show
+    /// line (`expert: <model> · 1 consult · 2.1% of weekly window`); `summary` is the diagnosis.
+    ExpertConsult {
+        trigger: String,
+        model: String,
+        summary: String,
+        status: String,
+    },
     /// Characters streamed by the active auxiliary call. Kept separate from assistant reasoning
     /// so internal diagnostics never leak into or pollute the conversation transcript.
     AuxiliaryProgress {
@@ -204,9 +212,44 @@ pub enum PresenterEvent {
         model: String,
         retrying: bool,
     },
+    /// The turn's provider is down and the turn is waiting it out (`mesh.outage_wait_secs`). Sent
+    /// before every probe of the long wait so a surface can show "down since / next try / until"
+    /// and keep the countdown honest. Times are unix seconds.
+    ProviderOutage {
+        model: String,
+        since: u64,
+        next_try: u64,
+        attempt: u32,
+        until: u64,
+        reason: String,
+    },
+    /// The turn stopped short and the core stored the "Turn stopped (<reason>): <what to do>" note
+    /// for it. Sent once, from the choke point that writes the note, so a live surface shows the
+    /// line the moment the turn ends instead of after a resume. Never sent for an error end (the
+    /// `Error` event says that) or when the newest row already explained the stop.
+    TurnStopped {
+        /// The stored `turn.end_reason`.
+        reason: String,
+        /// `Turn stopped (<plain reason>): <what to do>`, without a glyph.
+        text: String,
+    },
+    /// The provider answered again after a [`PresenterEvent::ProviderOutage`] wait; the turn
+    /// carries on.
+    ProviderRecovered {
+        model: String,
+        down_secs: u64,
+    },
     ToolStart {
         name: String,
         args: String,
+    },
+    /// A rolling tail of a foreground tool call's live output (the last few ANSI-stripped lines)
+    /// plus how long it has run, sampled a few times a second while the call is in flight. UI
+    /// only: never reaches the model's context or the store. The call's `ToolResult` supersedes it.
+    ToolOutputDelta {
+        name: String,
+        lines: Vec<String>,
+        elapsed_ms: u64,
     },
     ToolResult {
         name: String,
@@ -356,6 +399,20 @@ impl ConfirmOutcome {
 pub struct ConfirmReply {
     pub outcome: ConfirmOutcome,
     pub note: Option<String>,
+    /// The person accepted the rule the prompt offered (see [`RuleSuggestion`]): the call is
+    /// allowed and the rule is written to the project. Only meaningful after `offer_rule`
+    /// returned `true`.
+    pub accept_rule: bool,
+}
+
+/// A standing rule a permission prompt offers after the person approved the same command shape
+/// several times in a project and never refused it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuleSuggestion {
+    /// The rule exactly as it would be written, e.g. `cargo test *`.
+    pub rule: String,
+    /// How many times the shape was allowed in this project.
+    pub allows: u32,
 }
 
 impl ConfirmReply {
@@ -365,6 +422,16 @@ impl ConfirmReply {
         Self {
             outcome,
             note: (!note.is_empty()).then(|| note.to_string()),
+            accept_rule: false,
+        }
+    }
+
+    /// An allow that also accepts the offered rule.
+    pub fn accepting_rule() -> Self {
+        Self {
+            outcome: ConfirmOutcome::Allow,
+            note: None,
+            accept_rule: true,
         }
     }
 }
@@ -374,6 +441,7 @@ impl From<ConfirmOutcome> for ConfirmReply {
         Self {
             outcome,
             note: None,
+            accept_rule: false,
         }
     }
 }
@@ -386,6 +454,11 @@ pub trait Presenter: Send {
     /// way to type one keep this default.
     fn confirm_reply(&mut self, tool: &str, side_effect: SideEffect) -> ConfirmReply {
         self.confirm(tool, side_effect).into()
+    }
+    /// Show `suggestion` on the next [`Presenter::confirm_reply`] prompt. Returns whether this
+    /// surface can: only then does the session count an answer without it as turning it down.
+    fn offer_rule(&mut self, _suggestion: &RuleSuggestion) -> bool {
+        false
     }
     fn ask(&mut self, question: &str, options: &[QChoice], allow_other: bool) -> String;
     /// Ask several questions as one form (multi-select, free text, notes). Surfaces without a
@@ -420,6 +493,11 @@ pub trait Presenter: Send {
     fn recap_sink(&self) -> Option<Box<dyn Presenter>> {
         None
     }
+    /// The stored end reason of the turn about to finish (`final_answer`,
+    /// `final_answer_mid_intent`, `stalled`, `provider_error`, ...), delivered just before
+    /// [`PresenterEvent::Done`] (or before the turn's error returns). Machine-readable surfaces
+    /// include it; the rest ignore it.
+    fn turn_end_reason(&mut self, _reason: &str) {}
     /// Whether this surface renders [`PresenterEvent::Recap`]. When `false` the session skips the
     /// recap side call instead of paying its latency and tokens for an event nobody shows.
     fn consumes_recap(&self) -> bool {

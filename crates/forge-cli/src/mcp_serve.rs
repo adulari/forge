@@ -44,42 +44,14 @@ use serde_json::Value;
 /// trusted parent↔child pipe); HTTP is network-reachable, so it must be behind auth.
 const MCP_SERVE_TOKEN_ENV: &str = "FORGE_MCP_SERVE_TOKEN";
 
-/// Append one JSON record to the out-of-band subagent sink the CLI bridge tails (if it gave us
-/// one via `FORGE_SUBAGENT_SINK`). Used to surface bridge-turn activity (subagents, task-list
-/// updates) in the parent Forge TUI live. Best-effort for the CALL (a sink failure must not fail
-/// the tool call it decorates), but never silent: an open/write/flush failure is reported as a
-/// diagnostic so a full or read-only disk doesn't quietly blind the parent TUI.
-fn report_to_sink(record: serde_json::Value) {
-    let Ok(path) = std::env::var(forge_provider::SUBAGENT_SINK_ENV) else {
-        return;
-    };
-    if let Err(error) = append_sink_record(&path, &record) {
-        tracing::warn!(
-            path,
-            %error,
-            "mcp-serve: failed to append bridge activity to the subagent sink; \
-             the parent session will not see this event"
-        );
-    }
-}
-
-/// One JSONL append to the sink at `path`, every I/O failure propagated.
-fn append_sink_record(path: &str, record: &serde_json::Value) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
-    writeln!(f, "{record}")?;
-    f.flush()
-}
-
 mod bridge_budget;
+mod bridge_records;
 mod deferred;
 mod heartbeats;
 mod push_notification;
 mod worktree;
 use bridge_budget::*;
+use bridge_records::*;
 
 mod auto_classify;
 mod permission_relay;
@@ -127,46 +99,8 @@ struct ForgeMcp {
     /// The bridged turn's progress ledger (`progress.rs`): nudges a call that earns one, refuses
     /// every call once the turn is stopped.
     progress: std::sync::Mutex<forge_core::BridgeProgress>,
-}
-
-fn parse_bridge_tasks(args: &Value) -> Result<Vec<forge_types::TodoItem>, &'static str> {
-    let tasks = forge_core::parse_tasks(args);
-    let input_count = args
-        .get("tasks")
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
-    if input_count > 0 && tasks.is_empty() {
-        Err("error: no valid tasks found; each task needs a non-empty title, content, or description")
-    } else {
-        Ok(tasks)
-    }
-}
-
-fn persist_bridge_memory(
-    store: &Store,
-    scope: &str,
-    kind: &str,
-    text: &str,
-    session_id: &str,
-) -> std::result::Result<(), forge_store::StoreError> {
-    // A bridged model's memory is injected into later prompts: mask credentials before storing.
-    let masked = forge_core::redact::Redactor::from_environment().redact(text);
-    store
-        .add_memory(scope, kind, &masked, session_id)
-        .map(|_| ())
-}
-
-/// Merge and persist a bridge task update for its parent session. Keep the read and write in one
-/// fallible seam so an unavailable or invalid Store cannot be reported as a successful update.
-fn persist_bridge_tasks(
-    store: &Store,
-    session_id: &str,
-    tasks: Vec<forge_types::TodoItem>,
-) -> std::result::Result<Vec<forge_types::TodoItem>, forge_store::StoreError> {
-    let existing = store.tasks(session_id)?;
-    let tasks = forge_core::merge_task_update(&existing, tasks);
-    store.set_tasks(session_id, &tasks)?;
-    Ok(tasks)
+    /// The bridged model's `consult_expert` consults (per-turn cap, budget meter).
+    expert: tokio::sync::Mutex<forge_core::BridgeExpert>,
 }
 
 /// rmcp 3's `with_all_items` leaves `ttlMs`/`cacheScope` unset, so they are omitted from the wire.
@@ -323,6 +257,16 @@ impl ForgeMcp {
             } else {
                 CallToolResult::error(vec![ContentBlock::text(text)])
             });
+        }
+
+        // Folded-history recall — read-only, scoped to the parent session (id from ENV_SESSION).
+        if name == forge_core::RECALL_TOOL {
+            let session_id = std::env::var(forge_core::snapshot::ENV_SESSION).ok();
+            return Ok(self.handle_recall(session_id.as_deref(), &args));
+        }
+        // The expert on call: answered from the parent session's stored transcript.
+        if name == forge_core::CONSULT_EXPERT_TOOL {
+            return Ok(self.handle_consult_expert(&args).await);
         }
 
         // On-demand memory write — bridge model can persist a durable fact mid-turn (parity with
@@ -717,8 +661,32 @@ impl ForgeMcp {
         core
     }
 
+    /// Whether the parent session has folded history to recall.
+    fn recall_available(&self, session_id: Option<&str>) -> bool {
+        session_id.is_some_and(|id| self.tasks_store.has_recallable_history(id))
+    }
+
+    fn handle_recall(&self, session_id: Option<&str>, args: &Value) -> CallToolResult {
+        let Some(session_id) = session_id else {
+            return CallToolResult::error(vec![ContentBlock::text(
+                "error: recall has no session to read",
+            )]);
+        };
+        let (text, ok) = forge_core::recall::run(&self.tasks_store, session_id, args);
+        if ok {
+            CallToolResult::success(vec![ContentBlock::text(text)])
+        } else {
+            CallToolResult::error(vec![ContentBlock::text(text)])
+        }
+    }
+
     /// Every tool this server can run, before the lean surface defers any of them.
     fn all_tools(&self) -> Vec<Tool> {
+        let session = std::env::var(forge_core::snapshot::ENV_SESSION).ok();
+        self.all_tools_for(session.as_deref())
+    }
+
+    fn all_tools_for(&self, session_id: Option<&str>) -> Vec<Tool> {
         let mut tools: Vec<Tool> = self
             .registry
             .names()
@@ -774,10 +742,23 @@ impl ForgeMcp {
                 .to_string(),
             Arc::new(ts_schema),
         ));
+        // The expert on call, only while one is configured and the model may ask for it.
+        if forge_core::expert_tool_configured(&self.config) {
+            let es = forge_core::consult_expert_spec();
+            let es_schema: JsonObject = es.schema.as_object().cloned().unwrap_or_default();
+            tools.push(Tool::new(es.name, es.description, Arc::new(es_schema)));
+        }
         // Always advertise the on-demand memory tool so a bridge model can persist facts mid-turn.
         let rs = forge_core::remember_spec();
         let rs_schema: JsonObject = rs.schema.as_object().cloned().unwrap_or_default();
         tools.push(Tool::new(rs.name, rs.description, Arc::new(rs_schema)));
+        // The folded-history reader, once the parent session has a compaction (the bridge process
+        // is respawned after one, so the list it serves is current).
+        if self.recall_available(session_id) {
+            let spec = forge_core::recall_spec();
+            let schema: JsonObject = spec.schema.as_object().cloned().unwrap_or_default();
+            tools.push(Tool::new(spec.name, spec.description, Arc::new(schema)));
+        }
         // Fleet agent-to-agent messaging — always advertised (unlike subagents, it needs no local
         // setup: a call simply fails with a clear error if no `forge serve` daemon is reachable).
         tools.push(self.message_session_tool());
@@ -944,6 +925,7 @@ pub async fn run(http: bool, bind: String) -> Result<()> {
         lean,
         auto_classify: Default::default(),
         progress,
+        expert: Default::default(),
     };
     clock.mark("mcp-serve: registry");
     if http {
@@ -1091,6 +1073,7 @@ mod tests {
             lean: false,
             auto_classify: Default::default(),
             progress: Default::default(),
+            expert: Default::default(),
         }
     }
 
@@ -1358,7 +1341,36 @@ mod tests {
             lean,
             auto_classify: Default::default(),
             progress: Default::default(),
+            expert: Default::default(),
         }
+    }
+
+    #[test]
+    fn consult_expert_is_advertised_to_a_bridge_only_when_an_expert_is_configured() {
+        let names = |server: &ForgeMcp| -> Vec<String> {
+            server
+                .tool_list()
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        let mut off = test_server(true);
+        assert!(!names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()));
+        off.config.harness.expert.model = "anthropic::sonnet".into();
+        assert!(
+            names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()),
+            "core on the lean surface"
+        );
+        off.config.harness.expert.triggers.tool = false;
+        assert!(!names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()));
+        off.config.harness.expert.triggers.tool = true;
+        off.config.harness.expert.model = "codex-oauth::gpt-5.6-sol".into();
+        assert!(
+            !names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()),
+            "a subscription expert without a budget stays hidden"
+        );
+        off.config.harness.expert.budget = "codex:5%w".into();
+        assert!(names(&off).contains(&forge_core::CONSULT_EXPERT_TOOL.to_string()));
     }
 
     /// An `McpConfig` with one active (never-actually-connected) stdio server, enough for
@@ -1540,6 +1552,61 @@ mod tests {
         assert!(
             text.contains("echo: alive"),
             "call did not continue after timeout: {text}"
+        );
+    }
+
+    #[test]
+    fn recall_is_advertised_and_served_only_for_a_session_with_folded_history() {
+        let server = test_server(false);
+        let sid = server.tasks_store.create_session("/x", "default").unwrap();
+        for (seq, text) in [
+            "decide the upload retry policy",
+            "settled on exponential backoff",
+            "b",
+            "c",
+            "d",
+            "e",
+        ]
+        .iter()
+        .enumerate()
+        {
+            server
+                .tasks_store
+                .add_message(&sid, seq as i64, forge_types::Role::User, text, None)
+                .unwrap();
+        }
+        let names = |s: Option<&str>| -> Vec<String> {
+            server
+                .all_tools_for(s)
+                .into_iter()
+                .map(|t| t.name.to_string())
+                .collect()
+        };
+        assert!(!names(Some(&sid)).contains(&"recall".to_string()));
+        assert!(!names(None).contains(&"recall".to_string()));
+
+        server
+            .tasks_store
+            .compact_session_store(&sid, "S", 2)
+            .unwrap();
+        assert!(names(Some(&sid)).contains(&"recall".to_string()));
+        assert!(!names(None).contains(&"recall".to_string()));
+
+        let found = server.handle_recall(
+            Some(&sid),
+            &serde_json::json!({"action": "search", "query": "exponential backoff"}),
+        );
+        assert_ne!(found.is_error, Some(true));
+        assert!(format!("{found:?}").contains("seq 1 [user]"), "{found:?}");
+        let other = server.tasks_store.create_session("/y", "default").unwrap();
+        let isolated = server.handle_recall(
+            Some(&other),
+            &serde_json::json!({"action": "search", "query": "exponential backoff"}),
+        );
+        assert_eq!(
+            isolated.is_error,
+            Some(true),
+            "another session folded nothing"
         );
     }
 

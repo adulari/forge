@@ -228,7 +228,7 @@ pub(super) async fn workflows_page(
         state.default_cwd.clone()
     } else {
         match state.registry.get(&params.session).await {
-            Some(handle) => handle.cwd.clone(),
+            Some(handle) => handle.cwd(),
             None => state.default_cwd.clone(),
         }
     };

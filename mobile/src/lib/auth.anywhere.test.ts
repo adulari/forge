@@ -31,6 +31,15 @@ describe("moved daemon recovery", () => {
     expect(moved).toEqual({ ...direct, baseUrl: "https://fresh-tunnel.test/token" });
   });
 
+  it("keeps the pin on a move and replaces it when the certificate was regenerated", () => {
+    const pinned = { ...direct, fingerprint: `sha256:${"aa".repeat(32)}` };
+    const fresh = `sha256:${"bb".repeat(32)}`;
+    const [moved] = repointMovedDaemons([pinned], { base_url: "https://new.test/token", token: "daemon-secret" });
+    expect(moved?.fingerprint).toBe(pinned.fingerprint);
+    const [repinned] = repointMovedDaemons([pinned], { ...{ base_url: pinned.baseUrl, token: "daemon-secret" }, fingerprint: fresh });
+    expect(repinned?.fingerprint).toBe(fresh);
+  });
+
   it("leaves a different daemon alone", () => {
     const servers = [direct];
     expect(

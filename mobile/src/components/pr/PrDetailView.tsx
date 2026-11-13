@@ -4,6 +4,7 @@ import { ActivityIndicator, Linking, Pressable, ScrollView, StyleSheet, Text, Vi
 
 import type { MergeMethod, PrDetailResponse } from "../../lib/apiPr";
 import { useCommentOnPr, useMergePr, usePrDetail, usePrDiff } from "../../lib/queriesPr";
+import { useDirectOnly } from "../../lib/prAccess";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { monoFamily, tabularNums, type as typeScale } from "../../theme/typography";
@@ -49,6 +50,7 @@ function SummaryTab({ sessionId, detail }: { sessionId: string; detail: PrDetail
   const toast = useToast();
   const comment = useCommentOnPr();
   const merge = useMergePr();
+  const writable = useDirectOnly();
   const [draft, setDraft] = useState("");
   const [method, setMethod] = useState<MergeMethod>("squash");
   const [deleteBranch, setDeleteBranch] = useState(false);
@@ -91,9 +93,15 @@ function SummaryTab({ sessionId, detail }: { sessionId: string; detail: PrDetail
         <Text style={[typeScale.sub, { color: tokens.ink3 }]}>No description.</Text>
       )}
 
-      {pr.state === "open" ? <PrWatchPanel sessionId={sessionId} /> : null}
+      {pr.state === "open" ? <PrWatchPanel sessionId={sessionId} prNumber={pr.number} /> : null}
 
-      {pr.state === "open" ? (
+      {pr.state === "open" && !writable ? (
+        <Text style={[typeScale.sub, { color: tokens.ink3 }]}>
+          Merging and comments need a direct connection to the host. Ship queues the merge for you.
+        </Text>
+      ) : null}
+
+      {pr.state === "open" && writable ? (
         <View style={[styles.panel, { borderColor: tokens.border, backgroundColor: tokens.bg2 }]}>
           <Text style={[typeScale.meta, { color: tokens.ink2 }]}>Merge</Text>
           <Segmented options={METHODS} value={method} onChange={setMethod} />
@@ -134,6 +142,8 @@ function SummaryTab({ sessionId, detail }: { sessionId: string; detail: PrDetail
           </Text>
         </View>
       ))}
+      {writable ? (
+        <>
       <Input
         label="Add a comment"
         value={draft}
@@ -143,6 +153,8 @@ function SummaryTab({ sessionId, detail }: { sessionId: string; detail: PrDetail
         accessibilityLabel="Pull request comment"
       />
       <Button label="Comment" variant="secondary" onPress={send} disabled={!draft.trim()} loading={comment.isPending} />
+        </>
+      ) : null}
 
       <ConfirmDialog
         visible={confirming}

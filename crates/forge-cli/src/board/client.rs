@@ -7,7 +7,9 @@
 //! the same error every fifteen seconds.
 
 use anyhow::{bail, Context, Result};
-use forge_tui::board::{BoardEvent, ConnState, FleetRow, GitInfo, HistoryRow, PastRow, ToastLevel};
+use forge_tui::board::{
+    BoardEvent, ConnState, FleetRow, GitInfo, HistoryRow, PastRow, PressureInfo, ToastLevel,
+};
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
 
@@ -50,6 +52,32 @@ pub(crate) async fn fetch_fleet(
     token: &str,
 ) -> Result<Vec<FleetRow>> {
     get_json(http, base, &api_url(base, token, "api/sessions")).await
+}
+
+/// The host's disk/memory pressure, from the `pressure` field of `GET /api/identity`. `Ok(None)`
+/// is a daemon that does not report one; an error is "could not ask", which leaves the chip as is.
+pub(crate) async fn fetch_pressure(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Result<Option<PressureInfo>> {
+    let identity: serde_json::Value =
+        get_json(http, base, &api_url(base, token, "api/identity")).await?;
+    Ok(identity
+        .get("pressure")
+        .and_then(|p| serde_json::from_value(p.clone()).ok()))
+}
+
+/// The merge queue (`GET /api/pr/queue`); an older daemon without it answers 404, which the
+/// caller drops so the board simply shows no queue section.
+pub(crate) async fn fetch_queue(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+) -> Result<Vec<forge_tui::queue_menu::QueueRow>> {
+    let answer: serde_json::Value =
+        get_json(http, base, &api_url(base, token, "api/pr/queue")).await?;
+    Ok(crate::cli::commands::prs::queue_rows(&answer))
 }
 
 pub(crate) async fn fetch_past(
@@ -172,10 +200,12 @@ async fn refresh_once(
     ev: &mpsc::UnboundedSender<Ev>,
     offline: &mut bool,
 ) {
-    let (fleet, past, dispatches) = tokio::join!(
+    let (fleet, past, dispatches, pressure, queue) = tokio::join!(
         fetch_fleet(http, base, token),
         fetch_past(http, base, token, PAST_LIMIT),
-        super::dispatch_client::fetch_dispatches(http, base, token)
+        super::dispatch_client::fetch_dispatches(http, base, token),
+        fetch_pressure(http, base, token),
+        fetch_queue(http, base, token)
     );
     match fleet {
         Ok(rows) => {
@@ -204,6 +234,12 @@ async fn refresh_once(
     }
     if let Ok(list) = dispatches {
         let _ = ev.send(Ev::Board(BoardEvent::Dispatches(list)));
+    }
+    if let Ok(rows) = queue {
+        let _ = ev.send(Ev::Board(BoardEvent::Queue(rows)));
+    }
+    if let Ok(info) = pressure {
+        let _ = ev.send(Ev::Board(BoardEvent::HostPressure(info)));
     }
 }
 
@@ -334,13 +370,24 @@ pub(crate) async fn create_session(
     ev: mpsc::UnboundedSender<Ev>,
     refresh: mpsc::UnboundedSender<()>,
 ) {
-    match post(&http, &url, &body).await {
+    match post_detailed(&http, &url, &body).await {
         Ok(value) => match value["id"].as_str() {
             Some(id) => {
-                let _ = ev.send(Ev::Board(BoardEvent::Toast(
-                    ToastLevel::Ok,
-                    format!("session {} started", super::short_id(id)),
-                )));
+                let low_disk = value["pressure"]["summary"].as_str();
+                let (level, text) = match low_disk {
+                    Some(why) => (
+                        ToastLevel::Info,
+                        format!(
+                            "session {} started, but {why} — press P to reclaim",
+                            super::short_id(id)
+                        ),
+                    ),
+                    None => (
+                        ToastLevel::Ok,
+                        format!("session {} started", super::short_id(id)),
+                    ),
+                };
+                let _ = ev.send(Ev::Board(BoardEvent::Toast(level, text)));
                 let _ = ev.send(Ev::Created(id.to_string(), prompt));
             }
             None => {
@@ -350,14 +397,58 @@ pub(crate) async fn create_session(
                 )));
             }
         },
-        Err(e) => {
+        // The disk is under its hard floor: show the whole sentence with the Reclaim offer.
+        Err(failure) if failure.code.as_deref() == Some("host_disk_floor") => {
+            let _ = ev.send(Ev::Board(BoardEvent::ReclaimOffer {
+                cwd: body["cwd"].as_str().map(str::to_string),
+                message: failure.full,
+            }));
+        }
+        Err(failure) => {
             let _ = ev.send(Ev::Board(BoardEvent::Toast(
                 ToastLevel::Error,
-                truncate(&e.to_string(), TOAST_MAX_CHARS),
+                truncate(&failure.message, TOAST_MAX_CHARS),
             )));
         }
     }
     let _ = refresh.send(());
+}
+
+/// `POST /api/host/reclaim`: what `forge worktree reclaim --artifacts --yes` frees, reported as
+/// one toast.
+pub(crate) async fn reclaim_action(
+    http: reqwest::Client,
+    url: String,
+    cwd: Option<String>,
+    ev: mpsc::UnboundedSender<Ev>,
+    refresh: mpsc::UnboundedSender<()>,
+) {
+    let toast = match post(&http, &url, &serde_json::json!({ "cwd": cwd })).await {
+        Ok(out) => {
+            let freed = forge_core::worktree_reclaim::human_bytes(
+                out["freed_bytes"].as_u64().unwrap_or_default(),
+            );
+            let failed = out["failures"].as_array().map_or(0, Vec::len);
+            let mut text = format!(
+                "reclaimed {freed}: {} worktree(s) removed, {} build dir(s) pruned",
+                out["removed"], out["pruned"]
+            );
+            if failed > 0 {
+                text.push_str(&format!(", {failed} failed"));
+            }
+            BoardEvent::Toast(ToastLevel::Ok, text)
+        }
+        Err(e) => BoardEvent::Toast(ToastLevel::Error, truncate(&e.to_string(), TOAST_MAX_CHARS)),
+    };
+    let _ = ev.send(Ev::Board(toast));
+    let _ = refresh.send(());
+}
+
+/// Why a `POST` failed: the toast-sized line, the daemon's stable code and its whole sentence.
+pub(crate) struct PostFailure {
+    pub(crate) message: String,
+    pub(crate) code: Option<String>,
+    pub(crate) full: String,
 }
 
 async fn post(
@@ -365,17 +456,42 @@ async fn post(
     url: &str,
     body: &serde_json::Value,
 ) -> Result<serde_json::Value> {
+    post_detailed(http, url, body)
+        .await
+        .map_err(|failure| anyhow::anyhow!("{}", failure.message))
+}
+
+async fn post_detailed(
+    http: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, PostFailure> {
+    let plain = |message: String| PostFailure {
+        full: message.clone(),
+        message,
+        code: None,
+    };
     let resp = http
         .post(url)
         .json(body)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("the daemon did not answer: {e}"))?;
+        .map_err(|e| plain(format!("the daemon did not answer: {e}")))?;
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        bail!("the daemon does not know that session (or the token is wrong)");
+        return Err(plain(
+            "the daemon does not know that session (or the token is wrong)".to_string(),
+        ));
     }
     if !resp.status().is_success() {
-        bail!("{}", body_message(resp).await);
+        let text = resp.text().await.unwrap_or_default();
+        let code = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .and_then(|v| v["code"].as_str().map(str::to_string));
+        return Err(PostFailure {
+            message: error_message(&text),
+            code,
+            full: full_error(&text),
+        });
     }
     Ok(resp.json::<serde_json::Value>().await.unwrap_or_default())
 }

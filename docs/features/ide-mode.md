@@ -25,6 +25,26 @@ that shows one pane at a time with a tab bar. The mouse selects rows and tabs. `
 belongs to the file's content hash: when an agent edits the file again the mark clears. `Y`/`N`
 answer the agent's pending permission from anywhere; `m` messages the agent.
 
+### Risk-sorted review
+
+The queue opens as "9 look here · 31 routine" (hunk counts) and lists the **Look here** files first,
+each with a one-line reason ("deletes a test", "touches permission code", "new migration",
+"removes error handling", "touches unsafe code"). **Routine** files follow: lockfile churn,
+generated files, snapshots, whitespace-only hunks and pure import reorders. `A` (the **Accept
+routine** button in the app) stages exactly the routine hunks of a shared tree, one hunk request
+each, and `u` (Undo in the toast) unstages them again. A worktree agent has no index to stage into,
+so its fully routine files are marked reviewed instead. The diff view shows each hunk's verdict on
+its header line.
+
+The verdict is computed on the daemon, with no model call, where the diff is parsed
+(`crates/forge-cli/src/serve_git/risk.rs`), and rides additively on `GET /api/git/diff` and the
+session diff (`risk`, `reason` per hunk) and on `GET /api/projects/changes` (`risk`, `risk_reason`,
+`look_hunks`, `routine_hunks` per file), so the terminal and the app always agree. It is
+conservative: a hunk is routine only when a rule proves it, a hand-written file's routine hunk never
+drops a code line it does not put back, a diff the daemon cut short is never routine, and
+indentation only counts as whitespace outside Python, YAML, Makefiles and Markdown. A shared-tree
+file whose changes are all staged is listed as routine "staged" with no hunks left to count.
+
 ### The editor
 
 `e` opens the file in a light built-in editor (a diff otherwise). Typing, `Enter` (keeps the

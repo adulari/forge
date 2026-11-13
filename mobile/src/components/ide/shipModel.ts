@@ -32,3 +32,16 @@ export function shipHint(steps: readonly ShipStep[]): string {
 export function shipLabel(steps: readonly ShipStep[]): string {
   return steps.includes("push") ? "Ship it" : "Commit";
 }
+
+export type PostShipAction = { kind: "none" } | { kind: "open-pr" } | { kind: "view-pr"; number: number };
+
+// After a push: offer the existing pull request when the branch has one, otherwise offer to open one.
+export function postShipAction(pushed: boolean, pr: { number: number } | null | undefined): PostShipAction {
+  if (!pushed) return { kind: "none" };
+  return pr ? { kind: "view-pr", number: pr.number } : { kind: "open-pr" };
+}
+
+export function failedChecksWarning(names: readonly string[]): string | null {
+  if (names.length === 0) return null;
+  return `Last check failed: ${names.slice(0, 2).join(", ")}${names.length > 2 ? ` +${names.length - 2}` : ""}.`;
+}

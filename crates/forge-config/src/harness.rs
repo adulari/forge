@@ -110,6 +110,30 @@ pub struct HarnessConfig {
     /// Second-model review at DONE (docs/features/advisor.md).
     #[serde(default)]
     pub advisor: crate::advisor::AdvisorConfig,
+    /// A stronger model on call for stalls, DONE and the model's own questions
+    /// (docs/features/advisor.md).
+    #[serde(default)]
+    pub expert: crate::expert::ExpertConfig,
+    /// Whether the model gets the `update_tasks` task-list tool. `false` is the no-task-list arm
+    /// of the task-list A/B: the tool is not advertised (nor in the `run_code` catalog), a call is
+    /// refused, and the system prompt stops mentioning it. Default `true` until the A/B decides.
+    #[serde(default = "default_true")]
+    pub task_tool: bool,
+    /// Whether open tasks drive the model onward: the continue re-drive when it signs off with
+    /// tasks open, the stale-task escalation, question and turn-start list note, and the
+    /// mid-intent nudge standing aside for the task gate. `None` keeps the built-in behaviour (all
+    /// on); `Some(false)` is the no-task-nudges arm of the A/B. Default `None` until the A/B decides.
+    #[serde(default, deserialize_with = "lenient_opt_bool")]
+    pub task_nudges: Option<bool>,
+    /// The `scout` tool: a throwaway read-only orientation run that returns a cited brief
+    /// (docs/features/scouts.md). Experimental, default `off`.
+    #[serde(default)]
+    pub scouts: crate::scouts::ScoutsMode,
+    /// Re-drive a turn whose reply announced its next step ("Now let me check...") but made no
+    /// tool call, up to a few times, before accepting it as the answer. `false` takes such a reply
+    /// as final. Default on.
+    #[serde(default = "default_true")]
+    pub mid_intent_redrive: bool,
 }
 
 impl Default for HarnessConfig {
@@ -141,7 +165,35 @@ impl Default for HarnessConfig {
             lsp_nav: false,
             subagent_output_schema: false,
             advisor: crate::advisor::AdvisorConfig::default(),
+            expert: crate::expert::ExpertConfig::default(),
+            task_tool: true,
+            task_nudges: None,
+            scouts: crate::scouts::ScoutsMode::default(),
+            mid_intent_redrive: true,
         }
+    }
+}
+
+/// An optional bool that also accepts the text the `/config` editor writes for an unset optional
+/// (`"true"`, `"false"`, or empty for unset).
+fn lenient_opt_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Bool(bool),
+        Text(String),
+    }
+    match Option::<Raw>::deserialize(d)? {
+        None => Ok(None),
+        Some(Raw::Bool(b)) => Ok(Some(b)),
+        Some(Raw::Text(t)) => match t.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => Ok(None),
+            "true" | "on" | "yes" | "1" => Ok(Some(true)),
+            "false" | "off" | "no" | "0" => Ok(Some(false)),
+            other => Err(serde::de::Error::custom(format!(
+                "expected true, false or empty, got '{other}'"
+            ))),
+        },
     }
 }
 

@@ -24,6 +24,8 @@ export type BridgeRoute =
   | "voice_transcribe"
   | "list_skills"
   | "list_models"
+  | "model_report"
+  | "turns_summary"
   | "read_config"
   | "update_config"
   | "list_hooks"
@@ -47,8 +49,10 @@ export type BridgeRoute =
   | "git_diff"
   | "session_diff"
   | "session_agents"
+  | "session_turns"
   | "blame"
   | "session_jobs"
+  | "session_history_search"
   | "session_job_tail"
   | "project_changes"
   | "git_hunk"
@@ -63,6 +67,7 @@ export type BridgeRoute =
   | "delete_schedule"
   | "changelog"
   | "list_notices"
+  | "brief"
   | "identity"
   | "account_sync_status"
   | "account_sync_update"
@@ -72,7 +77,31 @@ export type BridgeRoute =
   | "import_scan"
   | "session_claude"
   | "export_session_claude"
-  | "continue_claude_session";
+  | "continue_claude_session"
+  // GitHub issues through the host's `gh`; `start_issue` opens a session and arms PR Watch.
+  | "list_issues"
+  | "issue_detail"
+  | "start_issue"
+  // Backlog drain: several issues, a few at a time, under an optional spend envelope.
+  | "drain_issues"
+  | "list_issue_drains"
+  | "cancel_issue_drain"
+  // Merge queue standing across repos, and the owner's hold / release / front / retry.
+  | "pr_queue"
+  | "pr_queue_action"
+  | "pr_review_action"
+  | "pr_status"
+  | "pr_list"
+  | "pr_detail"
+  | "pr_diff"
+  | "pr_watch_get"
+  | "pr_watches"
+  | "pr_watch_set"
+  | "session_ship"
+  | "session_done"
+  // Local CI (docs/features/ci-parity.md): the plan with its last run, and a run of it.
+  | "session_ci"
+  | "session_ci_run";
 
 export interface AnywhereBridgeRequest {
   hostId: string;
@@ -278,6 +307,8 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/voice/transcribe": { POST: "voice_transcribe" },
     "/api/skills": { GET: "list_skills" },
     "/api/models": { GET: "list_models" },
+    "/api/models/report": { GET: "model_report" },
+    "/api/turns/summary": { GET: "turns_summary" },
     "/api/config": { GET: "read_config", PUT: "update_config" },
     "/api/hooks": { GET: "list_hooks" },
     "/api/plans": { GET: "list_plans" },
@@ -304,15 +335,33 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
     "/api/schedules": { GET: "list_schedules" },
     "/api/changelog": { GET: "changelog" },
     "/api/notices": { GET: "list_notices" },
+    "/api/brief": { GET: "brief" },
     "/api/identity": { GET: "identity" },
     "/api/anywhere/sync": { GET: "account_sync_status", PUT: "account_sync_update" },
     "/api/anywhere/sync/now": { POST: "account_sync_now" },
     "/api/import/scan": { GET: "import_scan" },
+    "/api/issues": { GET: "list_issues" },
+    "/api/issues/detail": { GET: "issue_detail" },
+    "/api/issues/start": { POST: "start_issue" },
+    "/api/issues/drain": { POST: "drain_issues" },
+    "/api/issues/drains": { GET: "list_issue_drains" },
+    "/api/issues/drain/cancel": { POST: "cancel_issue_drain" },
+    "/api/pr/queue": { GET: "pr_queue" },
+    "/api/pr/queue/action": { POST: "pr_queue_action" },
+    "/api/pr/review/action": { POST: "pr_review_action" },
+    "/api/pr/status": { GET: "pr_status" },
+    "/api/pr/list": { GET: "pr_list" },
+    "/api/pr/detail": { GET: "pr_detail" },
+    "/api/pr/diff": { GET: "pr_diff" },
+    "/api/pr/watches": { GET: "pr_watches" },
+    // Ship and the PR Watch write are bridged but the host refuses them unless its owner set
+    // `[anywhere] allow_ship_over_relay` (RouteId::SessionShip / PrWatchSet in the protocol crate).
+    "/api/pr/watch": { GET: "pr_watch_get", POST: "pr_watch_set" },
   };
   const route = exact[path]?.[method];
   if (route) return { route, parameters: [] };
 
-  const session = path.match(/^\/api\/sessions\/([^/]+)\/(archive|fork|merge|discard|mode)$/);
+  const session = path.match(/^\/api\/sessions\/([^/]+)\/(archive|fork|merge|discard|mode|ship|done)$/);
   if (session) {
     const operation: Record<string, BridgeRoute> = {
       archive: "archive_session",
@@ -320,6 +369,8 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
       merge: "merge_session",
       discard: "discard_session",
       mode: "set_session_mode",
+      ship: "session_ship",
+      done: "session_done",
     };
     const expectedMethod = "POST";
     if (method === expectedMethod) {
@@ -344,6 +395,18 @@ function routeFor(path: string, method: string): { route: BridgeRoute; parameter
   const sessionAgents = path.match(/^\/api\/sessions\/([^/]+)\/agents$/);
   if (sessionAgents && method === "GET") {
     return { route: "session_agents", parameters: [sessionPathParameter(sessionAgents[1])] };
+  }
+  const sessionCi = path.match(/^\/api\/sessions\/([^/]+)\/ci(\/run)?$/);
+  if (sessionCi && method === (sessionCi[2] ? "POST" : "GET")) {
+    return { route: sessionCi[2] ? "session_ci_run" : "session_ci", parameters: [sessionPathParameter(sessionCi[1])] };
+  }
+  const sessionTurns = path.match(/^\/api\/sessions\/([^/]+)\/turns$/);
+  if (sessionTurns && method === "GET") {
+    return { route: "session_turns", parameters: [sessionPathParameter(sessionTurns[1])] };
+  }
+  const historySearch = path.match(/^\/api\/sessions\/([^/]+)\/history\/search$/);
+  if (historySearch && method === "GET") {
+    return { route: "session_history_search", parameters: [sessionPathParameter(historySearch[1])] };
   }
   const sessionJobs = path.match(/^\/api\/sessions\/([^/]+)\/jobs$/);
   if (sessionJobs && method === "GET") {

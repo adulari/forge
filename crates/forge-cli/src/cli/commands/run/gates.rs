@@ -25,6 +25,36 @@ const BOUNDED_OUTPUT_CHARS: usize = 4000;
 #[cfg(unix)]
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
+/// The built-in gate that runs the repository's own CI plan (docs/features/ci-parity.md). It is a
+/// name, not a shell command: [`run_gate_command`] runs the plan in-process, and the plan's own
+/// per-step and total timeouts replace the 300 s gate timeout.
+pub(crate) const CI_GATE_CMD: &str = "forge ci run";
+
+/// Add the CI-parity gate to `gates` when the repo has runnable workflow steps and `[ci] gate`
+/// is not `off`. Idempotent; called when a goal reaches completion.
+pub(crate) fn ensure_ci_gate(gates: &mut Vec<GateState>, cwd: &std::path::Path) {
+    if gates.iter().any(|g| g.spec.cmd == CI_GATE_CMD) {
+        return;
+    }
+    let (plan, settings) = crate::ci_run::make_plan(cwd);
+    if settings.gate == forge_config::ci_parity::settings::GateMode::Auto && !plan.steps.is_empty()
+    {
+        gates.push(GateState::new(GateSpec {
+            cmd: CI_GATE_CMD.to_string(),
+        }));
+    }
+}
+
+async fn run_ci_gate(cwd: &std::path::Path) -> (bool, String) {
+    let root = cwd.to_path_buf();
+    match tokio::task::spawn_blocking(move || crate::ci_run::automatic_check(&root, "goal")).await {
+        Ok(crate::ci_run::Check::Passed(summary)) => (true, summary),
+        Ok(crate::ci_run::Check::Skipped(why)) => (true, format!("skipped: {why}")),
+        Ok(crate::ci_run::Check::Failed(text)) => (false, text),
+        Err(e) => (false, format!("the CI plan run crashed: {e}")),
+    }
+}
+
 /// A single user-defined quality gate: a shell command that must exit 0.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GateSpec {
@@ -137,6 +167,9 @@ fn bound_output(s: &str, max_chars: usize) -> String {
 /// tree if it outruns `timeout`. gates.rs can't reuse forge-tools' shell runtime directly (it's a
 /// private tool-execution path in a different crate) so this mirrors its process-group kill idiom.
 async fn run_gate_command(cmd: &str, timeout: Duration, cwd: &std::path::Path) -> (bool, String) {
+    if cmd == CI_GATE_CMD {
+        return run_ci_gate(cwd).await;
+    }
     let (shell, flag) = shell_invocation();
     let mut command = Command::new(shell);
     command
@@ -288,6 +321,7 @@ async fn capture_git(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
 
 /// `/goal` dispatch body — pins the goal guidance on the session and produces the decomposition
 /// turn. Lives here (not dispatch.rs) with the rest of the autonomy surface.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn goal_outcome(
     session: &std::sync::Arc<tokio::sync::Mutex<forge_core::Session>>,
     app: &mut forge_tui::App,
@@ -295,9 +329,11 @@ pub(crate) async fn goal_outcome(
     gates: Vec<String>,
     max_tokens: Option<u64>,
     max_minutes: Option<u64>,
+    budget: Option<String>,
+    contract: bool,
 ) -> anyhow::Result<super::dispatch::DispatchOutcome> {
     use super::dispatch::DispatchOutcome;
-    let text = objective.trim().to_string();
+    let (text, mission) = super::goal_mission::take_flag(&objective);
     if text.is_empty() {
         if let Some(goal) = &app.goal {
             let summary = goal.summary();
@@ -305,16 +341,43 @@ pub(crate) async fn goal_outcome(
             return Ok(DispatchOutcome::Handled);
         }
         app.note(
-            "usage: /goal <objective> [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
-             — sets the goal and breaks it into tasks",
+            "usage: /goal <objective> [--contract|--mission] [--gate \"<cmd>\"]... [--max-tokens N] [--max-minutes N] \
+             [--budget claude:20%w|$5] — sets the goal and breaks it into tasks",
         );
         return Ok(DispatchOutcome::Handled);
+    }
+    app.pending_envelope = None;
+    if let Some(budget) = budget {
+        let spec = forge_types::goal_envelope::EnvelopeSpec::parse(&budget, None)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        match super::goal_envelope::baseline(session, spec).await {
+            Ok(envelope) => {
+                app.note(&format!(
+                    "▤ {} — the goal pauses when it is spent",
+                    envelope.meter()
+                ));
+                app.pending_envelope = Some(envelope);
+            }
+            Err(why) => {
+                app.note(&format!(
+                    "goal not started — {why}. Try again once a reading is available."
+                ));
+                return Ok(DispatchOutcome::Handled);
+            }
+        }
     }
     {
         let mut s = session.lock().await;
         s.prime_guidance(&[super::goal_session_guidance(&text)])
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         s.set_active_goal(Some(&text));
+        if mission {
+            s.request_goal_mission(&text);
+            app.note("🧭 drafting a mission - approve its milestones to start the goal");
+        } else if contract || s.goal_contract_default() {
+            s.request_goal_contract(&text);
+            app.note("📜 drafting a validation contract — approve it to start the goal");
+        }
     }
     app.note(&format!("🎯 goal set — {text}"));
     Ok(DispatchOutcome::StartGoal {

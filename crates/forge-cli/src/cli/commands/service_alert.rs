@@ -24,7 +24,8 @@ pub(crate) fn render_systemd_alert_unit(forge_exe: &str) -> String {
         "[Unit]\nDescription=Forge serve failed — local notification\n\
          # Started by OnFailure= in forge-serve.service. Kept as its own unit rather than an\n\
          # ExecStopPost= so it runs when the service FAILS, not on every ordinary stop.\n\n\
-         [Service]\nType=oneshot\nExecStart={forge_exe} service alert\n"
+         [Service]\nType=oneshot\nExecStart={} service alert\n",
+        super::schedule::quote_unit_arg(forge_exe)
     )
 }
 
@@ -98,7 +99,7 @@ mod tests {
     #[test]
     fn the_alert_unit_runs_forge_and_is_oneshot() {
         let unit = render_systemd_alert_unit("/usr/bin/forge");
-        assert!(unit.contains("ExecStart=/usr/bin/forge service alert"));
+        assert!(unit.contains("ExecStart=\"/usr/bin/forge\" service alert"));
         assert!(unit.contains("Type=oneshot"));
     }
 

@@ -60,20 +60,120 @@ pub(crate) fn mcp_action(arg: String) -> CommandAction {
     }
 }
 
-/// `/goal <objective> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`
+/// `/goal <objective> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N] [--budget <spec>]`
 pub(crate) fn goal_action(arg: &str) -> CommandAction {
     if let Some(control) = goal_control(arg) {
         return CommandAction::GoalControl(control);
     }
-    let Ok((objective, gates, max_tokens, max_minutes)) = parse_autonomy_options(arg) else {
-        return bad_budget("/goal", arg);
+    let (arg, budget) = match take_budget(arg) {
+        Ok(taken) => taken,
+        Err(why) => {
+            return CommandAction::Unknown(format!("/goal {arg} ({why}; nothing was started)"))
+        }
+    };
+    let (arg, contract) = take_flag(&arg, "--contract");
+    let Ok((objective, gates, max_tokens, max_minutes)) = parse_autonomy_options(&arg) else {
+        return bad_budget("/goal", &arg);
     };
     CommandAction::Goal {
         objective,
         gates,
         max_tokens,
         max_minutes,
+        budget,
+        contract,
     }
+}
+
+/// Remove a bare whole-word `flag` from a goal's arguments. A plain whitespace scan, like
+/// [`take_budget`]: a quoted gate command that happens to contain the word is not a flag, because
+/// only an unquoted token equal to the flag counts.
+fn take_flag(arg: &str, flag: &str) -> (String, bool) {
+    if !arg.contains(flag) {
+        return (arg.to_string(), false);
+    }
+    let mut kept: Vec<&str> = Vec::new();
+    let mut found = false;
+    let mut quote: Option<char> = None;
+    let mut word_start: Option<usize> = None;
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for (i, c) in arg.char_indices() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None if c == '"' => {
+                quote = Some(c);
+                word_start.get_or_insert(i);
+            }
+            None if c.is_whitespace() => {
+                if let Some(st) = word_start.take() {
+                    spans.push((st, i));
+                }
+            }
+            None => {
+                word_start.get_or_insert(i);
+            }
+        }
+    }
+    if let Some(st) = word_start {
+        spans.push((st, arg.len()));
+    }
+    let mut cursor = 0;
+    for (st, en) in spans {
+        if &arg[st..en] == flag {
+            kept.push(&arg[cursor..st]);
+            cursor = en;
+            found = true;
+        }
+    }
+    kept.push(&arg[cursor..]);
+    if !found {
+        return (arg.to_string(), false);
+    }
+    let joined: String = kept.concat();
+    (
+        joined.split_whitespace().collect::<Vec<_>>().join(" "),
+        true,
+    )
+}
+
+/// Pull `--budget <spec>` out of a goal's arguments, validating the spec. Without the flag the
+/// text comes back untouched.
+fn take_budget(arg: &str) -> Result<(String, Option<String>), String> {
+    if !arg.contains("--budget") {
+        return Ok((arg.to_string(), None));
+    }
+    // A plain whitespace scan, not shell parsing: an apostrophe elsewhere in the objective
+    // ("fix the user's login bug") must not hide the flag.
+    let mut words: Vec<(usize, &str)> = Vec::new();
+    let mut start = None;
+    for (i, c) in arg.char_indices() {
+        match (c.is_whitespace(), start) {
+            (false, None) => start = Some(i),
+            (true, Some(st)) => {
+                words.push((st, &arg[st..i]));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(st) = start {
+        words.push((st, &arg[st..]));
+    }
+    let Some(at) = words.iter().position(|(_, w)| *w == "--budget") else {
+        return Ok((arg.to_string(), None));
+    };
+    let (_, spec) = words.get(at + 1).copied().ok_or_else(|| {
+        "--budget needs a value: claude:20%w, codex:15%w, claude:30%5h or $5".to_string()
+    })?;
+    forge_types::goal_envelope::EnvelopeSpec::parse(spec, None)?;
+    let from = words[at].0;
+    let to = words[at + 1].0 + spec.len();
+    let rest = format!("{} {}", arg[..from].trim_end(), arg[to..].trim_start());
+    Ok((rest.trim().to_string(), Some(spec.to_string())))
 }
 
 /// The steering verbs are whole-word matches, so a goal that merely starts with one of them
@@ -89,8 +189,18 @@ fn goal_control(arg: &str) -> Option<GoalControl> {
     }
     let (verb, rest) = arg.split_once(char::is_whitespace)?;
     let rest = rest.trim();
-    (verb.eq_ignore_ascii_case("edit") && !rest.is_empty())
-        .then(|| GoalControl::Edit(rest.to_string()))
+    if rest.is_empty() {
+        return None;
+    }
+    if verb.eq_ignore_ascii_case("edit") {
+        Some(GoalControl::Edit(rest.to_string()))
+    } else if verb.eq_ignore_ascii_case("budget")
+        && forge_types::goal_envelope::EnvelopeSpec::parse(rest, Some("claude")).is_ok()
+    {
+        Some(GoalControl::Budget(rest.to_string()))
+    } else {
+        None
+    }
 }
 
 /// `/loop <task> [--gate "<cmd>"]... [--max-tokens N] [--max-minutes N]`

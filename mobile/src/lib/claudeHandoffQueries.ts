@@ -88,18 +88,25 @@ export function useContinueInClaudeCode(): (sessionId: string) => void {
 }
 
 /** Continue one Claude Code conversation in Forge (import or sync) and open the Forge session. */
-export function useContinueFromClaudeCode(): (ccSessionId: string, onDone?: () => void) => void {
+export function useContinueFromClaudeCode(): (
+  ccSessionId: string,
+  onDone?: () => void,
+  onFailed?: () => void,
+) => void {
   const toast = useToast();
   const { mutate } = useContinueClaudeSession();
   return useCallback(
-    (ccSessionId: string, onDone?: () => void) => {
+    (ccSessionId: string, onDone?: () => void, onFailed?: () => void) => {
       mutate(ccSessionId, {
         onSuccess: (reply) => {
           toast.show(continueToast(reply), { tone: "success" });
           onDone?.();
           openSession(reply.session_id);
         },
-        onError: (error) => toast.show(text(error, "Could not continue this Claude Code session"), { tone: "danger" }),
+        onError: (error) => {
+          toast.show(text(error, "Could not continue this Claude Code session"), { tone: "danger" });
+          onFailed?.();
+        },
       });
     },
     [mutate, toast],

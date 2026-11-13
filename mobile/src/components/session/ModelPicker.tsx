@@ -1,3 +1,4 @@
+import { modelMetaLine } from "../../lib/modelMeta";
 import { Check, ChevronDown, Cpu, EyeOff, Star } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
@@ -138,7 +139,7 @@ export function ModelPicker({ value, onChange }: ModelPickerProps) {
                       key={`${section.key}:${provider}:${model.id}`}
                       title={model.name}
                       providerId={`${provider}::${model.id}`}
-                      subtitle={`${provider} · ${model.id}`}
+                      subtitle={`${provider} · ${modelMetaLine(model)}`}
                       runtime={runtimeLabel(row)}
                       selected={value === model.id}
                       health={model.health ? "benched" : "ready"}

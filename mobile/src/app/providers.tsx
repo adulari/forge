@@ -58,6 +58,8 @@ import { supportsDirectDaemonEndpoints } from "../lib/transport";
 import { useTokens } from "../theme/ThemeProvider";
 import { radii, space, type ColorTokens } from "../theme/tokens";
 import { monoFamily, type, tabularNums } from "../theme/typography";
+import { keyVerdict, verdictDetail, verdictHeadline } from "../lib/providerVerdict";
+import { useClockSeconds } from "../components/ds/relativeClock";
 import { SettingsShell } from "./(tabs)/settings";
 import { usePullRefresh } from "../lib/usePullRefresh";
 
@@ -75,6 +77,7 @@ function errorMessage(error: unknown, fallback: string): string {
 
 function statusTone(provider: ProviderRow): BadgeTone {
   if (!provider.enabled) return "neutral";
+  if (keyVerdict(provider)) return "danger";
   if (provider.auth_status === "ready" || provider.auth_status === "configured") return "success";
   if (provider.auth_status === "expired" || provider.auth_status === "missing") return "danger";
   if (provider.auth_status === "stopped" || provider.auth_status === "unverified") return "warn";
@@ -90,6 +93,8 @@ function toneColor(tone: BadgeTone, tokens: ColorTokens): string {
 
 function statusLabel(provider: ProviderRow): string {
   if (!provider.enabled) return "disabled";
+  const headline = verdictHeadline(provider);
+  if (headline) return headline;
   switch (provider.auth_status) {
     case "configured":
       return "configured";
@@ -146,6 +151,8 @@ function ProviderItem({
   onRemoveAccount: (provider: ProviderRow, account: ProviderOAuthAccount) => void;
 }) {
   const tokens = useTokens();
+  const nowSeconds = useClockSeconds();
+  const verdict = verdictDetail(provider, nowSeconds);
   const source = provider.environment_key_present
     ? `environment · ${provider.env_var}`
     : provider.stored_key_fingerprints.length > 0
@@ -191,6 +198,11 @@ function ProviderItem({
 
       {provider.kind === "api_key" || provider.kind === "custom" || provider.kind === "azure" ? (
         <Text style={[type.monoMeta, { color: tokens.ink4 }]}>{source}</Text>
+      ) : null}
+      {verdict ? (
+        <Text style={[type.monoMeta, { color: tokens.danger }]} numberOfLines={3}>
+          {verdict}
+        </Text>
       ) : null}
       {provider.endpoint ? (
         <Text style={[type.monoMeta, { color: tokens.ink4 }]} numberOfLines={2}>
@@ -258,7 +270,7 @@ function ProviderItem({
         {!provider.keyless && ["api_key", "custom", "azure"].includes(provider.kind) ? (
           <Button
             label={provider.stored_key_fingerprints.length > 0 ? "Add / replace key" : "Store key"}
-            variant="secondary"
+            variant={keyVerdict(provider) ? "primary" : "secondary"}
             icon={<KeyRound size={15} strokeWidth={1.75} color={tokens.ink2} />}
             disabled={mutationBusy}
             onPress={() => onKey(provider)}

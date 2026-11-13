@@ -483,6 +483,72 @@ pub(crate) fn replay_cmd(
 /// it answers "would today's model/config solve this the same way?" — auditable and
 /// reproducible. Tools run under the normal permission mode, exactly as `forge run` does, so a
 /// re-run is no more privileged than re-typing the prompts yourself.
+/// `forge replay <id> --search <words>`: ranked hits over the session's whole history. A hit's
+/// seq is what the model's `recall` tool reads; `[` `]` mark the matched words.
+pub(crate) fn replay_search_cmd(
+    ids: &[String],
+    query: &str,
+    json: bool,
+    redact: bool,
+) -> Result<()> {
+    let [one] = ids else {
+        anyhow::bail!("--search takes exactly one session id");
+    };
+    let store = open_store()?;
+    let mut matches = store
+        .matching_session_ids(one)
+        .with_context(|| format!("resolving session {one}"))?;
+    let id = match matches.len() {
+        0 => anyhow::bail!("no session matches '{one}' — see `forge sessions`"),
+        1 => matches.remove(0),
+        n => anyhow::bail!("'{one}' is ambiguous ({n} sessions) — use more characters"),
+    };
+    let hits = store
+        .search_session_history(&id, query, 40)
+        .context("searching the session")?;
+    let redactor = redact.then(forge_core::redact::Redactor::from_environment);
+    let scrub = |text: &str| match &redactor {
+        Some(r) => r.redact(text).into_owned(),
+        None => text.to_string(),
+    };
+    if json {
+        let rows: Vec<serde_json::Value> = hits
+            .iter()
+            .map(|h| {
+                serde_json::json!({
+                    "seq": h.seq, "role": h.role, "folded": h.folded,
+                    "snippet": scrub(&h.snippet),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::json!({ "session_id": id, "hits": rows }));
+        return Ok(());
+    }
+    print!("{}", render_search_hits(&hits, query, &scrub));
+    Ok(())
+}
+
+fn render_search_hits(
+    hits: &[forge_store::FoldedHit],
+    query: &str,
+    scrub: &dyn Fn(&str) -> String,
+) -> String {
+    if hits.is_empty() {
+        return format!("nothing in this session matches \"{query}\"\n");
+    }
+    let mut out = format!("{} hit(s) for \"{query}\", best first:\n", hits.len());
+    for hit in hits {
+        let folded = if hit.folded { "  (folded)" } else { "" };
+        out.push_str(&format!(
+            "  #{:<6} {:<10}{folded}  {}\n",
+            hit.seq,
+            hit.role,
+            scrub(hit.snippet.trim())
+        ));
+    }
+    out
+}
+
 pub(crate) async fn replay_rerun_cmd(ids: &[String]) -> Result<()> {
     let [one] = ids else {
         anyhow::bail!("--rerun takes exactly one session id");
@@ -732,6 +798,34 @@ fn replay_preview(text: &str) -> String {
         out.push('…');
     }
     out
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::render_search_hits;
+
+    #[test]
+    fn hits_list_their_seq_role_and_whether_they_are_folded() {
+        let hits = vec![
+            forge_store::FoldedHit {
+                seq: 7,
+                role: "assistant".into(),
+                snippet: "settled on [backoff]".into(),
+                folded: true,
+            },
+            forge_store::FoldedHit {
+                seq: 90,
+                role: "user".into(),
+                snippet: "[backoff] again?".into(),
+                folded: false,
+            },
+        ];
+        let text = render_search_hits(&hits, "backoff", &|s| s.to_string());
+        assert!(text.starts_with("2 hit(s) for \"backoff\""), "{text}");
+        assert!(text.contains("#7") && text.contains("(folded)"), "{text}");
+        assert!(text.contains("#90") && !text.lines().last().unwrap().contains("folded"));
+        assert!(render_search_hits(&[], "zzz", &|s| s.to_string()).contains("nothing"));
+    }
 }
 
 #[cfg(test)]

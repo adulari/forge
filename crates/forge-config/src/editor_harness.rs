@@ -14,13 +14,36 @@ pub(crate) fn group_and_label(path: &str) -> Option<(&'static str, &'static str)
         "harness.eval_kernel" => Some(("Behaviour", "Persistent Python kernel")),
         "harness.lsp_nav" => Some(("Behaviour", "LSP navigation tool")),
         "harness.subagent_output_schema" => Some(("Behaviour", "Subagent output schemas")),
+        "harness.scouts" => Some(("Behaviour", "Scouts")),
+        "harness.mid_intent_redrive" => Some(("Behaviour", "Re-drive announced steps")),
+        "harness.task_tool" => Some(("Behaviour", "Task-list tool")),
+        "harness.task_nudges" => Some(("Behaviour", "Task-list nudges")),
         "harness.advisor.enabled" => Some(("Behaviour", "Advisor review")),
         "harness.advisor.model" => Some(("Behaviour", "Advisor model")),
         "harness.advisor.timeout_secs" => Some(("Behaviour", "Advisor timeout")),
+        "harness.expert.model" => Some(("Behaviour", "Expert model")),
+        "harness.expert.max_consults_per_turn" => Some(("Behaviour", "Expert consults per turn")),
+        "harness.expert.budget" => Some(("Behaviour", "Expert budget")),
+        "harness.expert.timeout_secs" => Some(("Behaviour", "Expert timeout")),
+        "harness.expert.triggers.stall" => Some(("Behaviour", "Expert on stalls")),
+        "harness.expert.triggers.done" => Some(("Behaviour", "Expert at DONE")),
+        "harness.expert.triggers.tool" => Some(("Behaviour", "Expert on request")),
         "tui.session_strip" => Some(("Interface", "Session strip")),
         "tui.sidebar" => Some(("Interface", "Sidebar")),
+        "anywhere.allow_ship_over_relay" => Some(("Anywhere", "Ship over Anywhere")),
+        "pr_watch.queue" => Some(("PR Watch", "Merge queue")),
+        "pr_watch.review_on_error" => Some(("PR Watch", "Merge when the review fails")),
+        "mesh.headless_outage_wait" => Some(("Mesh & Cost", "Headless runs wait out outages")),
         _ => None,
     }
+}
+
+pub(crate) fn options(path: &str) -> Option<Vec<&'static str>> {
+    Some(match path {
+        "harness.scouts" => vec!["off", "tool", "auto"],
+        "pr_watch.review_on_error" => vec!["allow", "block"],
+        _ => return None,
+    })
 }
 
 pub(crate) fn help(path: &str) -> Option<&'static str> {
@@ -41,9 +64,55 @@ pub(crate) fn help(path: &str) -> Option<&'static str> {
         "harness.eval_kernel" => "Advertise a `python` tool: a persistent per-session Python kernel. Runs code with shell-level permissions. Applies to new sessions. Default off.",
         "harness.lsp_nav" => "Add a deferred read-only lsp tool (definition, hover, references; Python via ty/pyright). Library definitions come back with source inline. Default off.",
         "harness.subagent_output_schema" => "Let the parent request a JSON-schema result from spawn_agents children; validated with up to 2 retries.",
+        "harness.scouts" => "The scout tool: a throwaway read-only agent on the cheap tier reads the code for a question and hands back a short cited brief, so the exploration never enters the working transcript. auto: tell the model to scout first when a task needs orientation. tool: offer it, the model decides. off: no scout. Experimental; default off.",
+        "harness.mid_intent_redrive" => "When a reply announces its next step (\"Now let me check...\") but makes no tool call, send it back to do it, up to a few times, instead of taking the reply as the answer. Off takes such a reply as final. Default on.",
+        "harness.task_tool" => "Give the model the update_tasks task-list tool. Off removes the tool, its mention in the system prompt and its run_code binding, so the model works without a list. One arm of the task-list A/B; the default will be set by its result. Default on.",
+        "harness.task_nudges" => "Whether open tasks push the model onward: the continue re-drive when it signs off with tasks open, the stale-task escalation and question, the turn-start list note. Type true or false; empty keeps the built-in behaviour (on). One arm of the task-list A/B; the default will be set by its result.",
         "harness.advisor.enabled" => "Before a turn that changed something finishes, a second model reads the work once and can send it back once with up to 4 notes. Skipped for CLI bridges and subscription models. Default off.",
         "harness.advisor.model" => "Model that reviews. Empty uses the model driving the turn. A Claude Sonnet-class model is the recommended setting; small models truncated on large transcripts in the replay.",
+        "harness.expert.model" => "Stronger model to ask when a turn stalls, at DONE and on request, as provider::model (for example codex-oauth::gpt-5.6-sol). A subscription model (codex-oauth, codex-cli, claude-cli) also needs a budget. Empty means no expert.",
+        "harness.expert.max_consults_per_turn" => "Consults one turn may spend across stall, DONE and on-request (default 2).",
+        "harness.expert.budget" => "Spend cap for the expert: codex:5%w (5% of the ChatGPT week), claude:10%5h, or $2 for an API model. A codex model takes a codex slice and a claude-cli model a claude one; an API model takes dollars or nothing. Required for a subscription expert; consults stop once it is spent.",
+        "harness.expert.timeout_secs" => "Seconds before an expert call is abandoned and the turn goes on without it (default 120).",
+        "harness.expert.triggers.stall" => "Consult the expert before Forge nudges or stops a turn that is going in circles.",
+        "harness.expert.triggers.done" => "Send the DONE review to the expert instead of the advisor model.",
+        "harness.expert.triggers.tool" => "Let the model call consult_expert with a question of its own.",
         "harness.advisor.timeout_secs" => "Seconds before an advisor call is abandoned and the turn finishes as it would have (default 120).",
+        "pr_watch.queue" => "Land merge-mode PRs one at a time per repository through the merge queue, each tested against the main the previous one produced. Off merges each PR on its own. Default on.",
+        "pr_watch.review_on_error" => "What a reviewer failure does to a PR about to merge. allow: merge anyway and note it. block: do not merge, retry the review, and block the PR after 3 failures on one head. Default allow.",
+        "mesh.headless_outage_wait" => "Let a headless forge run wait out a provider outage (up to the outage wait, 8 hours) like chat and the daemon do. Off, it fails fast with end reason provider_down. forge run --wait-for-outage opts one run in. Default off.",
+        "anywhere.allow_ship_over_relay" => "Let your paired phone ship while you are away: commit a session's files, push the branch (never forced), open or reuse the PR and queue it for merge, through the Anywhere relay. Off by default because it commits and pushes in your repositories without you at this machine. Switch it on from this machine only; the relay cannot change it.",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::help;
+
+    #[test]
+    fn the_expert_model_and_budget_help_show_the_spelling_to_type() {
+        let model = help("harness.expert.model").unwrap();
+        assert!(model.contains("provider::model"), "{model}");
+        assert!(model.contains("codex-oauth::gpt-5.6-sol"), "{model}");
+        let budget = help("harness.expert.budget").unwrap();
+        for spelling in ["codex:5%w", "claude:10%5h", "$2"] {
+            assert!(budget.contains(spelling), "{budget}");
+        }
+        assert!(budget.contains("API model"), "{budget}");
+    }
+
+    #[test]
+    fn ship_over_relay_is_an_off_by_default_setting_in_the_config_editor() {
+        let descriptor = crate::config_descriptors()
+            .into_iter()
+            .find(|d| d.path == "anywhere.allow_ship_over_relay")
+            .expect("descriptor");
+        assert_eq!(descriptor.group, "Anywhere");
+        assert_eq!(descriptor.label, "Ship over Anywhere");
+        assert_eq!(descriptor.default.display(), "false");
+        assert!(help("anywhere.allow_ship_over_relay")
+            .unwrap()
+            .contains("never forced"));
+    }
 }

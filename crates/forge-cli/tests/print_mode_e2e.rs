@@ -374,3 +374,46 @@ fn claude_print_flags_are_accepted_together() {
         .unwrap());
     assert_eq!(events(&out)[0]["subtype"], "success");
 }
+
+#[test]
+fn a_run_whose_provider_stays_down_fails_with_the_stored_end_reason() {
+    let ws = tempfile::tempdir().unwrap();
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let cfg = ws.path().join("cfg").join("forge");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(
+        cfg.join("config.toml"),
+        format!(
+            "[[providers.custom]]\nnamespace = \"drill\"\nbase_url = \"http://127.0.0.1:{port}/v1\"\n\
+             free = true\nmodels = [\"flash\"]\n\n[mesh]\npin_outage_wait_secs = 1\noutage_wait_secs = 2\nheadless_outage_wait = true\n"
+        ),
+    )
+    .unwrap();
+    let out = forge(ws.path())
+        .args([
+            "run",
+            "-p",
+            "say hello",
+            "--model",
+            "drill::flash",
+            "--output-format",
+            "json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "a provider that never came back is a failed run"
+    );
+    let result = events(&out).pop().expect("a result line");
+    assert_eq!(result["is_error"], true);
+    assert_eq!(result["end_reason"], "provider_down", "{result}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("check your provider keys"),
+        "an outage is not a key problem: {stderr}"
+    );
+}

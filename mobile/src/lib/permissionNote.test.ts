@@ -24,4 +24,17 @@ describe("allowInput", () => {
     expect(input).toEqual({ kind: "allow", yes: false, seq: 2 });
     expect("note" in input).toBe(false);
   });
+
+  it("sends the session scope only with an allow", () => {
+    expect(allowInput(true, 4, "", false, "session")).toEqual({ kind: "allow", yes: true, seq: 4, scope: "session" });
+    expect(allowInput(false, 4, "", false, "session")).toEqual({ kind: "allow", yes: false, seq: 4 });
+    expect("scope" in allowInput(true, 4, "", false)).toBe(false);
+  });
+});
+
+describe("allowInput rule scope", () => {
+  it("accepts the offered rule only with an allow", () => {
+    expect(allowInput(true, 5, "", false, "rule")).toEqual({ kind: "allow", yes: true, seq: 5, scope: "rule" });
+    expect("scope" in allowInput(false, 5, "", false, "rule")).toBe(false);
+  });
 });

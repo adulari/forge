@@ -11,6 +11,13 @@
 
 #[path = "doctor_bridge_models.rs"]
 mod bridge_models;
+#[path = "doctor_reachability.rs"]
+mod reachability;
+
+pub(crate) use reachability::AUTH_REJECTED_PREFIX;
+#[cfg(test)]
+pub(crate) use reachability::{auth_rejected_detail, auth_rejection_status};
+use reachability::{key_verdict_checks, mark_rejected_keys, provider_reachability_checks};
 
 use crate::local;
 
@@ -124,7 +131,9 @@ pub async fn run(fix: bool) -> anyhow::Result<usize> {
             || local::ollama_installed() && !local::ollama_installed_models().is_empty()
     };
     provider_v.extend(routing);
+    let verdict_rows = key_verdict_checks(&reachability);
     provider_v.extend(reachability);
+    provider_v.extend(verdict_rows);
     sections.push(("Providers", provider_v));
     if !bridge_live.is_empty() {
         sections.push(("Bridge liveness", bridge_live));
@@ -144,6 +153,7 @@ pub async fn run(fix: bool) -> anyhow::Result<usize> {
     if let Some(worktrees) = crate::cli::commands::worktree::doctor_summary() {
         sections.push(("Worktree disk", vec![worktrees]));
     }
+    sections.push(("Host pressure", vec![crate::host_pressure::doctor_check()]));
     if let Ok(config) = forge_config::load() {
         sections.push(("Preview URLs", vec![crate::preview::doctor_check(&config)]));
     }
@@ -542,7 +552,7 @@ pub(crate) async fn daemon_checks() -> Vec<Check> {
 
     // Installed and claiming to run is not the same as serving: a daemon that is up but whose
     // listener never bound is invisible to every client, which is the failure a state word misses.
-    let port = crate::cli::commands::service::resolved_port(None);
+    let port = crate::cli::commands::service::daemon_port();
     let responding = crate::cli::commands::service::probe_port(port);
     out.push(match (status.running, responding) {
         (true, true) => check(Status::Ok, "daemon port", format!("{port} responding"), None),
@@ -606,121 +616,6 @@ fn daemon_state_check(state: &str) -> Check {
         ),
         other => check(Status::Warn, "background daemon", other.to_string(), None),
     }
-}
-
-/// The one wording for "this provider read the stored key and refused it", shared by the key row,
-/// the reachability row and (by prefix match) the routing verdict.
-pub(crate) fn auth_rejected_detail(provider: &str, code: u16) -> String {
-    format!("rejected by {provider} (HTTP {code}): the stored key is invalid")
-}
-
-pub(crate) const AUTH_REJECTED_PREFIX: &str = "rejected by ";
-
-/// Is this listing failure the provider REFUSING the credential (vs. a network/endpoint blip)?
-/// Returns the HTTP status to report. The typed [`ProviderError::Auth`] variant is authoritative;
-/// the text scan is a backstop for adapters that stringify a status before we can classify it.
-///
-/// Deliberately narrow: only 401/403 and unambiguous "invalid/unauthorized key" prose count, so a
-/// connection refusal, a 5xx or a missing listing endpoint keeps the old, softer wording.
-pub(crate) fn auth_rejection_status(err: &forge_provider::ProviderError) -> Option<u16> {
-    let text = err.to_string();
-    let lower = text.to_lowercase();
-    let code = if lower.contains("403") || lower.contains("forbidden") {
-        403
-    } else {
-        401
-    };
-    if matches!(err, forge_provider::ProviderError::Auth(_)) {
-        return Some(code);
-    }
-    let names_401 = lower.contains("401") || lower.contains("unauthorized");
-    let names_403 = lower.contains("403") || lower.contains("forbidden");
-    let names_bad_key = lower.contains("invalid api key")
-        || lower.contains("invalid_api_key")
-        || lower.contains("incorrect api key")
-        || lower.contains("authentication_error")
-        || lower.contains("invalid authentication");
-    (names_401 || names_403 || names_bad_key).then_some(code)
-}
-
-/// Downgrade the `<provider> key` rows for providers whose credential the provider itself
-/// rejected. The key rows are built from key PRESENCE, which cannot see a 401.
-pub(crate) fn mark_rejected_keys(checks: &mut [Check], reachability: &[Check]) {
-    for reach in reachability {
-        let Some(provider) = reach.label.strip_suffix(" reachability") else {
-            continue;
-        };
-        if reach.status != Status::Fail || !reach.detail.starts_with(AUTH_REJECTED_PREFIX) {
-            continue;
-        }
-        for row in checks.iter_mut() {
-            if row.label == format!("{provider} key") {
-                row.status = Status::Fail;
-                row.detail = reach.detail.clone();
-                row.fix = Some(format!("`forge auth {provider}` to replace the stored key"));
-            }
-        }
-    }
-}
-
-/// LIVE: for each KEYED provider, can we actually list its models within a timeout? A keyed
-/// provider whose discovery times out silently drops out of routing and the mesh falls back to a
-/// keyless default (the "groq for everything" churn) — a key-PRESENCE check can't see this.
-async fn provider_reachability_checks() -> Vec<Check> {
-    const REACH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
-    // Probe every keyed provider CONCURRENTLY — each is an independent network call, so a sequential
-    // loop made doctor pay the SUM of every provider's timeout (N keyed providers × 8s). join_all
-    // collapses that to the slowest single probe; results stay in provider order.
-    let probes = forge_config::known_key_providers()
-        .filter(|p| forge_config::has_api_key(p))
-        .map(|p| async move {
-            let res = tokio::time::timeout(REACH_TIMEOUT, forge_provider::list_models(p)).await;
-            match res {
-            Ok(Ok(list)) if !list.is_empty() => check(
-                Status::Ok,
-                &format!("{p} reachability"),
-                format!("{} models", list.len()),
-                None,
-            ),
-            // Reachable but empty listing — chat may still work; not actionable, so Info.
-            Ok(Ok(_)) => check(
-                Status::Info,
-                &format!("{p} reachability"),
-                "responded, but listed no models",
-                None,
-            ),
-            // An authentication rejection IS a reliable usability signal: the provider read the
-            // stored key and refused it, so every chat call fails the same way. Anything else
-            // (no listing endpoint, a keying difference, a 5xx, a refused connection) is not —
-            // several adapters (Gemini, Groq, the cerebras custom endpoint) error here while chat
-            // works fine, so those stay Info.
-            Ok(Err(e)) => match auth_rejection_status(&e) {
-                Some(code) => check(
-                    Status::Fail,
-                    &format!("{p} reachability"),
-                    auth_rejected_detail(p, code),
-                    Some(&format!("`forge auth {p}` to replace the stored key")),
-                ),
-                None => check(
-                    Status::Info,
-                    &format!("{p} reachability"),
-                    "model listing unavailable — chat unaffected",
-                    None,
-                ),
-            },
-            // The churn cause: keyed but unreachable. Its models won't route.
-            Err(_) => check(
-                Status::Fail,
-                &format!("{p} reachability"),
-                format!("discovery timed out (> {}s)", REACH_TIMEOUT.as_secs()),
-                Some(
-                    "provider/network unreachable — its models won't route this session; the mesh \
-                     falls back to another provider",
-                ),
-            ),
-            }
-        });
-    futures::future::join_all(probes).await
 }
 
 /// LIVE: for each AVAILABLE CLI bridge, actually launch it with a tiny prompt and confirm it

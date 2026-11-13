@@ -63,6 +63,19 @@ pub(super) fn keyed_discovery_failures(
         .collect()
 }
 
+/// [`keyed_discovery_failures`] minus providers that REFUSED their key. Those are settled facts
+/// with a persisted verdict, not boot races: retrying them every few seconds and warning each
+/// round is what produced 11,138 identical warnings in two weeks.
+fn keyed_retryable_failures(
+    statuses: &[ProviderDiscoveryStatus],
+    has_key: impl Fn(&str) -> bool,
+) -> Vec<&ProviderDiscoveryStatus> {
+    keyed_discovery_failures(statuses, has_key)
+        .into_iter()
+        .filter(|s| super::verdict::rejection(s).is_none())
+        .collect()
+}
+
 fn describe_failures(failing: &[&ProviderDiscoveryStatus]) -> String {
     let names: Vec<&str> = failing.iter().map(|s| s.provider.as_str()).collect();
     let cause = failing
@@ -78,7 +91,7 @@ pub(super) fn warn_unreachable(
     statuses: &[ProviderDiscoveryStatus],
     has_key: impl Fn(&str) -> bool,
 ) {
-    let failing = keyed_discovery_failures(statuses, has_key);
+    let failing = keyed_retryable_failures(statuses, has_key);
     if !failing.is_empty() {
         tracing::warn!(
             "model discovery: keyed provider(s) unreachable: {}",
@@ -106,7 +119,7 @@ pub(super) async fn discover_until_keyed_providers_answer<D, Fut, P>(
     let mut attempt = 0usize;
     loop {
         let (catalog, statuses) = discover().await;
-        let failing = keyed_discovery_failures(&statuses, &has_key);
+        let failing = keyed_retryable_failures(&statuses, &has_key);
         let summary = describe_failures(&failing);
         let all_answered = failing.is_empty();
         publish(catalog, attempt > 0);
@@ -569,5 +582,22 @@ mod tests {
         let (added, clock) = plan_carry(&ids(&["groq::a"]), &ids(&["groq::b"]), &[], &since, 2_000);
         assert!(added.is_empty());
         assert!(clock.is_empty());
+    }
+
+    #[test]
+    fn a_provider_that_refused_its_key_is_neither_retried_nor_warned_about() {
+        let statuses = vec![
+            ProviderDiscoveryStatus {
+                detail: Some(
+                    r#"provider auth failed: 401 {"error":"This API key has expired"}"#.into(),
+                ),
+                ..status("opencode", DiscoveryStatusKind::Failed)
+            },
+            status("groq", DiscoveryStatusKind::TimedOut),
+        ];
+        let retry = keyed_retryable_failures(&statuses, |_| true);
+        assert_eq!(retry.len(), 1);
+        assert_eq!(retry[0].provider, "groq");
+        assert_eq!(keyed_discovery_failures(&statuses, |_| true).len(), 2);
     }
 }

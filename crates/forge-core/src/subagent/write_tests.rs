@@ -95,6 +95,7 @@ async fn run(agent: &str, mode: PermissionMode, asker: Option<ChildAsker>) -> Ru
     });
     let config = Config::default();
     let ctx = AgentCtx {
+        outage_deadline: None,
         provider: provider.clone(),
         router: Arc::new(One),
         store: Arc::new(Store::open_in_memory().unwrap()),

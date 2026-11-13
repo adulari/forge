@@ -57,6 +57,7 @@ pub(crate) struct ResultTotals {
     /// The newest per-call usage: the difference between the last two cost snapshots.
     last_call: Totals,
     last_error: Option<String>,
+    end_reason: Option<String>,
     denials: Vec<serde_json::Value>,
     usage_slot: Option<UsageSlot>,
     /// The session's per-model usage when this turn was routed: `modelUsage` is what came after.
@@ -78,6 +79,7 @@ impl ResultTotals {
             baseline: Totals::default(),
             last_call: Totals::default(),
             last_error: None,
+            end_reason: None,
             denials: Vec::new(),
             usage_slot: None,
             model_base: Vec::new(),
@@ -92,6 +94,10 @@ impl ResultTotals {
 
     fn model_snapshot(&self) -> Option<Vec<ModelUsage>> {
         self.usage_slot.as_ref().and_then(UsageSlot::snapshot)
+    }
+
+    pub(crate) fn set_end_reason(&mut self, reason: &str) {
+        self.end_reason = Some(reason.to_string());
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -179,6 +185,7 @@ impl ResultTotals {
             "num_turns": self.model_calls.max(1),
             "result": result,
             "stop_reason": stop_reason.as_str(),
+            "end_reason": self.end_reason.as_deref().unwrap_or(stop_reason.as_str()),
             "session_id": self.session_id,
             "total_cost_usd": spent.usd,
             "usage": usage_json(spent),
@@ -221,6 +228,7 @@ impl ResultTotals {
         self.request_started = None;
         self.turn_started = None;
         self.last_error = None;
+        self.end_reason = None;
         self.denials.clear();
         self.last_model = None;
     }

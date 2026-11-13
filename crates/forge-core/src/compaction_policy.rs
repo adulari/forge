@@ -393,6 +393,11 @@ impl Session {
         active_model: &str,
     ) -> Result<(), CoreError> {
         self.emit_cost_snapshot(context_tokens, active_model)?;
+        // Close the turn's row (and write its stop note) before the surfaces hear it is over.
+        self.finish_turn_row(&Ok(forge_types::LoopOutcome {
+            text: final_text.to_string(),
+            stop_reason,
+        }));
         self.presenter.emit(PresenterEvent::Done {
             final_text: final_text.to_string(),
             stop_reason,

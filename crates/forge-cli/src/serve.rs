@@ -110,8 +110,11 @@ pub(crate) fn daemon_token(rotate: bool) -> Result<String> {
 /// starting the service but surprising (and disruptive to existing clients) from `forge doctor`.
 pub(crate) fn read_daemon_token() -> Result<String> {
     let dir = forge_config::config_dir().context("no config directory on this platform")?;
-    let path = dir.join(TOKEN_FILE);
-    let text = std::fs::read_to_string(&path)
+    read_daemon_token_at(&dir.join(TOKEN_FILE))
+}
+
+fn read_daemon_token_at(path: &std::path::Path) -> Result<String> {
+    let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading daemon token {}", path.display()))?;
     let token = text.trim();
     if !(16..=64).contains(&token.len()) || !token.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -147,12 +150,8 @@ pub(crate) fn daemon_token_at(path: &std::path::Path, rotate: bool) -> Result<St
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating token directory {}", parent.display()))?;
     }
-    std::fs::write(path, &token).with_context(|| format!("writing {}", path.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
+    // Created 0600, never world-readable for even a moment on a shared host.
+    crate::serve_pairing::write_private(path, token.as_bytes())?;
     Ok(token)
 }
 
@@ -288,6 +287,9 @@ pub(crate) struct SessionRegistry {
     pub(crate) signals: crate::serve_fleet_ws::HostSignals,
     /// Other machines, while Forge Anywhere is on (`crate::fleet_peers`).
     pub(crate) remote_hosts: std::sync::RwLock<Option<Arc<dyn crate::fleet_peers::RemoteHosts>>>,
+    /// Where a goal relay asks the daemon to bring up its successor session
+    /// (`crate::serve_relay`); unset outside `forge serve`.
+    relay_tx: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 impl SessionRegistry {
@@ -298,7 +300,20 @@ impl SessionRegistry {
             draining: std::sync::atomic::AtomicBool::new(false),
             signals: crate::serve_fleet_ws::HostSignals::new(),
             remote_hosts: std::sync::RwLock::new(None),
+            relay_tx: std::sync::OnceLock::new(),
         }
+    }
+
+    pub(crate) fn set_relay_launcher(&self, tx: tokio::sync::mpsc::UnboundedSender<String>) {
+        let _ = self.relay_tx.set(tx);
+    }
+
+    /// Ask the daemon to host `session_id`, a fresh worker a goal was just handed to. False when
+    /// no daemon is listening (a test, a bare driver).
+    pub(crate) fn launch_relay(&self, session_id: String) -> bool {
+        self.relay_tx
+            .get()
+            .is_some_and(|tx| tx.send(session_id).is_ok())
     }
 
     pub(crate) fn notify_fleet(&self) {
@@ -396,26 +411,6 @@ impl SessionRegistry {
             self.notify_fleet();
         }
         removed
-    }
-
-    /// Drop `id`'s driver only if it is still idle, deciding under the registry lock so a turn
-    /// that started after the caller's earlier check is never shut down under itself. `Err` carries
-    /// the reason it was kept.
-    pub(crate) async fn remove_if_idle(
-        &self,
-        id: &str,
-    ) -> Result<Option<Arc<SessionDriverHandle>>, &'static str> {
-        let mut sessions = self.sessions.lock().await;
-        let Some(handle) = sessions.get(id) else {
-            return Ok(None);
-        };
-        if !handle.is_idle() {
-            return Err("this session started a turn while it was syncing");
-        }
-        let removed = sessions.remove(id);
-        drop(sessions);
-        self.notify_fleet();
-        Ok(removed)
     }
 
     pub(crate) async fn all(&self) -> Vec<Arc<SessionDriverHandle>> {
@@ -543,6 +538,10 @@ struct SessionRow {
     last_turn_outcome: Option<String>,
     /// The precise stop reason behind `last_turn_outcome` — see [`forge_types::StopReason`].
     last_stop_reason: Option<String>,
+    /// Set while the session's turn waits out a provider outage: which provider, since when.
+    /// Additive; absent otherwise, so an older client never reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outage: Option<crate::remote::SnapOutage>,
     cost_usd: f64,
     /// Context-window fill (v7 fleet fields), same numbers the statusline gauge shows.
     context_tokens: u64,
@@ -577,6 +576,7 @@ fn sort_session_rows(rows: &mut [SessionRow]) {
         a.terminal
             .cmp(&b.terminal)
             .then(b.waiting.cmp(&a.waiting))
+            .then(b.outage.is_some().cmp(&a.outage.is_some()))
             .then(b.busy.cmp(&a.busy))
             .then(b.created_at.cmp(&a.created_at))
             .then_with(|| a.id.cmp(&b.id))
@@ -742,6 +742,7 @@ pub(crate) async fn serve_cmd(
     crate::push_tool::install_daemon_sink(crate::push_tool::channels_for(&state, true));
     crate::serve_control::install(&state);
     crate::power::start(registry.clone());
+    crate::host_pressure::start(state.clone());
     crate::host_caps::install_helper_limit();
     let app = daemon_router(state.clone());
 
@@ -756,11 +757,14 @@ pub(crate) async fn serve_cmd(
     let supervised = state.clone();
     tokio::spawn(async move {
         resurrect_fleet(supervised.clone()).await;
+        tokio::spawn(crate::serve_drain::run(supervised.clone()));
         crate::serve_dispatch::run_supervisor(supervised).await;
     });
     crate::serve_update::start_auto(&state.registry);
     crate::serve_lifecycle::start(&state, config.sessions.clone());
+    crate::serve_relay::start(&state);
     crate::serve_pr_watch::start(&state);
+    crate::serve_drain::init();
 
     // Forge Anywhere gets a private loopback copy of the SAME router. The public LAN/local/tunnel
     // listener below is unchanged, while the connector never needs to upload the daemon token or
@@ -980,6 +984,7 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
         )
         .route(&format!("{base}/api/projects"), get(project_catalog))
         .route(&format!("{base}/api/identity"), get(identity))
+        .merge(crate::host_reclaim::routes(&base))
         .route(
             &format!("{base}/api/diagnostics"),
             get(crate::serve_diagnostics::diagnostics),
@@ -1032,6 +1037,10 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
             &format!("{base}/api/sessions/{{id}}/diff"),
             get(crate::serve_git::session_diff),
         )
+        .route(
+            &format!("{base}/api/sessions/{{id}}/ship"),
+            post(crate::serve_git::session_ship),
+        )
         .merge(crate::serve_dispatch::routes(&base))
         .merge(crate::push_tool::routes(&base))
         .merge(crate::serve_update::routes(&base))
@@ -1042,6 +1051,8 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_media::routes(&base))
         .merge(crate::serve_workspace_pdf::routes(&base))
         .merge(crate::serve_agents::routes(&base))
+        .merge(crate::serve_turns::routes(&base))
+        .merge(crate::serve_history_search::routes(&base))
         .merge(crate::serve_agent_installs::routes(&base))
         .merge(crate::serve_spend::routes(&base))
         .merge(crate::serve_hosts::routes(&base))
@@ -1063,6 +1074,8 @@ pub(crate) fn daemon_routes(state: Arc<DaemonState>) -> Router {
         .merge(crate::serve_workspace::edit_routes(&base))
         .merge(crate::serve_keybindings::routes(&base))
         .merge(crate::serve_import::routes(&base))
+        .merge(crate::serve_brief::routes(&base))
+        .merge(crate::model_report::routes(&base))
         .merge(crate::serve_claude_link::routes(&base))
         .merge(crate::serve_crews::routes(&base))
         .merge(crate::serve_skills::routes(&base))
@@ -1182,14 +1195,20 @@ struct HostIdentity {
     protocol: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     update_available: Option<String>,
+    /// Disk and memory pressure on this host; absent before the first sample or when sampling is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pressure: Option<crate::host_pressure::Pressure>,
+    ship: crate::serve_ship_caps::ShipCapability,
 }
 
 async fn identity() -> axum::Json<HostIdentity> {
     axum::Json(HostIdentity {
+        ship: crate::serve_ship_caps::ShipCapability::current(),
         hostname: crate::anywhere::default_host_name(),
         version: env!("CARGO_PKG_VERSION"),
         protocol: crate::remote::PROTOCOL_VERSION,
         update_available: crate::update_state::cached_offer(),
+        pressure: crate::host_pressure::current(),
     })
 }
 
@@ -1293,7 +1312,8 @@ mod serve_mcp_redact;
 mod serve_models;
 mod serve_projects;
 mod serve_providers;
-mod serve_session_meta;
+mod serve_registry_idle;
+pub(crate) mod serve_session_meta;
 mod serve_usage;
 mod serve_workflows;
 mod serve_ws;
@@ -1322,12 +1342,15 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
         rows.push(SessionRow {
             id: h.session_id.clone(),
             title: h.title(),
-            cwd: h.cwd.clone(),
+            // The live cwd: a session moved into a project (`project_move`) no longer lives where
+            // it was spawned, and the list groups sessions by it.
+            cwd: snap.cwd.clone(),
             worktree: h.worktree.clone(),
             busy: snap.busy,
             waiting: snap.permission_prompt.is_some() || snap.question.is_some(),
             last_turn_outcome: snap.last_turn_outcome.clone(),
             last_stop_reason: snap.last_stop_reason.clone(),
+            outage: snap.outage.clone(),
             cost_usd: snap.cost_usd,
             context_tokens: snap.context_tokens,
             context_limit: snap.context_limit,
@@ -1360,6 +1383,7 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
             waiting: false,
             last_turn_outcome: None,
             last_stop_reason: None,
+            outage: None,
             cost_usd: 0.0,
             context_tokens: 0,
             context_limit: None,
@@ -1385,8 +1409,16 @@ async fn list_sessions(State(state): State<Arc<DaemonState>>) -> Response {
     json_response(&rows)
 }
 
+async fn host_pressure_gate(repo: &std::path::Path) -> Option<crate::host_pressure::Gate> {
+    let repo = repo.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::host_pressure::gate_for_new_worktree(&repo))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// `POST /api/sessions` starts a session.
-async fn create_session(
+pub(crate) async fn create_session(
     State(state): State<Arc<DaemonState>>,
     request: Result<axum::Json<CreateSessionReq>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
@@ -1411,14 +1443,28 @@ async fn create_session(
         .filter(|p| !p.trim().is_empty())
         .filter(|_| req.resume.is_none());
     let is_resume_request = req.resume.is_some();
+    let worktree_cwd = (req.worktree || req.branch.is_some())
+        .then(|| req.cwd.clone().unwrap_or_else(|| state.default_cwd.clone()));
     match start_session(&state, req).await {
         Ok(handle) => {
+            let low_disk = match worktree_cwd.as_deref().filter(|_| !is_resume_request) {
+                Some(cwd) => host_pressure_gate(std::path::Path::new(cwd)).await,
+                None => None,
+            };
+            let pressure = match low_disk {
+                Some(gate) => {
+                    let reclaimable = crate::host_reclaim::preview_for(
+                        &state,
+                        std::path::Path::new(worktree_cwd.as_deref().unwrap_or_default()),
+                    )
+                    .await;
+                    Some(crate::host_pressure::gate_details(&gate, reclaimable))
+                }
+                None => None,
+            };
             let terminals = state.terminals.clone();
             let terminal_session = handle.session_id.clone();
-            let terminal_cwd = handle
-                .worktree
-                .clone()
-                .unwrap_or_else(|| handle.cwd.clone());
+            let terminal_cwd = handle.worktree.clone().unwrap_or_else(|| handle.cwd());
             tokio::spawn(async move { terminals.prewarm(&terminal_session, terminal_cwd).await });
             crate::serve_worktree_start::apply_effort(
                 &handle,
@@ -1434,15 +1480,16 @@ async fn create_session(
                     .input_tx
                     .send(remote::RemoteInput::Prompt {
                         text,
-                        attachments: Vec::new(),
+                        attachments: None,
                     })
                     .await;
             }
             json_response(&serde_json::json!({
                 "id": handle.session_id,
                 "title": handle.title(),
-                "cwd": handle.cwd,
+                "cwd": handle.cwd(),
                 "worktree": handle.worktree,
+                "pressure": pressure,
             }))
         }
         Err(error) => error.into_response(),
@@ -1455,6 +1502,8 @@ pub(crate) struct StartSessionError {
     status: axum::http::StatusCode,
     code: Option<&'static str>,
     pub(crate) message: String,
+    /// Extra JSON fields merged into the error body (host-pressure refusals carry the reclaim offer).
+    details: Option<serde_json::Value>,
 }
 
 impl StartSessionError {
@@ -1463,6 +1512,7 @@ impl StartSessionError {
             status,
             code: None,
             message: message.into(),
+            details: None,
         }
     }
 
@@ -1475,10 +1525,31 @@ impl StartSessionError {
             status,
             code: Some(code),
             message,
+            details: None,
         }
     }
 
+    fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+
     pub(crate) fn into_response(self) -> Response {
+        if let (Some(code), Some(serde_json::Value::Object(extra))) = (self.code, &self.details) {
+            let mut body = serde_json::json!({ "error": self.message, "code": code });
+            body.as_object_mut()
+                .expect("a json! object literal")
+                .extend(extra.clone());
+            return (
+                self.status,
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/json"),
+                    (axum::http::header::CACHE_CONTROL, "no-store"),
+                ],
+                body.to_string(),
+            )
+                .into_response();
+        }
         match self.code {
             Some(code) => err_response_coded(self.status, code, &self.message),
             None => err_response(self.status, &self.message),
@@ -1642,6 +1713,19 @@ pub(crate) async fn start_session(
                 StatusCode::BAD_REQUEST,
                 format!("worktree: {cwd} is not a git repository"),
             ));
+        }
+        if let Some(gate) = host_pressure_gate(cwd_path).await {
+            if gate.level == crate::host_pressure::Level::Floor {
+                let reclaimable = crate::host_reclaim::preview_for(state, cwd_path).await;
+                return Err(StartSessionError::coded(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "host_disk_floor",
+                    crate::host_pressure::refusal_message(&gate, reclaimable),
+                )
+                .with_details(serde_json::json!({
+                    "pressure": crate::host_pressure::gate_details(&gate, reclaimable),
+                })));
+            }
         }
         let branch = req.branch.clone();
         let created = crate::serve_worktree_start::create_off_thread(cwd_path, branch).await;
@@ -1979,14 +2063,14 @@ pub(crate) async fn fork_session(
                     .input_tx
                     .send(remote::RemoteInput::Prompt {
                         text,
-                        attachments: Vec::new(),
+                        attachments: None,
                     })
                     .await;
             }
             json_response(&serde_json::json!({
                 "id": handle.session_id,
                 "title": handle.title(),
-                "cwd": handle.cwd,
+                "cwd": handle.cwd(),
                 "worktree": handle.worktree,
             }))
         }
@@ -2012,7 +2096,7 @@ const RESURRECT_LIMIT: usize = 16;
 ///
 /// Best-effort by design: a session whose cwd has since been deleted, or whose worktree is gone,
 /// must not stop the daemon from starting. Failures are reported and skipped.
-async fn resurrect_fleet(state: Arc<DaemonState>) {
+pub(crate) async fn resurrect_fleet(state: Arc<DaemonState>) {
     let live = match state.store.daemon_live_sessions() {
         Ok(live) => live,
         Err(error) => {
@@ -2033,6 +2117,7 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
         println!("  restoring {restoring} session(s) from the previous run");
     }
     let mut attempted = 0;
+    let mut redrive = crate::serve_restart_redrive::RedriveLedger::default();
     for id in live {
         if attempted >= RESURRECT_LIMIT {
             break;
@@ -2050,6 +2135,8 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
             );
             continue;
         }
+        let interrupted =
+            crate::serve_restart_redrive::mark_interrupted(&state.store, &mut redrive, &id);
         let request = CreateSessionReq {
             resume: Some(id.clone()),
             ..Default::default()
@@ -2058,6 +2145,9 @@ async fn resurrect_fleet(state: Arc<DaemonState>) {
         let status = response.status();
         if status.is_success() {
             attempted += 1;
+            if interrupted {
+                crate::serve_restart_redrive::announce_and_schedule(state.clone(), id.clone());
+            }
             continue;
         }
         // Stop retrying a session the daemon can no longer open — otherwise every restart repeats
@@ -2315,12 +2405,13 @@ async fn past_sessions(
         if let Ok(local) = store.local_live_sessions() {
             running.extend(local.into_iter().map(|row| row.id));
         }
+        // Running ids can occupy at most `running.len()` of the fetched rows, so this many extra
+        // rows always leaves a full page after they are dropped.
         let page: Vec<_> = store
-            .list_sessions_for_resume()
+            .list_sessions_for_resume_page(before, limit + running.len())
             .unwrap_or_default()
             .into_iter()
             .filter(|s| !running.contains(&s.id))
-            .filter(|s| before.is_none_or(|b| s.last_activity < b))
             .take(limit)
             .collect();
         let ids: Vec<String> = page.iter().map(|s| s.id.clone()).collect();
@@ -2365,7 +2456,9 @@ pub(crate) use crate::serve_worktree_start::worktree_repo_and_branch;
 /// worktree dirs and other untracked cruft never count). A non-empty list means merging would
 /// apply a patch on top of uncommitted work — the merge route refuses rather than do that
 /// silently. Best-effort: a git failure returns empty (the 3-way apply is the real safety net).
-pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
+/// `Err` when git could not answer (an `index.lock`, a broken repo): a merge must then refuse,
+/// because its conflict path ends in `reset --hard` and would discard work it never saw.
+pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Result<Vec<String>, String> {
     let out = std::process::Command::new("git")
         .args([
             "-C",
@@ -2376,11 +2469,12 @@ pub(crate) fn base_dirty_tracked(repo_root: &std::path::Path) -> Vec<String> {
         ])
         .output();
     match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout)
             .lines()
             .filter_map(|l| l.get(3..).map(str::to_string))
-            .collect(),
-        _ => Vec::new(),
+            .collect()),
+        Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -2415,6 +2509,8 @@ enum MergeOutcome {
     Conflicts(Vec<String>),
     /// A hard git error (not a conflict); state left intact.
     Error(String),
+    /// The checkout is behind where the session started; it is reported, never moved.
+    BaseBehind(String),
 }
 
 /// Run `git -C <root> <args>`, returning trimmed stdout on success.
@@ -2448,6 +2544,12 @@ fn parse_apply_conflicts(stderr: &str) -> Vec<String> {
             if let Some(rest) = line.strip_prefix("error: patch failed: ") {
                 return rest.rsplit_once(':').map(|(p, _)| p.to_string());
             }
+            if let Some(file) = line.strip_prefix("error: ").and_then(|r| {
+                r.strip_suffix(": does not exist in index")
+                    .or_else(|| r.strip_suffix(": already exists in index"))
+            }) {
+                return Some(file.to_string());
+            }
             None
         })
         .collect()
@@ -2459,20 +2561,48 @@ fn parse_apply_conflicts(stderr: &str) -> Vec<String> {
 /// On a clean apply the changes are staged and the worktree + branch removed. On conflict the base
 /// tree is restored to its pre-merge state (`reset --hard`, safe because the caller guaranteed it
 /// was clean) so nothing is left half-applied, and the worktree + branch are kept for manual work.
+#[cfg(test)]
 fn run_merge(repo_root: &std::path::Path, worktree: &str, branch: &str) -> MergeOutcome {
+    run_merge_noted(repo_root, worktree, branch).0
+}
+
+/// [`run_merge`] plus an optional line for the result.
+fn run_merge_noted(
+    repo_root: &std::path::Path,
+    worktree: &str,
+    branch: &str,
+) -> (MergeOutcome, Option<String>) {
+    let mut note = None;
+    let outcome = run_merge_inner(repo_root, worktree, branch, &mut note);
+    (outcome, note)
+}
+
+fn run_merge_inner(
+    repo_root: &std::path::Path,
+    worktree: &str,
+    branch: &str,
+    note: &mut Option<String>,
+) -> MergeOutcome {
     if let Err(e) = forge_core::worktree::commit_worktree(std::path::Path::new(worktree)) {
         return MergeOutcome::Error(format!("snapshotting the worktree failed: {e}"));
     }
-    let mergebase = match git_stdout(repo_root, &["merge-base", "HEAD", branch]) {
-        Ok(b) => b,
-        Err(e) => return MergeOutcome::Error(format!("finding the fork point failed: {e}")),
+    let Some(mergebase) = forge_core::worktree_base::fork_point(repo_root, branch) else {
+        return MergeOutcome::Error(format!("finding the fork point of {branch} failed"));
     };
+    match forge_core::worktree_base::sync_checkout_to_fork(repo_root, &mergebase) {
+        Ok(n) => *note = n,
+        Err(msg) => return MergeOutcome::BaseBehind(msg),
+    }
     let diff = std::process::Command::new("git")
         .args([
             "-C",
             repo_root.to_str().unwrap_or("."),
             "diff",
-            "--diff-filter=ACDMR",
+            // `--binary` so images and other blobs carry full index lines `git apply` can use;
+            // `T` so a file turned into a symlink (or back) is not mistaken for an empty patch,
+            // which would take the no-op path below and delete the branch with the work on it.
+            "--binary",
+            "--diff-filter=ACDMRT",
             &mergebase,
             branch,
         ])
@@ -2575,9 +2705,14 @@ async fn merge_session(
     AxumPath(id): AxumPath<String>,
 ) -> Response {
     match merge_session_core(&state, &id, true).await {
-        SessionMerge::Clean { branch } => json_response(&serde_json::json!({
-            "ok": true, "merged": true, "branch": branch,
+        SessionMerge::Clean { branch, base, note } => json_response(&serde_json::json!({
+            "ok": true, "merged": true, "branch": branch, "base": base, "note": note,
         })),
+        SessionMerge::BaseBehind(message) => err_response_coded(
+            axum::http::StatusCode::CONFLICT,
+            "base_behind_session",
+            &message,
+        ),
         SessionMerge::Refused(status, message) => err_response(status, &message),
         SessionMerge::Dirty(dirty) => conflict_json(serde_json::json!({
             "error": "the base branch has uncommitted changes — commit or stash them, then merge",
@@ -2612,7 +2747,14 @@ pub(crate) fn conflict_json(body: serde_json::Value) -> Response {
 /// What [`merge_session_core`] did with one session.
 pub(crate) enum SessionMerge {
     /// Applied and staged; the worktree, branch and session are gone.
-    Clean { branch: String },
+    Clean {
+        branch: String,
+        base: String,
+        /// A line about the merge's result, when there is one.
+        note: Option<String>,
+    },
+    /// The checkout is behind where the session started; nothing merged, session left running.
+    BaseBehind(String),
     /// Refused before anything was touched (unknown session, no worktree, already claimed).
     Refused(axum::http::StatusCode, String),
     /// Refused because the base repo has uncommitted tracked changes; the session is untouched.
@@ -2657,10 +2799,17 @@ pub(crate) async fn merge_session_core(
         let root = repo_root.clone();
         tokio::task::spawn_blocking(move || base_dirty_tracked(&root))
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|e| Err(e.to_string()))
     };
-    if !dirty.is_empty() {
-        return SessionMerge::Dirty(dirty);
+    match dirty {
+        Ok(dirty) if !dirty.is_empty() => return SessionMerge::Dirty(dirty),
+        Ok(_) => {}
+        Err(why) => {
+            return SessionMerge::Refused(
+                StatusCode::CONFLICT,
+                format!("could not check the base repo for uncommitted changes, so nothing was merged: {why}"),
+            )
+        }
     }
 
     // Atomically claim ownership: `remove` is the only serialization point, so a concurrent
@@ -2676,7 +2825,7 @@ pub(crate) async fn merge_session_core(
     };
     state.terminals.close_session(id).await;
     let resume_spec = DriverSpec {
-        cwd: handle.cwd.clone(),
+        cwd: handle.cwd(),
         worktree: handle.worktree.clone(),
         title: handle.title(),
         mock: state.mock,
@@ -2692,10 +2841,11 @@ pub(crate) async fn merge_session_core(
     stop_and_join(handle).await;
     let outcome = {
         let (root, br, wt) = (repo_root.clone(), branch.clone(), worktree.clone());
-        tokio::task::spawn_blocking(move || run_merge(&root, &wt, &br))
+        tokio::task::spawn_blocking(move || run_merge_noted(&root, &wt, &br))
             .await
-            .unwrap_or_else(|e| MergeOutcome::Error(format!("merge task failed: {e}")))
+            .unwrap_or_else(|e| (MergeOutcome::Error(format!("merge task failed: {e}")), None))
     };
+    let (outcome, note) = outcome;
     // Conflicts and hard errors both mean nothing was merged — the worktree + branch are still
     // there (run_merge either never applied anything or reset --hard'd the base back). Both must
     // respawn the driver and re-register the session so it stays visible in the fleet instead of
@@ -2723,6 +2873,13 @@ pub(crate) async fn merge_session_core(
             (MergeOutcome::Error(msg), Err(e)) => SessionMerge::Failed(format!(
                 "merge failed: {msg}; additionally the session failed to restart: {e}"
             )),
+            (MergeOutcome::BaseBehind(msg), Ok(handle)) => {
+                state.registry.insert(handle, &state.store).await;
+                SessionMerge::BaseBehind(msg)
+            }
+            (MergeOutcome::BaseBehind(msg), Err(e)) => SessionMerge::Failed(format!(
+                "{msg}; additionally the session failed to restart: {e}"
+            )),
             (MergeOutcome::Clean, _) => unreachable!("Clean is filtered out above"),
         };
     }
@@ -2731,7 +2888,11 @@ pub(crate) async fn merge_session_core(
         crate::serve_dispatch::worker_left(state, id, forge_core::dispatch::item_status::MERGED)
             .await;
     }
-    SessionMerge::Clean { branch }
+    SessionMerge::Clean {
+        branch,
+        base: repo_root.display().to_string(),
+        note,
+    }
 }
 
 /// `POST /api/sessions/{id}/discard` — stop the session and drop its worktree + branch WITHOUT
@@ -2910,6 +3071,7 @@ async fn answer(
             yes: req.allow,
             seq: req.seq,
             note: req.note,
+            scope: None,
         })
         .await
         .is_err()
@@ -2938,7 +3100,7 @@ async fn upload(
     let Some(handle) = state.registry.get(&params.session).await else {
         return err_response(axum::http::StatusCode::NOT_FOUND, "no such session");
     };
-    let Some(uploads_root) = unlinked_uploads_root(std::path::Path::new(&handle.cwd)) else {
+    let Some(uploads_root) = unlinked_uploads_root(std::path::Path::new(&handle.cwd())) else {
         return err_response(
             axum::http::StatusCode::FORBIDDEN,
             "the uploads directory is a symlink",
@@ -3082,6 +3244,10 @@ struct ServeUploadParams {
     session: String,
     #[serde(default)]
     path: String,
+    /// Thumbnail width: an image is downsampled to at most this many pixels wide (the history
+    /// shows 72-point squares; a phone photo upload can be 10 MiB).
+    #[serde(default)]
+    w: Option<u32>,
 }
 
 /// `GET /api/upload?session=<id>&path=<stored-path>` — stream back the raw bytes of a file
@@ -3141,6 +3307,14 @@ async fn serve_upload(
             axum::http::StatusCode::FORBIDDEN,
             "path is outside this session's uploads",
         );
+    }
+    if params.w.is_some() && guess_content_type(&params.path).starts_with("image/") {
+        return crate::serve_media::serve(
+            std::path::PathBuf::from(&params.path),
+            params.w,
+            "private, max-age=31536000, immutable",
+        )
+        .await;
     }
     let bytes = match tokio::fs::read(&params.path).await {
         Ok(b) => b,
@@ -3503,6 +3677,8 @@ pub(crate) mod tests {
         assert_eq!(body["hostname"], crate::anywhere::default_host_name());
         assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(body["protocol"], crate::remote::PROTOCOL_VERSION);
+        assert_eq!(body["ship"]["pr"], true);
+        assert!(body["ship"]["over_relay"].is_boolean());
 
         let unauthorized = router
             .clone()
@@ -3865,6 +4041,21 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn read_daemon_token_never_creates_or_repairs_the_file() {
+        let dir = std::env::temp_dir().join(format!("forge-serve-readtok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("serve-token");
+        assert!(read_daemon_token_at(&path).is_err());
+        assert!(!path.exists(), "a missing token is not minted");
+        std::fs::write(&path, "not-hex").unwrap();
+        assert!(read_daemon_token_at(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-hex");
+        let token = daemon_token_at(&path, true).unwrap();
+        assert_eq!(read_daemon_token_at(&path).unwrap(), token);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn daemon_token_persists_and_rotates() {
         let dir = std::env::temp_dir().join(format!("forge-serve-token-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -3969,7 +4160,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "mock:write please".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -4088,14 +4279,14 @@ pub(crate) mod tests {
         a.input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "alpha-marker task".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
         b.input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "beta-marker task".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -4131,7 +4322,7 @@ pub(crate) mod tests {
         a.input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "second-marker follow-up".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -4534,7 +4725,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "hello worktree".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -4561,6 +4752,158 @@ pub(crate) mod tests {
         handle.shutdown();
         handle.join(std::time::Duration::from_secs(5)).await;
         std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn pressure_state(repo: &std::path::Path) -> Arc<DaemonState> {
+        Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: repo.display().to_string(),
+            project_roots: vec![repo.to_path_buf()],
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        })
+    }
+
+    async fn call(
+        router: &Router,
+        request: axum::http::Request<axum::body::Body>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use tower::ServiceExt;
+        let response = router.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
+    fn json_post(path: &str, body: serde_json::Value) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::post(path)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    /// Host pressure end to end on the daemon routes: under the hard floor a worktree session is
+    /// refused with the reclaim offer and nothing is created; under only the warn threshold it is
+    /// created with the warning; the reclaim routes answer for known workspaces only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn low_disk_warns_then_refuses_new_worktree_sessions_with_a_reclaim_offer() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = std::env::temp_dir().join(format!("forge-serve-press-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("repo")).unwrap();
+        let repo = dir.join("repo").canonicalize().unwrap();
+        let _git = init_repo(&repo, &[("README.md", "hi\n")]);
+        std::env::set_var("FORGE_DB", dir.join("press.db"));
+        let old_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::set_var("XDG_CONFIG_HOME", dir.join("config"));
+        let state = pressure_state(&repo);
+        let router = daemon_router(state.clone());
+        let create = || {
+            json_post(
+                "/tok/api/sessions",
+                serde_json::json!({ "cwd": repo, "worktree": true }),
+            )
+        };
+
+        // Every filesystem reads as full: below the floor.
+        for key in [
+            "FORGE_PRESSURE__DISK_WARN_FREE_PERCENT",
+            "FORGE_PRESSURE__DISK_FLOOR_FREE_PERCENT",
+        ] {
+            std::env::set_var(key, "100");
+        }
+        let (status, body) = call(&router, create()).await;
+        assert_eq!(
+            status,
+            axum::http::StatusCode::INSUFFICIENT_STORAGE,
+            "{body}"
+        );
+        assert_eq!(body["code"], "host_disk_floor");
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("reclaim"),
+            "{body}"
+        );
+        assert_eq!(body["pressure"]["level"], "floor");
+        assert!(body["pressure"]["reclaimable_bytes"].is_u64(), "{body}");
+        assert!(
+            !repo.join(".forge/worktrees").exists(),
+            "nothing was created"
+        );
+
+        // Only the warn threshold: created, with the warning attached.
+        std::env::set_var("FORGE_PRESSURE__DISK_FLOOR_FREE_PERCENT", "0");
+        std::env::set_var("FORGE_PRESSURE__DISK_FLOOR_FREE_GB", "0");
+        let (status, body) = call(&router, create()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(body["pressure"]["level"], "warn");
+        assert!(body["worktree"].as_str().is_some());
+
+        // Plenty of room: no warning at all.
+        std::env::set_var("FORGE_PRESSURE__DISK_WARN_FREE_PERCENT", "0");
+        std::env::set_var("FORGE_PRESSURE__DISK_WARN_FREE_GB", "0");
+        let (status, body) = call(&router, create()).await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body["pressure"].is_null(), "{body}");
+
+        // The reclaim offer: a preview for a known workspace, a refusal for any other path.
+        let (status, body) = call(
+            &router,
+            axum::http::Request::get(format!("/tok/api/host/pressure?cwd={}", repo.display()))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert!(body["reclaimable_bytes"].is_u64(), "{body}");
+        let (status, _) = call(
+            &router,
+            axum::http::Request::get("/tok/api/host/pressure?cwd=/etc")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        let (status, body) = call(
+            &router,
+            json_post("/tok/api/host/reclaim", serde_json::json!({ "cwd": repo })),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(
+            body["removed"], 0,
+            "live sessions' worktrees are never reclaimed"
+        );
+
+        for handle in state.registry.all().await {
+            handle.shutdown();
+            handle.join(std::time::Duration::from_secs(5)).await;
+        }
+        for key in [
+            "FORGE_PRESSURE__DISK_WARN_FREE_PERCENT",
+            "FORGE_PRESSURE__DISK_FLOOR_FREE_PERCENT",
+            "FORGE_PRESSURE__DISK_WARN_FREE_GB",
+            "FORGE_PRESSURE__DISK_FLOOR_FREE_GB",
+            "FORGE_DB",
+        ] {
+            std::env::remove_var(key);
+        }
+        match old_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5092,7 +5435,11 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::env::set_var("FORGE_DB", dir.join("merge.db"));
-        let _ = init_repo(&dir, &[("README.md", "hi\n")]);
+        let git = init_repo(&dir, &[("README.md", "hi\n")]);
+        // The commit route runs git as the daemon would, so the repo needs its own identity: a CI
+        // runner has no global one.
+        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "t@t"]);
 
         let registry = Arc::new(SessionRegistry::new());
         let (handle, wt_path) = spawn_worktree_session(&registry, &dir).await;
@@ -5106,7 +5453,7 @@ pub(crate) mod tests {
         let state = Arc::new(DaemonState {
             registry: registry.clone(),
             terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
-            store: Arc::new(forge_store::Store::open_in_memory().unwrap()),
+            store: Arc::new(crate::open_store().unwrap()),
             base: "/tok".into(),
             mock: true,
             default_cwd: dir.display().to_string(),
@@ -5116,6 +5463,10 @@ pub(crate) mod tests {
             voice: crate::voice::VoiceState::new(),
             anywhere_enable: tokio::sync::watch::channel(false).0,
         });
+        state
+            .store
+            .set_session_worktree(&handle.session_id, &wt_path)
+            .unwrap();
         let router = daemon_router(state);
         let resp = router
             .clone()
@@ -5132,6 +5483,11 @@ pub(crate) mod tests {
         );
         let j = json_body(resp).await;
         assert_eq!(j["merged"], true);
+        let base = j["base"].as_str().expect("merge reports the base repo");
+        assert_eq!(
+            std::fs::canonicalize(base).unwrap(),
+            std::fs::canonicalize(&dir).unwrap()
+        );
         // The change landed in the base tree, staged for review, not committed.
         assert!(
             dir.join("added.txt").exists(),
@@ -5151,6 +5507,59 @@ pub(crate) mod tests {
             String::from_utf8_lossy(&staged.stdout).contains("added.txt"),
             "the merged change is staged"
         );
+        // The deleted worktree no longer hides the staged merge from the git dock: status and
+        // commit resolve to the base repo.
+        let status = router
+            .clone()
+            .oneshot(
+                axum::http::Request::get(format!(
+                    "/tok/api/git/status?session={}",
+                    handle.session_id
+                ))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(status.status(), axum::http::StatusCode::OK);
+        assert!(
+            json_body(status).await.to_string().contains("added.txt"),
+            "staged file listed from the base repo"
+        );
+        let commit = router
+            .clone()
+            .oneshot(post_json_req(
+                "/api/git/commit",
+                serde_json::json!({"session": handle.session_id, "message": "merge work"}),
+            ))
+            .await
+            .unwrap();
+        let commit_status = commit.status();
+        let commit_body = json_body(commit).await;
+        assert_eq!(
+            commit_status,
+            axum::http::StatusCode::OK,
+            "commit of the merged change failed: {commit_body}"
+        );
+        let staged_after = std::process::Command::new("git")
+            .args([
+                "-C",
+                dir.to_str().unwrap(),
+                "diff",
+                "--cached",
+                "--name-only",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            staged_after.stdout.is_empty(),
+            "commit consumed the staged merge"
+        );
+        let log = std::process::Command::new("git")
+            .args(["-C", dir.to_str().unwrap(), "log", "-1", "--format=%s"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "merge work");
         // Worktree + branch are gone.
         assert!(
             !std::path::Path::new(&wt_path).exists(),
@@ -5178,6 +5587,201 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
         std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Set up a repo plus a session-style worktree on its own branch, let `edit` change the
+    /// worktree, and run the merge sequence directly.
+    fn merge_with(
+        tag: &str,
+        edit: impl Fn(&std::path::Path),
+    ) -> (std::path::PathBuf, MergeOutcome) {
+        let dir = std::env::temp_dir().join(format!("forge-merge-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let repo = dir.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = init_repo(&repo, &[("README.md", "hi\n"), ("target.txt", "t\n")]);
+        std::fs::write(repo.join("logo.bin"), [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+        git(&["add", "logo.bin"]);
+        git(&["commit", "-qm", "binary"]);
+        let wt = dir.join("wt");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "forge/merge-test",
+            wt.to_str().unwrap(),
+        ]);
+        edit(&wt);
+        let outcome = run_merge(&repo, wt.to_str().unwrap(), "forge/merge-test");
+        (dir, outcome)
+    }
+
+    /// A bare origin with `main`, the user's checkout (`mine`) and a clone (`other`) that pushes
+    /// three commits (one adds `up.txt`) the checkout has not pulled. A session worktree is cut
+    /// from the fetched `origin/main` tip, as a fresh-base daemon session is.
+    fn stale_checkout_with_fresh_session(
+    ) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let run = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        let seed = root.join("seed");
+        std::fs::create_dir(&seed).unwrap();
+        let _ = init_repo(&seed, &[("README.md", "hi\n")]);
+        run(&seed, &["branch", "-M", "main"]);
+        run(&root, &["clone", "-q", "--bare", "seed", "origin.git"]);
+        run(&root, &["clone", "-q", "origin.git", "mine"]);
+        run(&root, &["clone", "-q", "origin.git", "other"]);
+        let (mine, other) = (root.join("mine"), root.join("other"));
+        std::fs::write(other.join("up.txt"), "one\n").unwrap();
+        run(&other, &["add", "."]);
+        run(&other, &["commit", "-qm", "up"]);
+        for n in ["a", "b"] {
+            std::fs::write(other.join(n), n).unwrap();
+            run(&other, &["add", "."]);
+            run(&other, &["commit", "-qm", n]);
+        }
+        run(&other, &["push", "-q", "origin", "main"]);
+        run(&mine, &["fetch", "-q", "origin"]);
+        let wt = root.join("wt");
+        run(
+            &mine,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "forge/fresh",
+                wt.to_str().unwrap(),
+                "origin/main",
+            ],
+        );
+        std::fs::write(wt.join("up.txt"), "one\nmine\n").unwrap();
+        (dir, mine, wt)
+    }
+
+    #[test]
+    fn a_stale_checkout_on_the_default_branch_is_reported_behind_never_fast_forwarded() {
+        let (_dir, mine, wt) = stale_checkout_with_fresh_session();
+        let before = git_stdout(&mine, &["rev-parse", "HEAD"]).unwrap();
+        let (outcome, note) = run_merge_noted(&mine, wt.to_str().unwrap(), "forge/fresh");
+        let MergeOutcome::BaseBehind(msg) = outcome else {
+            panic!("expected a base-behind refusal");
+        };
+        assert!(
+            msg.contains("3 commit(s) behind") && msg.contains("pull, then merge"),
+            "{msg}"
+        );
+        assert!(note.is_none());
+        assert_eq!(git_stdout(&mine, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert!(!mine.join("up.txt").exists());
+        assert!(!mine.join("a").exists());
+    }
+
+    #[test]
+    fn a_fresh_base_session_is_refused_when_the_stale_checkout_is_on_another_branch() {
+        let (_dir, mine, wt) = stale_checkout_with_fresh_session();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&mine)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["checkout", "-q", "-b", "side"]);
+        let before = git_stdout(&mine, &["rev-parse", "HEAD"]).unwrap();
+        let (outcome, _) = run_merge_noted(&mine, wt.to_str().unwrap(), "forge/fresh");
+        let MergeOutcome::BaseBehind(msg) = outcome else {
+            panic!("expected a base-behind refusal");
+        };
+        assert!(
+            msg.contains("3 commit(s) behind") && msg.contains("pull, then merge"),
+            "{msg}"
+        );
+        assert_eq!(git_stdout(&mine, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert!(!mine.join("up.txt").exists());
+    }
+
+    #[test]
+    fn index_refusals_from_git_apply_are_conflicts_not_server_errors() {
+        let stderr =
+            "error: up.txt: does not exist in index\nerror: new.txt: already exists in index\n";
+        assert_eq!(parse_apply_conflicts(stderr), vec!["up.txt", "new.txt"]);
+    }
+
+    #[test]
+    fn the_dirty_base_check_fails_closed_when_git_cannot_answer() {
+        let not_a_repo = tempfile::tempdir().unwrap();
+        assert!(base_dirty_tracked(not_a_repo.path()).is_err());
+        let repo = tempfile::tempdir().unwrap();
+        let _ = init_repo(repo.path(), &[("a.txt", "a\n")]);
+        assert_eq!(
+            base_dirty_tracked(repo.path()).unwrap(),
+            Vec::<String>::new()
+        );
+        std::fs::write(repo.path().join("a.txt"), "changed\n").unwrap();
+        assert_eq!(
+            base_dirty_tracked(repo.path()).unwrap(),
+            vec!["a.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn worktree_merge_carries_binary_files() {
+        let (dir, outcome) = merge_with("bin", |wt| {
+            std::fs::write(wt.join("logo.bin"), [0u8, 1, 2, 3, 255, 0, 7]).unwrap();
+            std::fs::write(wt.join("new.png"), [137u8, 80, 78, 71, 0, 0, 0, 13]).unwrap();
+        });
+        assert!(
+            matches!(outcome, MergeOutcome::Clean),
+            "binary edits merge cleanly"
+        );
+        let repo = dir.join("repo");
+        assert_eq!(
+            std::fs::read(repo.join("logo.bin")).unwrap(),
+            [0u8, 1, 2, 3, 255, 0, 7]
+        );
+        assert_eq!(
+            std::fs::read(repo.join("new.png")).unwrap(),
+            [137u8, 80, 78, 71, 0, 0, 0, 13]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worktree_merge_keeps_a_type_change_instead_of_discarding_it() {
+        let (dir, outcome) = merge_with("type", |wt| {
+            std::fs::remove_file(wt.join("README.md")).unwrap();
+            std::os::unix::fs::symlink("target.txt", wt.join("README.md")).unwrap();
+        });
+        assert!(
+            matches!(outcome, MergeOutcome::Clean),
+            "a type change merges"
+        );
+        let link = dir.join("repo/README.md");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the symlink landed in the base tree"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -5407,7 +6011,7 @@ pub(crate) mod tests {
         past.input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "past-marker".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -5424,7 +6028,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "live-marker".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -5606,7 +6210,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "archived-marker".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -5702,7 +6306,7 @@ pub(crate) mod tests {
             .await
             .expect("resumed driver registered");
         assert_eq!(resumed.title(), "was-archived");
-        assert_eq!(resumed.cwd, stored_dir.display().to_string());
+        assert_eq!(resumed.cwd(), stored_dir.display().to_string());
         assert_eq!(
             resumed.worktree.as_deref(),
             Some(stored_dir.to_str().unwrap())
@@ -6119,6 +6723,22 @@ pub(crate) mod tests {
             .unwrap();
         assert_eq!(&bytes[..], b"fake-png-bytes");
 
+        // With `w`, an image upload comes back downsampled for a thumbnail.
+        let big = uploads.join("124-big.png");
+        image::RgbImage::new(400, 300).save(&big).unwrap();
+        let req = axum::http::Request::get(format!(
+            "/tok/api/upload?session={session_id}&path={}&w=64",
+            big.display()
+        ))
+        .body(axum::body::Body::empty())
+        .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let thumb = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(image::load_from_memory(&thumb).unwrap().width(), 64);
+
         // A path outside THIS session's `.forge/uploads/` (a traversal / wrong-session attempt)
         // is a 403, never a 500 — even though the file genuinely exists on disk.
         let outside = dir.join("secret.txt");
@@ -6348,7 +6968,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "mock:write please".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -6516,7 +7136,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "mock:write again".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -6610,7 +7230,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "quick check".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -6662,6 +7282,7 @@ pub(crate) mod tests {
             waiting,
             last_turn_outcome: Some("failed".into()),
             last_stop_reason: Some("no_output".into()),
+            outage: None,
             cost_usd: 0.5,
             context_tokens: 18_200,
             context_limit: Some(200_000),
@@ -6713,6 +7334,58 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_session_waiting_out_an_outage_sorts_after_decisions_and_carries_its_provider() {
+        let mk = |id: &str, waiting: bool, down: bool, created_at: i64| SessionRow {
+            id: id.into(),
+            title: String::new(),
+            cwd: "/w".into(),
+            worktree: None,
+            busy: true,
+            waiting,
+            last_turn_outcome: None,
+            last_stop_reason: None,
+            outage: down.then(|| crate::remote::SnapOutage {
+                model: "inferhub::flash".into(),
+                provider: "inferhub".into(),
+                since_unix: 1_700_000_000,
+                next_try_unix: 1_700_000_300,
+                until_unix: 1_700_028_800,
+                attempts: 3,
+                reason: "503 no_capacity".into(),
+            }),
+            cost_usd: 0.0,
+            context_tokens: 0,
+            context_limit: None,
+            model: "m".into(),
+            permission_mode: Some("default".into()),
+            created_at,
+            last_activity: created_at,
+            read_only: false,
+            terminal: false,
+            dispatch: Default::default(),
+            meta: Default::default(),
+        };
+        let mut rows = vec![
+            mk("newest-busy", false, false, 30),
+            mk("down", false, true, 10),
+            mk("asks", true, false, 5),
+        ];
+        sort_session_rows(&mut rows);
+        assert_eq!(
+            rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            vec!["asks", "down", "newest-busy"]
+        );
+        let v: serde_json::Value = serde_json::to_value(&rows[1]).unwrap();
+        assert_eq!(v["outage"]["provider"], "inferhub");
+        assert_eq!(v["outage"]["since_unix"], 1_700_000_000_u64);
+        let quiet = serde_json::to_value(&rows[2]).unwrap();
+        assert!(
+            quiet.get("outage").is_none(),
+            "absent when the provider is up"
+        );
+    }
+
+    #[test]
     fn fleet_rows_sort_terminal_sessions_after_every_daemon_hosted_one() {
         let mk =
             |id: &str, terminal: bool, waiting: bool, busy: bool, created_at: i64| SessionRow {
@@ -6724,6 +7397,7 @@ pub(crate) mod tests {
                 waiting,
                 last_turn_outcome: None,
                 last_stop_reason: None,
+                outage: None,
                 cost_usd: 0.0,
                 context_tokens: 0,
                 context_limit: None,
@@ -6939,7 +7613,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "use the attached notes".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -7012,7 +7686,7 @@ pub(crate) mod tests {
             .input_tx
             .send(remote::RemoteInput::Prompt {
                 text: "/plan mock:plan the feature".into(),
-                attachments: Vec::new(),
+                attachments: None,
             })
             .await
             .unwrap();
@@ -7709,6 +8383,100 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A restart that finds a transcript cut off mid-turn says so in the history and re-drives the
+    /// session once; a finished session and one the user stopped on purpose are left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restore_redrives_a_cut_off_turn_but_not_finished_or_user_stopped_ones() {
+        let _env = FORGE_DB_LOCK.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("FORGE_DB", dir.path().join("restore-redrive.db"));
+        let store = Arc::new(crate::open_store().unwrap());
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let mk = |prompt: &str| {
+            let id = store
+                .create_session(ws.to_str().unwrap(), "default")
+                .unwrap();
+            store
+                .add_message(&id, 0, forge_types::Role::User, prompt, None)
+                .unwrap();
+            store.set_session_daemon_live(&id, true).unwrap();
+            id
+        };
+        let cut_off = mk("long task");
+        let finished = mk("short task");
+        store
+            .add_message(&finished, 1, forge_types::Role::Assistant, "done", None)
+            .unwrap();
+        let stopped = mk("stopped task");
+        store.note_user_interrupt(&stopped).unwrap();
+
+        let state = Arc::new(DaemonState {
+            registry: Arc::new(SessionRegistry::new()),
+            terminals: Arc::new(crate::serve_terminal::TerminalRegistry::new()),
+            store: store.clone(),
+            base: "/tok".into(),
+            mock: true,
+            default_cwd: dir.path().display().to_string(),
+            project_roots: Vec::new(),
+            push: None,
+            apns: None,
+            voice: crate::voice::VoiceState::new(),
+            anywhere_enable: tokio::sync::watch::channel(false).0,
+        });
+        resurrect_fleet(state.clone()).await;
+
+        let continued = |id: &str| {
+            store.load_all_messages(id).unwrap().iter().any(|m| {
+                m.role == forge_types::Role::User
+                    && m.content == crate::serve_restart_redrive::CONTINUE_PROMPT
+            })
+        };
+        let noted = |id: &str| {
+            store
+                .load_all_messages(id)
+                .unwrap()
+                .iter()
+                .any(|m| m.content.starts_with(forge_store::RESTART_INTERRUPT_NOTE))
+        };
+        assert!(
+            noted(&cut_off),
+            "the history says a restart cut the turn off"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !continued(&cut_off) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cut-off session was never re-driven: {:?}",
+                store
+                    .load_all_messages(&cut_off)
+                    .unwrap()
+                    .iter()
+                    .map(|m| (
+                        m.role,
+                        m.visibility,
+                        m.content.chars().take(60).collect::<String>()
+                    ))
+                    .collect::<Vec<_>>()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        for id in [&finished, &stopped] {
+            assert!(!noted(id) && !continued(id), "left alone");
+        }
+        let count = store
+            .load_all_messages(&cut_off)
+            .unwrap()
+            .iter()
+            .filter(|m| m.content == crate::serve_restart_redrive::CONTINUE_PROMPT)
+            .count();
+        assert_eq!(count, 1, "re-driven exactly once");
+
+        std::env::remove_var("FORGE_DB");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A daemon restart must not drop what a session had lined up behind its running turn, nor a
     /// session that was created but never prompted: both come back, and the queue runs.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -7727,8 +8495,27 @@ pub(crate) mod tests {
             .add_message(&queued_id, 0, forge_types::Role::User, "first", None)
             .unwrap();
         store
-            .set_session_queued_prompts(&queued_id, &["queued before the restart".to_string()])
+            .set_session_queued_prompts(
+                &queued_id,
+                &[forge_store::QueuedPrompt::text("queued before the restart")],
+            )
             .unwrap();
+        let imaged_id = store
+            .create_session(ws.to_str().unwrap(), "default")
+            .unwrap();
+        store
+            .add_message(&imaged_id, 0, forge_types::Role::User, "first", None)
+            .unwrap();
+        store
+            .set_session_queued_prompts(
+                &imaged_id,
+                &[forge_store::QueuedPrompt {
+                    text: "what is in this screenshot".into(),
+                    had_images: true,
+                }],
+            )
+            .unwrap();
+        store.set_session_daemon_live(&imaged_id, true).unwrap();
         store.set_session_daemon_live(&queued_id, true).unwrap();
         let never_prompted = store
             .create_session(ws.to_str().unwrap(), "default")
@@ -7765,6 +8552,22 @@ pub(crate) mod tests {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the restored queue never ran"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let ran = store.load_messages(&imaged_id).unwrap().iter().any(|m| {
+                m.role == forge_types::Role::User
+                    && m.content.contains("images that were lost")
+                    && m.content.ends_with("what is in this screenshot")
+            });
+            if ran {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the imaged prompt ran without saying its images were lost"
             );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }

@@ -30,6 +30,7 @@ export function applyServerIdentity(server: StoredServer, identity: ServerIdenti
 export interface DetectedDaemon {
   base_url: string;
   token: string;
+  fingerprint?: string | null;
 }
 
 /**
@@ -52,11 +53,15 @@ export function repointMovedDaemons(
   let changed = false;
   const next = servers.map((server) => {
     const direct = (server.transport ?? "direct") === "direct";
-    if (!direct || server.token !== detected.token || server.baseUrl === detected.base_url) {
-      return server;
-    }
+    if (!direct || server.token !== detected.token) return server;
+    const repin = Boolean(server.fingerprint && detected.fingerprint && server.fingerprint !== detected.fingerprint);
+    if (server.baseUrl === detected.base_url && !repin) return server;
     changed = true;
-    return { ...server, baseUrl: detected.base_url };
+    return {
+      ...server,
+      baseUrl: detected.base_url,
+      ...(repin && detected.fingerprint ? { fingerprint: detected.fingerprint } : {}),
+    };
   });
   return changed ? next : servers;
 }

@@ -171,7 +171,15 @@ export interface FormAnswer {
   note?: string | null;
 }
 
-export type GoalPhase = "active" | "paused" | "budget_limit" | "complete" | "failed" | "cancelled";
+export type GoalPhase = "active" | "paused" | "budget_limit" | "complete" | "failed" | "cancelled" | "handed_off";
+
+/** One session of a goal's fresh-worker relay chain. `reason` (`wedged`, `stalled`, `worn`) is why
+ * that session handed the goal on; absent for the session that holds it now. */
+export interface SnapshotRelayLink {
+  session_id: string;
+  state: GoalPhase;
+  reason?: string;
+}
 
 /** Additive: the `/goal` run as the host tracks it. Absent from an older host and before any goal
  * starts; a client then falls back to the transient notes (see `lib/goalState.ts`). */
@@ -191,6 +199,95 @@ export interface SnapshotGoal {
   reason: string | null;
   /** A pause or clear that applies when the turn in flight ends. */
   pending: "pause" | "clear" | null;
+  /** The spend envelope (`/goal --budget`). Absent when the goal has none or the host predates it. */
+  envelope?: SnapshotEnvelope | null;
+  /** The validation contract of a `/goal --contract` run and the validator's latest results.
+   * Absent when the goal has none or the host predates it. */
+  contract?: SnapshotContract | null;
+  /** The sessions the goal has run in, oldest first. Absent for a goal that never changed worker. */
+  relay?: SnapshotRelayLink[];
+}
+
+/** One row of a goal contract: `state` is `pass`, `fail`, or `pending` before the validator has
+ * run. `proof` is the tail of the check's output. */
+export interface SnapshotAssertion {
+  id: number;
+  text: string;
+  command: string;
+  expect: string;
+  state: "pass" | "fail" | "pending" | "unverified";
+  reason: string;
+  proof: string;
+  /** Path of a screenshot a behaviour (QA) probe took; served by the evidence image route. */
+  artifact?: string | null;
+  /** True for a behaviour assertion the QA runner starts and probes. */
+  behaviour?: boolean;
+}
+
+export interface SnapshotContract {
+  /** The host's ready-to-show line, e.g. `2/3 pass`. */
+  headline: string;
+  approved: boolean;
+  /** How many times the validator has run. */
+  rounds: number;
+  passed: number;
+  total: number;
+  /** Unix seconds of the last validator run. */
+  checked_at: number | null;
+  assertions: SnapshotAssertion[];
+  /** Present for a `/goal --mission` run: the milestones the assertions are grouped by. */
+  mission?: SnapshotMission | null;
+}
+
+export interface SnapshotMilestone {
+  /** 1-based. */
+  index: number;
+  title: string;
+  state: "done" | "active" | "upcoming";
+  passed: number;
+  total: number;
+  /** The contract assertions that prove this milestone, in order. */
+  assertion_ids: number[];
+}
+
+/** A mission: milestones done in order, each by a fresh worker. `progress` is the host's
+ * ready-to-show line, e.g. `milestone 2/4: 3/5 pass`. */
+export interface SnapshotMission {
+  current: number;
+  total: number;
+  progress: string;
+  milestones: SnapshotMilestone[];
+}
+
+/** How much of a goal's spend envelope is used. `unit` is `percent` of a subscription window or
+ * `usd`; `meter` is the host's ready-to-show line. */
+export interface SnapshotEnvelope {
+  unit: "percent" | "usd";
+  used: number;
+  slice: number;
+  label: string;
+  meter: string;
+  spent: boolean;
+  unverified: boolean;
+  /** When the measured window resets, Unix seconds. */
+  resets_at: number | null;
+  /** When a goal paused on this envelope continues by itself, Unix seconds. Absent when it will not. */
+  resumes_at?: number | null;
+}
+
+/** A rule a permission prompt offers: `rule` exactly as it would be written (`cargo test *`),
+ * `allows` how many times the shape was allowed in this project. */
+export interface PermissionSuggestion {
+  rule: string;
+  allows: number;
+}
+
+/** The repository an idle Home-scope session keeps `cd`-ing into; `path` is echoed back in
+ * `project_move` / `project_dismiss` so a stale tap is dropped by the host. */
+export interface ProjectSuggestion {
+  path: string;
+  name: string;
+  calls: number;
 }
 
 export interface Snapshot {
@@ -226,6 +323,9 @@ export interface Snapshot {
   activity?: string;
   /** Additive: when the running turn started, Unix ms; 0/absent when idle or unknown. */
   turn_started_at?: number;
+  /** Additive: the expert-on-call line ("expert: <model> · 1 consult · 2.1% of weekly window"),
+   * absent until the session has consulted its expert. */
+  expert?: string;
   transcript: string[];
   /** v9 additive: `transcript` with per-line provenance. Absent/empty from a pre-v9 host —
    * fall back to `transcript` rather than rendering nothing. */
@@ -237,6 +337,12 @@ export interface Snapshot {
   goal?: SnapshotGoal | null;
   queued: string[];
   permission_prompt: string | null;
+  /** Additive: a standing rule the pending permission prompt offers because this command shape
+   * was allowed several times in the project and never refused. Absent from an older host. */
+  permission_suggestion?: PermissionSuggestion | null;
+  /** Additive: "this session is working in <repo> — move it there?" while idle. Absent from an
+   * older host. */
+  project_suggestion?: ProjectSuggestion | null;
   question: string | null;
   question_options: QuestionOption[];
   question_allow_other: boolean;
@@ -262,10 +368,52 @@ export interface Snapshot {
   parent?: { id: string; title: string } | null;
   /** Why the last turn failed, from the turn's end until the next turn starts. */
   thread_error?: ThreadError | null;
+  /** How the last turn ended when it did not finish cleanly: the stored reason, a plain label and
+   * when (unix seconds). Absent after a clean answer and from an older host. */
+  last_turn_end?: { reason: string; label: string; at: number; advice?: string; resumable?: boolean } | null;
   /** On the resync frame of a reconnect the host could not replay: how many updates were missed. */
   history_gap?: { count: number; reason: string } | null;
   /** Progress of the worktree's background copy + `setup`; absent when nothing was provisioned. */
   worktree_setup?: { state: "running" | "done" | "failed" | "interrupted"; message: string } | null;
+  /** One line saying what a worktree session was branched from, e.g. "based on origin/main @1a2b3c4
+   * (local main was 3 behind)". Absent from an older host and for sessions without a new worktree. */
+  worktree_base?: string | null;
+  /** Additive: the rolling output of the foreground tool call in flight (last few lines, ANSI
+   * stripped) and how long it has run. Absent from an older host and when nothing is reporting. */
+  live_tail?: SnapshotLiveTail | null;
+  /** Additive: set while the turn waits out a provider outage (`mesh.outage_wait_secs`). Times are
+   * unix seconds. Absent from an older host and whenever the provider is answering. */
+  outage?: SnapshotOutage | null;
+  /** Additive: the local CI plan for the session's repository (plan size, the run in flight, the
+   * last run per step, the step holding a goal or push back). Absent from an older host and until
+   * the repository has had a run. The plan itself is `GET /api/sessions/{id}/ci`. */
+  ci?: SnapshotCi | null;
+}
+
+export interface SnapshotCi {
+  runnable: number;
+  skipped: number;
+  running?: { name: string; index: number; total: number } | null;
+  steps: { key: string; name: string; status: "pass" | "fail" | "skip" | "not_run"; secs: number }[];
+  finished_unix?: number | null;
+  ok?: boolean | null;
+  blocked?: { key: string; name: string; via: "goal" | "push" } | null;
+}
+
+export interface SnapshotOutage {
+  model: string;
+  provider: string;
+  since_unix: number;
+  next_try_unix: number;
+  until_unix: number;
+  attempts: number;
+  reason: string;
+}
+
+export interface SnapshotLiveTail {
+  tool: string;
+  lines: string[];
+  elapsed_ms: number;
 }
 
 export interface ThreadError {
@@ -299,8 +447,12 @@ export type RemoteInput =
   // Reorders / promotes one server-queued prompt; index+text echo Snapshot.queued like dequeue.
   | { kind: "queue_move"; index: number; text: string; to: number }
   | { kind: "queue_send_now"; index: number; text: string }
-  | { kind: "allow"; yes: boolean; seq: number; note?: string }
+  // scope "session" = allow for this session; "rule" = allow and accept the offered
+  // `permission_suggestion` (writes a project always-allow rule).
+  | { kind: "allow"; yes: boolean; seq: number; note?: string; scope?: "session" | "rule" }
   | { kind: "answer"; text: string; seq: number }
+  | { kind: "project_move"; path: string }
+  | { kind: "project_dismiss"; path: string }
   | { kind: "interrupt" }
   // Cancels one server-queued prompt; index+text echo Snapshot.queued so a shifted queue is
   // detected server-side and dropped as stale.

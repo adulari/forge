@@ -53,8 +53,10 @@ pub(super) fn apply_ui_msgs(
                 tool,
                 side_effect,
                 reply,
+                suggestion,
             } => {
                 app.open_permission(&tool, &format!("{side_effect:?}"));
+                app.set_permission_suggestion(suggestion);
                 let hint = trust_hint::trust_hint_for(
                     app,
                     &tool,

@@ -264,7 +264,10 @@ fn evaluator_input(
 impl Session {
     /// The evaluator's model: `[goal] evaluator_model` when it is safe to use, else the ordinary
     /// side-call model (pin semantics, no foreign subscription, zero-retention, no CLI bridge).
-    fn goal_evaluator_model(&self, routed: &forge_mesh::RoutingDecision) -> Option<String> {
+    pub(crate) fn goal_evaluator_model(
+        &self,
+        routed: &forge_mesh::RoutingDecision,
+    ) -> Option<String> {
         let configured = self
             .config
             .goal

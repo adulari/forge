@@ -137,6 +137,78 @@ impl Store {
             .map_err(StoreError::from)
     }
 
+    /// One MRU page of [`Store::list_sessions_for_resume`]: same rows, same order
+    /// (`last_activity DESC, rowid DESC`), but only sessions with `last_activity < before` and at
+    /// most `limit` of them. Each session's `last_activity` is one `idx_message_session_created`
+    /// seek; the per-session message count and opening-prompt preview are computed only for the
+    /// returned page rather than for every session in the store.
+    pub fn list_sessions_for_resume_page(
+        &self,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<SessionSummary>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "WITH activity AS (
+                 SELECT s.rowid AS rid,
+                        COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
+                                 s.created_at) AS last_activity
+                 FROM session s
+                 WHERE s.parent_session_id IS NULL
+                   AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id AND m.role = 'user')
+             ),
+             page AS (
+                 SELECT rid, last_activity FROM activity
+                 WHERE ?1 IS NULL OR last_activity < ?1
+                 ORDER BY last_activity DESC, rid DESC
+                 LIMIT ?2
+             )
+             SELECT s.id, s.cwd, s.permission_mode, s.created_at, s.total_cost_usd,
+                    (SELECT COUNT(*) FROM message m WHERE m.session_id = s.id AND m.active = 1),
+                    (SELECT content FROM message m WHERE m.session_id = s.id
+                       AND m.role = 'user' AND m.active = 1 ORDER BY m.seq LIMIT 1),
+                    page.last_activity,
+                    s.title, s.worktree_path, s.archived
+             FROM page JOIN session s ON s.rowid = page.rid
+             ORDER BY page.last_activity DESC, page.rid DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![before, limit as i64], |row| {
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                cwd: row.get(1)?,
+                permission_mode: row.get(2)?,
+                created_at: row.get(3)?,
+                total_cost_usd: row.get(4)?,
+                message_count: row.get(5)?,
+                preview: row.get(6)?,
+                last_activity: row.get(7)?,
+                title: row.get(8)?,
+                worktree_path: row.get(9)?,
+                archived: row.get::<_, i64>(10)? != 0,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// `(cwd, last_activity)` of every top-level used session that is not worktree-bound, for the
+    /// project catalog. Same membership and activity definition as
+    /// [`Store::list_sessions_for_resume`] without its per-session count and preview subqueries.
+    pub fn recent_project_activity(&self) -> Result<Vec<(String, i64)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare(
+            "SELECT s.cwd,
+                    COALESCE((SELECT MAX(m.created_at) FROM message m WHERE m.session_id = s.id),
+                             s.created_at)
+             FROM session s
+             WHERE s.parent_session_id IS NULL AND s.worktree_path IS NULL
+               AND EXISTS (SELECT 1 FROM message m WHERE m.session_id = s.id AND m.role = 'user')",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     /// Search every top-level, used session by title, id, cwd, and active user/assistant content.
     ///
     /// The query is executed and ranked in SQLite and returns a bounded result set. This avoids
@@ -590,5 +662,103 @@ mod tests {
             store.most_recent_session_id_in("/work/here").unwrap(),
             Some(used)
         );
+    }
+
+    #[test]
+    fn resume_page_matches_full_list_order_ties_and_before_cursor() {
+        let store = Store::open_in_memory().unwrap();
+        let mut ids = Vec::new();
+        // Activity times 100,100,100,200,200,300: ties must fall back to rowid DESC.
+        for (n, at) in [100i64, 100, 100, 200, 200, 300].into_iter().enumerate() {
+            let id = store.create_session("/w", "default").unwrap();
+            store.add_message(&id, 0, Role::User, "hi", None).unwrap();
+            store
+                .add_message(&id, 1, Role::Assistant, "yo", None)
+                .unwrap();
+            store
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE message SET created_at = ?1 WHERE session_id = ?2",
+                    rusqlite::params![at, id],
+                )
+                .unwrap();
+            if n == 4 {
+                store.archive_session(&id).unwrap();
+            }
+            ids.push(id);
+        }
+        let unused = store.create_session("/w", "default").unwrap();
+        let child = store.create_session("/w", "default").unwrap();
+        store
+            .add_message(&child, 0, Role::User, "sub", None)
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE session SET parent_session_id = ?1 WHERE id = ?2",
+                rusqlite::params![ids[0], child],
+            )
+            .unwrap();
+
+        let full = store.list_sessions_for_resume().unwrap();
+        assert_eq!(full.len(), 6);
+        assert!(full.iter().all(|s| s.id != unused && s.id != child));
+        let key = |v: &[crate::SessionSummary]| {
+            v.iter()
+                .map(|s| {
+                    (
+                        s.id.clone(),
+                        s.last_activity,
+                        s.message_count,
+                        s.archived,
+                        s.preview.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            key(&store.list_sessions_for_resume_page(None, 100).unwrap()),
+            key(&full)
+        );
+        assert_eq!(
+            key(&store.list_sessions_for_resume_page(None, 4).unwrap()),
+            key(&full[..4])
+        );
+        for before in [None, Some(301), Some(300), Some(200), Some(100), Some(99)] {
+            let want: Vec<_> = full
+                .iter()
+                .filter(|s| before.is_none_or(|b| s.last_activity < b))
+                .take(2)
+                .cloned()
+                .collect();
+            assert_eq!(
+                key(&store.list_sessions_for_resume_page(before, 2).unwrap()),
+                key(&want),
+                "before={before:?}"
+            );
+        }
+        let projects = store.recent_project_activity().unwrap();
+        assert_eq!(projects.len(), 6);
+        assert_eq!(projects.iter().map(|p| p.1).max(), Some(300));
+    }
+
+    #[test]
+    fn migration_51_creates_activity_index_and_is_idempotent() {
+        let store = Store::open_in_memory().unwrap();
+        let conn = store.lock().unwrap();
+        conn.execute_batch("DROP INDEX idx_message_session_created")
+            .unwrap();
+        crate::migrations::MIGRATIONS[50](&conn).unwrap();
+        crate::migrations::MIGRATIONS[50](&conn).unwrap();
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT MAX(created_at) FROM message WHERE session_id = 'x'",
+                [],
+                |r| r.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("idx_message_session_created"), "{plan}");
     }
 }

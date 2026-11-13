@@ -36,7 +36,15 @@ fn wrap_rows(input: &str, width: usize) -> Vec<InputRow> {
             for (i, c) in input[start..line_end].char_indices() {
                 let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
                 if cells + w > width {
-                    cut = Some(break_after.unwrap_or(start + i).max(start + 1));
+                    // A row holds at least one whole char: a wide char wider than the row still
+                    // gets a row of its own. Stepping one byte would split it and panic on the
+                    // next slice (CJK or emoji in a terminal 8 columns wide or less).
+                    let min_end = if i == 0 {
+                        start + c.len_utf8()
+                    } else {
+                        start + 1
+                    };
+                    cut = Some(break_after.unwrap_or(start + i).max(min_end));
                     break;
                 }
                 cells += w;
@@ -334,4 +342,22 @@ pub(crate) fn input_spans(input: &str) -> Vec<Span<'static>> {
         out.push(Span::raw(input[at..].to_string()));
     }
     out
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+
+    #[test]
+    fn wide_chars_wider_than_the_row_never_split() {
+        for input in ["你好", "🙂🙂", "a你b", "你 好"] {
+            let rows = wrap_rows(input, 1);
+            for row in &rows {
+                assert!(input.is_char_boundary(row.start) && input.is_char_boundary(row.end));
+            }
+            let joined: String = rows.iter().map(|r| &input[r.start..r.end]).collect();
+            assert_eq!(joined, input, "{input:?}");
+        }
+        assert!(input_text_rows("你好", 8) >= 2);
+    }
 }

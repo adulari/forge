@@ -127,3 +127,213 @@ fn the_summary_names_state_budget_and_gates() {
     );
     assert!(text.contains("gates: cargo test"), "{text}");
 }
+
+fn enveloped() -> App {
+    use forge_types::goal_envelope::{EnvelopeSpec, EnvelopeState};
+    let mut app = App::default();
+    app.pending_envelope = Some(EnvelopeState::new(
+        EnvelopeSpec::parse("claude:20%w", None).unwrap(),
+        40.0,
+        None,
+    ));
+    app.goal_begin("harden the importer", &[], None, None);
+    app
+}
+
+#[test]
+fn the_envelope_meter_rides_the_chip_and_the_summary() {
+    let mut app = enveloped();
+    let mut envelope = app.goal.as_ref().unwrap().envelope.clone().unwrap();
+    envelope.used = 12.0;
+    app.goal_envelope_sync(&envelope);
+    let goal = app.goal.clone().unwrap();
+    assert_eq!(
+        goal.chip(0, 0),
+        "iteration 1 · envelope 12/20% claude weekly"
+    );
+    assert!(goal.summary().contains("envelope 12/20% claude weekly"));
+    assert!(app.pending_envelope.is_none(), "the run adopted it");
+}
+
+#[test]
+fn a_goal_paused_at_its_cap_keeps_the_reason_and_resume_keeps_the_envelope() {
+    let mut app = enveloped();
+    app.goal_paused_by_envelope("Envelope spent (20% of Claude weekly).");
+    let goal = app.goal.clone().unwrap();
+    assert_eq!(goal.phase, GoalPhase::Paused);
+    assert_eq!(
+        goal.reason.as_deref(),
+        Some("Envelope spent (20% of Claude weekly).")
+    );
+    app.goal_prepare_resume().unwrap();
+    app.goal_begin("harden the importer", &[], None, None);
+    assert!(app.goal.as_ref().unwrap().envelope.is_some());
+}
+
+#[test]
+fn raising_a_paused_envelope_takes_at_once_and_a_live_one_waits_for_the_loop() {
+    use forge_types::goal_envelope::EnvelopeSpec;
+    let raise = EnvelopeSpec::parse("30%w", Some("claude")).unwrap();
+    let mut app = enveloped();
+    assert!(app.goal_request_envelope(raise.clone()));
+    assert_eq!(app.goal_take_envelope_edit(), Some(raise.clone()));
+    app.goal_paused();
+    assert!(app.goal_request_envelope(raise));
+    assert_eq!(
+        app.goal
+            .as_ref()
+            .unwrap()
+            .envelope
+            .as_ref()
+            .unwrap()
+            .spec
+            .slice,
+        30.0
+    );
+    let mut bare = started();
+    assert!(!bare.goal_request_envelope(EnvelopeSpec::parse("$5", None).unwrap()));
+}
+
+#[test]
+fn a_goal_waiting_for_its_window_says_when_it_resumes() {
+    let mut app = enveloped();
+    let mut envelope = app.goal.as_ref().unwrap().envelope.clone().unwrap();
+    envelope.used = 21.0;
+    envelope.spent = true;
+    envelope.resets_at = Some(5000);
+    envelope.resume_label = Some("04:00".into());
+    app.goal_envelope_sync(&envelope);
+    app.goal_paused_by_envelope("spent");
+    let goal = app.goal.clone().unwrap();
+    assert!(
+        goal.chip(0, 0).ends_with(" · resumes at 04:00"),
+        "{}",
+        goal.chip(0, 0)
+    );
+    assert!(goal
+        .summary()
+        .contains("resumes at 04:00 when the window resets"));
+    envelope.held = true;
+    app.goal_envelope_sync(&envelope);
+    let held = app.goal.clone().unwrap();
+    assert!(!held.chip(0, 0).contains("resumes at"));
+    assert!(!held.summary().contains("resumes at"));
+}
+
+mod contract {
+    use super::*;
+    use forge_types::goal_contract::{parse_contract, AssertionResult, GoalContract};
+
+    fn contract() -> GoalContract {
+        let text = r#"{"assertions":[
+          {"assertion":"a exists","check":"test -f a"},
+          {"assertion":"b exists","check":"test -f b"},
+          {"assertion":"c exists","check":"test -f c"}]}"#;
+        let mut c = GoalContract::new(parse_contract(text).unwrap());
+        c.approved = true;
+        c
+    }
+
+    fn result(id: u32, passed: bool) -> AssertionResult {
+        AssertionResult {
+            id,
+            passed,
+            proof: "out".into(),
+            reason: if passed {
+                String::new()
+            } else {
+                "exit 1".into()
+            },
+            artifact: None,
+        }
+    }
+
+    #[test]
+    fn status_shows_the_contract_table_and_the_chip_the_count() {
+        let mut app = App::default();
+        app.goal_begin("ship", &[], None, None);
+        app.goal_set_contract(contract());
+        assert!(!app.goal.as_ref().unwrap().chip(0, 0).contains("contract"));
+        app.goal_contract_results(vec![result(1, true), result(2, false), result(3, true)]);
+        let goal = app.goal.as_ref().unwrap();
+        assert!(
+            goal.chip(1, 3).contains("contract 2/3 pass"),
+            "{}",
+            goal.chip(1, 3)
+        );
+        let summary = goal.summary();
+        assert!(summary.contains("📜 contract — 2/3 pass"), "{summary}");
+        assert!(summary.contains("✗ 2. b exists [FAIL]"), "{summary}");
+        assert!(summary.contains("why: exit 1"), "{summary}");
+    }
+
+    #[test]
+    fn a_resumed_goal_keeps_its_contract() {
+        let mut app = App::default();
+        app.goal_begin("ship", &[], None, None);
+        app.goal_set_contract(contract());
+        app.goal_paused();
+        app.goal_prepare_resume();
+        app.goal_begin("ship", &[], None, None);
+        assert!(app.goal.as_ref().unwrap().contract.is_some());
+        app.goal_begin("something else", &[], None, None);
+        assert!(app.goal.as_ref().unwrap().contract.is_none());
+    }
+
+    fn mission() -> GoalContract {
+        let items = |t: &str| {
+            format!(
+                r#"{{"title":"{t}","assertions":[{{"assertion":"{t} a","check":"true"}},{{"assertion":"{t} b","check":"true"}}]}}"#
+            )
+        };
+        let reply = format!(
+            r#"{{"milestones":[{},{},{}]}}"#,
+            items("lexer"),
+            items("parser"),
+            items("cli")
+        );
+        let mut c = forge_types::goal_contract::mission::parse_mission(&reply, 6)
+            .unwrap()
+            .into_contract()
+            .unwrap();
+        c.approved = true;
+        c
+    }
+
+    #[test]
+    fn a_mission_status_groups_the_table_by_milestone_and_the_chip_shows_progress() {
+        let mut app = App::default();
+        app.goal_begin("ship", &[], None, None);
+        app.goal_set_contract(mission());
+        app.goal_contract_results(vec![result(1, true), result(2, true)]);
+        app.goal
+            .as_mut()
+            .unwrap()
+            .contract
+            .as_mut()
+            .unwrap()
+            .advance_milestone();
+        app.goal_contract_results(vec![result(3, true), result(4, false)]);
+        let goal = app.goal.as_ref().unwrap();
+        let chip = goal.chip(1, 3);
+        assert!(chip.contains("contract milestone 2/3: 1/2 pass"), "{chip}");
+        let summary = goal.summary();
+        assert!(
+            summary.contains("📜 contract — milestone 2/3: 1/2 pass"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("milestone 1/3 - lexer [done 2/2]"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("milestone 2/3 - parser [current 1/2 pass]"),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("milestone 3/3 - cli [upcoming, 2 assertions]"),
+            "{summary}"
+        );
+        assert!(summary.contains("✗ 4. parser b [FAIL]"), "{summary}");
+    }
+}

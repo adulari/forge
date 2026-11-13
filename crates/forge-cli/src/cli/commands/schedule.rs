@@ -107,6 +107,8 @@ impl ScheduleSpec {
     }
 }
 
+const MIN_EVERY_SECS: u64 = 60;
+
 /// Parse `--every` shorthand: `<N><unit>` with unit s/m/h/d (e.g. `30m`, `1h`, `1d`).
 pub(crate) fn parse_every(spec: &str) -> Result<std::time::Duration> {
     let trimmed = spec.trim();
@@ -125,8 +127,8 @@ pub(crate) fn parse_every(spec: &str) -> Result<std::time::Duration> {
         _ => return Err(bad()),
     }
     .ok_or_else(bad)?;
-    if secs == 0 {
-        anyhow::bail!("--every must be greater than zero");
+    if secs < MIN_EVERY_SECS {
+        anyhow::bail!("--every must be at least {MIN_EVERY_SECS}s (got '{spec}')");
     }
     Ok(std::time::Duration::from_secs(secs))
 }
@@ -337,7 +339,7 @@ pub(crate) use cron::parse_posix_cron;
 
 // ---------------------------------------------------------------------------
 mod native;
-pub(crate) use native::{install_timer, uninstall_timer};
+pub(crate) use native::{install_timer, quote_unit_arg, uninstall_timer};
 pub(crate) mod tick;
 #[cfg(test)]
 use native::{
@@ -364,9 +366,11 @@ mod tests {
             std::time::Duration::from_secs(172_800)
         );
         assert_eq!(
-            parse_every("45s").unwrap(),
-            std::time::Duration::from_secs(45)
+            parse_every("60s").unwrap(),
+            std::time::Duration::from_secs(60)
         );
+        assert!(parse_every("59s").is_err());
+        assert!(parse_every("1s").is_err());
         assert!(parse_every("abc").is_err());
         assert!(parse_every("0m").is_err());
         assert!(parse_every("10x").is_err());

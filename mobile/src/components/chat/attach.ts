@@ -136,6 +136,8 @@ export interface SentAttachment {
   name: string;
   image: boolean;
   uri?: string;
+  /** A small version of `uri` for the attachment chip; `uri` stays the full image for the viewer. */
+  thumbUri?: string;
   /** Server-relative upload path (`UploadedFile.path`) — rides the `prompt` WS message so the
    * daemon can correlate this exact attachment to this exact send, instead of relying on
    * whichever ambient upload happens to be pending when the next prompt is submitted. */

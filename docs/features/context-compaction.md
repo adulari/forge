@@ -176,8 +176,102 @@ of summarizing again, and one notice says so (`compaction_budget.rs`, `compactio
 `RUST_LOG=forge_agent_core=info` logs the summarizer chain and why a candidate was skipped or
 failed.
 
+### Checkpoint at a landed slice
+
+A long session pays for the whole transcript of the slice it just finished (exploration, superseded
+file contents, old tool output) on every later step, until the size trigger finally compacts.
+Measured on the owner's store (Sep 1 - Oct 30): 204 commit segments, the 19 over 300 steps used 57%
+of all input tokens; 91% of input is cached prompt re-send, the step prompt grows ~1.45k tokens per
+step, and 70% of `read_file` calls re-read a path already read. The checkpoint folds a finished
+slice at the boundary instead of waiting.
+
+- **When.** A slice has landed when the agent ran `git commit` in this session (exit 0, not
+  `--dry-run`) and a check (test, lint, typecheck or build; the same classification as the
+  completion gate) passed after the last file edit and before the commit, with no failing check
+  outstanding. A later edit un-lands it. The commit is the agent's own: a commit the user made in a
+  shell does not count. The decision runs at the next step boundary (`prepare_step_context`), which
+  is also the first step of the next turn when the commit was the last thing a turn did.
+- **Threshold.** The live transcript must be above `[compact] checkpoint_min_tokens` (default
+  60,000); below it the landed slice is dropped without a fold. The checkpoint is off by default
+  (experimental): `[compact] checkpoint = true` turns it on. Both are settable per project (`compact` is in the trusted-safe key
+  list).
+- **Superseded reads first.** Every `read_file` result of a path that a later call in the slice
+  edited is replaced by `[superseded: <path> was read here and changed later in this slice; ...]`
+  (results under 400 chars are left). If that alone brings the context under the threshold, nothing
+  else folds and the scrollback says `checkpoint: folded the superseded reads behind <sha> (a -> b)`.
+- **The fold.** Everything before the assistant message that issued the commit is replaced by one
+  summary; the commit round itself stays whole. No model call: the summary is written from facts
+  the harness holds. It holds the commit sha, subject and body, the diffstat of `git show --stat`,
+  the files the slice edited with a one-line purpose when the file states one (a `//!` line, a
+  markdown title or a docstring), the open tasks, the check commands that passed, the shortened
+  list of earlier checkpoint slices, a model-written summary from an earlier ordinary compaction
+  carried forward unchanged, then the same episode index and verbatim user messages as any
+  summary. Recently used files are not restored (the next slice rarely needs them; they are in the
+  summary and in `recall`). It installs through the same path as `/compact`, so the store rows are
+  soft-deleted (`recall` and `/uncompact` reach them), the persisted view is the compacted one and
+  the lifecycle hooks fire with `trigger: "auto"`.
+- **Scrollback.** One line on every surface: `checkpoint: folded the slice behind <sha> (192k -> 41k)`
+  (token estimates of the transcript before and after).
+- **CLI bridge.** Not applicable: a bridged claude/codex keeps its tool rounds in its own process,
+  not in the session transcript, so there is nothing for the fold to drop and the tracker (fed by
+  direct-path tool outcomes) never sees a commit. Bridge compaction is unchanged.
+- Code: `compaction_checkpoint.rs` (tracker, superseded-read fold, summary), `install_fold` in
+  `compaction_run.rs` (shared with the model-written compaction), hook in `context_floor.rs`.
+
+### Recall: reaching what a compaction folded away
+
+A compaction used to be a one-way door for the model. The folded rows stay in the store
+(`active = 0, compacted = 1`), but only the human's `/uncompact` and `forge replay` reached them,
+so a stalled task whose detail had been summarized away could only be asked about or dropped (an
+unattended session blocks on the ask or loses the work). Every recorded incident in the long
+sessions began after a compaction: the Sep 9 narration stall, the stalled-task redrive, the Sep 16
+empty summary.
+
+- **`recall` tool** (`recall.rs`). Read-only, no permission prompt, answers from this session's
+  own rows only. `action: "search"` takes `query` (a few words, any order; every word must match,
+  falling back to any) and returns up to 12 hits as `seq [role]: snippet`, best first.
+  `action: "read"` takes `from_seq` and `to_seq` (default `from_seq + 40`) and returns the folded
+  rows in that range, a tool result clipped to 1,500 chars and any other row to 6,000, with a
+  `[clipped]` mark, and stops at the character budget with `continue with recall read
+  from_seq=N`. A whole result is capped at 8,000 characters. The model sees it only once the
+  session has a folded row (`Store::has_folded_history`), so a short session pays nothing, and it
+  is a core tool, not deferred behind `tool_search`. One line of `FORGE_SYSTEM` is added only while
+  it is advertised. A chat-style question about earlier work ("what did we decide") counts as tool
+  intent for a trivial-tier turn (`tool_intent.rs`), otherwise that turn would be sent without it.
+- **Both paths.** The direct path dispatches it in `tool_dispatch.rs`; the CLI bridge serves it
+  from `forge mcp-serve` (`mcp_serve.rs`), scoped to the parent session through
+  `FORGE_CHECKPOINT_SESSION`, listed only when that session has folded rows. Both call
+  `forge_core::recall::run`. It is not in the `run_code` catalog (virtual tools are not), though a
+  script may still call `tools.recall`.
+- **Index** (`recall_store.rs`, migration 57). `message_fts` is an FTS5 table (bundled SQLite,
+  porter tokenizer) filled lazily: the first search of a session indexes its folded rows, later
+  searches top up whatever is new, and the migration itself scans nothing. Message content never
+  changes after it is written, so the index only says which words a row holds; whether a row
+  counts as folded is read from `message.compacted` at query time. A fold, `/uncompact`, a rewind
+  and a sync apply therefore need no bookkeeping, and an unfolded row simply stops matching. Each
+  index row carries the message id, so a rowid SQLite hands out again after a delete cannot match
+  the wrong row; deleting a session drops its index rows. Row text is cut at 16,000 chars plus the
+  first 2,000 of its tool-call JSON before it is indexed.
+- **Episode index** (`compaction_episodes.rs`). Each summary carries `## Earlier episodes (message
+  seq ranges)`: one `- seq A-B: <first line of the user prompt that opened it>` per episode, built
+  by the harness from the rows being folded (`Store::fold_preview`), so it costs no model output
+  and cannot be paraphrased away. At most 12 lines; beyond that the neighbours covering the fewest
+  messages merge. A later compaction reads the previous list back out of the summary it absorbs
+  (the summarizer never sees it), appends its own episodes and merges again, so the index survives
+  summary-of-summaries. It sits before the verbatim section and says to use `recall`.
+- **Guidance.** The stalled-task escalation (`task_staleness.rs`) no longer says "ask the user or
+  drop it" on its own: after a compaction it tells the model to `recall` (search the task's words,
+  read the range) as the one reading step it allows, and to ask or drop only if recall finds
+  nothing.
+- **For the owner.** TUI `/history <words>` (palette entry; interactive overlay): ranked hits over
+  the whole history with a `folded` mark, Enter reads the messages around a hit. Daemon
+  `GET /api/sessions/{id}/history/search?q=&limit=` returns `{hits: [{seq, role, snippet,
+  folded}]}`; it is a typed `session_history_search` bridge route, and the desktop/mobile session
+  menu has a Search history sheet that jumps to the hit. `forge replay <id> --search <words>`
+  prints the same hits.
+
 **Deferred**
-- Protecting specific messages; configurable keep-count; summary-of-summaries; restoring the
+- Protecting specific messages; configurable keep-count; restoring the
   invoked skill/command guidance and the orchestration/harness one-shots (still stored messages
   that a compaction folds); persisting the approved plan across a resume.
 

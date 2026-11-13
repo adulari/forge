@@ -240,7 +240,94 @@ export interface PrWatch {
   last_checked: number | null;
   last_action: string | null;
   created_at: number;
+  /** Merge queue standing; only merge-mode watches carry it. */
+  queue?: PrQueueInfo | null;
+  hold?: string | null;
+  /** The independent review of the PR's current head; absent until a merge is about to happen. */
+  review?: PrReview | null;
 }
+
+export interface PrReviewFinding {
+  severity: string;
+  file: string;
+  line: number | null;
+  title: string;
+  why: string;
+  fix?: string;
+  /** At or above the configured severity: this one holds the merge. */
+  blocking: boolean;
+  /** The owner dismissed it; it no longer blocks. */
+  dismissed?: PrReviewOwner | null;
+}
+
+/** Who did an owner override on a review, and when (epoch seconds). */
+export interface PrReviewOwner {
+  by: string;
+  at: number;
+}
+
+export interface PrReview {
+  head_sha: string;
+  verdict: "running" | "clean" | "findings" | "error";
+  findings: PrReviewFinding[];
+  model: string | null;
+  error: string | null;
+  fix_sent: boolean;
+  rounds: number;
+  /** The owner let this head merge without waiting for the review. */
+  merge_anyway?: PrReviewOwner | null;
+}
+
+export type PrQueueState = "queued" | "head" | "checks" | "held" | "skipped";
+
+export interface PrQueueInfo {
+  repo: string;
+  state: PrQueueState;
+  reason: string | null;
+  pushes: number;
+  last_update: string | null;
+}
+
+export interface PrQueueRow {
+  session_id: string;
+  pr_number: number | null;
+  pr_url: string | null;
+  position: number | null;
+  state: PrQueueState | "merged" | "blocked";
+  reason: string | null;
+  pushes: number;
+  last_update: string | null;
+  /** The owner paused this row; it keeps no position and does not block the queue. */
+  held?: boolean;
+  /** `review clean` / `review: 2 confirmed, fixing`; absent before the PR is reviewed. */
+  review?: string | null;
+}
+
+export interface PrRepoQueue {
+  repo: string;
+  rows: PrQueueRow[];
+}
+
+export interface PrQueueResponse {
+  queues: PrRepoQueue[];
+}
+
+export const getPrQueue = (baseUrl: string) => request<PrQueueResponse>(baseUrl, "/api/pr/queue");
+
+export type PrQueueAction = "hold" | "release" | "front" | "retry";
+
+export interface PrQueueActionResponse extends PrQueueResponse {
+  ok: boolean;
+  message: string;
+}
+
+export const postPrQueueAction = (baseUrl: string, body: { session: string; action: PrQueueAction }) =>
+  post<PrQueueActionResponse>(baseUrl, "/api/pr/queue/action", body);
+
+export type PrReviewAction = { action: "merge_anyway" } | { action: "dismiss"; finding: number };
+
+export const postPrReviewAction = (baseUrl: string, body: { session: string; pr?: number; by?: string } & PrReviewAction) =>
+  post<PrQueueActionResponse>(baseUrl, "/api/pr/review/action", body);
 
 export const getPrWatch = (baseUrl: string, session: string) =>
   request<{ watch: PrWatch | null }>(baseUrl, `/api/pr/watch${query({ session })}`);

@@ -766,6 +766,30 @@ fn streaming_tool_input_and_hidden_thinking_replace_the_buffered_event_count() {
 }
 
 #[test]
+fn an_expert_consult_leaves_a_scrollback_line_a_status_row_and_a_snapshot_field() {
+    let mut app = App::default();
+    let line = "expert: codex-oauth::gpt-5.6-sol · 1 consult · 2.1% of weekly window";
+    assert_eq!(app.remote_snapshot().expert, None);
+    app.apply(PresenterEvent::ExpertConsult {
+        trigger: "stall".into(),
+        model: "codex-oauth::gpt-5.6-sol".into(),
+        summary: "you keep reading lines that hold nothing".into(),
+        status: line.into(),
+    });
+    let scrollback = flush_text(&mut app);
+    assert!(scrollback.contains(line), "{scrollback}");
+    assert!(scrollback.contains("(stall): you keep reading lines that hold nothing"));
+    assert_eq!(app.remote_snapshot().expert.as_deref(), Some(line));
+    app.status_open = true;
+    let status = screen_wh(&app, 150, 30);
+    assert!(status.contains("EXPERT"), "{status}");
+    assert!(
+        status.contains("1 consult · 2.1% of weekly window"),
+        "{status}"
+    );
+}
+
+#[test]
 fn auxiliary_model_work_replaces_the_stale_tool_result_phase() {
     let mut app = App::default();
     app.on_turn_start();
@@ -978,4 +1002,61 @@ fn statusline_command_without_output_reserves_no_row() {
     app.custom_widget_cache
         .insert("x".to_string(), String::new());
     assert_eq!(crate::app::render::statusline_height(&app), h);
+}
+
+#[test]
+fn a_running_shell_card_shows_its_live_tail_until_the_result_lands() {
+    let mut app = App {
+        fullscreen: true,
+        ..App::default()
+    };
+    app.on_turn_start();
+    app.busy = true;
+    app.apply(PresenterEvent::ToolStart {
+        name: "shell".into(),
+        args: r#"{"command":"cargo test"}"#.into(),
+    });
+    app.apply(PresenterEvent::ToolOutputDelta {
+        name: "shell".into(),
+        lines: vec!["running 4 tests".into(), "test a ... ok".into()],
+        elapsed_ms: 1500,
+    });
+    let card_text = |app: &App| {
+        let card = app.tool_cards.last().unwrap();
+        crate::app::tool_cards::card_lines(card, 120)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let _ = app.drain_flush();
+    app.apply(PresenterEvent::ToolOutputDelta {
+        name: "shell".into(),
+        lines: vec!["running 4 tests".into(), "test a ... ok".into()],
+        elapsed_ms: 1600,
+    });
+    let on_screen = screen_wh(&app, 150, 40);
+    assert!(on_screen.contains("test a ... ok"), "drawn: {on_screen}");
+    let remote = app.remote_snapshot().live_tail.expect("remote live tail");
+    assert_eq!(remote.tool, "shell");
+    assert_eq!(remote.lines.len(), 2);
+    assert_eq!(remote.elapsed_ms, 1600);
+    let text = card_text(&app);
+    assert!(text.contains("running 4 tests"), "{text}");
+    assert!(text.contains("test a ... ok"), "{text}");
+
+    app.apply(PresenterEvent::ToolResult {
+        name: "shell".into(),
+        ok: true,
+        summary: "exit 0".into(),
+        detail: None,
+    });
+    assert!(app.remote_snapshot().live_tail.is_none());
+    let text = card_text(&app);
+    assert!(!text.contains("running 4 tests"), "{text}");
 }

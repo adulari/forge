@@ -41,6 +41,17 @@ describe("optimistic message reconciliation", () => {
   it("clears only the matching user message newer than its baseline", () => {
     expect(reconcilePendingMessages(pending, [{ seq: 6, role: "user", content: "first" }])).toEqual([pending[1]]);
   });
+
+  it("clears a message whose stored row has the upload mentions prepended", () => {
+    const file = "@/w/.forge/uploads/s1/1-notes.txt\nfirst";
+    const image = "@/w/.forge/uploads/s1/2-shot.png @/w/.forge/uploads/s1/3-a.txt\nsecond";
+    expect(reconcilePendingMessages(pending, [{ seq: 6, role: "user", content: file }])).toEqual([pending[1]]);
+    expect(reconcilePendingMessages(pending, [{ seq: 6, role: "user", content: image }])).toEqual([pending[0]]);
+  });
+
+  it("does not treat a typed @mention as an upload", () => {
+    expect(reconcilePendingMessages(pending, [{ seq: 6, role: "user", content: "@src/a.ts\nfirst" }])).toEqual(pending);
+  });
 });
 
 describe("unqueuedPendingMessages", () => {
@@ -53,6 +64,11 @@ describe("unqueuedPendingMessages", () => {
 
   it("shows it again once the daemon takes it off the queue", () => {
     expect(unqueuedPendingMessages([msg("b", "follow-up")], []).map((m) => m.id)).toEqual(["b"]);
+  });
+
+  it("matches a queued entry that carries upload mentions", () => {
+    const pending = [msg("a", "look")];
+    expect(unqueuedPendingMessages(pending, ["@/w/.forge/uploads/s1/1-shot.png\nlook"])).toEqual([]);
   });
 
   it("hides one message per queued entry", () => {

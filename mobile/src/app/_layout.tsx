@@ -29,6 +29,7 @@ import { ErrorBoundary } from "../components/ErrorBoundary";
 import { StartupWatchdog } from "../components/StartupWatchdog";
 import { DesktopOtaHost } from "../components/DesktopOtaHost";
 import { UpdateNotice } from "../components/UpdateNotice";
+import { HostReclaimDialog } from "../components/HostReclaimDialog";
 import { OperationalNotice } from "../components/OperationalNotice";
 import { useOnboardingBrief } from "../components/onboarding/brief";
 import { ClaudeReconnectBanner } from "../components/onboarding/ClaudeReconnectBanner";
@@ -57,6 +58,8 @@ import { activeWorkbenchSurface } from "../components/workbench/model";
 import { useWorkbenchCommands } from "../components/workbench/useWorkbenchCommands";
 import { FindHotkey } from "../components/find/FindHotkey";
 import { ClaudePickerHost } from "../components/claude/ClaudePickerHost";
+import { CiHost } from "../components/ci/CiHost";
+import { ShipHost } from "../components/ship/ShipHost";
 import { PaletteHost } from "../components/overlay/CommandPalette";
 import { WebTopBar } from "../components/WebTopBar";
 import { AnywhereProvider as RealAnywhereProvider } from "../lib/AnywhereProvider";
@@ -456,6 +459,8 @@ export default function RootLayout() {
                         <HostRecoveryGate />
                         <NoticesWatcher />
                         <ClaudePickerHost />
+                        <ShipHost />
+                        <CiHost />
                         {/* Inside the query provider because it reads the daemon's changelog, and above
                             the navigator so it is not tied to whichever tab happens to be open. */}
                         <UpdateNotice />
@@ -463,6 +468,7 @@ export default function RootLayout() {
                             `usePalette().open()` affordance (e.g. a header IconButton) on native. */}
                         <View style={{ flex: 1, paddingTop: isTauri ? DESKTOP_WINDOW_CHROME_HEIGHT : 0 }}>
                           <OperationalNotice />
+                          <HostReclaimDialog />
                           <ScopeDeniedToast />
                           <ClaudeReconnectBanner />
                           <DesktopOtaHost />

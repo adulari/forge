@@ -16,9 +16,9 @@ pub(crate) use cli::args::mcp::{McpSyncTarget, McpTransportArg};
 pub(crate) use cli::args::plugins::PluginMarketplaceCmd;
 pub(crate) use cli::args::{
     AnywhereCmd, AssayCmd, AssayFormat, BenchCmd, Cli, Command, ControlCmd, ExportScope,
-    FailOnSeverity, GitCmd, HostCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode, OutputFormat,
-    PluginCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd, SkillCmd,
-    VoiceOp,
+    FailOnSeverity, GitCmd, GoalCmd, HostCmd, ImportSource, LatticeOp, LocalCmd, McpCmd, Mode,
+    OutputFormat, PluginCmd, ProviderCmd, QueueCmd, ScheduleCmd, Scope, SelfMcpAction, ServiceCmd,
+    SkillCmd, VoiceOp,
 };
 pub(crate) use cli::commands::assay::{assay_cmd, spawn_assay};
 pub(crate) use cli::commands::blame::blame_cmd;
@@ -38,8 +38,8 @@ pub(crate) use cli::commands::models::{
 pub(crate) use cli::commands::provider::provider_cmd;
 pub(crate) use cli::commands::queue::{queue_cmd, scoreboard_cmd};
 pub(crate) use cli::commands::replay::{
-    fork_cmd, open_store, replay_cmd, replay_rerun_cmd, resolve_resume_mode, resolve_session,
-    sessions, store_path, tree_cmd, ResumeMode,
+    fork_cmd, open_store, replay_cmd, replay_rerun_cmd, replay_search_cmd, resolve_resume_mode,
+    resolve_session, sessions, store_path, tree_cmd, ResumeMode,
 };
 pub(crate) use cli::commands::run::{
     build_session, chat, fmt_age, nl_cmd, run, session_title, DoneGuard,
@@ -51,6 +51,7 @@ pub(crate) use cli::commands::sessions_delete::sessions_delete_cmd;
 pub(crate) use cli::commands::skill::{commands_cmd, skill_cmd};
 pub(crate) use cli::commands::stats::stats_cmd;
 pub(crate) use cli::commands::tour::tour_cmd;
+pub(crate) use cli::commands::turns::turns_cmd;
 pub(crate) use cli::commands::voice::voice_cmd;
 
 mod alloc_policy;
@@ -67,8 +68,10 @@ mod benchmarks;
 mod blame;
 mod board;
 mod bridge_stats;
+mod brief_client;
 #[path = "cli/browser_args.rs"]
 mod browser_args;
+mod ci_run;
 mod cli;
 mod clipboard_image;
 mod context_windows;
@@ -86,6 +89,8 @@ mod fleet_peers;
 mod host_add;
 mod host_caps;
 mod host_lock;
+mod host_pressure;
+mod host_reclaim;
 mod hosts;
 mod ide_host;
 mod image_input;
@@ -97,8 +102,11 @@ mod mcp_agent;
 mod mcp_control;
 mod mcp_serve;
 mod mentions;
+mod model_report;
 mod onboarding;
 mod open_pr_hooks;
+#[cfg(test)]
+mod outage_e2e;
 mod ports;
 mod power;
 mod preview;
@@ -115,44 +123,55 @@ mod serve_account_sync;
 mod serve_actions;
 mod serve_agent_installs;
 mod serve_agents;
+mod serve_brief;
 mod serve_claude_link;
 mod serve_clients;
 mod serve_clients_cli;
 mod serve_control;
 mod serve_crews;
+mod serve_custody;
 mod serve_diagnostics;
 mod serve_dispatch;
+mod serve_drain;
 mod serve_fleet_ws;
 mod serve_fork_move;
 mod serve_git;
 #[cfg(test)]
 mod serve_going_away;
 mod serve_history;
+mod serve_history_search;
 mod serve_hosts;
 mod serve_ide;
 mod serve_import;
 mod serve_input_gate;
+mod serve_issues;
 mod serve_keybindings;
 mod serve_lifecycle;
 mod serve_media;
+mod serve_merge_queue;
 mod serve_notes;
 mod serve_onboarding;
 mod serve_pairing;
 mod serve_ports;
 mod serve_pr;
+mod serve_pr_review;
 mod serve_pr_watch;
 mod serve_project_actions;
 mod serve_project_ops;
 mod serve_push_owners;
 mod serve_push_routes;
 mod serve_recovery;
+mod serve_relay;
+mod serve_restart_redrive;
 mod serve_revoke;
 mod serve_schedules;
+mod serve_ship_caps;
 mod serve_skills;
 mod serve_skills_confine;
 mod serve_spend;
 mod serve_terminal;
 mod serve_terminal_util;
+mod serve_turns;
 mod serve_update;
 mod serve_workspace;
 mod serve_workspace_pdf;
@@ -421,6 +440,15 @@ fn error_next_step(e: &anyhow::Error) -> &'static str {
     }) {
         return "this store was written by a newer Forge — install a build at least that new (`forge update`); `forge doctor` reports the store path and both schema versions";
     }
+    if e.chain().any(|c| {
+        c.downcast_ref::<forge_core::CoreError>()
+            .is_some_and(|core| matches!(core, forge_core::CoreError::ProviderDown { .. }))
+    }) {
+        return "the provider is down, not misconfigured: send `continue` in this session once it is back, or raise mesh.outage_wait_secs to wait longer";
+    }
+    if e.to_string().starts_with("the run did not finish") {
+        return "the session is kept: send `continue` to pick it up where it stopped";
+    }
     let text = e
         .chain()
         .map(|c| c.to_string().to_lowercase())
@@ -483,6 +511,21 @@ mod error_hint_tests {
         let hint = error_next_step(&schema_too_new());
         assert!(!hint.contains("PRAGMA"), "got: {hint}");
         assert!(!hint.contains("user_version"), "got: {hint}");
+    }
+
+    #[test]
+    fn a_provider_that_stayed_down_gets_the_wait_advice_not_the_key_check() {
+        let down = anyhow::Error::new(forge_core::CoreError::ProviderDown {
+            model: "drill::flash".into(),
+            message: "drill::flash: provider still down after 15s".into(),
+        })
+        .context("running agent turn");
+        let hint = error_next_step(&down);
+        assert!(
+            hint.contains("continue") && hint.contains("outage_wait_secs"),
+            "{hint}"
+        );
+        assert!(!hint.contains("provider keys"), "{hint}");
     }
 
     /// The pre-existing branches must be untouched by the early return.

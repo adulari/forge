@@ -78,7 +78,14 @@ pub(crate) fn validate_hunk_patch(
         seen_old = true;
         seen_new = true;
     }
-    for line in patch.lines() {
+    // Split on '\n' only: `str::lines` would also drop the '\r' of a CRLF file's lines, and a
+    // body line without it no longer matches the file, so git refuses the patch.
+    let mut raw_lines: Vec<&str> = patch.split('\n').collect();
+    if raw_lines.last() == Some(&"") {
+        raw_lines.pop();
+    }
+    for raw in raw_lines {
+        let line = raw.trim_end_matches('\r');
         if line.starts_with("@@") {
             if in_body {
                 return Err("patch must contain exactly one hunk".to_string());
@@ -119,7 +126,11 @@ pub(crate) fn validate_hunk_patch(
             // let one "hunk" do more than edit lines of the named file.
             return Err(format!("unsupported patch header line: {line}"));
         }
-        out.push_str(line);
+        out.push_str(if in_body && !line.starts_with("@@") {
+            raw
+        } else {
+            line
+        });
         out.push('\n');
     }
     if !in_body {

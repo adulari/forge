@@ -13,6 +13,7 @@ mod account_sync_store;
 mod assay_store;
 mod automation_store;
 mod bench_solve_store;
+mod brief_store;
 mod busy;
 mod checkpoint_store;
 mod child_view_store;
@@ -24,23 +25,34 @@ mod duel_store;
 mod ephemeral_session_store;
 mod fleet_message_store;
 mod fork_store;
+mod goal_state_store;
 mod handoff;
 mod handoff_types;
 mod harness_store;
 mod heartbeat_store;
 mod history_stats;
 mod host_state_store;
+mod interrupted_turn_store;
 mod lattice_store;
 mod live_session_store;
 mod maintenance;
 mod memory;
 mod migrations;
 mod model_health_store;
+mod model_report_store;
 mod notification_store;
 mod path_evidence_store;
+mod permission_decision_store;
 mod project_notes_store;
 mod provider_items_store;
+mod provider_verdict_store;
 mod queued_prompt_store;
+mod recall_store;
+mod relay_store;
+mod turn_store;
+pub use provider_verdict_store::{ProviderVerdict, VerdictChange};
+pub use queued_prompt_store::QueuedPrompt;
+pub use turn_store::{TurnRow, TurnShape};
 mod schedule_run_store;
 use migrations::{
     add_column_if_missing, migrate_subscription_usage, run_migrations, seed_singleton_rows,
@@ -78,6 +90,7 @@ mod usage_store;
 
 pub use account_sync_store::AccountSyncItem;
 pub use bench_solve_store::{BenchSolveRun, BenchSolveTotals};
+pub use brief_store::BriefSessionRow;
 pub use cc_link_store::{CcLink, CcLinkUpdate, ExportRow, SessionMeta};
 pub use child_view_store::{ChildIndexRow, ChildSessionInfo};
 pub use codemode_store::{CodemodeStats, ToolCallRow};
@@ -93,9 +106,17 @@ pub use handoff_types::{
 };
 pub use harness_store::{AppliedHarnessEdit, HarnessEdit, HarnessEntry, HarnessRefinement};
 pub use history_stats::RowStats;
+pub use interrupted_turn_store::{
+    classify_tail, InterruptedTail, TailRow, TailState, JOB_WAKE_NOTE, OUTAGE_BACK_MARK,
+    OUTAGE_ENTER_MARK, QUEUED_FOR_RESTART_NOTE, RESTART_INTERRUPT_NOTE, STEER_NOTE,
+    USER_INTERRUPT_NOTE,
+};
 pub use maintenance::MaintenanceReport;
 pub use memory::{Memory, MemoryAdded};
+pub use model_report_store::ModelReportRow;
 pub use project_notes_store::{project_key, ProjectNotes, ProjectTodo, ScratchpadSave};
+pub use recall_store::{FoldPreviewRow, FoldedHit, FoldedRead, FoldedRow};
+pub use relay_store::RelayLink;
 pub use session_import_store::{ImportSink, ImportedRow, ImportedSessionMeta};
 pub use transcript_read_store::HistoryFilter;
 pub use usage_activity_store::{streaks, ActivityStreaks, DayUsage};
@@ -105,7 +126,7 @@ pub use usage_store::ModelUsageRow;
 /// Current schema version this build understands. Bumped whenever a new entry is added to
 /// [`migrations::MIGRATIONS`]; persisted in the DB via `PRAGMA user_version`. A DB whose `user_version`
 /// exceeds this (written by a NEWER Forge) is refused, rather than silently misread.
-const SCHEMA_VERSION: i64 = 50;
+const SCHEMA_VERSION: i64 = 58;
 
 /// Max attempts a critical write makes when SQLite reports the database is busy/locked. The single
 /// WAL writer lock can be briefly held by another connection (TUI vs mcp-serve, or the indexer);
@@ -7905,6 +7926,31 @@ mod tests {
         assert_eq!(store.prune(-1, 50).unwrap(), 2);
         assert!(store.session_cost(&a).is_err(), "old session gone");
         assert!(store.session_cost(&b).is_err());
+    }
+
+    #[test]
+    fn prune_keeps_starred_sessions_and_sessions_with_a_live_worktree() {
+        let store = Store::open_in_memory().unwrap();
+        let starred = store.create_session("/tmp", "default").unwrap();
+        let worktree = store.create_session("/tmp", "default").unwrap();
+        let gone_worktree = store.create_session("/tmp", "default").unwrap();
+        let plain = store.create_session("/tmp", "default").unwrap();
+        store.set_session_starred(&starred, true).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        store
+            .set_session_worktree(&worktree, &dir.path().display().to_string())
+            .unwrap();
+        store
+            .set_session_worktree(&gone_worktree, "/nonexistent/forge-worktree")
+            .unwrap();
+        assert_eq!(store.prune(-1, 50).unwrap(), 2);
+        assert!(store.session_cost(&starred).is_ok(), "starred kept");
+        assert!(store.session_cost(&worktree).is_ok(), "live worktree kept");
+        assert!(
+            store.session_cost(&gone_worktree).is_err(),
+            "removed worktree pruned"
+        );
+        assert!(store.session_cost(&plain).is_err());
     }
 
     #[test]

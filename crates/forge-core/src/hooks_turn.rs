@@ -39,8 +39,20 @@ impl Session {
         for text in crate::hooks_async::take(&self.id) {
             self.inject_hook_context(&text);
         }
+        if self.goal_contract_requested() {
+            self.resolve_goal_contract().await;
+            if !matches!(
+                self.contract_outcome,
+                Some(crate::goal_contract::ContractOutcome::Approved(_))
+            ) {
+                return Ok(LoopOutcome::final_answer(
+                    "The goal contract was not approved, so the goal did not start.".to_string(),
+                ));
+            }
+        }
         forge_reporting::event("turn_start", None);
         let started = std::time::Instant::now();
+        let _turn_guard = self.turn_end_guard();
         let result = IN_TURN
             .scope(
                 (),
@@ -56,6 +68,7 @@ impl Session {
             Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),
         );
         self.close_shell_diagnoses();
+        self.finish_turn_row(&result);
         if let Err(error) = &result {
             crate::error_report::report_turn_error(error);
             self.fire_stop_failure(error).await;

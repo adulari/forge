@@ -135,6 +135,43 @@ fn busy_with_danger_signal_classifies_as_stalled_attention() {
 }
 
 #[test]
+fn a_session_waiting_out_an_outage_is_attention_with_its_since_time_not_stalled() {
+    let r = FleetRow {
+        busy: true,
+        last_activity: NOW - 7_000,
+        outage: Some(crate::board::wire::RowOutage {
+            provider: "inferhub".into(),
+            since_unix: 1_700_000_000,
+            ..Default::default()
+        }),
+        ..row("s1")
+    };
+    let c = live_card(&r, None, NOW);
+    assert_eq!(c.health, Health::ProviderDown);
+    assert_eq!(c.column, Column::Attention);
+    let since = crate::outage_text::clock(1_700_000_000);
+    assert_eq!(
+        c.signals.first().map(|s| s.text.clone()),
+        Some(format!("inferhub down since {since}"))
+    );
+    assert!(
+        !c.signals.iter().any(|s| s.text.starts_with("silent")),
+        "a long quiet during an outage is not a stall"
+    );
+    let ok = live_card(
+        &FleetRow {
+            outage: None,
+            ..r.clone()
+        },
+        None,
+        NOW,
+    );
+    assert_eq!(ok.health, Health::Stalled);
+    let waiting = FleetRow { waiting: true, ..r };
+    assert_eq!(live_card(&waiting, None, NOW).health, Health::Waiting);
+}
+
+#[test]
 fn past_row_classifies_as_done_finished() {
     let p = PastRow {
         id: "p1".into(),
@@ -1417,6 +1454,65 @@ fn x_on_a_live_daemon_card_opens_the_archive_confirm() {
 }
 
 #[test]
+fn shift_s_previews_then_asks_with_the_file_list_and_only_enter_ships() {
+    let mut a = app_with_selected("s1");
+    let out = handle_key(&mut a, key(KeyCode::Char('S')));
+    assert_eq!(out, vec![BoardAction::ShipPreview("s1".into())]);
+    assert!(
+        a.confirm.is_none(),
+        "nothing to confirm before the file list is known"
+    );
+
+    a.apply(BoardEvent::ShipPreview(
+        "s1".into(),
+        Ok(vec![
+            "Commits 1 file(s) from this session's files:".into(),
+            "  M a.rs".into(),
+        ]),
+    ));
+    let confirm = a.confirm.as_ref().unwrap();
+    assert_eq!(confirm.kind, ConfirmKind::Ship("s1".into()));
+    assert!(confirm.body.contains("never forced") && confirm.body.contains("PR Watch"));
+    assert!(confirm.body.contains("  M a.rs"), "{}", confirm.body);
+    assert!(handle_key(&mut a, key(KeyCode::Esc)).is_empty());
+    assert!(a.confirm.is_none());
+
+    a.apply(BoardEvent::ShipPreview(
+        "s1".into(),
+        Ok(vec!["  M a.rs".into()]),
+    ));
+    let out = handle_key(&mut a, key(KeyCode::Enter));
+    assert_eq!(out, vec![BoardAction::Ship("s1".into())]);
+}
+
+#[test]
+fn a_refused_preview_toasts_the_reason_instead_of_asking() {
+    let mut a = app_with_selected("s1");
+    handle_key(&mut a, key(KeyCode::Char('S')));
+    a.apply(BoardEvent::ShipPreview(
+        "s1".into(),
+        Err("Stopped at commit changes: README.md changed by two sessions".into()),
+    ));
+    assert!(a.confirm.is_none());
+}
+
+#[test]
+fn a_busy_or_past_session_is_not_offered_for_shipping() {
+    let mut a = app();
+    a.apply(BoardEvent::Fleet(vec![FleetRow {
+        busy: true,
+        ..row("busy")
+    }]));
+    a.select("busy");
+    handle_key(&mut a, key(KeyCode::Char('S')));
+    assert!(a.confirm.is_none());
+    assert!(a
+        .toasts
+        .back()
+        .is_some_and(|t| t.text.contains("still working")));
+}
+
+#[test]
 fn enter_on_the_confirm_archives() {
     let mut a = app_with_selected("s1");
     handle_key(&mut a, key(KeyCode::Char('x')));
@@ -1450,6 +1546,68 @@ fn a_refused_delete_shows_the_whole_reason_in_a_dialog() {
     assert_eq!(confirm.body, why);
     let out = handle_key(&mut a, key(KeyCode::Enter));
     assert!(out.is_empty() && a.confirm.is_none());
+}
+
+#[test]
+fn p_offers_reclaim_only_while_the_host_is_pressured() {
+    let mut a = app();
+    handle_key(&mut a, key(KeyCode::Char('P')));
+    assert!(a.confirm.is_none(), "a healthy host has nothing to reclaim");
+    assert!(a.toasts.back().unwrap().text.contains("nothing to reclaim"));
+
+    a.apply(BoardEvent::HostPressure(Some(PressureInfo {
+        level: "warn".into(),
+        summary: Some("data disk: 9.0 GB free of 100.0 GB (9%)".into()),
+        cause: Some("disk".into()),
+    })));
+    handle_key(&mut a, key(KeyCode::Char('P')));
+    let confirm = a.confirm.as_ref().unwrap();
+    assert_eq!(confirm.kind, ConfirmKind::Reclaim(None));
+    assert!(confirm.body.contains("9.0 GB free"));
+    let out = handle_key(&mut a, key(KeyCode::Enter));
+    assert_eq!(out, vec![BoardAction::Reclaim(None)]);
+}
+
+#[test]
+fn p_on_memory_only_pressure_explains_instead_of_offering_to_delete_worktrees() {
+    let mut a = app();
+    a.apply(BoardEvent::HostPressure(Some(PressureInfo {
+        level: "warn".into(),
+        summary: Some("memory: 200.0 MB available of 16.0 GB".into()),
+        cause: Some("memory".into()),
+    })));
+    handle_key(&mut a, key(KeyCode::Char('P')));
+    assert!(
+        a.confirm.is_none(),
+        "reclaiming worktrees does not free RAM"
+    );
+    let toast = &a.toasts.back().unwrap().text;
+    assert!(toast.contains("memory: 200.0 MB"), "{toast}");
+}
+
+#[test]
+fn a_floor_refusal_opens_a_reclaim_dialog_for_that_repository() {
+    let mut a = app();
+    a.apply(BoardEvent::ReclaimOffer {
+        cwd: Some("/work/repo".into()),
+        message: "not creating a worktree: 2.0 GB free. Reclaim can free 30.0 GB".into(),
+    });
+    let confirm = a.confirm.as_ref().unwrap();
+    assert_eq!(
+        confirm.kind,
+        ConfirmKind::Reclaim(Some("/work/repo".into()))
+    );
+    assert!(confirm.body.contains("Reclaim can free 30.0 GB"));
+    let out = handle_key(&mut a, key(KeyCode::Enter));
+    assert_eq!(out, vec![BoardAction::Reclaim(Some("/work/repo".into()))]);
+    a.apply(BoardEvent::ReclaimOffer {
+        cwd: None,
+        message: "again".into(),
+    });
+    assert!(
+        handle_key(&mut a, key(KeyCode::Esc)).is_empty(),
+        "Esc declines"
+    );
 }
 
 #[test]
@@ -1898,4 +2056,76 @@ fn offline_connection_toasts_once_not_on_every_repeat() {
     assert_eq!(a.toasts.len(), 1);
     a.apply(BoardEvent::Connection(ConnState::Offline("down".into())));
     assert_eq!(a.toasts.len(), 1);
+}
+
+// ============================================================ while you were away
+
+fn away_card() -> BriefCard {
+    BriefCard {
+        title: "While you were away (6h)".into(),
+        headline: "2 finished, 1 failed".into(),
+        lines: vec![
+            BriefLine {
+                session_id: "a".into(),
+                text: "Fix flake [forge] — failed: provider 503".into(),
+                detail: String::new(),
+                tone: BriefTone::Bad,
+            },
+            BriefLine {
+                session_id: "gone".into(),
+                text: "Old work [forge] — finished".into(),
+                detail: "done".into(),
+                tone: BriefTone::Good,
+            },
+        ],
+    }
+}
+
+#[test]
+fn the_away_digest_takes_the_keyboard_and_esc_dismisses_it() {
+    let mut a = app_with_selected("a");
+    a.apply(BoardEvent::Brief(away_card()));
+    assert_eq!(a.focus, Focus::Brief);
+    // Keys that would act on the board are inert while the overlay is up.
+    assert!(handle_key(&mut a, key(KeyCode::Char('x'))).is_empty());
+    assert!(a.confirm.is_none());
+    handle_key(&mut a, key(KeyCode::Esc));
+    assert_eq!(a.focus, Focus::Board);
+    assert!(a.brief.is_none());
+}
+
+#[test]
+fn b_asks_the_host_for_the_digest() {
+    let mut a = app_with_selected("a");
+    assert_eq!(
+        handle_key(&mut a, key(KeyCode::Char('B'))),
+        vec![BoardAction::ShowBrief]
+    );
+}
+
+#[test]
+fn enter_opens_the_picked_session_and_tolerates_one_that_left_the_board() {
+    let mut a = app_with_selected("a");
+    a.apply(BoardEvent::Brief(away_card()));
+    handle_key(&mut a, key(KeyCode::Enter));
+    assert!(a.detail_open, "the picked session's pane opened");
+    assert_eq!(a.selected.as_deref(), Some("a"));
+
+    a.close_detail();
+    a.apply(BoardEvent::Brief(away_card()));
+    handle_key(&mut a, key(KeyCode::Down));
+    handle_key(&mut a, key(KeyCode::Down));
+    assert_eq!(a.brief_cursor, 1, "the cursor stops on the last line");
+    handle_key(&mut a, key(KeyCode::Enter));
+    assert!(!a.detail_open);
+    assert_eq!(a.focus, Focus::Board);
+    assert!(a
+        .toasts
+        .back()
+        .is_some_and(|t| t.text.contains("not on the board")));
+}
+
+#[test]
+fn the_away_key_is_in_the_help() {
+    assert!(HELP.iter().any(|(k, d)| *k == "B" && d.contains("away")));
 }

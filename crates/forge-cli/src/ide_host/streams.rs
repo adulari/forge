@@ -94,7 +94,7 @@ pub(super) async fn term_task(
             return;
         }
     };
-    let socket = match tokio_tungstenite::connect_async(&url).await {
+    let socket = match crate::attach::ws_connect(&url).await {
         Ok((socket, _)) => socket,
         Err(e) => {
             send(IdeEvent::Toast(
@@ -154,7 +154,7 @@ pub(super) async fn stream_check(api: &Api, session: &str, action: &str, termina
     let Ok(url) = ws_url(&api.base, &api.token, &path) else {
         return;
     };
-    let Ok((mut socket, _)) = tokio_tungstenite::connect_async(&url).await else {
+    let Ok((mut socket, _)) = crate::attach::ws_connect(&url).await else {
         return;
     };
     let mut first = true;

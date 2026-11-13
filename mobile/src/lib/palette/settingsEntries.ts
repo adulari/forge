@@ -22,6 +22,7 @@ export type SettingsHref =
   | "/session-tree"
   | "/workflows"
   | "/prs"
+  | "/merge-queue"
   | "/notes"
   | "/remote-access";
 
@@ -52,7 +53,8 @@ export const SETTINGS_ENTRIES: readonly SettingsEntry[] = [
   { href: "/control", title: "Control tools", subtitle: "What agents may do to this app", keywords: "control tools agents mcp create session terminal schedule worktree notify permissions audit" },
   { href: "/crews", title: "Crews", subtitle: "Saved subagent rosters", keywords: "crews crew subagents team roster delegate agents roles" },
   { href: "/session-tree", title: "Session tree", subtitle: "Parent and child sessions", keywords: "tree subagents children fork" },
-  { href: "/prs", title: "Pull requests", subtitle: "Open PRs across projects", keywords: "pull requests prs github review merge checks" },
+  { href: "/prs", title: "Pull requests", subtitle: "Open PRs and issues across projects", keywords: "pull requests prs github review merge checks issues issue start fix drain backlog batch" },
+  { href: "/merge-queue", title: "Merge queue", subtitle: "PRs landing one at a time", keywords: "merge queue prs landing hold release front retry handed back watch ship drain" },
   { href: "/notes", title: "Notes", subtitle: "Scratchpad and to-dos per project", keywords: "notes todo to-do scratchpad checklist project thread" },
   { href: "/remote-access", title: "Remote access", subtitle: "Pair devices and manage who can connect", keywords: "remote access pair qr devices clients revoke token viewer scopes lan tailscale tunnel" },
   { href: "/workflows", title: "Workflows", subtitle: "Workflow runs", keywords: "workflows runs graph" },

@@ -1,5 +1,5 @@
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::ChildStdout;
 
 /// Upper bound on a single LSP message body. Real messages (even large `publishDiagnostics`
@@ -20,76 +20,115 @@ pub async fn write_msg<W: tokio::io::AsyncWrite + Unpin>(
     Ok(())
 }
 
-pub(crate) async fn read_msg_inner<R: tokio::io::AsyncRead + Unpin>(
-    reader: &mut BufReader<R>,
-) -> std::io::Result<Option<Value>> {
-    let mut content_length: Option<usize> = None;
-    let mut saw_header = false;
-    loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line).await {
-            Ok(0) if !saw_header => return Ok(None),
-            Ok(0) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "lsp: truncated message headers",
-                ))
-            }
-            Err(error) => return Err(error),
-            _ => {}
-        }
-        saw_header = true;
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
-        }
-        if let Some(val) = trimmed.strip_prefix("Content-Length: ") {
-            content_length = Some(val.trim().parse().map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("lsp: invalid Content-Length header: {val:?}"),
-                )
-            })?);
-        }
-    }
-    let len = content_length.ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "lsp: message is missing a Content-Length header",
-        )
-    })?;
-    if len > MAX_CONTENT_LENGTH {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("lsp: Content-Length {len} exceeds the {MAX_CONTENT_LENGTH}-byte limit"),
-        ));
-    }
-    let mut buf = vec![0u8; len];
-    reader.read_exact(&mut buf).await?;
-    serde_json::from_slice(&buf).map(Some).map_err(|error| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("lsp: invalid JSON message body: {error}"),
-        )
-    })
+pub struct FrameReader<R> {
+    reader: R,
+    buf: Vec<u8>,
 }
 
-pub async fn read_msg(reader: &mut BufReader<ChildStdout>) -> std::io::Result<Option<Value>> {
-    read_msg_inner(reader).await
+impl<R: tokio::io::AsyncRead + Unpin> FrameReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            buf: Vec::new(),
+        }
+    }
+
+    fn take_frame(&mut self) -> std::io::Result<Option<Value>> {
+        let mut content_length: Option<usize> = None;
+        let mut pos = 0;
+        let body_start = loop {
+            let Some(rel) = self.buf[pos..].iter().position(|&b| b == b'\n') else {
+                return Ok(None);
+            };
+            let line = String::from_utf8_lossy(&self.buf[pos..pos + rel]).into_owned();
+            pos += rel + 1;
+            let trimmed = line.trim_end_matches(['\r', '\n']);
+            if trimmed.is_empty() {
+                break pos;
+            }
+            if let Some(val) = trimmed.strip_prefix("Content-Length: ") {
+                content_length = Some(val.trim().parse().map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("lsp: invalid Content-Length header: {val:?}"),
+                    )
+                })?);
+            }
+        };
+        let len = content_length.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "lsp: message is missing a Content-Length header",
+            )
+        })?;
+        if len > MAX_CONTENT_LENGTH {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("lsp: Content-Length {len} exceeds the {MAX_CONTENT_LENGTH}-byte limit"),
+            ));
+        }
+        if self.buf.len() < body_start + len {
+            return Ok(None);
+        }
+        let parsed = serde_json::from_slice(&self.buf[body_start..body_start + len]);
+        self.buf.drain(..body_start + len);
+        parsed.map(Some).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("lsp: invalid JSON message body: {error}"),
+            )
+        })
+    }
+
+    /// Cancel-safe: bytes read before a dropped future stay in `buf` and the next call resumes.
+    pub async fn read_msg(&mut self) -> std::io::Result<Option<Value>> {
+        loop {
+            match self.take_frame() {
+                Ok(Some(msg)) => return Ok(Some(msg)),
+                Ok(None) => {}
+                Err(error) => {
+                    self.buf.clear();
+                    return Err(error);
+                }
+            }
+            // A full Vec only grows ~64 bytes per `read_buf`; reserve so a large body arrives in
+            // real chunks instead of thousands of tiny reads that each re-scan the headers.
+            self.buf.reserve(8192);
+            if self.reader.read_buf(&mut self.buf).await? == 0 {
+                if self.buf.is_empty() {
+                    return Ok(None);
+                }
+                let headers_done = self.buf.windows(2).any(|w| w == b"\n\n")
+                    || self.buf.windows(4).any(|w| w == b"\r\n\r\n");
+                let truncated = if headers_done {
+                    "lsp: truncated message body"
+                } else {
+                    "lsp: truncated message headers"
+                };
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    truncated,
+                ));
+            }
+        }
+    }
+}
+
+pub async fn read_msg(reader: &mut FrameReader<ChildStdout>) -> std::io::Result<Option<Value>> {
+    reader.read_msg().await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{duplex, AsyncWriteExt, BufReader};
+    use tokio::io::{duplex, AsyncWriteExt};
 
     /// Frame `bytes` through a closed in-memory stream and return what `read_msg_inner` makes of it.
     async fn parse_bytes(bytes: &[u8]) -> std::io::Result<Option<Value>> {
         let (mut writer, reader) = duplex(64 * 1024);
         writer.write_all(bytes).await.unwrap();
         drop(writer);
-        let mut reader = BufReader::new(reader);
-        read_msg_inner(&mut reader).await
+        FrameReader::new(reader).read_msg().await
     }
 
     #[tokio::test]
@@ -103,8 +142,8 @@ mod tests {
         });
         write_msg(&mut writer, &msg).await.unwrap();
         drop(writer);
-        let mut buf_reader = BufReader::new(reader);
-        let result = read_msg_inner(&mut buf_reader)
+        let result = FrameReader::new(reader)
+            .read_msg()
             .await
             .expect("should read")
             .expect("should parse");
@@ -213,11 +252,31 @@ mod tests {
         let msg = serde_json::json!({"msg": "café 你好"});
         write_msg(&mut writer, &msg).await.unwrap();
         drop(writer);
-        let mut reader = BufReader::new(reader);
-        let v = read_msg_inner(&mut reader)
+        let v = FrameReader::new(reader)
+            .read_msg()
             .await
             .expect("should read")
             .expect("should parse");
         assert_eq!(v["msg"], "café 你好");
+    }
+
+    #[tokio::test]
+    async fn timed_out_read_resumes_mid_frame() {
+        let (mut writer, reader) = duplex(4096);
+        let mut reader = FrameReader::new(reader);
+        let body = br#"{"id":1}"#;
+        writer.write_all(b"Content-Len").await.unwrap();
+        let first =
+            tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_msg()).await;
+        assert!(first.is_err());
+        let mut rest = format!("gth: {}\r\n\r\n", body.len()).into_bytes();
+        rest.extend_from_slice(&body[..3]);
+        writer.write_all(&rest).await.unwrap();
+        let second =
+            tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_msg()).await;
+        assert!(second.is_err());
+        writer.write_all(&body[3..]).await.unwrap();
+        let v = reader.read_msg().await.unwrap().unwrap();
+        assert_eq!(v["id"], 1);
     }
 }

@@ -99,6 +99,9 @@ fn verb_and_detail(app: &App) -> (String, Option<String>) {
         ),
         TurnPhase::ProcessingToolResult => ("Thinking".into(), Some("reading the result".into())),
         TurnPhase::Auxiliary => ("Working".into(), Some(activity.detail.clone())),
+        TurnPhase::Recovering if app.provider_outage.is_some() => {
+            ("Waiting".into(), Some("provider down".into()))
+        }
         TurnPhase::Recovering => match &app.model_search {
             Some((_, true)) => ("Retrying".into(), Some("same model".into())),
             _ => ("Finding a model".into(), None),
@@ -211,6 +214,13 @@ fn stop_line(
             "No progress · send continue",
             "send continue",
         )),
+        R::ProviderDown => Some((
+            false,
+            "Provider stayed down",
+            "send `continue` once it is back",
+            "Provider down · send continue",
+            "send continue",
+        )),
         R::NoOutput => Some((
             true,
             "No output, the turn failed",
@@ -269,6 +279,14 @@ pub(crate) fn live_state(app: &App, room: usize) -> Option<LiveState> {
                     styles::warn(),
                 ),
                 Span::styled(format!(" {} {what}", glyphs.sep), styles::muted()),
+            ],
+        });
+    }
+    if let Some(outage) = &app.provider_outage {
+        return Some(LiveState {
+            spans: vec![
+                Span::styled(glyphs.spin(app.tick).to_string(), styles::spinner(app.tick)),
+                Span::styled(format!(" {}", outage.status_line()), styles::warn()),
             ],
         });
     }

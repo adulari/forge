@@ -7,15 +7,20 @@ import { AlertTriangle, History } from "lucide-react-native";
 import React, { useEffect, useMemo, useState } from "react";
 
 import { getHistoryIntegrity } from "../../lib/api";
+import { readGapAck } from "../../lib/serverStorageKeys";
 import { gapAckKey, liveGapNotice, missingRowsNotice, needsAck, type GapNotice } from "../../lib/historyGap";
 import { hasMoreDetail, threadErrorKey, threadErrorTitle } from "../../lib/threadError";
+import { continuePrompt, turnEndAdvice, turnEndKey, turnEndTitle, visibleTurnEnd } from "../../lib/turnEnd";
 import type { Snapshot } from "../../lib/ws";
 import { NoticeDock } from "./NoticeDock";
+import { TurnEndingsSheet } from "./TurnEndingsSheet";
 
 export interface IntegrityDocksProps {
   baseUrl: string | null;
   sessionId: string;
   snapshot: Snapshot | null;
+  /** Sends a prompt as the person: the turn-stopped banner's Continue button uses it. */
+  onSendPrompt?: (text: string) => void;
 }
 
 function useStoredGapNotice(baseUrl: string | null, sessionId: string, refreshKey: number): {
@@ -35,7 +40,7 @@ function useStoredGapNotice(baseUrl: string | null, sessionId: string, refreshKe
     setAcked(null);
     if (!ackKey) return;
     let live = true;
-    AsyncStorage.getItem(ackKey)
+    readGapAck(AsyncStorage, baseUrl as string, sessionId)
       .then((raw) => {
         if (live) setAcked(raw == null ? 0 : Number(raw) || 0);
       })
@@ -45,7 +50,7 @@ function useStoredGapNotice(baseUrl: string | null, sessionId: string, refreshKe
     return () => {
       live = false;
     };
-  }, [ackKey]);
+  }, [ackKey, baseUrl, sessionId]);
   const gap = query.data ?? null;
   const notice = acked != null && needsAck(gap, acked) && gap ? missingRowsNotice(gap) : null;
   const acknowledge = () => {
@@ -58,13 +63,21 @@ function useStoredGapNotice(baseUrl: string | null, sessionId: string, refreshKe
   return { notice, acknowledge };
 }
 
-export function IntegrityDocks({ baseUrl, sessionId, snapshot }: IntegrityDocksProps) {
+export function IntegrityDocks({ baseUrl, sessionId, snapshot, onSendPrompt }: IntegrityDocksProps) {
   const threadError = snapshot?.thread_error ?? null;
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const errorKey = threadError ? threadErrorKey(threadError) : null;
   useEffect(() => {
     if (errorKey == null) setDismissedError(null);
   }, [errorKey]);
+
+  const turnEnd = visibleTurnEnd(snapshot?.last_turn_end, snapshot?.busy);
+  const [endingsOpen, setEndingsOpen] = useState(false);
+  const [endingsMounted, setEndingsMounted] = useState(false);
+  const prompt = turnEnd ? continuePrompt(turnEnd) : null;
+  const sendContinue = prompt != null && onSendPrompt ? () => onSendPrompt(prompt) : undefined;
+  const [dismissedEnd, setDismissedEnd] = useState<string | null>(null);
+  const endKey = turnEnd ? turnEndKey(turnEnd) : null;
 
   const liveGap = snapshot?.history_gap ?? null;
   const liveRevision = snapshot?.revision ?? 0;
@@ -91,6 +104,30 @@ export function IntegrityDocks({ baseUrl, sessionId, snapshot }: IntegrityDocksP
           onDismiss={() => setDismissedError(errorKey)}
           dismissLabel="Dismiss error"
           testID="thread-error-dock"
+        />
+      ) : null}
+      {turnEnd && !threadError && endKey !== dismissedEnd ? (
+        <NoticeDock
+          tone="warn"
+          icon={AlertTriangle}
+          title={turnEndTitle(turnEnd)}
+          summary={turnEndAdvice(turnEnd)}
+          onOpen={() => {
+            setEndingsMounted(true);
+            setEndingsOpen(true);
+          }}
+          action={sendContinue ? { label: "Continue", onPress: sendContinue } : undefined}
+          onDismiss={() => setDismissedEnd(endKey)}
+          dismissLabel="Dismiss turn notice"
+          testID="turn-end-dock"
+        />
+      ) : null}
+      {endingsMounted ? (
+        <TurnEndingsSheet
+          visible={endingsOpen}
+          onClose={() => setEndingsOpen(false)}
+          sessionId={sessionId}
+          onContinue={sendContinue}
         />
       ) : null}
       {notices.map((notice) => (

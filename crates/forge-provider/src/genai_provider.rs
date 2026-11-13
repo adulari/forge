@@ -334,7 +334,20 @@ async fn list_custom_models_at(
             .map_err(|e| ProviderError::Request(e.to_string()))?;
         if !resp.status().is_success() {
             let status = resp.status();
-            let message = format!("{namespace} `/models` returned HTTP {status}");
+            // The provider's own sentence ("This API key has expired") is what tells an expired key
+            // from a revoked one; bounded so a HTML error page cannot flood a status line.
+            let body = resp.text().await.unwrap_or_default();
+            let body: String = body.trim().chars().take(300).collect();
+            let message = if body.is_empty() {
+                format!("{namespace} `/models` returned HTTP {status}")
+            } else {
+                format!("{namespace} `/models` returned HTTP {status}: {body}")
+            };
+            if status == reqwest::StatusCode::PAYMENT_REQUIRED {
+                return Err(ProviderError::Capability(format!(
+                    "{message} (payment required)"
+                )));
+            }
             if status == reqwest::StatusCode::UNAUTHORIZED
                 || status == reqwest::StatusCode::FORBIDDEN
             {
@@ -793,6 +806,37 @@ fn requires_reasoning_echo(model: &str) -> bool {
     model.starts_with("deepseek::") || model.starts_with("kimi::")
 }
 
+/// Whether this provider's API rejects `reasoning_content` on an assistant message.
+///
+/// Groq answers the second request of any tool turn with `'messages.N' : property
+/// 'reasoning_content' is unsupported` (weekly e2e, 2026-11-02). Deny-list rather than allow-list:
+/// genai's shared OpenAI serializer emits the field for every OpenAI-compatible adapter (OpenAI,
+/// Groq, Fireworks, Together, Nebius, xAI, DeepSeek, Moonshot, MiMo, Aihubmix, OpenRouter, Zai,
+/// BigModel, Aliyun, OpenCode Zen, custom gateways), and the field has always been sent to all of
+/// them. Only Groq is confirmed to reject it; the rest either need it or are unverified, so an
+/// allow-list would silently drop it from providers that rely on it (MiMo, Zai, Zen/OpenRouter
+/// routes to thinking models, custom gateways). Add a provider here once it is shown to reject it.
+fn rejects_reasoning_echo(model: &str) -> bool {
+    model.starts_with("groq::")
+}
+
+/// The request transcript for `model`: captured reasoning goes back to providers that take it and
+/// is dropped for those that reject it.
+fn genai_messages_for(model: &str, messages: &[Message], opts_echo: bool) -> Vec<ChatMessage> {
+    if rejects_reasoning_echo(model) {
+        let stripped: Vec<Message> = messages
+            .iter()
+            .cloned()
+            .map(|mut m| {
+                m.reasoning = None;
+                m
+            })
+            .collect();
+        return to_genai_messages(&stripped, false);
+    }
+    to_genai_messages(messages, requires_reasoning_echo(model) || opts_echo)
+}
+
 /// Whether this model's API takes `tool_choice: "required"`.
 ///
 /// Kimi Code verified live (2026-09-16): K3 on a session that kept announcing its next step and
@@ -855,7 +899,8 @@ fn to_genai_messages(messages: &[Message], echo_reasoning: bool) -> Vec<ChatMess
                 // message — and it is the case that matters, because a tool call with no prose
                 // would otherwise carry no reasoning at all and DeepSeek rejects the next request.
                 // genai renders this as the `ContentPart::ReasoningContent` its adapters serialize
-                // to `reasoning_content`; providers that never ask for it ignore the part.
+                // to `reasoning_content`. Not every provider tolerates it (Groq rejects the request),
+                // so `genai_messages_for` strips the reasoning before this runs for those.
                 let reasoning_rides_on_calls = !m.tool_calls.is_empty();
                 // `Some("")` where the API demands the field but the reply streamed no reasoning:
                 // presence is what DeepSeek checks, and a tool-calling reply often has none.
@@ -959,38 +1004,11 @@ pub use error_policy::falls_back_to_local_ollama;
 use error_policy::*;
 use gateway_route::*;
 mod bedrock_error;
-
-/// Whether a failed embedding call fails the same way on every retry in this process: a rejection
-/// of the request itself (a retired model, a missing credential, a malformed call), not a rate
-/// limit or an outage.
-pub(crate) fn embed_failure_is_final(err: &genai::Error) -> bool {
-    let classified = classify_genai_error(err);
-    classified.is_permanent() || matches!(classified, ProviderError::Request(_))
-}
-
-/// Qwen 3.8 Max Preview is thinking-only on the Token Plan endpoint (the API rejects
-/// `enable_thinking=false`). Bound its private reasoning phase independently from the answer/tool
-/// payload so a difficult coding turn cannot spend many minutes re-planning before its first tool
-/// call. This is deliberately *not* `max_tokens`: the final response remains at the model's native
-/// output limit.
-fn qwencloud_thinking_budget(effort: Option<EffortLevel>) -> u32 {
-    match effort.unwrap_or(EffortLevel::Medium) {
-        EffortLevel::Low => 1_024,
-        EffortLevel::Medium => 4_096,
-        EffortLevel::High => 8_192,
-        EffortLevel::XHigh | EffortLevel::WhiteHot => 16_384,
-    }
-}
-
-/// The failure shape OpenCode Go returns when a model is sent to the wrong wire format: an
-/// immediate 5xx (`Unavailable`) or 401 (`Auth`) with no useful body. Rate limits, capability
-/// and access failures are real answers about the model and must not trigger endpoint learning.
-fn opencode_go_wrong_endpoint(error: &ProviderError) -> bool {
-    matches!(
-        error,
-        ProviderError::Unavailable(_) | ProviderError::Auth(_)
-    )
-}
+mod model_quirks;
+mod usage;
+pub(crate) use model_quirks::embed_failure_is_final;
+use model_quirks::{opencode_go_wrong_endpoint, qwencloud_thinking_budget};
+use usage::{is_phantom_truncation, normalize_usage};
 
 #[async_trait]
 impl Provider for GenAiProvider {
@@ -1084,10 +1102,7 @@ impl GenAiProvider {
     ) -> Result<ModelResponse, ProviderError> {
         let model_name = to_genai_model(model);
 
-        let mut genai_messages = to_genai_messages(
-            messages,
-            requires_reasoning_echo(&model_name) || opts.echo_reasoning,
-        );
+        let mut genai_messages = genai_messages_for(&model_name, messages, opts.echo_reasoning);
         // Opt-in per provider (`[reasoning_prefill]`); absent for every provider by default.
         // Keyed on Forge's namespace, which is what `[reasoning_prefill]` names: genai's differs for
         // some providers (`bedrock` is `bedrock_api` by now), and the entry silently never applied.
@@ -1627,38 +1642,6 @@ impl GenAiProvider {
     }
 }
 
-/// Normalize genai's provider-independent usage into Forge accounting. OpenAI-compatible APIs
-/// report prompt-cache hits under `prompt_tokens_details.cached_tokens`; preserving that subset
-/// lets every API-key provider receive the correct discounted cache-read pricing when known.
-///
-/// Providers that omit `prompt_tokens_details` entirely (groq among them) yield `None` rather than
-/// 0: they never told us how much was cached, which is not a claim that nothing was.
-fn normalize_usage(usage: &genai::chat::Usage) -> Usage {
-    let count = |n: Option<i32>| n.map(|n| n.max(0) as u64);
-    let prompt = usage.prompt_tokens_details.as_ref();
-    let completion = usage.completion_tokens_details.as_ref();
-    Usage {
-        input_tokens: count(usage.prompt_tokens).unwrap_or(0),
-        output_tokens: count(usage.completion_tokens).unwrap_or(0),
-        cached_input_tokens: count(prompt.and_then(|d| d.cached_tokens)),
-        cost_usd: 0.0, // priced by the mesh from token counts (FR-5)
-        // Anthropic/Bedrock cache creation and reasoning counts; genai turns a zero into None.
-        cache_write_tokens: count(prompt.and_then(|d| d.cache_creation_tokens)),
-        reasoning_tokens: count(completion.and_then(|d| d.reasoning_tokens)),
-        // The provider's own charge (`usage.cost`), when it sends one; the mesh prefers it to its
-        // rate-table estimate for metered models.
-        reported_cost_usd: usage.cost,
-    }
-}
-
-/// Decide whether a finished stream is a silently-truncated phantom rather than a real completion.
-/// True (→ reject as retryable) only when NONE of the completion signals are present: no finish/
-/// `End` event, no tool calls, and zero usage. Any one of those means the provider actually
-/// finished (even an empty answer), so the response is kept.
-fn is_phantom_truncation(saw_end: bool, has_tool_calls: bool, usage: &Usage) -> bool {
-    !saw_end && !has_tool_calls && usage.input_tokens == 0 && usage.output_tokens == 0
-}
-
 #[cfg(test)]
 mod tests {
     /// DeepSeek in thinking mode answers `The reasoning_content in the thinking mode must be
@@ -1718,6 +1701,30 @@ mod tests {
 
         // Providers that never ask for it must not gain empty fields.
         assert!(reasoning_parts(&to_genai_messages(&messages, false)).is_empty());
+    }
+
+    #[test]
+    fn groq_never_gets_reasoning_content_but_deepseek_does() {
+        let call = forge_types::ToolCall {
+            id: "call_0".to_string(),
+            name: "read_file".to_string(),
+            args: serde_json::json!({"path": "/etc/hostname"}),
+        };
+        let thought =
+            Message::assistant_tool_calls("checking", vec![call]).with_reasoning("need the file");
+        let msgs = vec![Message::user("go"), thought];
+
+        for echo in [false, true] {
+            let groq = genai_messages_for("groq::openai/gpt-oss-120b", &msgs, echo);
+            assert!(reasoning_parts(&groq).is_empty(), "echo={echo}");
+        }
+        let ds = genai_messages_for("deepseek::deepseek-v4-pro", &msgs, false);
+        assert_eq!(
+            reasoning_parts(&ds),
+            vec![String::new(), "need the file".to_string()]
+        );
+        let other = genai_messages_for("zai::glm-5", &msgs, false);
+        assert_eq!(reasoning_parts(&other), vec!["need the file".to_string()]);
     }
 
     // Captured shape: a DeepSeek reply behind a custom gateway that streamed `reasoning_content`

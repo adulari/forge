@@ -13,11 +13,12 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use crossterm::event::{Event as TermEvent, KeyEventKind};
 use forge_tui::board::{BoardEvent, FleetRow, HistoryRow};
-use forge_tui::ide::hunk::{Bucket, UndoRecord};
+use forge_tui::ide::hunk::Bucket;
+#[cfg(test)]
+use forge_tui::ide::hunk::UndoRecord;
 use forge_tui::ide::wire::{GitStatus, ProjectChanges, WireDiff, WireDiffFile};
 use forge_tui::ide::{
-    handle_key, handle_mouse, handle_paste, DiffLoaded, HunkFailure, HunkOutcome, IdeAction,
-    IdeApp, IdeEvent,
+    handle_key, handle_mouse, handle_paste, DiffLoaded, HunkFailure, IdeAction, IdeApp, IdeEvent,
 };
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc;
@@ -59,7 +60,7 @@ pub(crate) async fn ensure_daemon(
 ) -> Result<(String, String)> {
     let explicit = url.is_some();
     let base = crate::attach::resolve_base_url(url);
-    let http = reqwest::Client::new();
+    let http = crate::attach::local_http_client(&base);
     if let Ok(token) = crate::attach::resolve_token(token.clone()) {
         if probe(&http, &base, &token).await {
             return Ok((base, token));
@@ -106,6 +107,7 @@ fn start_daemon() -> Result<()> {
 }
 
 mod edit_copy;
+mod hunks;
 mod perform;
 mod streams;
 mod tools_api;
@@ -343,48 +345,6 @@ impl Api {
         Ok((bucket, pick(diff)))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn hunk(
-        &self,
-        session: String,
-        path: String,
-        header: String,
-        patch: String,
-        action: forge_tui::ide::hunk::HunkAction,
-        undo: Option<UndoRecord>,
-        is_undo: bool,
-    ) {
-        let body = serde_json::json!({
-            "session": session,
-            "path": path,
-            "hunk_header": header,
-            "patch": patch,
-            "action": action.wire(),
-        });
-        let result = post(&self.http, &self.base, &self.token, "api/git/hunk", body).await;
-        self.send(IdeEvent::Hunk(HunkOutcome {
-            session_id: session,
-            path,
-            action,
-            undo: result.is_ok().then_some(undo).flatten(),
-            is_undo,
-            result: result.map(|_| ()).map_err(classify),
-        }));
-    }
-
-    async fn discard(&self, session: String, path: String, undo: Option<UndoRecord>) {
-        let body = serde_json::json!({ "session": session, "paths": [path] });
-        let result = post(&self.http, &self.base, &self.token, "api/git/discard", body).await;
-        self.send(IdeEvent::Hunk(HunkOutcome {
-            session_id: session,
-            path,
-            action: forge_tui::ide::hunk::HunkAction::Revert,
-            undo: result.is_ok().then_some(undo).flatten(),
-            is_undo: false,
-            result: result.map(|_| ()).map_err(classify),
-        }));
-    }
-
     async fn git_op(&self, route: &str, body: serde_json::Value, ok: String) {
         let result = post(&self.http, &self.base, &self.token, route, body).await;
         self.send(IdeEvent::GitOp(result.map(|_| ok).map_err(|e| e.message)));
@@ -480,7 +440,7 @@ impl IdeHost {
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<Ev>();
         let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel::<()>();
         let api = Api {
-            http: reqwest::Client::new(),
+            http: crate::attach::local_http_client(&self.base),
             base: self.base.clone(),
             token: self.token.clone(),
             cwd: self.app.cwd().to_string(),
@@ -847,6 +807,9 @@ mod tests {
             path: "p".into(),
             label: "l".into(),
             steps: vec![],
+            action: HunkAction::Revert,
+            unmark: vec![],
+            with: vec![],
         };
         api.hunk(
             "a".into(),

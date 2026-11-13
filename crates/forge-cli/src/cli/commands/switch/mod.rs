@@ -254,10 +254,13 @@ async fn daemon_busy(forge_id: &str) -> bool {
     let Ok(token) = crate::serve::read_daemon_token() else {
         return false;
     };
-    let Ok(http) = reqwest::Client::builder().timeout(DAEMON_PROBE).build() else {
+    let base = crate::attach::resolve_base_url(None);
+    let Ok(http) = crate::attach::local_http_builder(&base)
+        .timeout(DAEMON_PROBE)
+        .build()
+    else {
         return false;
     };
-    let base = crate::attach::resolve_base_url(None);
     crate::attach::fetch_sessions(&http, &base, &token)
         .await
         .is_ok_and(|list| {

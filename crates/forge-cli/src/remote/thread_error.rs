@@ -133,3 +133,63 @@ mod tests {
         assert_eq!(long.summary.chars().count(), 140);
     }
 }
+
+/// How the session's last turn ended when it did not finish cleanly, for a banner on the session
+/// screen: the stable `reason` (the `turn.end_reason` value), a plain `label`, and when (unix
+/// seconds).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LastTurnEnd {
+    pub reason: String,
+    pub label: String,
+    /// What to do about it, in a sentence ("send continue to finish them").
+    pub advice: String,
+    /// Whether sending `continue` picks the work back up (the banner offers it).
+    pub resumable: bool,
+    pub at: i64,
+}
+
+impl LastTurnEnd {
+    /// `None` for a turn that answered, was stopped on purpose, or is still running.
+    pub fn from_row(row: &forge_store::TurnRow) -> Option<Self> {
+        let reason = row.end_reason.as_deref()?;
+        if matches!(reason, "final_answer" | "interrupted" | "plan_presented") {
+            return None;
+        }
+        let (label, advice) = forge_core::describe_end(reason);
+        Some(Self {
+            reason: reason.to_string(),
+            label,
+            advice,
+            resumable: forge_core::is_resumable(reason),
+            at: row.ended_at.unwrap_or(row.started_at),
+        })
+    }
+}
+
+#[cfg(test)]
+mod last_turn_end_tests {
+    use super::*;
+
+    fn row(reason: &str) -> forge_store::TurnRow {
+        forge_store::TurnRow {
+            id: 1,
+            session_id: "s".into(),
+            prompt_seq: 1,
+            started_at: 10,
+            ended_at: Some(20),
+            end_reason: Some(reason.into()),
+            detail_json: None,
+            last_role_shape: None,
+        }
+    }
+
+    #[test]
+    fn the_banner_carries_the_advice_and_whether_continue_helps() {
+        let stalled = LastTurnEnd::from_row(&row("stalled")).unwrap();
+        assert_eq!(stalled.label, "no progress");
+        assert!(stalled.resumable && stalled.advice.contains("continue"));
+        let budget = LastTurnEnd::from_row(&row("budget_exhausted")).unwrap();
+        assert!(!budget.resumable);
+        assert!(LastTurnEnd::from_row(&row("final_answer")).is_none());
+    }
+}

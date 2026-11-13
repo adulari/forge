@@ -15,6 +15,8 @@ pub enum Focus {
     Filter,
     /// The plan-and-dispatch form.
     Form,
+    /// The "while you were away" overlay.
+    Brief,
 }
 
 /// The detail pane's sections.
@@ -200,7 +202,11 @@ pub enum ConfirmKind {
     /// Merge every succeeded worker of this dispatch, in index order.
     MergeFinished(String),
     Merge(String),
+    /// Commit, push, open the PR and arm PR Watch for this session.
+    Ship(String),
     Discard(String),
+    /// Reclaim worktree space on the host, for the repository at this cwd.
+    Reclaim(Option<String>),
 }
 
 impl ConfirmKind {
@@ -249,6 +255,8 @@ pub enum Hit {
     CloseDetail,
     Help,
     ProjectFilter,
+    /// The header's host-pressure chip.
+    Pressure,
     /// The header's `◆ dispatch` chip.
     DispatchChip,
     /// The header's zoom chip (`◆ <title> ✕`).
@@ -282,5 +290,6 @@ pub enum Button {
     CancelDispatch,
     MergeAll,
     Merge,
+    Ship,
     Discard,
 }

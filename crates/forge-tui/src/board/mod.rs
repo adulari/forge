@@ -15,6 +15,7 @@
 //! uses, so the same board can later render in the mobile and desktop apps.
 
 pub mod actions;
+pub mod brief;
 pub mod card_render;
 pub mod detail;
 pub mod detail_head;
@@ -38,6 +39,7 @@ mod dispatch_tests;
 #[cfg(test)]
 mod tests;
 
+pub use brief::{BriefCard, BriefLine, BriefTone};
 pub use dispatch::{group_color, CardDispatch, Progress, Role};
 pub use form::{DispatchForm, FormField, FormHit};
 pub use keys::{handle_key, handle_mouse, handle_paste, HELP};
@@ -51,8 +53,8 @@ pub use state::{
 };
 pub use wire::{
     DiffCard, DiffFile, DispatchInfo, DispatchItemInfo, FleetRow, GitFile, GitInfo, HistoryRow,
-    LiveSnapshot, PastRow, PlanCard, PlanStep, QOption, Subagent, Task, TranscriptRow,
-    WorkflowCard,
+    LiveSnapshot, PastRow, PlanCard, PlanStep, PressureInfo, QOption, Subagent, Task,
+    TranscriptRow, WorkflowCard,
 };
 
 /// Something the host learned and the board should reflect.
@@ -80,12 +82,26 @@ pub enum BoardEvent {
     Git(String, GitInfo),
     /// `GET /api/history?include_tools=1` for one session (newest first, as served).
     History(String, Vec<HistoryRow>),
+    /// The answer to [`BoardAction::ShipPreview`]: the commit set as text lines, or the refusal.
+    ShipPreview(String, Result<Vec<String>, String>),
     /// Feedback about an action the host performed, or a failure worth showing.
     Toast(ToastLevel, String),
     /// A delete the daemon refused: its full sentence, shown as a dialog (a toast clips it).
     DeleteRefused(String),
     /// Daemon connectivity.
     Connection(ConnState),
+    /// The "while you were away" digest: opens the overlay over the board.
+    Brief(BriefCard),
+    /// A fresh `GET /api/pr/queue` (empty from a daemon that predates the merge queue).
+    Queue(Vec<crate::queue_menu::QueueRow>),
+    /// The daemon's host disk/memory pressure (`None` from a daemon that does not report it).
+    HostPressure(Option<PressureInfo>),
+    /// The daemon refused a new worktree session because the disk is under its hard floor: the
+    /// full sentence, shown as a dialog that offers Reclaim for `cwd`.
+    ReclaimOffer {
+        cwd: Option<String>,
+        message: String,
+    },
     /// ~10 Hz: advances animation, ages, toast expiry.
     Tick,
     /// The terminal was resized.
@@ -149,9 +165,19 @@ pub enum BoardAction {
     Merge(String),
     /// `POST /api/sessions/{id}/discard`.
     Discard(String),
+    /// `POST /api/sessions/{id}/ship` with `preview: true`; the host reports
+    /// [`BoardEvent::ShipPreview`] with the exact files the commit would hold.
+    ShipPreview(String),
+    /// `POST /api/sessions/{id}/ship`: commit, push, open the PR, arm PR Watch in merge mode.
+    Ship(String),
     /// Merge every `succeeded` worker of this dispatch in index order, stopping at the first
     /// conflict or error.
     MergeFinished(String),
+    /// `B`: fetch the "while you were away" digest and show it ([`BoardEvent::Brief`]).
+    ShowBrief,
+    /// `POST /api/host/reclaim`: free what `forge worktree reclaim --artifacts --yes` would,
+    /// for the repository at `cwd` (the daemon's default project when `None`).
+    Reclaim(Option<String>),
     /// Open IDE mode (F2) over the board, then come back.
     OpenIde,
     Quit,

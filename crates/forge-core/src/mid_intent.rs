@@ -408,9 +408,15 @@ const FOLLOWUP_INTENT_NUDGE: &str =
     tool call, or give a self-contained final answer.";
 
 impl crate::Session {
-    /// Whether tracked tasks remain unfinished. The task-list gate owns that case with a stronger,
-    /// task-naming nudge, so the generic mid-intent nudge stands aside. A bridge's `update_tasks`
-    /// runs in a separate process, so the store is the source of truth there.
+    /// Whether the task-list gate will take this stop: tasks remain unfinished and task nudges are
+    /// on. That gate owns the case with a stronger, task-naming nudge, so the generic mid-intent
+    /// nudge stands aside; when the gate is switched off it must not, or nothing would catch the
+    /// stop. A bridge's `update_tasks` runs in a separate process, so the store is the source of
+    /// truth there.
+    fn task_gate_owns_stop(&self) -> bool {
+        self.task_nudges_on() && self.has_open_tasks()
+    }
+
     fn has_open_tasks(&self) -> bool {
         let stored = self.store.tasks(&self.id).unwrap_or_default();
         let tasks = if stored.is_empty() {
@@ -438,10 +444,10 @@ impl crate::Session {
         } else {
             MAX_FOLLOWUP_INTENT_NUDGES
         };
-        if *sent >= max
-            || !(retries || self.advisory_nudges_on())
+        if !self.config.harness.mid_intent_redrive
+            || *sent >= max
             || !(ends_mid_intent(content) || (content.trim().is_empty() && bridge_tool_progress))
-            || self.has_open_tasks()
+            || self.task_gate_owns_stop()
         {
             return false;
         }

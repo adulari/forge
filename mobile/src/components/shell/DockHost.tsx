@@ -169,7 +169,7 @@ const DOCK_REGISTRY: Record<DockKind, DockDefinition> = {
   },
   git: {
     // The dock follows the focused pane's session unless a future resource tab pins one.
-    render: ({ sessionId }) => (sessionId ? <GitReviewDock sessionId={sessionId} /> : <NeedsSession what="its changes" />),
+    render: ({ sessionId }) => (sessionId ? <GitReviewDock key={sessionId} sessionId={sessionId} /> : <NeedsSession what="its changes" />),
   },
   files: {
     render: ({ sessionId, surface }) => (

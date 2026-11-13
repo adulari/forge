@@ -606,6 +606,7 @@ impl Store {
             "INSERT INTO session_compaction (session_id, summary) VALUES (?1, ?2)
              ON CONFLICT(session_id) DO UPDATE SET
                summary = excluded.summary,
+               compactions = compactions + 1,
                created_at = strftime('%s','now')",
             (session_id, summary),
         )?;

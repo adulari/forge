@@ -282,10 +282,7 @@ async fn pull(State(state): State<Arc<DaemonState>>, Json(req): Json<PullReq>) -
     // its in-progress edits out from beneath it.
     let target = dir.canonicalize().unwrap_or_else(|_| dir.clone());
     let working = state.registry.all().await.into_iter().any(|handle| {
-        let root = handle
-            .worktree
-            .clone()
-            .unwrap_or_else(|| handle.cwd.clone());
+        let root = handle.worktree.clone().unwrap_or_else(|| handle.cwd());
         let root = PathBuf::from(root);
         handle.snapshot_rx.borrow().snapshot.busy
             && root.canonicalize().unwrap_or(root).starts_with(&target)

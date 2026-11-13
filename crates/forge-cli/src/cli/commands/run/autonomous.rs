@@ -47,6 +47,8 @@ pub(crate) struct AutonomyBudget {
     pub(crate) max_elapsed: Option<Duration>,
     pub(crate) tokens_used: u64,
     pub(crate) started_at: Instant,
+    /// Dollars left in a `/goal --budget $N` envelope, enforced inside the turn.
+    pub(crate) usd_remaining: Option<f64>,
 }
 
 impl AutonomyBudget {
@@ -56,6 +58,7 @@ impl AutonomyBudget {
             max_elapsed: max_minutes.map(|m| Duration::from_secs(m.saturating_mul(60))),
             tokens_used: 0,
             started_at: Instant::now(),
+            usd_remaining: None,
         }
     }
 }
@@ -64,7 +67,7 @@ impl AutonomyBudget {
     /// What is left of this run's budget, in the form the session enforces INSIDE a turn. `None`
     /// when the run is unbounded.
     pub(crate) fn remaining(&self) -> Option<forge_core::RunBudget> {
-        if self.max_tokens.is_none() && self.max_elapsed.is_none() {
+        if self.max_tokens.is_none() && self.max_elapsed.is_none() && self.usd_remaining.is_none() {
             return None;
         }
         Some(forge_core::RunBudget {
@@ -72,7 +75,7 @@ impl AutonomyBudget {
                 .max_tokens
                 .map(|max| max.saturating_sub(self.tokens_used)),
             deadline: self.max_elapsed.map(|max| self.started_at + max),
-            usd_remaining: None,
+            usd_remaining: self.usd_remaining,
         })
     }
 }
@@ -229,6 +232,12 @@ pub(crate) struct GoalState {
     pub(crate) started_unix: i64,
     /// Progress-evaluator state (docs/features/goal-evaluator.md).
     pub(crate) eval: GoalEvalTrack,
+    /// The spend envelope (`/goal --budget`), when the goal has one.
+    pub(crate) envelope: Option<forge_types::goal_envelope::EnvelopeState>,
+    /// The approved validation contract (`/goal --contract`), with the latest validator results.
+    pub(crate) contract: Option<forge_types::goal_contract::GoalContract>,
+    /// Validator bookkeeping (docs/features/goal-contract.md).
+    pub(crate) validation: super::goal_progress::ValidationTrack,
 }
 
 impl GoalState {
@@ -255,7 +264,19 @@ impl GoalState {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs() as i64),
             eval: GoalEvalTrack::default(),
+            envelope: None,
+            contract: None,
+            validation: Default::default(),
         }
+    }
+
+    /// Hand a USD envelope's remaining dollars to the in-turn budget guard.
+    pub(crate) fn sync_envelope_budget(&mut self) {
+        self.budget.usd_remaining = self
+            .envelope
+            .as_ref()
+            .filter(|e| e.is_usd())
+            .map(|e| (e.spec.slice - e.used).max(0.0));
     }
 }
 
@@ -272,6 +293,9 @@ impl GoalState {
     ) -> Self {
         let carry = app.goal_begin(&goal, &gate_cmds, max_tokens, max_minutes);
         let mut state = Self::new(gen, goal, gate_cmds, max_tokens, max_minutes);
+        state.envelope = app.goal.as_ref().and_then(|g| g.envelope.clone());
+        state.contract = app.goal.as_ref().and_then(|g| g.contract.clone());
+        state.sync_envelope_budget();
         if let Some(carry) = carry {
             state.iter = carry.iteration;
             state.budget.tokens_used = carry.tokens_used;
@@ -348,6 +372,12 @@ pub(crate) fn dequeue_prompt(queue: &mut Vec<String>, app: &mut forge_tui::App) 
 pub(crate) fn finish_interrupted_presenter(app: &mut forge_tui::App) {
     app.workflow.on_interrupt();
     app.apply(forge_tui::PresenterEvent::AssistantDone);
+    // The aborted task never emits its own Done, so an outage or retry wait it was showing would
+    // stay on the status bar, spinner and "Esc stops" included, long after Esc stopped it.
+    app.apply(forge_tui::PresenterEvent::Done {
+        final_text: String::new(),
+        stop_reason: forge_types::StopReason::Interrupted,
+    });
 }
 
 /// A model-skip retries the same logical autonomous turn under a fresh generation. Keep `/loop`
@@ -493,7 +523,7 @@ pub(crate) fn spawn_turn(
             sess.attach_images(images);
         }
         if let Err(e) = sess.run_turn(&prompt).await {
-            sess.notify_error(&format!("turn failed: {e}"));
+            sess.notify_turn_error(&format!("turn failed: {e}"), &e);
         }
     })
 }
@@ -531,7 +561,7 @@ pub(crate) fn spawn_resume_turn(
         let _done = DoneGuard(dt, gen);
         let mut sess = s.lock().await;
         if let Err(e) = sess.run_turn_resuming(&prompt).await {
-            sess.notify_error(&format!("turn failed: {e}"));
+            sess.notify_turn_error(&format!("turn failed: {e}"), &e);
         }
     })
 }
@@ -569,7 +599,7 @@ pub(crate) fn spawn_turn_with(
             sess.attach_images(images);
         }
         if let Err(e) = sess.run_turn_with(&prompt, &guidance, tier).await {
-            sess.notify_error(&format!("turn failed: {e}"));
+            sess.notify_turn_error(&format!("turn failed: {e}"), &e);
         }
     })
 }
@@ -655,4 +685,30 @@ pub(crate) fn spawn_refine(
             sess.notify_error(&format!("refine failed: {e}"));
         }
     })
+}
+
+#[cfg(test)]
+mod interrupt_tests {
+    use super::*;
+
+    #[test]
+    fn an_interrupt_during_an_outage_wait_clears_the_outage_status() {
+        let mut app = forge_tui::App::default();
+        app.busy = true;
+        app.apply(forge_tui::PresenterEvent::ProviderOutage {
+            model: "drill::flash".into(),
+            since: 1,
+            next_try: 2,
+            attempt: 1,
+            until: 3,
+            reason: "503 no_capacity".into(),
+        });
+        app.apply(forge_tui::PresenterEvent::ModelSearch {
+            model: "drill::flash".into(),
+            retrying: true,
+        });
+        finish_interrupted_presenter(&mut app);
+        assert!(app.provider_outage.is_none());
+        assert!(app.model_search.is_none());
+    }
 }

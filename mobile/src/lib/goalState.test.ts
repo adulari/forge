@@ -3,12 +3,20 @@ import { describe, expect, it } from "vitest";
 import {
   budgetFraction,
   compactTokens,
+  contractHeadline,
+  contractRows,
   deriveNoteGoal,
+  envelopeFraction,
   formatElapsed,
   goalActions,
   goalInput,
   goalMeta,
+  goalStartCommand,
   liveElapsedSecs,
+  missionGroups,
+  missionLine,
+  relayLine,
+  resumeLine,
   resolveGoal,
 } from "./goalState";
 import type { SnapshotGoal } from "./ws";
@@ -26,6 +34,46 @@ const wire = (over: Partial<SnapshotGoal> = {}): SnapshotGoal => ({
   reason: null,
   pending: null,
   ...over,
+});
+
+describe("envelope", () => {
+  const envelope = { unit: "usd" as const, used: 1.5, slice: 5, label: "spend", meter: "envelope $1.50/$5.00", spent: false, unverified: false, resets_at: null };
+
+  it("carries the host's envelope and reports how full it is", () => {
+    const goal = resolveGoal({ goal: wire({ envelope }), notes: [] });
+    expect(goal?.envelope?.meter).toBe("envelope $1.50/$5.00");
+    expect(goal && envelopeFraction(goal)).toBeCloseTo(0.3);
+  });
+
+  it("is absent from an older host's goal", () => {
+    const goal = resolveGoal({ goal: wire(), notes: [] });
+    expect(goal?.envelope).toBeNull();
+    expect(goal && envelopeFraction(goal)).toBeNull();
+  });
+});
+
+describe("resumeLine", () => {
+  const spent = { unit: "percent" as const, used: 21, slice: 20, label: "claude weekly", meter: "envelope 21/20% claude weekly", spent: true, unverified: false, resets_at: 0 };
+  const now = new Date(2026, 10, 6, 23, 30).getTime();
+  const at = new Date(2026, 10, 7, 4, 0).getTime() / 1000;
+
+  it("says when a goal waiting for its window continues by itself", () => {
+    const goal = resolveGoal({ goal: wire({ state: "paused", envelope: { ...spent, resumes_at: at } }), notes: [] });
+    expect(goal && resumeLine(goal, now)).toBe("Resumes at 04:00");
+  });
+
+  it("stays silent when it will not resume by itself", () => {
+    const held = resolveGoal({ goal: wire({ state: "paused", envelope: spent }), notes: [] });
+    expect(held && resumeLine(held, now)).toBeNull();
+    const running = resolveGoal({ goal: wire({ state: "active", envelope: { ...spent, resumes_at: at } }), notes: [] });
+    expect(running && resumeLine(running, now)).toBeNull();
+  });
+
+  it("adds the weekday when the reset is a day or more away", () => {
+    const far = new Date(2026, 10, 9, 9, 0).getTime() / 1000;
+    const goal = resolveGoal({ goal: wire({ state: "paused", envelope: { ...spent, resumes_at: far } }), notes: [] });
+    expect(goal && resumeLine(goal, now)).toBe("Resumes at Mon 09:00");
+  });
 });
 
 describe("resolveGoal", () => {
@@ -103,5 +151,130 @@ describe("goal readouts", () => {
     expect(budgetFraction(goal)).toBeCloseTo(0.25);
     expect(budgetFraction({ ...goal, maxTokens: null })).toBeNull();
     expect(goalMeta(goal, 1_000_000)).toBe("turn 3 · 12.5k / 50k tok · 1m 30s / 30m · 1 gate");
+  });
+});
+
+describe("contract", () => {
+  const contract = {
+    headline: "1/3 pass",
+    approved: true,
+    rounds: 2,
+    passed: 1,
+    total: 3,
+    checked_at: 1_700_000_000,
+    assertions: [
+      { id: 1, text: "a exists", command: "test -f a.txt", expect: "exit 0", state: "pass" as const, reason: "", proof: "" },
+      { id: 2, text: "b says ready", command: "cat b.txt", expect: "", state: "fail" as const, reason: 'output does not contain "ready"', proof: "pending\nnot yet\n" },
+      { id: 3, text: "c exists", command: "test -f c.txt", expect: "", state: "pending" as const, reason: "", proof: "" },
+    ],
+  };
+
+  it("turns the host's contract into table rows with a mark per state", () => {
+    const goal = resolveGoal({ goal: wire({ contract }), notes: [] });
+    const rows = goal && contractRows(goal);
+    expect(rows?.map((r) => r.mark)).toEqual(["✓", "✗", "·"]);
+    expect(rows?.[1].detail).toBe('output does not contain "ready" · not yet');
+    expect(rows?.[0].detail).toBe("");
+    expect(goal && contractHeadline(goal)).toBe("Contract · 1/3 pass");
+  });
+
+  it("is absent for a goal without a contract or from an older host", () => {
+    const goal = resolveGoal({ goal: wire(), notes: [] });
+    expect(goal && contractRows(goal)).toBeNull();
+    expect(goal && contractHeadline(goal)).toBeNull();
+  });
+});
+
+describe("goalStartCommand", () => {
+  it("asks for a contract only when the switch is on", () => {
+    expect(goalStartCommand("  ship it ", false)).toBe("/goal ship it");
+    expect(goalStartCommand("ship it", true)).toBe("/goal --contract ship it");
+  });
+
+  it("asks for a mission, which includes its contracts, when the mission switch is on", () => {
+    expect(goalStartCommand(" ship it ", false, true)).toBe("/goal --mission ship it");
+    expect(goalStartCommand("ship it", true, true)).toBe("/goal --mission ship it");
+  });
+});
+
+describe("mission", () => {
+  const assertion = (id: number, state: "pass" | "fail" | "pending") => ({
+    id,
+    text: `fact ${id}`,
+    command: `test -f f${id}`,
+    expect: "",
+    state,
+    reason: state === "fail" ? "exit 1" : "",
+    proof: "",
+  });
+  const mission = {
+    headline: "milestone 2/3: 1/2 pass",
+    approved: true,
+    rounds: 3,
+    passed: 3,
+    total: 6,
+    checked_at: 1_700_000_000,
+    assertions: [
+      assertion(1, "pass"),
+      assertion(2, "pass"),
+      assertion(3, "pass"),
+      assertion(4, "fail"),
+      assertion(5, "pending"),
+      assertion(6, "pending"),
+    ],
+    mission: {
+      current: 2,
+      total: 3,
+      progress: "milestone 2/3: 1/2 pass",
+      milestones: [
+        { index: 1, title: "lexer", state: "done" as const, passed: 2, total: 2, assertion_ids: [1, 2] },
+        { index: 2, title: "parser", state: "active" as const, passed: 1, total: 2, assertion_ids: [3, 4] },
+        { index: 3, title: "cli", state: "upcoming" as const, passed: 0, total: 2, assertion_ids: [5, 6] },
+      ],
+    },
+  };
+
+  it("groups the contract rows under their milestone with a progress line", () => {
+    const goal = resolveGoal({ goal: wire({ contract: mission }), notes: [] });
+    expect(goal && missionLine(goal)).toBe("Mission · milestone 2/3: 1/2 pass");
+    const groups = goal && missionGroups(goal);
+    expect(groups?.map((g) => g.tally)).toEqual(["done 2/2", "current 1/2 pass", "upcoming, 2 assertions"]);
+    expect(groups?.[1].rows.map((r) => r.id)).toEqual([3, 4]);
+    expect(groups?.[1].rows[1].mark).toBe("✗");
+    expect(goal && contractHeadline(goal)).toBe("Contract · milestone 2/3: 1/2 pass");
+  });
+
+  it("is absent for a flat contract, no contract, or a host that predates missions", () => {
+    const { mission: _gone, ...flat } = mission;
+    const goal = resolveGoal({ goal: wire({ contract: flat }), notes: [] });
+    expect(goal && missionGroups(goal)).toBeNull();
+    expect(goal && missionLine(goal)).toBeNull();
+    const bare = resolveGoal({ goal: wire(), notes: [] });
+    expect(bare && missionGroups(bare)).toBeNull();
+  });
+});
+
+describe("relay", () => {
+  it("draws the chain of workers the goal has run in", () => {
+    const goal = resolveGoal({
+      goal: wire({
+        state: "active",
+        relay: [
+          { session_id: "aaaa1111", state: "handed_off", reason: "wedged" },
+          { session_id: "bbbb2222", state: "handed_off", reason: "worn" },
+          { session_id: "cccc3333", state: "active" },
+        ],
+      }),
+      notes: [],
+    });
+    expect(goal && relayLine(goal)).toBe("S1 handed off (wedged) → S2 handed off (worn) → S3 running");
+  });
+
+  it("is absent for a goal that never changed worker and offers no controls once handed off", () => {
+    const plain = resolveGoal({ goal: wire(), notes: [] });
+    expect(plain && relayLine(plain)).toBeNull();
+    const gone = resolveGoal({ goal: wire({ state: "handed_off", relay: [{ session_id: "a", state: "handed_off", reason: "wedged" }] }), notes: [] });
+    expect(gone && goalActions(gone)).toEqual([]);
+    expect(gone?.phase).toBe("handed_off");
   });
 });

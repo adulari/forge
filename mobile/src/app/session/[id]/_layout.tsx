@@ -64,7 +64,10 @@ import { PullRequestSheet } from "../../../components/session/PullRequestSheet";
 import { MemorySheet } from "../../../components/session/MemorySheet";
 
 
+import { HistorySearchSheet } from "../../../components/session/HistorySearchSheet";
 import { JobsSheet } from "../../../components/session/JobsSheet";
+import { ciBanner } from "../../../lib/ciModel";
+import { openCi } from "../../../lib/ciRequest";
 import { LatticeSheet } from "../../../components/session/LatticeSheet";
 import { StatusStrip } from "../../../components/session/StatusStrip";
 import { useAnywhere } from "../../../lib/anywhere/store";
@@ -91,7 +94,8 @@ import { isSegmentPath, type SegmentValue } from "../../../lib/sessionSegments";
 import { useSessionSegment } from "../../../lib/useSessionSegment";
 import { sessionDisplayTitle } from "../../../lib/sessionTitle";
 import { PROTOCOL_VERSION } from "../../../lib/ws";
-import { worktreeSetupBanner } from "../../../lib/worktreeCommands";
+import { providerOutageBanner } from "../../../lib/providerOutage";
+import { worktreeBaseBanner, worktreeSetupBanner } from "../../../lib/worktreeCommands";
 import { durations, easings } from "../../../theme/motion";
 import { useTokens } from "../../../theme/ThemeProvider";
 import { radii, space, type StatusDotState } from "../../../theme/tokens";
@@ -157,6 +161,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const [projectWarningDismissed, setProjectWarningDismissed] = useState(false);
   const [setupDismissed, setSetupDismissed] = useState<string | null>(null);
   const [setupExpanded, setSetupExpanded] = useState(false);
+  const [baseDismissed, setBaseDismissed] = useState<string | null>(null);
   const [projectSetupRequested, setProjectSetupRequested] = useState(false);
 
   useEffect(() => {
@@ -181,6 +186,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
 
   const [latticeVisible, setLatticeVisible] = useState(false);
   const [jobsVisible, setJobsVisible] = useState(false);
+  const [historySearchVisible, setHistorySearchVisible] = useState(false);
   const [lifecycleVisible, setLifecycleVisible] = useState(false);
   const [worktreeVisible, setWorktreeVisible] = useState(false);
 
@@ -356,6 +362,9 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const projectNeedsInitialization = snapshot?.project_initialized === false && !projectWarningDismissed;
   const setupBanner = worktreeSetupBanner(snapshot?.worktree_setup);
   const setupState = snapshot?.worktree_setup?.state;
+  const baseBanner = worktreeBaseBanner(snapshot?.worktree_base);
+  const outageBanner = providerOutageBanner(snapshot?.outage);
+  const ciBannerModel = ciBanner(snapshot?.ci);
   useEffect(() => {
     setSetupExpanded(false);
   }, [setupState]);
@@ -403,6 +412,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
   const onMemory = useCallback(() => setMemoryVisible(true), []);
   const onLattice = useCallback(() => setLatticeVisible(true), []);
   const onJobs = useCallback(() => setJobsVisible(true), []);
+  const onHistorySearch = useCallback(() => setHistorySearchVisible(true), []);
   const onManageLifecycle = useCallback(() => setLifecycleVisible(true), []);
   const continueInClaudeCode = useContinueInClaudeCode();
   const onContinueClaude = useCallback(() => continueInClaudeCode(sessionId), [continueInClaudeCode, sessionId]);
@@ -506,6 +516,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
             onMemory={onMemory}
             onLattice={onLattice}
             onJobs={onJobs}
+            onHistorySearch={onHistorySearch}
             onManageLifecycle={onManageLifecycle}
             onContinueClaude={onContinueClaude}
             onToggleFiles={onToggleFiles}
@@ -587,6 +598,7 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
 
 
         <OnFirstOpen visible={latticeVisible}><LatticeSheet visible={latticeVisible} onClose={() => setLatticeVisible(false)} send={sendWithFeedback} /></OnFirstOpen>
+        <OnFirstOpen visible={historySearchVisible}><HistorySearchSheet visible={historySearchVisible} onClose={() => setHistorySearchVisible(false)} sessionId={sessionId} /></OnFirstOpen>
         <OnFirstOpen visible={jobsVisible}><JobsSheet visible={jobsVisible} onClose={() => setJobsVisible(false)} sessionId={sessionId} /></OnFirstOpen>
         <OnFirstOpen visible={portsVisible}><PortsSheet visible={portsVisible} onClose={() => setPortsVisible(false)} sessionId={sessionId} /></OnFirstOpen>
         <OnFirstOpen visible={lifecycleVisible}><SessionLifecycleSheet
@@ -648,6 +660,22 @@ function SessionShell({ sessionId, active, hostRoutes }: { sessionId: string; ac
               actionLabel={setupBanner.expandable ? (setupExpanded ? "Show less" : "Show all") : undefined}
               onAction={setupBanner.expandable ? () => setSetupExpanded((open) => !open) : undefined}
               onDismiss={setupBanner.dismissible ? () => setSetupDismissed(snapshot?.worktree_setup?.state ?? null) : undefined}
+            />
+          ) : null}
+          {baseBanner && baseDismissed !== snapshot?.worktree_base ? (
+            <Banner
+              tone={baseBanner.tone}
+              message={baseBanner.message}
+              onDismiss={() => setBaseDismissed(snapshot?.worktree_base ?? null)}
+            />
+          ) : null}
+          {outageBanner ? <Banner tone={outageBanner.tone} message={outageBanner.message} /> : null}
+          {ciBannerModel ? (
+            <Banner
+              tone={ciBannerModel.tone}
+              message={ciBannerModel.message}
+              actionLabel="Open"
+              onAction={() => openCi(sessionId)}
             />
           ) : null}
           {projectNeedsInitialization ? (

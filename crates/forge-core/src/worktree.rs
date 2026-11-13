@@ -56,6 +56,16 @@ impl WorktreeGuard {
         child_id: &str,
         worktree_path: PathBuf,
     ) -> Result<WorktreeGuard, WorktreeError> {
+        Self::create_at_base(repo_root, child_id, worktree_path, "HEAD")
+    }
+
+    /// [`create_at`](Self::create_at) branched from `start_point` (a commit id) instead of HEAD.
+    pub fn create_at_base(
+        repo_root: &Path,
+        child_id: &str,
+        worktree_path: PathBuf,
+        start_point: &str,
+    ) -> Result<WorktreeGuard, WorktreeError> {
         let branch = format!("forge/subagent/{child_id}");
         if let Some(parent) = worktree_path.parent() {
             if worktree_path.starts_with(repo_root) {
@@ -73,7 +83,7 @@ impl WorktreeGuard {
                 worktree_path.to_str().unwrap_or(child_id),
                 "-b",
                 &branch,
-                "HEAD",
+                start_point,
             ],
             "worktree add",
         )?;
@@ -207,6 +217,9 @@ pub fn commit_worktree(worktree_path: &Path) -> Result<bool, WorktreeError> {
             "--",
             ".cargo",
             ".forge/checkpoints",
+            // Files attached from the phone or desktop (screenshots, documents) are saved here for
+            // the agent to read; they are not project changes and must never reach the user's repo.
+            ".forge/uploads",
         ])
         .output()
         .map_err(|e| WorktreeError::SpawnFailed(e.to_string()))?;
@@ -238,6 +251,11 @@ pub fn commit_worktree(worktree_path: &Path) -> Result<bool, WorktreeError> {
             "-m",
             "forge: worktree snapshot",
             "--no-gpg-sign",
+            // An internal checkpoint, not the user's commit: a pre-commit hook that cannot run in a
+            // fresh worktree (lint-staged without node_modules, a formatter) would otherwise fail
+            // archive, merge and subagent merge-back. The user's own commit of the merged changes
+            // still runs their hooks.
+            "--no-verify",
         ])
         .output()
         .map_err(|e| WorktreeError::SpawnFailed(e.to_string()))?;
@@ -601,6 +619,50 @@ mod tests {
             std::fs::read_to_string(repo.join("child.txt")).unwrap(),
             "uncommitted work\n",
             "the child's uncommitted edit must reach the main tree"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_skips_uploads_and_a_failing_pre_commit_hook() {
+        if !git_available() {
+            return;
+        }
+        let repo = init_repo();
+        let wt_path = repo.join(".forge").join("worktrees").join("hooked");
+        run_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                wt_path.to_str().unwrap(),
+                "-b",
+                "forge/subagent/hooked",
+                "HEAD",
+            ],
+            "worktree add",
+        )
+        .unwrap();
+        let hooks = repo.join(".git/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::create_dir_all(wt_path.join(".forge/uploads/u1")).unwrap();
+        std::fs::write(wt_path.join(".forge/uploads/u1/photo.png"), "png").unwrap();
+        std::fs::write(wt_path.join("child.txt"), "work\n").unwrap();
+        assert!(
+            commit_worktree(&wt_path).unwrap(),
+            "a failing hook does not block the snapshot"
+        );
+        let tree = String::from_utf8(
+            run_git(&wt_path, &["ls-tree", "-r", "--name-only", "HEAD"], "ls").unwrap(),
+        )
+        .unwrap();
+        assert!(
+            tree.contains("child.txt") && !tree.contains("uploads"),
+            "{tree}"
         );
     }
 

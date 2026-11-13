@@ -66,6 +66,7 @@ pub(super) async fn ws_handler(
             params.rev,
             going_away,
             Some(gate),
+            remote::WsLiveness::DEFAULT,
         )
         .await
     })

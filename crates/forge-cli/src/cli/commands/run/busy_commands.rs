@@ -41,15 +41,25 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::Notes
         | CommandAction::Run
         | CommandAction::Import
+        | CommandAction::Issues
+        | CommandAction::Queue
+        | CommandAction::Ci
         | CommandAction::Host(_)
         | CommandAction::Control
+        | CommandAction::Turns
+        | CommandAction::Contract
         | CommandAction::AgentClis
         | CommandAction::Strip(_)
         | CommandAction::Sidebar(_)
         | CommandAction::Jobs
+        | CommandAction::History(_)
         | CommandAction::Ide
         | CommandAction::GoalControl(
-            GoalControl::Pause | GoalControl::Clear | GoalControl::Status | GoalControl::Edit(_),
+            GoalControl::Pause
+                | GoalControl::Clear
+                | GoalControl::Status
+                | GoalControl::Edit(_)
+                | GoalControl::Budget(_),
         )
         | CommandAction::Thinking
         | CommandAction::ToolOutput
@@ -126,8 +136,17 @@ pub(crate) fn busy_policy(action: &CommandAction) -> BusyPolicy {
         | CommandAction::ListCheckpoints
         | CommandAction::Claude
         | CommandAction::ContinueClaude(_)
+        // Commits and pushes whatever the agent has written so far, then auto-merges it.
+        | CommandAction::Ship
         | CommandAction::Quit => Refuse,
     }
+}
+
+/// The note for a refused command that deserves its own wording; `None` for the generic one.
+pub(crate) fn refuse_note(line: &str) -> Option<&'static str> {
+    matches!(forge_tui::parse_command(line), CommandAction::Ship).then_some(
+        "⏳ ship when the turn finishes — /ship commits and merges what is written so far",
+    )
 }
 
 /// What an input surface does with a command line typed while a turn runs.
@@ -296,6 +315,7 @@ mod tests {
             "/claude",
             "/continue-claude",
             "/quit",
+            "/ship",
         ];
         for l in immediate {
             assert_eq!(policy(l), Immediate, "{l}");
@@ -306,6 +326,17 @@ mod tests {
         for l in refused {
             assert_eq!(policy(l), Refuse, "{l}");
         }
+    }
+
+    #[test]
+    fn ship_is_refused_while_a_turn_runs_with_its_own_note() {
+        let catalog = forge_skills::Catalog::default();
+        assert_eq!(route_busy_line("/ship", &catalog, false), BusyRoute::Refuse);
+        assert_eq!(route_busy_line("/ship", &catalog, true), BusyRoute::Refuse);
+        assert!(refuse_note("/ship")
+            .unwrap()
+            .contains("ship when the turn finishes"));
+        assert!(refuse_note("/quit").is_none());
     }
 
     #[test]

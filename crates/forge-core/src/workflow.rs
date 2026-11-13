@@ -855,6 +855,7 @@ mod tests {
         let config = forge_config::Config::default();
         let pricing = forge_mesh::pricing::Pricing::from_config(&config);
         AgentCtx {
+            outage_deadline: None,
             provider,
             router: Arc::new(FixedRouter {
                 model: model.to_string(),

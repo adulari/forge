@@ -62,8 +62,13 @@ mod auxiliary_candidates;
 mod auxiliary_policy;
 mod bridge_trace;
 mod btw_policy;
+pub mod expert;
+pub mod goal_contract;
 pub mod goal_evaluator;
 mod goal_evidence;
+pub mod goal_mission;
+mod goal_qa;
+pub mod goal_relay;
 mod shell_batch;
 mod silence_guard;
 mod workspace_policy;
@@ -78,6 +83,8 @@ pub mod codemode;
 mod commit_policy;
 mod compaction_budget;
 mod compaction_chain;
+mod compaction_checkpoint;
+mod compaction_episodes;
 mod compaction_headroom;
 mod compaction_input;
 mod compaction_policy;
@@ -121,6 +128,11 @@ mod hooks_model;
 pub mod hooks_session;
 mod hooks_subagent;
 mod hooks_turn;
+mod turn_record;
+pub use turn_record::{
+    describe_end, end_fails_run, end_label, expert_of_detail, is_resumable, shape_label, stop_note,
+    TurnEndView,
+};
 mod hooks_worktree;
 pub mod host_move;
 mod stop_guards;
@@ -161,6 +173,7 @@ pub mod project_context;
 pub mod push_notify;
 mod quality_gates;
 pub mod readiness;
+pub mod recall;
 mod recent_files;
 pub mod redact;
 mod refinement;
@@ -183,6 +196,8 @@ mod session_restore;
 mod session_rewind;
 pub use session_rewind::{RewindScope, SummarizeOutcome, SUMMARIZED_FROM_HERE};
 pub mod host_limits;
+pub mod outage_wait;
+mod scouts;
 pub mod session_slash_controls;
 mod session_usage_detail;
 mod session_virtual_tools;
@@ -223,13 +238,19 @@ pub mod workflow;
 pub mod workflow_meta;
 mod workspace_context;
 pub mod worktree;
+pub mod worktree_base;
 pub mod worktree_ops;
 pub mod worktree_reclaim;
 pub mod worktree_setup;
 pub mod zero_retention;
 
+pub use expert::{
+    consult_expert_spec, expert_config_problem, expert_tool_configured, BridgeExpert,
+    CONSULT_EXPERT_TOOL,
+};
 pub use llm_router::LlmRouter;
 pub use pinned_context::render_task_list;
+pub use recall::{recall_spec, RECALL_TOOL};
 use replay::messages_to_replay_items;
 pub use replay::stored_replay_items;
 pub use session_usage_detail::{row_notional_cost, SessionUsageDetail};
@@ -438,6 +459,10 @@ pub enum CoreError {
         reason: &'static str,
         last_error: String,
     },
+    /// A provider that stayed down for the whole `mesh.outage_wait_secs` allowance. The turn
+    /// ends with [`StopReason::ProviderDown`] rather than as an ordinary failure.
+    #[error("{message}")]
+    ProviderDown { model: String, message: String },
     /// The auto-review gate found findings at/above the configured severity and `gate_mode =
     /// "block"` is set — the turn is aborted so the model can fix them before proceeding.
     #[error("auto-review gate blocked: {0}")]
@@ -447,6 +472,16 @@ pub enum CoreError {
     /// aborting the whole process mid-turn.
     #[error("internal invariant violated: {0}")]
     Internal(String),
+}
+
+impl CoreError {
+    /// How a turn that ended in this error is recorded.
+    pub fn stop_reason(&self) -> StopReason {
+        match self {
+            Self::ProviderDown { .. } => StopReason::ProviderDown,
+            _ => StopReason::NoOutput,
+        }
+    }
 }
 
 /// Result of a [`Session::rewind_to`] / [`Session::undo`]: what the file-restore did, plus the
@@ -1585,6 +1620,8 @@ pub struct Session {
     checkpoint_root_custom: bool,
     /// The seq that began the current turn (its user message), keying this turn's snapshot dir.
     current_turn_seq: i64,
+    /// Id of the open `turn` row (0 = none); shared with the cancellation guard (turn_record.rs).
+    turn_row: Arc<std::sync::atomic::AtomicI64>,
     /// The discovered model catalog (auto-discovery mesh), kept so the TUI `/models` browser can
     /// classify + group what's available without re-running discovery. `None` for mock/offline.
     catalog: Option<ModelCatalog>,
@@ -1601,6 +1638,12 @@ pub struct Session {
     /// A plan proposed this turn via `present_plan` (planning mode), awaiting interactive approval
     /// at turn end. `Some` between the proposal and the approve/revise/cancel decision.
     pending_plan: Option<forge_types::PlanProposal>,
+    /// A `/goal --contract` waiting for its first turn to draft and get the contract approved.
+    pending_contract_goal: Option<String>,
+    /// The pending contract is a mission (`/goal --mission`): milestones, not one flat list.
+    pending_mission: bool,
+    /// What the contract flow decided, until the goal loop takes it.
+    contract_outcome: Option<crate::goal_contract::ContractOutcome>,
     /// Immutable authority for the active turn. Observational scopes cannot mutate state or spawn.
     task_scope: Option<TaskScope>,
     /// Connected external MCP servers (mcp-client.md). `None` when no servers are configured —
@@ -1771,6 +1814,8 @@ pub struct Session {
     /// Where the last compaction left the context, so auto-compaction waits for regrowth
     /// (compaction_budget.rs).
     compact_guard: compaction_budget::ThrashGuard,
+    /// Slices landed since the last checkpoint fold (`compaction_checkpoint.rs`).
+    checkpoint: compaction_checkpoint::CheckpointTracker,
     /// Pinned session context: recalled memories, goal, plan and the task list snapshot.
     pinned: pinned_context::PinnedState,
     /// Files this session read or edited most recently, newest first, for the restore after a
@@ -1842,6 +1887,8 @@ pub struct Session {
     turn_unfinished_tasks: Vec<String>,
     /// The advisor has reviewed this turn (one shot, spent even by an error; advisor.rs).
     advisor_reviewed: bool,
+    /// Expert-on-call consults, per turn and per session (expert.rs).
+    expert: expert::ExpertState,
     /// The latest turn was refused by a spend cap before any model call; a `/goal` driver reads
     /// it to stop instead of re-driving refused turns.
     turn_budget_refused: bool,
@@ -1867,6 +1914,10 @@ pub struct Session {
     /// One-shot latch for the deadline-reconciliation instruction; re-armed by
     /// [`Session::set_turn_deadline`].
     deadline_reconciled: bool,
+    /// The provider outage this turn is waiting out (`outage_wait.rs`). On the session, not in
+    /// the model loop's locals, so every pass of one turn shares a single horizon. Cleared when
+    /// the provider answers and at the start of each turn.
+    outage: Option<outage_wait::OutageEpisode>,
     /// Env-fight spend cap (quality guards wave 4): consecutive failed env-provisioning shell
     /// commands this turn + the once-per-turn nudge latch. Reset at each turn start.
     env_fight: EnvFightTracker,
@@ -2353,10 +2404,20 @@ impl Session {
     /// task's completion, not by which presenter event fired) — the gap was purely "no visible
     /// error signal", not "stuck busy forever".
     pub fn notify_error(&mut self, msg: &str) {
+        self.notify_failure(msg, StopReason::NoOutput);
+    }
+
+    /// [`Session::notify_error`] for a failed turn: ends it with the stop reason the error
+    /// carries, so a provider that stayed down is `ProviderDown` and not a turn that did nothing.
+    pub fn notify_turn_error(&mut self, msg: &str, error: &CoreError) {
+        self.notify_failure(msg, error.stop_reason());
+    }
+
+    fn notify_failure(&mut self, msg: &str, stop_reason: StopReason) {
         self.presenter.emit(PresenterEvent::Error(msg.to_string()));
         self.presenter.emit(PresenterEvent::Done {
             final_text: String::new(),
-            stop_reason: StopReason::NoOutput,
+            stop_reason,
         });
     }
 
@@ -2420,6 +2481,7 @@ impl Session {
             specs.push(spawn_spec);
             // Follow-ups to already-spawned children (persistent subagents). Advertised beside
             // spawn_agents — a fresh session simply has no children yet and the tool says so.
+            specs.extend(scouts::specs(&self.config.harness));
             specs.push(subagent::send_to_agent_spec());
             specs.push(workflow::run_workflow_spec());
             // Retained async subagents (RFC retained-async-subagents): status + cancellation for
@@ -2445,15 +2507,30 @@ impl Session {
                 .as_ref()
                 .is_none_or(|scope| scope.permits_tool(codemode::RUN_CODE_TOOL))
         {
-            specs.push(codemode::run_code_spec());
+            let mut spec = codemode::run_code_spec();
+            if !self.task_tool_on() {
+                spec.description = spec
+                    .description
+                    .replace(codemode::TASKS_IN_SCRIPT_SENTENCE, "");
+            }
+            specs.push(spec);
         }
         // The task-tracking tool — always advertised so the model can keep a live todo list.
-        if self
-            .task_scope
-            .as_ref()
-            .is_none_or(|scope| scope.permits_tool(UPDATE_TASKS_TOOL))
+        if self.task_tool_on()
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(UPDATE_TASKS_TOOL))
         {
             specs.push(update_tasks_spec());
+        }
+        if self.expert_tool_on()
+            && self
+                .task_scope
+                .as_ref()
+                .is_none_or(|scope| scope.permits_tool(CONSULT_EXPERT_TOOL))
+        {
+            specs.push(consult_expert_spec());
         }
         // The on-demand memory tool — model calls this to persist a durable fact at any
         // point during a turn, not just via end-of-turn auto-capture.
@@ -2463,6 +2540,15 @@ impl Session {
             .is_none_or(|scope| scope.permits_tool(REMEMBER_TOOL))
         {
             specs.push(remember_spec());
+        }
+        // The folded-history reader: only once a compaction has folded something away.
+        if self
+            .task_scope
+            .as_ref()
+            .is_none_or(|scope| scope.permits_tool(RECALL_TOOL))
+            && self.recall_on()
+        {
+            specs.push(recall_spec());
         }
         // Agent-created recurring re-entry prompts — distinct from the user's own `/heartbeat`.
         if self
@@ -2811,6 +2897,7 @@ impl Session {
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            self.open_turn_row(seq);
             // UI-only: the note ends the turn for the USER; a model resuming this session gains
             // nothing from stale budget chrome in its prompt.
             let seq = self.next_seq();
@@ -2830,6 +2917,7 @@ impl Session {
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            self.open_turn_row(seq);
             let seq = self.next_seq();
             self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
             self.transcript.push(Message::system(&msg).ui_only());
@@ -2856,146 +2944,170 @@ impl Session {
 
         // Route around any currently-benched models (failover): the snapshot excludes models
         // whose cooldown hasn't elapsed, even across restarts (docs/features/mesh-routing.md).
-        let readiness = self.provider_readiness();
-        let health = readiness.health;
-        // Quota-aware routing (L3): demote/skip a subscription that the bridge reported is near or
-        // over its plan limit (recorded after earlier turns from the CLI's rate-limit events).
-        let quota = readiness.quota;
-        // A per-turn `tier_override` (command/skill `tier:` hint) wins; otherwise the in-session
-        // tier pin (set by the `tier_up`/`tier_down` keybinds) biases routing.
-        let effective_tier = tier_override.or(self.pinned_tier);
-        // Whether THIS turn has image attachments queued (vision input) — route around a
-        // text-only model so an image doesn't land on a provider that 404s on it.
-        let has_images = self.transcript_carries_images();
-        // Routing happens before the current user message is appended, so the transcript is
-        // exactly the bounded prior-turn context needed to interpret "continue", "fix that", etc.
-        let routing_context = RoutingContext::from_messages(&self.transcript)
-            .with_session_affinity(
-                self.route_affinity.clone(),
-                self.estimated_reusable_prefix_tokens(),
-            )
-            .with_prior_tier(self.inheritable_prior_tier(effective_tier));
-        let decision = match self.pinned_model.as_deref() {
-            // `/model <id>`/`/model a,b` override: route restricted to the pinned set. The mesh
-            // still classifies (for tier stats) but the actual call + failover chain stay within
-            // the set — a single pin is strict (no cross-model fallback), a set ranks within
-            // itself and fails over only to other set members.
-            Some(pin) => {
-                self.router
-                    .route_with_pin_set(
-                        pin,
-                        prompt,
-                        has_images,
-                        budget,
-                        &health,
-                        &quota,
-                        self.pinned_effort,
-                        &self.project,
-                    )
-                    .await
-            }
-            None => {
-                self.router
-                    .route_contextual(
-                        prompt,
-                        has_images,
-                        budget,
-                        &health,
-                        &quota,
-                        effective_tier,
-                        self.pinned_effort,
-                        &self.project,
-                        &routing_context,
-                    )
-                    .await
-            }
-        };
-        // `[mesh] min_tier`: a turn classified below the floor is routed as the floor tier. An
-        // explicit tier hint or in-session tier pin is the user's own choice and is left alone; a
-        // pinned model keeps its model and only takes the floor's tier (and so its tool surface).
-        let decision = match self.config.mesh.min_tier {
-            Some(floor) if tier_rank(decision.tier) < tier_rank(floor) => {
-                if self.pinned_model.is_none() && effective_tier.is_none() {
-                    let mut floored = self
-                        .router
+        // Routed again after a wait when the only reason nothing is routable is that every
+        // candidate was benched moments ago by an outage (`wait_out_benches`).
+        self.outage = None;
+        let mut waiting_prompt_seq: Option<i64> = None;
+        let (decision, routing_context) = loop {
+            let readiness = self.provider_readiness();
+            let health = readiness.health;
+            // Quota-aware routing (L3): demote/skip a subscription that the bridge reported is near or
+            // over its plan limit (recorded after earlier turns from the CLI's rate-limit events).
+            let quota = readiness.quota;
+            // A per-turn `tier_override` (command/skill `tier:` hint) wins; otherwise the in-session
+            // tier pin (set by the `tier_up`/`tier_down` keybinds) biases routing.
+            let effective_tier = tier_override.or(self.pinned_tier);
+            // Whether THIS turn has image attachments queued (vision input) — route around a
+            // text-only model so an image doesn't land on a provider that 404s on it.
+            let has_images = self.transcript_carries_images();
+            // Routing happens before the current user message is appended, so the transcript is
+            // exactly the bounded prior-turn context needed to interpret "continue", "fix that", etc.
+            let routing_context = RoutingContext::from_messages(&self.transcript)
+                .with_session_affinity(
+                    self.route_affinity.clone(),
+                    self.estimated_reusable_prefix_tokens(),
+                )
+                .with_prior_tier(self.inheritable_prior_tier(effective_tier));
+            let decision = match self.pinned_model.as_deref() {
+                // `/model <id>`/`/model a,b` override: route restricted to the pinned set. The mesh
+                // still classifies (for tier stats) but the actual call + failover chain stay within
+                // the set — a single pin is strict (no cross-model fallback), a set ranks within
+                // itself and fails over only to other set members.
+                Some(pin) => {
+                    self.router
+                        .route_with_pin_set(
+                            pin,
+                            prompt,
+                            has_images,
+                            budget,
+                            &health,
+                            &quota,
+                            self.pinned_effort,
+                            &self.project,
+                        )
+                        .await
+                }
+                None => {
+                    self.router
                         .route_contextual(
                             prompt,
                             has_images,
                             budget,
                             &health,
                             &quota,
-                            Some(floor),
+                            effective_tier,
                             self.pinned_effort,
                             &self.project,
                             &routing_context,
                         )
-                        .await;
-                    floored.tier = floor;
-                    floored
-                } else {
-                    let mut floored = decision;
-                    floored.tier = floor;
-                    floored
+                        .await
                 }
+            };
+            // `[mesh] min_tier`: a turn classified below the floor is routed as the floor tier. An
+            // explicit tier hint or in-session tier pin is the user's own choice and is left alone; a
+            // pinned model keeps its model and only takes the floor's tier (and so its tool surface).
+            let decision = match self.config.mesh.min_tier {
+                Some(floor) if tier_rank(decision.tier) < tier_rank(floor) => {
+                    if self.pinned_model.is_none() && effective_tier.is_none() {
+                        let mut floored = self
+                            .router
+                            .route_contextual(
+                                prompt,
+                                has_images,
+                                budget,
+                                &health,
+                                &quota,
+                                Some(floor),
+                                self.pinned_effort,
+                                &self.project,
+                                &routing_context,
+                            )
+                            .await;
+                        floored.tier = floor;
+                        floored
+                    } else {
+                        let mut floored = decision;
+                        floored.tier = floor;
+                        floored
+                    }
+                }
+                _ => decision,
+            };
+            // BACKSTOP: a pin is a contract, and it was being honoured per-call-site rather than in one
+            // place — so any routing path that forgot it (the architect plan phase builds its failover
+            // chain from an unpinned Complex-tier route; last-resort filtered on keys but not the pin)
+            // could dispatch a model the user never asked for. Reported live twice: a session pinned to
+            // a local model answered from `gpt-5.6-luna`, and another died on an OpenRouter model it was
+            // never pinned to. Clamp the decision here, after every routing path has produced it, so
+            // escaping the pin is structurally impossible rather than a property each site must
+            // remember. Fallbacks are confined to the pin set for the same reason.
+            let (decision, left_pin_for_vision) = self
+                .vision_switch(
+                    decision,
+                    prompt,
+                    budget,
+                    &health,
+                    &quota,
+                    effective_tier,
+                    &routing_context,
+                )
+                .await;
+            let mut decision = decision;
+            if let Some(pin) = self.effective_pin().filter(|_| !left_pin_for_vision) {
+                if !pin.iter().any(|m| m == &decision.model) {
+                    let forced = pin[0].clone();
+                    self.presenter.emit(PresenterEvent::Warning(format!(
+                        "routing tried {} while pinned to {forced} — honouring the pin",
+                        decision.model
+                    )));
+                    decision.model = forced;
+                    decision.pinned = true;
+                }
+                decision.fallbacks.retain(|m| pin.iter().any(|p| p == m));
             }
-            _ => decision,
+            self.apply_fallback_models(&mut decision);
+            // Same reasoning as the pin backstop above, for the same reason: `decision.effort` is read
+            // at six call sites, so honouring an exact rung at each one is a bug waiting to happen.
+            // Clamp it once, here, after every routing path has produced a decision.
+            //
+            // Resolved against the ROUTED model's provider ladder — the pin may have just changed which
+            // model this is — so an exact rung can never name something the provider does not offer.
+            // An invoked skill's `effort:` outranks the session rung for its one turn.
+            if let Some(exact) = self.turn_effort().or(self.exact_effort) {
+                decision.effort =
+                    forge_types::effort::resolve_id(&decision.model, Some(exact)).sent;
+            }
+            // After every pin backstop: a session pin the router never saw must not reach a retaining
+            // provider either.
+            forge_mesh::privacy::enforce_on_decision(&self.config, &mut decision);
+            let decision = decision;
+            if decision.unroutable
+                && self
+                    .wait_out_benches(
+                        &decision.model,
+                        (!resume_absorbed).then_some(prompt),
+                        &mut waiting_prompt_seq,
+                    )
+                    .await
+            {
+                continue;
+            }
+            break (decision, routing_context);
         };
-        // BACKSTOP: a pin is a contract, and it was being honoured per-call-site rather than in one
-        // place — so any routing path that forgot it (the architect plan phase builds its failover
-        // chain from an unpinned Complex-tier route; last-resort filtered on keys but not the pin)
-        // could dispatch a model the user never asked for. Reported live twice: a session pinned to
-        // a local model answered from `gpt-5.6-luna`, and another died on an OpenRouter model it was
-        // never pinned to. Clamp the decision here, after every routing path has produced it, so
-        // escaping the pin is structurally impossible rather than a property each site must
-        // remember. Fallbacks are confined to the pin set for the same reason.
-        let (decision, left_pin_for_vision) = self
-            .vision_switch(
-                decision,
-                prompt,
-                budget,
-                &health,
-                &quota,
-                effective_tier,
-                &routing_context,
-            )
-            .await;
-        let mut decision = decision;
-        if let Some(pin) = self.effective_pin().filter(|_| !left_pin_for_vision) {
-            if !pin.iter().any(|m| m == &decision.model) {
-                let forced = pin[0].clone();
-                self.presenter.emit(PresenterEvent::Warning(format!(
-                    "routing tried {} while pinned to {forced} — honouring the pin",
-                    decision.model
-                )));
-                decision.model = forced;
-                decision.pinned = true;
-            }
-            decision.fallbacks.retain(|m| pin.iter().any(|p| p == m));
-        }
-        self.apply_fallback_models(&mut decision);
-        // Same reasoning as the pin backstop above, for the same reason: `decision.effort` is read
-        // at six call sites, so honouring an exact rung at each one is a bug waiting to happen.
-        // Clamp it once, here, after every routing path has produced a decision.
-        //
-        // Resolved against the ROUTED model's provider ladder — the pin may have just changed which
-        // model this is — so an exact rung can never name something the provider does not offer.
-        // An invoked skill's `effort:` outranks the session rung for its one turn.
-        if let Some(exact) = self.turn_effort().or(self.exact_effort) {
-            decision.effort = forge_types::effort::resolve_id(&decision.model, Some(exact)).sent;
-        }
-        // After every pin backstop: a session pin the router never saw must not reach a retaining
-        // provider either.
-        forge_mesh::privacy::enforce_on_decision(&self.config, &mut decision);
-        let decision = decision;
         if decision.unroutable {
+            // Gave up waiting for the benches, or never waited: the episode ends with the turn.
+            self.outage = None;
             let has_credentials = forge_config::known_key_providers()
                 .any(forge_config::has_api_key)
                 || forge_provider::CliKind::all().iter().any(|k| k.available());
             let msg = unroutable_message(&decision.rationale, has_credentials);
             self.presenter.emit(PresenterEvent::Error(msg.clone()));
-            let seq = self.next_seq();
-            self.store
-                .add_message(&self.id, seq, Role::User, prompt, None)?;
+            if waiting_prompt_seq.is_none() {
+                let seq = self.next_seq();
+                self.store
+                    .add_message(&self.id, seq, Role::User, prompt, None)?;
+                self.open_turn_row(seq);
+            }
             self.transcript.push(Message::user(prompt));
             let seq = self.next_seq();
             self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
@@ -3030,6 +3142,7 @@ impl Session {
             self.store
                 .add_message(&self.id, seq, Role::User, prompt, None)?;
             self.transcript.push(Message::user(prompt));
+            self.open_turn_row(seq);
             // UI-only, same reasoning as the budget-stop note above.
             let seq = self.next_seq();
             self.store.add_ui_note(&self.id, seq, Role::System, &msg)?;
@@ -3156,6 +3269,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         self.spend.begin_turn();
         self.turn_unfinished_tasks.clear();
         self.advisor_reviewed = false;
+        self.expert.begin_turn();
+        self.note_expert_problem();
         self.env_fight = EnvFightTracker::default();
 
         // 2. Persist + record the user message. Its seq keys this turn's code-snapshot dir
@@ -3223,8 +3338,13 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
                 }
             }
         }
-        let mut seq = self.next_seq();
-        if !resume_absorbed {
+        // A prompt that waited out benches at turn start was saved, with its turn row, before the
+        // wait (`wait_out_benches`).
+        let mut seq = match waiting_prompt_seq {
+            Some(saved) => saved,
+            None => self.next_seq(),
+        };
+        if !resume_absorbed && waiting_prompt_seq.is_none() {
             // The row can land past `seq` (a side-call usage anchor took it, or another writer
             // raced us). Rewind checkpoints and snapshot dirs are keyed by the row's REAL seq.
             let (_, landed) =
@@ -3236,6 +3356,9 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
             seq = landed;
         }
         self.current_turn_seq = seq;
+        if waiting_prompt_seq.is_none() {
+            self.open_turn_row(seq);
+        }
         let turn_start_head = git_head(Some(self.workspace.root()));
         self.turn_start_baseline = if self.config.mesh.verify_completeness
             && forge_provider::is_cli_bridge(&routed_model)
@@ -3309,6 +3432,8 @@ hook — do NOT add Claude/Codex/Anthropic co-author lines yourself.\n\
         // prefix on every request (clock.rs explains the trade-off).
         self.inject_turn_clock(&mut context_pack)?;
         self.inject_git_branch_if_changed(&mut context_pack)?;
+        self.pre_scout(&mut context_pack, prompt, seq, &routed_model)
+            .await?;
 
         // Commit discipline (git_hygiene.rs): while files this session edited are still
         // uncommitted, say so once per turn; when the branch is well ahead of its upstream, ask
@@ -4486,6 +4611,18 @@ pub fn use_skill_spec(catalog: &forge_skills::Catalog, allow_project: bool) -> T
 /// The task-tracking virtual tool name.
 pub const UPDATE_TASKS_TOOL: &str = "update_tasks";
 
+/// `FORGE_SYSTEM` without its task-list bullet, for `[harness] task_tool = false`.
+pub(crate) fn strip_task_bullet(system: &str) -> String {
+    const START: &str = "- For any non-trivial task, make a short plan";
+    const NEXT: &str = "\n- Make the smallest change";
+    match (system.find(START), system.find(NEXT)) {
+        (Some(start), Some(next)) if start < next => {
+            format!("{}{}", &system[..start], &system[next + 1..])
+        }
+        _ => system.to_string(),
+    }
+}
+
 /// Parse the `update_tasks` arguments into a task list (tolerant of missing/loose fields).
 /// Shared by the in-process intercept and the CLI-bridge `mcp-serve` handler.
 pub fn parse_tasks(args: &serde_json::Value) -> Vec<forge_types::TodoItem> {
@@ -5044,6 +5181,12 @@ mod tests {
     #[path = "compaction_summary.rs"]
     mod compaction_summary_tests;
 
+    #[path = "recall.rs"]
+    mod recall_tests;
+
+    #[path = "checkpoint.rs"]
+    mod checkpoint_tests;
+
     #[path = "transcript_mark.rs"]
     mod transcript_mark_tests;
 
@@ -5074,6 +5217,8 @@ mod tests {
     mod mcp_elicitation_tests;
     #[path = "placeholder_args.rs"]
     mod placeholder_args_tests;
+    #[path = "scouts.rs"]
+    mod scouts_tests;
     #[path = "subagent_schema.rs"]
     mod subagent_schema_tests;
 
@@ -5094,6 +5239,11 @@ mod tests {
 
     #[path = "no_op_turn.rs"]
     mod no_op_turn_tests;
+
+    #[path = "outage_drill.rs"]
+    mod outage_drill_tests;
+    #[path = "turn_end_reason.rs"]
+    mod turn_end_reason_tests;
 
     #[path = "bridge_stall.rs"]
     mod bridge_stall_tests;
@@ -5131,6 +5281,9 @@ mod tests {
     #[path = "prompt_answers.rs"]
     mod prompt_answers_tests;
 
+    #[path = "approvals_learn.rs"]
+    mod approvals_learn_tests;
+
     #[path = "tool_marks.rs"]
     mod tool_marks_tests;
 
@@ -5154,6 +5307,9 @@ mod tests {
 
     #[path = "shell_batching.rs"]
     mod shell_batching_tests;
+
+    #[path = "shell_live_tail.rs"]
+    mod shell_live_tail_tests;
 
     #[path = "live_cost.rs"]
     mod live_cost_tests;
@@ -5209,6 +5365,9 @@ mod tests {
     #[path = "harness_profile.rs"]
     mod harness_profile_tests;
 
+    #[path = "stop_integrity.rs"]
+    mod stop_integrity_tests;
+
     #[path = "droid_loop.rs"]
     mod droid_loop_tests;
     #[path = "hashline_edit.rs"]
@@ -5217,8 +5376,20 @@ mod tests {
     #[path = "goal_evaluator.rs"]
     mod goal_evaluator_tests;
 
+    #[path = "goal_contract.rs"]
+    mod goal_contract_tests;
+
+    #[path = "goal_qa.rs"]
+    mod goal_qa_tests;
+
+    #[path = "goal_relay.rs"]
+    mod goal_relay_session_tests;
+
     #[path = "advisor.rs"]
     mod advisor_tests;
+
+    #[path = "expert.rs"]
+    mod expert_tests;
 
     #[test]
     fn inheritable_prior_tier_reads_latest_active_routing_decision() {
@@ -6026,10 +6197,15 @@ mod tests {
         attended: bool,
         /// What `ask` returns; empty falls back to the first option (the old deterministic default).
         ask_answer: String,
+        /// Every stored end reason the session handed to the surface.
+        end_reasons: Arc<Mutex<Vec<String>>>,
     }
     impl Presenter for CapturePresenter {
         fn emit(&mut self, event: PresenterEvent) {
             self.events.lock().unwrap().push(event);
+        }
+        fn turn_end_reason(&mut self, reason: &str) {
+            self.end_reasons.lock().unwrap().push(reason.to_string());
         }
         fn confirm(
             &mut self,
@@ -12064,7 +12240,7 @@ mod tests {
                         id: new_id(),
                         name: "spawn_agents".into(),
                         args: serde_json::json!({
-                            "agents": [ { "agent": "scout", "task": "scan the auth module" } ]
+                            "agents": [ { "agent": "surveyor", "task": "scan the auth module" } ]
                         }),
                     }],
                 ),
@@ -12074,7 +12250,7 @@ mod tests {
                         id: new_id(),
                         name: "send_to_agent".into(),
                         args: serde_json::json!({
-                            "agent": "scout",
+                            "agent": "surveyor",
                             "message": "dig deeper on that finding"
                         }),
                     }],
@@ -12123,7 +12299,7 @@ mod tests {
         assert_eq!(children.len(), 1, "follow-up must not create a new child");
         let (child_id, title) = &children[0];
         // Named at spawn — the send_to_agent address book works by this title.
-        assert_eq!(title.as_deref(), Some("scout"));
+        assert_eq!(title.as_deref(), Some("surveyor"));
 
         // The child transcript holds BOTH exchanges: task + first answer, follow-up + deeper
         // answer (the provider itself asserts the follow-up turn saw the first finding).
@@ -12153,7 +12329,7 @@ mod tests {
         let child_id = store
             .create_child_session(".", "default", &parent_id)
             .unwrap();
-        store.set_session_title(&child_id, "scout").unwrap();
+        store.set_session_title(&child_id, "surveyor").unwrap();
         store
             .add_message(&child_id, 0, Role::User, "scan the auth module", None)
             .unwrap();
@@ -13596,6 +13772,55 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("isn't available"), "{text}");
+    }
+
+    fn connection_refused(_m: &str) -> forge_provider::ProviderError {
+        forge_provider::ProviderError::Unavailable(
+            "could not connect: error sending request for url \
+             (http://127.0.0.1:1/v1/chat/completions): tcp connect error: Connection refused \
+             (os error 111)"
+                .into(),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_refused_connection_is_backed_off_not_called_a_rejection() {
+        // An unreachable provider answers instantly with the same text every time, which is the
+        // shape of a rejection. It failed the turn after one 5s backoff as "its provider rejected
+        // it twice" and told the user to pick another model; nothing had answered at all.
+        let provider = Arc::new(EchoProvider {
+            bad: ["pin::model".to_string()].into_iter().collect(),
+            err: connection_refused,
+        });
+        let router = Arc::new(PinnedRouter {
+            model: "pin::model".into(),
+            fallbacks: vec![],
+        });
+        let (_store, mut session) = fixed_session(provider, router);
+        session.config.mesh.pin_outage_wait_secs = 120;
+        let capture = CapturePresenter {
+            attended: true,
+            ..CapturePresenter::default()
+        };
+        let events = capture.events.clone();
+        session.presenter = Box::new(capture);
+        let started = tokio::time::Instant::now();
+        let err = session
+            .run_turn("fix the bug")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("rejected"), "{err}");
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(60),
+            "the pinned budget is spent before the turn gives up, took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            events.lock().unwrap().iter().any(|e| matches!(e,
+                PresenterEvent::Warning(w) if w.contains("provider unreachable (could not connect"))),
+            "the wait is announced as an unreachable provider"
+        );
     }
 
     #[tokio::test]
@@ -16407,6 +16632,9 @@ mod tests {
         // server `retry_after`; the wait path has its own test that re-enables it with a tiny reset.
         let mut config = Config::default();
         config.mesh.rate_limit_wait_secs = 0;
+        // The hours-long outage wait is opt-in per test: leaving it on would turn every test that
+        // exhausts a pinned budget into an eight hour sleep.
+        config.mesh.outage_wait_secs = 0;
         Session::start(
             store,
             provider,

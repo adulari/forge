@@ -4,6 +4,8 @@
 
 use super::*;
 
+mod steering;
+
 impl Session {
     pub fn id(&self) -> &str {
         &self.id
@@ -760,40 +762,8 @@ impl Session {
     }
 }
 
-impl Session {
-    /// A handle a surface keeps to queue prompts INTO a running turn (docs/features/queue-autopilot.md).
-    pub fn steer_handle(&self) -> crate::steer::SteerInbox {
-        self.steer.clone()
-    }
-
-    /// Hand every queued steer prompt to the model as a persisted user message and tell the
-    /// surface. Returns whether anything was injected — the loop then continues instead of
-    /// treating the last response as the end of the turn.
-    ///
-    /// `answered` is the text the model just finished streaming when the injection replaces the
-    /// end of the turn. That reply is stored provider-only until a turn accepts it as terminal, and
-    /// this turn will not end on it, so it is published first: otherwise history, resume and the
-    /// phone show the steer straight after the user's prompt with the reply the user watched
-    /// stream missing, and the steer's own answer reading as the reply to the wrong message.
-    pub(crate) fn inject_steers(&mut self, answered: &str) -> bool {
-        let mut texts = self.steer.drain();
-        texts.extend(self.job_wake.drain());
-        if texts.is_empty() {
-            return false;
-        }
-        self.ledger.note_steer();
-        if let Err(error) = self.publish_terminal_answer(answered) {
-            tracing::warn!(%error, "could not publish the reply a steer interrupted");
-        }
-        self.adaptive_effort.restore();
-        for text in texts {
-            let seq = self.next_seq();
-            let _ = self
-                .store
-                .add_message(&self.id, seq, Role::User, &text, None);
-            self.transcript.push(Message::user(&text));
-            self.presenter.emit(PresenterEvent::Steered(text));
-        }
-        true
-    }
-}
+/// UI-only note stored after a prompt that joined a running turn. Owned by the store, whose tail
+/// classifier must read it as mid-turn.
+pub(crate) const STEER_NOTE: &str = forge_store::STEER_NOTE;
+/// The same for a finished background job's wake message.
+pub(crate) const JOB_WAKE_NOTE: &str = forge_store::JOB_WAKE_NOTE;

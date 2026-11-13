@@ -100,6 +100,8 @@ struct Args {
     base: Option<String>,
     draft: bool,
     allow_untracked: bool,
+    /// Set by a caller that decided what was committed (Ship); never from tool arguments.
+    allow_dirty: bool,
     publish_images: bool,
 }
 
@@ -124,6 +126,7 @@ impl Args {
             base: text("base"),
             draft: flag("draft", false),
             allow_untracked: flag("allow_untracked", false),
+            allow_dirty: false,
             publish_images: flag("publish_images", true),
         })
     }
@@ -196,6 +199,27 @@ pub async fn create_pr_in(workspace: &Path, args: &Value) -> Result<String, Stri
     open_pr(&ctx, workspace, &args).await
 }
 
+/// [`create_pr_in`] for a session-owned PR: the body carries the session's provenance section and
+/// evidence, exactly as the model-facing tool writes them. `gh` is injectable so a caller (or a
+/// test) can point at a specific binary.
+pub async fn create_pr_for_session(
+    workspace: &Path,
+    args: &Value,
+    session: &str,
+    gh: &Path,
+) -> Result<String, String> {
+    let mut args = Args::parse(args).map_err(|e| e.to_string())?;
+    args.allow_dirty = true;
+    let ctx = Ctx {
+        git: PathBuf::from("git"),
+        gh: gh.to_path_buf(),
+        settings: settings(),
+        session: Some(session.to_string()),
+        ledger: Ledger::new(workspace, session),
+    };
+    open_pr(&ctx, workspace, &args).await
+}
+
 struct Ctx {
     git: PathBuf,
     gh: PathBuf,
@@ -211,7 +235,7 @@ async fn open_pr(ctx: &Ctx, workspace: &Path, args: &Args) -> Result<String, Str
             .await
             .map_err(|e| format!("not inside a git repository: {e}"))?,
     );
-    check_clean(git, &top, args.allow_untracked).await?;
+    check_clean(git, &top, args.allow_untracked, args.allow_dirty).await?;
     let branch = run(git, &["symbolic-ref", "--short", "-q", "HEAD"], &top, &[])
         .await
         .map_err(|_| "HEAD is detached; check out a feature branch first".to_string())?;
@@ -393,10 +417,15 @@ async fn open_pr(ctx: &Ctx, workspace: &Path, args: &Args) -> Result<String, Str
     Ok(text)
 }
 
-async fn check_clean(git: &Path, top: &Path, allow_untracked: bool) -> Result<(), String> {
+async fn check_clean(
+    git: &Path,
+    top: &Path,
+    allow_untracked: bool,
+    allow_dirty: bool,
+) -> Result<(), String> {
     let status = run(git, &["status", "--porcelain=v1", "-z"], top, &[]).await?;
     let Dirty { tracked, untracked } = dirty_paths(&status);
-    if !tracked.is_empty() {
+    if !tracked.is_empty() && !allow_dirty {
         return Err(format!(
             "uncommitted changes in {}; commit them (stage specific paths) or stash them first",
             list(&tracked)

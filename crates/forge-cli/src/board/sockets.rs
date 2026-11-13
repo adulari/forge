@@ -66,7 +66,7 @@ pub(crate) async fn fleet_watcher(
     };
     let mut attempt = 0usize;
     loop {
-        match tokio_tungstenite::connect_async(&url).await {
+        match crate::attach::ws_connect(&url).await {
             Ok((mut socket, _)) => {
                 attempt = 0;
                 set_conn(&ev, &mut state, ConnState::Live);
@@ -113,6 +113,9 @@ pub(crate) struct SocketPool {
 struct Socket {
     input: mpsc::UnboundedSender<String>,
     task: tokio::task::JoinHandle<()>,
+    /// Whether the session's socket is open right now. Input sent while it is reconnecting would
+    /// sit in the channel and arrive minutes later, after the moment it answered had passed.
+    connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SocketPool {
@@ -142,33 +145,55 @@ impl SocketPool {
                 continue;
             }
             let (input, rx) = mpsc::unbounded_channel();
+            let connected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let task = tokio::spawn(session_socket(
                 self.base.clone(),
                 self.token.clone(),
                 id.clone(),
                 self.ev.clone(),
                 rx,
+                connected.clone(),
             ));
-            self.open.insert(id.clone(), Socket { input, task });
+            self.open.insert(
+                id.clone(),
+                Socket {
+                    input,
+                    task,
+                    connected,
+                },
+            );
         }
     }
 
-    pub(crate) fn open_ids(&self) -> Vec<String> {
-        self.open.keys().cloned().collect()
+    /// Ids whose socket has finished its handshake and can take a frame right now.
+    pub(crate) fn connected_ids(&self) -> Vec<String> {
+        self.open
+            .iter()
+            .filter(|(_, socket)| socket.connected.load(std::sync::atomic::Ordering::Acquire))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// Send one `RemoteInput` frame. A card whose socket is gone must SAY so — silently dropping a
     /// permission answer would look like the daemon ignored the user.
     pub(crate) fn send(&self, id: &str, json: &serde_json::Value) {
-        let sent = self
-            .open
-            .get(id)
-            .is_some_and(|socket| socket.input.send(json.to_string()).is_ok());
+        let socket = self.open.get(id);
+        let connected = socket
+            .is_some_and(|socket| socket.connected.load(std::sync::atomic::Ordering::Acquire));
+        let sent =
+            connected && socket.is_some_and(|socket| socket.input.send(json.to_string()).is_ok());
         if !sent {
-            let _ = self.ev.send(Ev::Board(BoardEvent::Toast(
-                ToastLevel::Error,
-                format!("no live connection to {}", short_id(id)),
-            )));
+            let text = if socket.is_some() {
+                format!(
+                    "{}: reconnecting; nothing was sent, try again in a moment",
+                    short_id(id)
+                )
+            } else {
+                format!("no live connection to {}", short_id(id))
+            };
+            let _ = self
+                .ev
+                .send(Ev::Board(BoardEvent::Toast(ToastLevel::Error, text)));
         }
     }
 
@@ -187,7 +212,9 @@ async fn session_socket(
     id: String,
     ev: mpsc::UnboundedSender<Ev>,
     mut input: mpsc::UnboundedReceiver<String>,
+    connected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
+    use std::sync::atomic::Ordering;
     let mut revision: u64 = 0;
     let mut failures: u32 = 0;
     loop {
@@ -195,8 +222,9 @@ async fn session_socket(
             Ok(url) => url,
             Err(_) => break,
         };
-        if let Ok((socket, _)) = tokio_tungstenite::connect_async(&url).await {
+        if let Ok((socket, _)) = crate::attach::ws_connect(&url).await {
             let (mut tx, mut rx) = socket.split();
+            connected.store(true, Ordering::Release);
             loop {
                 tokio::select! {
                     message = rx.next() => match message {
@@ -220,6 +248,10 @@ async fn session_socket(
                         None => return,
                         Some(line) => {
                             if tx.send(Message::Text(line.into())).await.is_err() {
+                                let _ = ev.send(Ev::Board(BoardEvent::Toast(
+                                    ToastLevel::Error,
+                                    format!("{}: the connection dropped before that was sent; try again", short_id(&id)),
+                                )));
                                 break;
                             }
                         }
@@ -227,6 +259,9 @@ async fn session_socket(
                 }
             }
         }
+        connected.store(false, Ordering::Release);
+        // Anything queued while the socket was failing belongs to a moment that has passed.
+        while input.try_recv().is_ok() {}
         failures += 1;
         if failures > SESSION_RETRIES {
             let _ = ev.send(Ev::Board(BoardEvent::SessionClosed(id)));
@@ -288,6 +323,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_socket_still_connecting_is_not_offered_a_first_prompt() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        // Port 1 on loopback refuses, so this socket stays registered but never connects.
+        let mut pool = SocketPool::new("http://127.0.0.1:1".into(), "tok".into(), tx);
+        pool.sync(&["new-1".to_string()]);
+        assert!(pool.connected_ids().is_empty());
+        let mut pending =
+            std::collections::HashMap::from([("new-1".to_string(), "hi".to_string())]);
+        assert!(
+            crate::board::pending_prompt_frames(&mut pending, &pool.connected_ids()).is_empty()
+        );
+        assert!(
+            pending.contains_key("new-1"),
+            "the prompt waits for the socket"
+        );
+        pool.shutdown();
+    }
+
+    #[tokio::test]
     async fn an_input_for_a_session_with_no_socket_says_so_instead_of_vanishing() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let pool = SocketPool::new("http://h:1".into(), "tok".into(), tx);
@@ -302,5 +356,24 @@ mod tests {
             }
             _ => panic!("a dropped input must be reported"),
         }
+    }
+
+    #[tokio::test]
+    async fn input_while_the_socket_is_down_is_refused_not_queued() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut pool = SocketPool::new("http://127.0.0.1:1".into(), "tok".into(), tx);
+        pool.sync(&["0123456789abcdef".to_string()]);
+        pool.send(
+            "0123456789abcdef",
+            &serde_json::json!({ "kind": "prompt", "text": "hi" }),
+        );
+        let refused = std::iter::from_fn(|| rx.try_recv().ok()).any(|ev| {
+            matches!(ev, Ev::Board(BoardEvent::Toast(ToastLevel::Error, text)) if text.contains("reconnecting"))
+        });
+        assert!(
+            refused,
+            "a prompt sent while disconnected must be refused with a reason"
+        );
+        pool.shutdown();
     }
 }

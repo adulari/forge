@@ -21,6 +21,10 @@ export function fileFromRoute(file: RouteFile, worktree: boolean): IdeChangedFil
     // The daemon hashes the file's current content: any edit, including one that keeps the +/-
     // totals, changes it.
     hash: file.content_hash,
+    risk: file.risk,
+    riskReason: file.risk_reason,
+    lookHunks: file.look_hunks,
+    routineHunks: file.routine_hunks,
   };
 }
 

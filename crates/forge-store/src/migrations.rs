@@ -20,6 +20,14 @@ mod m0047_session_lifecycle;
 mod m0048_schedule_runs;
 mod m0049_account_sync_item;
 mod m0050_project_notes;
+mod m0051_message_activity_index;
+mod m0052_permission_decision;
+mod m0053_goal_state;
+mod m0054_provider_verdict;
+mod m0055_report_indexes;
+mod m0056_turn;
+mod m0057_recall_index;
+mod m0058_relay;
 pub(super) use apply::run_migrations;
 #[cfg(test)]
 pub(super) use apply::{ANYWHERE_PRERELEASE_MAX_VERSION, ANYWHERE_PRERELEASE_MIN_VERSION};
@@ -40,6 +48,14 @@ use m0047_session_lifecycle::migration_0047;
 use m0048_schedule_runs::migration_0048;
 use m0049_account_sync_item::migration_0049;
 use m0050_project_notes::migration_0050;
+use m0051_message_activity_index::migration_0051;
+use m0052_permission_decision::migration_0052;
+use m0053_goal_state::migration_0053;
+use m0054_provider_verdict::migration_0054;
+use m0055_report_indexes::migration_0055;
+use m0056_turn::migration_0056;
+use m0057_recall_index::migration_0057;
+use m0058_relay::migration_0058;
 mod usage;
 pub(super) use usage::migrate_subscription_usage;
 use usage::migration_0030;
@@ -697,6 +713,14 @@ pub(super) const MIGRATIONS: &[fn(&Connection) -> rusqlite::Result<()>] = &[
     migration_0048,
     migration_0049,
     migration_0050,
+    migration_0051,
+    migration_0052,
+    migration_0053,
+    migration_0054,
+    migration_0055,
+    migration_0056,
+    migration_0057,
+    migration_0058,
 ];
 
 /// Migration #31: give existing stores the `model_pricing.cache_read_per_1k` column.

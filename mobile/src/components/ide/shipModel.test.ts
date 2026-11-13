@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { shipHint, shipLabel, shipSteps } from "./shipModel";
+import { failedChecksWarning, postShipAction, shipHint, shipLabel, shipSteps } from "./shipModel";
 
 describe("shipSteps", () => {
   it("does nothing on a clean tree", () => {
@@ -26,5 +26,20 @@ describe("copy", () => {
   it("labels by whether it pushes", () => {
     expect(shipLabel(["commit", "push"])).toBe("Ship it");
     expect(shipLabel(["commit"])).toBe("Commit");
+  });
+});
+
+describe("post-ship action", () => {
+  it("offers nothing unless pushed", () => {
+    expect(postShipAction(false, null)).toEqual({ kind: "none" });
+  });
+  it("offers a new PR or the existing one", () => {
+    expect(postShipAction(true, null)).toEqual({ kind: "open-pr" });
+    expect(postShipAction(true, { number: 7 })).toEqual({ kind: "view-pr", number: 7 });
+  });
+  it("warns about failed checks", () => {
+    expect(failedChecksWarning([])).toBeNull();
+    expect(failedChecksWarning(["test"])).toBe("Last check failed: test.");
+    expect(failedChecksWarning(["a", "b", "c"])).toBe("Last check failed: a, b +1.");
   });
 });

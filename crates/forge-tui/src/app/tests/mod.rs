@@ -27,6 +27,7 @@ mod session_delete;
 mod state;
 mod transcript;
 mod trust_hint;
+mod turn_stopped;
 mod update_band;
 mod welcome_narrow;
 

@@ -22,6 +22,8 @@ import { Screen } from "../components/ds/Screen";
 import { Sheet } from "../components/ds/Sheet";
 import { StatusDot } from "../components/ds/StatusDot";
 import { useToast } from "../components/ds/ToastHost";
+import { useWorkbench } from "../components/workbench/WorkbenchProvider";
+import { mergeStagedMessage } from "../lib/mergeNextStep";
 import { DiffCard } from "../components/review/DiffCard";
 import { ForkSheet } from "../components/session/ForkSheet";
 import { ApiError, type SessionDiffResponse, type SessionRow, type SessionTreeRow } from "../lib/api";
@@ -126,6 +128,7 @@ export default function SessionTreeScreen() {
 function SessionTreeScreenBody() {
   const tokens = useTokens();
   const toast = useToast();
+  const workbench = useWorkbench();
   const { baseUrl } = useAuth();
   const query = useSessionTree();
   const pull = usePullRefresh(query.refetch);
@@ -144,12 +147,23 @@ function SessionTreeScreenBody() {
     (id: string) => {
       setMergingId(id);
       merge.mutate(id, {
-        onSuccess: (res) => toast.show(`merged branch ${res.branch}`, { tone: "success" }),
+        onSuccess: (res) =>
+          toast.show(mergeStagedMessage(res.base, res.branch), {
+            tone: "success",
+            duration: 10_000,
+            action: {
+              label: "Review",
+              onPress: () => {
+                router.push(`/session/${id}`);
+                workbench.openSurface({ kind: "git" });
+              },
+            },
+          }),
         onError: (err) => toast.show(err instanceof ApiError ? err.message : "merge failed", { tone: "danger" }),
         onSettled: () => setMergingId((current) => (current === id ? null : current)),
       });
     },
-    [merge, toast],
+    [merge, toast, workbench],
   );
   const confirmMerge = useCallback(() => {
     if (mergeTarget) runMerge(mergeTarget);
