@@ -105,10 +105,12 @@ jobs:
             --ignore RUSTSEC-2026-0370 \
             --ignore RUSTSEC-2026-0371 \
             --ignore RUSTSEC-2026-0372 \
-            --ignore RUSTSEC-2026-0441
+            --ignore RUSTSEC-2026-0441 \
+            --ignore RUSTSEC-2026-0543
           cargo audit --file vendor/genai-0.6.5/Cargo.lock --deny warnings \
             --ignore RUSTSEC-2024-0436 \
-            --ignore RUSTSEC-2026-0441
+            --ignore RUSTSEC-2026-0441 \
+            --ignore RUSTSEC-2026-0543
 
   deny:
     name: cargo deny (licenses + bans + advisories)

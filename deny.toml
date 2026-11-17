@@ -35,6 +35,10 @@ ignore = [
   # aws-smithy-runtime / aws-smithy-types via the vendored genai's Bedrock client. No CVE; no safe
   # upgrade. Added 2026-11-05; drop when the AWS SDK moves to core::pin::pin! / pin-project-lite.
   "RUSTSEC-2026-0441",
+  # `chrono` is unmaintained (announced 2026-11; chronotope/chrono#1768). No CVE. Used directly by
+  # five workspace crates, so replacing it (jiff or time) is its own change. Added 2026-11-17; drop
+  # when the workspace moves off chrono.
+  "RUSTSEC-2026-0543",
 ]
 
 [licenses]
