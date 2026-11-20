@@ -3474,6 +3474,7 @@ pub(crate) async fn run_chat_tui(
                             break;
                         }
                     }
+                    ui_events::record_user_interrupt(&session, &app.session_id);
                     turn_gen += 1; // discard the aborted turn's (now stale) done-signal
                     while rx.try_recv().is_ok() {} // nothing more is coming; drop any leftover
                     busy = false;
@@ -4794,6 +4795,7 @@ pub(crate) async fn run_chat_tui(
                             if let Some(h) = turn_handle.take() {
                                 h.abort();
                             }
+                            ui_events::record_user_interrupt(&session, &app.session_id);
                             turn_gen += 1;
                             while rx.try_recv().is_ok() {}
                             busy = false;

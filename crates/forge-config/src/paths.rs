@@ -17,6 +17,55 @@ pub fn data_dir() -> Option<PathBuf> {
     directories::ProjectDirs::from("dev", "forge", "forge").map(|d| d.data_dir().to_path_buf())
 }
 
+/// Where the daemon keeps a JSON state file (`pr-watch.json`, `drains.json`). Follows the store
+/// like the workspace state and install notices do: `<FORGE_DB>.daemon/<name>` when a scratch or
+/// operator-selected store is in use, so an isolated run never reads or writes the owner's real
+/// files; otherwise `<data dir>/<name>`.
+pub fn daemon_state_file(name: &str) -> Option<PathBuf> {
+    daemon_state_file_for(std::env::var_os("FORGE_DB"), data_dir(), name)
+}
+
+fn daemon_state_file_for(
+    forge_db: Option<std::ffi::OsString>,
+    data: Option<PathBuf>,
+    name: &str,
+) -> Option<PathBuf> {
+    match forge_db.filter(|v| !v.is_empty()) {
+        Some(db) => {
+            let mut beside = db;
+            beside.push(".daemon");
+            Some(PathBuf::from(beside).join(name))
+        }
+        None => data.map(|d| d.join(name)),
+    }
+}
+
+#[cfg(test)]
+mod daemon_state_tests {
+    use super::*;
+
+    #[test]
+    fn an_isolated_store_gets_its_own_daemon_state() {
+        let data = Some(PathBuf::from("/real/forge"));
+        assert_eq!(
+            daemon_state_file_for(
+                Some("/scratch/run.db".into()),
+                data.clone(),
+                "pr-watch.json"
+            ),
+            Some(PathBuf::from("/scratch/run.db.daemon/pr-watch.json"))
+        );
+        assert_eq!(
+            daemon_state_file_for(None, data.clone(), "pr-watch.json"),
+            Some(PathBuf::from("/real/forge/pr-watch.json"))
+        );
+        assert_eq!(
+            daemon_state_file_for(Some("".into()), data, "drains.json"),
+            Some(PathBuf::from("/real/forge/drains.json"))
+        );
+    }
+}
+
 /// Whether `path` sits under the directory that holds `[worktree] root = "global"` checkouts.
 pub fn is_global_worktree_path(path: &Path) -> bool {
     data_dir().is_some_and(|d| path.starts_with(d.join("worktrees")))

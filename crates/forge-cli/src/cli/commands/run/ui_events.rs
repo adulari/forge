@@ -12,6 +12,21 @@ use super::{trust_hint, SteerTracker};
 /// the old "stopped responding" read like a hang.
 pub(crate) const INTERRUPTED_NOTE: &str = "⏹ Interrupted. Type what to do instead.";
 
+/// Leave the persisted "interrupted by you" note after an Esc (or a remote interrupt) stopped the
+/// running turn, as the daemon driver does. Without it `forge turns`, `/turns` and the resume path
+/// see an unanswered prompt, which a restart re-drives as if it had crashed.
+pub(super) fn record_user_interrupt(
+    session: &std::sync::Arc<tokio::sync::Mutex<forge_core::Session>>,
+    live_id: &str,
+) {
+    let Some((store, id)) = super::slash_commands::session_store(session, live_id) else {
+        return;
+    };
+    if let Err(error) = store.note_user_interrupt(&id) {
+        tracing::warn!(session = %id, %error, "could not record the interrupt");
+    }
+}
+
 /// A permission prompt the turn task is blocked on, answered through the sender.
 pub(super) type PendingPrompt = Option<(String, Sender<ConfirmReply>)>;
 
@@ -190,6 +205,33 @@ mod tests {
         );
         assert!(!applied && !app.done);
         assert!(!esc_has_nothing_to_stop(app.done, false, false));
+    }
+
+    #[tokio::test]
+    async fn a_local_interrupt_leaves_the_user_interrupt_note() {
+        crate::cli::commands::run::driver::tests::isolate_store();
+        let session = crate::cli::commands::run::build_session_with(
+            Box::new(forge_tui::HeadlessPresenter::default()),
+            true,
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("build mock session");
+        let (store, id) = (session.store.clone(), session.session_id().to_string());
+        store
+            .add_message(&id, 1, forge_types::Role::User, "go", None)
+            .unwrap();
+        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(session));
+
+        record_user_interrupt(&shared, &id);
+
+        assert_eq!(
+            store.session_tail_state(&id).unwrap(),
+            forge_store::TailState::UserInterrupted
+        );
     }
 
     #[test]
