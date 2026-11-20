@@ -226,7 +226,7 @@ fn this_repos_plan_carries_the_clippy_env_and_the_size_guard() {
     let test = p
         .steps
         .iter()
-        .find(|s| s.run.starts_with("cargo test --locked --all"))
+        .find(|s| s.run.contains("cargo test --locked --all"))
         .expect("cargo test");
     assert_eq!(
         test.env.get("FORGE_DB").map(String::as_str),

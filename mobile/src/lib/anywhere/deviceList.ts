@@ -49,11 +49,23 @@ export interface DeviceRowModel {
   stale: boolean;
   /** Another enrollment shares this name, so the name alone cannot identify it. */
   duplicateName: boolean;
+  /** The account's owner device. Always false against a service that predates the owner rule. */
+  isOwner: boolean;
+  /**
+   * Whether this device may revoke it: any other device, except the owner unless this device is
+   * the owner. The service enforces the same rule; this only hides a button that would fail.
+   */
+  canRevoke: boolean;
 }
 
 export function describeDevice(
   device: AnywhereDevice,
-  ctx: { currentDeviceId: string | null | undefined; nowMs: number; nameCounts: ReadonlyMap<string, number> },
+  ctx: {
+    currentDeviceId: string | null | undefined;
+    nowMs: number;
+    nameCounts: ReadonlyMap<string, number>;
+    currentIsOwner?: boolean;
+  },
 ): DeviceRowModel {
   const { nowMs } = ctx;
   const created = parse(device.created_at);
@@ -77,6 +89,8 @@ export function describeDevice(
     enrolled: created == null ? "Enrollment date unknown" : `Enrolled ${formatShortDate(created, nowMs)}`,
     stale,
     duplicateName: (ctx.nameCounts.get(device.name) ?? 0) > 1,
+    isOwner: device.owner === true,
+    canRevoke: !isThisDevice && (device.owner !== true || ctx.currentIsOwner === true),
   };
 }
 
@@ -97,5 +111,7 @@ export function describeDevices(
 ): DeviceRowModel[] {
   const nameCounts = new Map<string, number>();
   for (const device of devices) nameCounts.set(device.name, (nameCounts.get(device.name) ?? 0) + 1);
-  return sortDevices(devices, currentDeviceId).map((device) => describeDevice(device, { currentDeviceId, nowMs, nameCounts }));
+  const currentIsOwner = devices.some((device) => device.id === currentDeviceId && device.owner === true);
+  return sortDevices(devices, currentDeviceId).map((device) =>
+    describeDevice(device, { currentDeviceId, nowMs, nameCounts, currentIsOwner }));
 }

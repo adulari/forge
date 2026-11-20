@@ -7,6 +7,7 @@ import { base64Url, fromBase64Url } from "./anywhereApi";
 import { secureRandomBytes } from "./secureRandom";
 import { decodeEnvelope, openEnvelope, bytesFromHex, bytesToHex } from "./transport/anywhereEnvelope";
 import type { StoredAnywhereCredentials } from "./transport/anywhereCredentialTypes";
+import { decodeWireBytes } from "./transport/anywhereWire";
 
 export interface AnywhereSyncChange {
   cursor: number;
@@ -76,7 +77,7 @@ export async function decryptSyncChange(change: AnywhereSyncChange, credentials:
     ?? (envelope.metadata.keyEpoch === credentials.keyEpoch ? credentials.accountDataKeyHex : undefined);
   if (epochKey == null) throw new Error("Encrypted history uses an unavailable key epoch");
   const opened = openEnvelope(bytes, bytesFromHex(epochKey), fromBase64Url(change.signing_public_key));
-  const record = JSON.parse(new TextDecoder().decode(opened.plaintext)) as DecryptedSyncRecord;
+  const record = normalizeSyncRecord(JSON.parse(new TextDecoder().decode(opened.plaintext)) as RawSyncRecord);
   validateRecord(record, change);
   return { cursor: change.cursor, record, createdAt: change.created_at * 1000, conflict: false };
 }
@@ -145,6 +146,22 @@ export async function clearOfflineHistory(credentials: StoredAnywhereCredentials
 function cacheName(credentials: StoredAnywhereCredentials): string { return `${CACHE_PREFIX}${credentials.accountIdHex}.${credentials.deviceIdHex}`; }
 function cacheKey(credentials: StoredAnywhereCredentials): Uint8Array { return hkdf(sha256, bytesFromHex(credentials.accountDataKeyHex), bytesFromHex(credentials.deviceIdHex), CACHE_CONTEXT, 32); }
 function bytesKey(value: number[] | null): string { return value == null ? "root" : base64Url(new Uint8Array(value)); }
+
+type RawSyncRecord = Omit<DecryptedSyncRecord, "device_id" | "base_hash" | "content_hash" | "payload"> & {
+  device_id: unknown; base_hash: unknown; content_hash: unknown; payload?: unknown;
+};
+
+/** Sync records are written as wire v1 today; a later writer may use v2 base64url. Read both. */
+export function normalizeSyncRecord(raw: RawSyncRecord): DecryptedSyncRecord {
+  const bytes = (label: string, value: unknown) => Array.from(decodeWireBytes(label, value));
+  return {
+    ...raw,
+    device_id: bytes("sync record device id", raw.device_id),
+    base_hash: raw.base_hash == null ? null : bytes("sync record base hash", raw.base_hash),
+    content_hash: bytes("sync record content hash", raw.content_hash),
+    payload: raw.payload === undefined ? [] : bytes("sync record payload", raw.payload),
+  };
+}
 
 function validateRecord(record: DecryptedSyncRecord, change: AnywhereSyncChange): void {
   if (record.stable_id !== change.stable_id || record.kind !== change.record_kind || record.revision !== change.revision

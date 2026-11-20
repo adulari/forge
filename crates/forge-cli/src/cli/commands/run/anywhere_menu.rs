@@ -188,6 +188,16 @@ impl AnywhereMenuDriver {
             MenuAction::SetupAnywhere => {
                 self.run_forge(app, tui, "Forge Anywhere", "forge anywhere setup");
             }
+            MenuAction::RevokeDevice { id, name } => {
+                // The revoke asks for the Recovery Kit at a real terminal, so it gets the whole one.
+                let label = format!("Revoke {name}");
+                self.run_forge(
+                    app,
+                    tui,
+                    &label,
+                    &format!("forge anywhere devices --revoke {id}"),
+                );
+            }
             MenuAction::OpenWeb => match crate::cli::commands::mcp::open_browser(WEB_URL) {
                 Ok(()) => app
                     .anywhere_menu
