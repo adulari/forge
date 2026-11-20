@@ -28,6 +28,7 @@ async fn git(root: &Path, args: &[&str]) -> Option<String> {
             .arg("-C")
             .arg(root)
             .args(args)
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output(),
