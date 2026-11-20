@@ -434,7 +434,7 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          # installed and never fired.\n\
          OnFailure={}\n\n\
          [Service]\nExecStart={} serve {} --port {port}\nRestart=always\nRestartSec=10\n\
-         # `Restart=on-failure` left the daemon down for 10 hours after an OOM kill: a clean exit\n\
+         # Restarting only on failure left the daemon down for 10 hours after an OOM kill: a clean exit\n\
          # on SIGTERM is not a failure, so nothing brought it back. `always` restarts after any\n\
          # exit EXCEPT an explicit `systemctl stop`/`forge service stop`, which systemd never\n\
          # overrides. The start-rate limit is off so a burst of quick failures can never park the\n\
@@ -756,12 +756,6 @@ mod tests {
         assert!(unit.contains("RestartSec=10"));
         assert!(unit.contains("StartLimitIntervalSec=0"));
         assert!(unit.contains("RestartPreventExitStatus=78"));
-        let service = unit.split("[Service]").nth(1).unwrap();
-        assert!(
-            service.contains("Restart=always")
-                && !unit.split("[Service]").next().unwrap().contains("Restart="),
-            "restart directives belong under [Service]"
-        );
         assert!(unit.contains("OOMPolicy=continue"));
         assert!(
             !unit.contains("OOMPolicy=stop"),

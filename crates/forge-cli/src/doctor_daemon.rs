@@ -268,6 +268,19 @@ mod tests {
     }
 
     #[test]
+    fn a_restart_on_failure_unit_is_flagged() {
+        let unit = "[Service]\nExecStart=/usr/bin/forge serve --port 7420\n\
+            RestartPreventExitStatus=78\nRestart=on-failure\n";
+        let out = at(unit, "/usr/bin/forge");
+        let c = out
+            .iter()
+            .find(|c| c.detail.contains("restarts only on failure"))
+            .expect("on-failure must be reported");
+        assert_eq!(c.status, Status::Warn);
+        assert!(c.fix.as_ref().unwrap().contains("forge service install"));
+    }
+
+    #[test]
     fn the_unit_port_is_read_from_exec_start() {
         let unit = "[Service]\nExecStart=\"/home/me/My Tools/forge\" serve --lan --port 9000\n";
         assert_eq!(super::unit_port(unit), Some(9000));
@@ -308,7 +321,7 @@ mod tests {
     #[test]
     fn a_current_unit_reports_ok_and_nothing_else() {
         let unit = "[Service]\nExecStart=/usr/bin/forge serve --port 7420\n\
-            RestartPreventExitStatus=78\nRestart=on-failure\n";
+            RestartPreventExitStatus=78\nRestart=always\n";
         let out = at(unit, "/usr/bin/forge");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].status, Status::Ok);
