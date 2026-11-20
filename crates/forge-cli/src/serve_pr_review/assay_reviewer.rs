@@ -211,7 +211,7 @@ impl AssayReviewer {
                 &self.window,
                 &spec,
                 &windows,
-                chrono::Utc::now().timestamp(),
+                jiff::Timestamp::now().as_second(),
             )?;
         }
         let cooldown = std::time::Duration::from_secs(config.mesh.failover_cooldown_secs);

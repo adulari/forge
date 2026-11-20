@@ -100,7 +100,7 @@ pub(crate) fn provider_exclusions_json(excluded: &[ProviderExclusion]) -> Vec<se
                 "provider": provider,
                 "reason": reason,
                 "expires_at": until,
-                "expires_in_secs": (until - chrono::Utc::now().timestamp()).max(0),
+                "expires_in_secs": (until - jiff::Timestamp::now().as_second()).max(0),
             })
         })
         .collect()
@@ -108,7 +108,7 @@ pub(crate) fn provider_exclusions_json(excluded: &[ProviderExclusion]) -> Vec<se
 
 /// A compact "12m" / "3h 20m" until an absolute epoch-second expiry.
 fn remaining(until_epoch: i64) -> String {
-    let secs = (until_epoch - chrono::Utc::now().timestamp()).max(0);
+    let secs = (until_epoch - jiff::Timestamp::now().as_second()).max(0);
     if secs >= 3600 {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     } else if secs >= 60 {
@@ -694,7 +694,7 @@ mod tests {
     /// reason and its expiry, not merely as an absence from the candidate table.
     #[test]
     fn explanation_json_surfaces_an_excluded_provider_with_reason_and_expiry() {
-        let until = chrono::Utc::now().timestamp() + 900;
+        let until = jiff::Timestamp::now().as_second() + 900;
         let excluded = vec![(
             "claude-cli".to_string(),
             until,
@@ -715,7 +715,7 @@ mod tests {
 
     #[test]
     fn remaining_reads_as_a_human_duration() {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         assert_eq!(remaining(now - 5), "0s");
         assert_eq!(remaining(now + 90), "1m");
         assert_eq!(remaining(now + 3 * 3600 + 20 * 60), "3h 20m");

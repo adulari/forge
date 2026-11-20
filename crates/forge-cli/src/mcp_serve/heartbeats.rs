@@ -18,7 +18,7 @@ impl ForgeMcp {
         };
         let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
         let label = args.get("label").and_then(|v| v.as_str());
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
 
         let (text, ok) = match action {
             "create" => {

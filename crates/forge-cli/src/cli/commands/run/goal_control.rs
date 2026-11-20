@@ -114,7 +114,7 @@ pub(crate) async fn goal_control_outcome(
         }
         GoalControl::Resume => {
             if let Some(envelope) = app.goal.as_mut().and_then(|g| g.envelope.as_mut()) {
-                let now = chrono::Utc::now().timestamp();
+                let now = jiff::Timestamp::now().as_second();
                 if let Err(why) = goal_envelope::resume_gate(envelope, now) {
                     app.note(&why);
                     return Ok(DispatchOutcome::Handled);

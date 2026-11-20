@@ -189,7 +189,7 @@ impl Store {
     /// observation (rather than adding them) so alias-group reads retain their latest-wins
     /// semantics.
     pub fn record_codex_quota(&self, hint: &forge_types::QuotaHint) -> Result<()> {
-        self.record_codex_quota_transaction(hint, chrono::Utc::now().timestamp(), false, None)
+        self.record_codex_quota_transaction(hint, jiff::Timestamp::now().as_second(), false, None)
     }
 
     /// Persist a quota observation read directly from ChatGPT's Codex OAuth response headers.
@@ -206,7 +206,7 @@ impl Store {
         hint: &forge_types::QuotaHint,
         plan: Option<&str>,
     ) -> Result<()> {
-        self.record_codex_quota_transaction(hint, chrono::Utc::now().timestamp(), true, plan)
+        self.record_codex_quota_transaction(hint, jiff::Timestamp::now().as_second(), true, plan)
     }
 
     /// Persist an official-Codex-CLI observation at its source observation time. Older rollout
@@ -222,7 +222,7 @@ impl Store {
     /// Age of the last direct OAuth header observation, independent from the shared CLI alias
     /// rows. `None` means no authoritative direct observation has ever been recorded.
     pub fn codex_oauth_quota_age_secs(&self) -> Result<Option<i64>> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         self.lock()?
             .query_row(
                 "SELECT ?1 - observed_at FROM codex_oauth_quota_observation WHERE singleton = 1",
@@ -362,7 +362,7 @@ impl Store {
     /// Snapshot of currently-constraining subscription quotas (rows whose window hasn't reset),
     /// for the router. Only `Warning`/`Exhausted` providers are carried — `Ok` is the default.
     pub fn current_quota(&self) -> Result<forge_types::SubscriptionQuota> {
-        self.quota_at(chrono::Utc::now().timestamp())
+        self.quota_at(jiff::Timestamp::now().as_second())
     }
 
     /// Seconds since the most recent quota update for `provider` (`None` if never recorded). Used
@@ -377,14 +377,14 @@ impl Store {
             )
             .ok()
             .flatten();
-        updated.map(|u| chrono::Utc::now().timestamp() - u)
+        updated.map(|u| jiff::Timestamp::now().as_second() - u)
     }
 
     /// Persist the current plan observed from the Codex backend. This is deliberately a tiny
     /// account snapshot rather than configuration: callers may trust it only while it remains as
     /// fresh as the associated quota observation.
     pub fn record_subscription_plan(&self, provider: &str, plan: &str) -> Result<()> {
-        self.record_subscription_plan_at(provider, plan, chrono::Utc::now().timestamp())
+        self.record_subscription_plan_at(provider, plan, jiff::Timestamp::now().as_second())
     }
 
     /// [`Self::record_subscription_plan`] at the actual observation time. Rollout-derived values
@@ -417,7 +417,7 @@ impl Store {
     /// same strict five-minute freshness limit as their quota; other providers have no live plan
     /// source today and therefore return no value unless a future caller writes one.
     pub fn fresh_subscription_plan(&self, provider: &str) -> Option<String> {
-        self.fresh_subscription_plan_at(provider, chrono::Utc::now().timestamp())
+        self.fresh_subscription_plan_at(provider, jiff::Timestamp::now().as_second())
     }
 
     /// [`Self::fresh_subscription_plan`] at an explicit clock value.
@@ -453,7 +453,7 @@ impl Store {
     pub fn bridge_fractions(
         &self,
     ) -> Result<std::collections::HashMap<String, std::collections::HashMap<String, f64>>> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         self.purge_expired_quota_observations_at(now)?;
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -657,7 +657,7 @@ impl Store {
     pub fn subscription_pacing(
         &self,
     ) -> Result<std::collections::HashMap<String, forge_types::SubscriptionPacing>> {
-        self.subscription_pacing_at(chrono::Utc::now().timestamp())
+        self.subscription_pacing_at(jiff::Timestamp::now().as_second())
     }
 
     /// [`Self::subscription_pacing`] at an explicit `now` (epoch secs) — testable clock.

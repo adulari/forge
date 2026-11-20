@@ -9,9 +9,7 @@ pub(super) fn display_timestamp(raw: &str) -> String {
     } else {
         value
     };
-    chrono::DateTime::from_timestamp(seconds, 0)
-        .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
-        .unwrap_or_else(|| raw.to_string())
+    crate::timefmt::utc(seconds, "%Y-%m-%d %H:%M UTC").unwrap_or_else(|| raw.to_string())
 }
 
 /// `[anywhere] host_name` when set, else the system hostname.
@@ -30,5 +28,22 @@ pub(super) fn human_bytes(bytes: u64) -> String {
         format!("{:.2} GiB", bytes as f64 / GIB as f64)
     } else {
         format!("{:.1} MiB", bytes as f64 / MIB as f64)
+    }
+}
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn service_timestamps_render_as_utc_minutes_and_text_passes_through() {
+        assert_eq!(display_timestamp("1700000000"), "2023-11-14 22:13 UTC");
+        assert_eq!(display_timestamp("1700000000999"), "2023-11-14 22:13 UTC");
+        assert_eq!(display_timestamp(" 0 "), "1970-01-01 00:00 UTC");
+        assert_eq!(display_timestamp("yesterday"), "yesterday");
+        assert_eq!(
+            display_timestamp("2026-01-01T00:00:00Z"),
+            "2026-01-01T00:00:00Z"
+        );
     }
 }

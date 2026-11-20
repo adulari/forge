@@ -307,7 +307,11 @@ pub(crate) async fn workspace_fingerprint(cwd: &std::path::Path) -> String {
 async fn capture_git(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        Command::new("git").args(args).current_dir(cwd).output(),
+        Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .output(),
     )
     .await
     .ok()?

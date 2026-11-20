@@ -36,7 +36,7 @@ impl Log {
         self.next += 1;
         self.items.push_back(Notice {
             seq: self.next,
-            at: chrono::Utc::now().timestamp(),
+            at: jiff::Timestamp::now().as_second(),
             title: request.title.clone().unwrap_or_else(|| "Forge".into()),
             message: request.message.clone(),
             priority: request.priority.as_str(),

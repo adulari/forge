@@ -293,7 +293,7 @@ fn classify(error: rusqlite::Error) -> Integrity {
 }
 
 fn unix_now() -> i64 {
-    chrono::Utc::now().timestamp()
+    jiff::Timestamp::now().as_second()
 }
 
 /// Move the store and its WAL/SHM files aside as `<db>.<label>-<ts>`; returns the main file's new name.
