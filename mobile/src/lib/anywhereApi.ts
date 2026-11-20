@@ -141,6 +141,8 @@ export interface AnywhereDevice {
   last_seen_at: string | null;
   signing_public_key: string;
   exchange_public_key: string;
+  /** The account's owner device; only it may revoke itself. Absent from older services. */
+  owner?: boolean;
 }
 
 interface ApiErrorBody {

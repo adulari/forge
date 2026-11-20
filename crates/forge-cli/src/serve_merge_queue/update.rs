@@ -57,6 +57,7 @@ fn git(root: &Path, args: &[&str]) -> Out {
         .arg(root)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_EDITOR", "true")
         .env("GIT_MERGE_AUTOEDIT", "no")
         .stdin(Stdio::null())

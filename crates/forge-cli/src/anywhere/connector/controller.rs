@@ -142,7 +142,9 @@ async fn exchange_inner(
         .context("connect encrypted Anywhere relay")?;
     let (mut write, mut read) = relay.split();
 
-    let plaintext = serde_json::to_vec(request).context("encode bridge request")?;
+    // The request itself stays v1, which every host parses; it advertises v2 so a host that reads
+    // it answers in the smaller form.
+    let plaintext = wire::encode_request(request, Wire::V1).context("encode bridge request")?;
     let encoded = seal_for_recipient(
         ctx.store,
         EnvelopeKind::BridgeRequest,
@@ -281,6 +283,8 @@ mod tests {
             assert_eq!(envelope.metadata.recipient_id, HOST_ID);
             let plain = envelope.open(&[0x44; 32], &controller_key).unwrap();
             let request: BridgeRequest = serde_json::from_slice(&plain).unwrap();
+            let negotiated = Wire::negotiate(wire::advertised(&plain));
+            assert_eq!(negotiated, Wire::V2, "a controller advertises wire v2");
             let response = answer(request);
             // A frame for some other request must be ignored by the controller.
             for rid in [[0xee; 16], response.request_id] {
@@ -300,7 +304,7 @@ mod tests {
                         created_at_ms: now_ms(),
                         nonce: rand::random::<[u8; 24]>(),
                     },
-                    &serde_json::to_vec(&reply).unwrap(),
+                    &wire::encode_response(&reply, negotiated).unwrap(),
                     &[0x44; 32],
                     &host_signing_key(),
                 )

@@ -17,31 +17,35 @@ import {
   sealEnvelope,
   type EnvelopeKind,
 } from "./anywhereEnvelope";
+import {
+  decodeOptionalWireBytes,
+  decodeWireBytes,
+  encodeWireBytes,
+  maxOutboundInline,
+  negotiateWire,
+  WIRE_LATEST,
+  WIRE_V1,
+  wireByteLength,
+  type WireBytes,
+} from "./anywhereWire";
 
 // What we ACCEPT inline from the other side. Deliberately permissive: a host on an older build
 // still offloads at its own threshold, and rejecting its frames here would break it for no gain.
 const MAX_INLINE_BYTES = 256 * 1024;
 
-// What we SEND inline before offloading to a blob, which is a much smaller number than the above
-// and must be, because bodies do not travel as bytes. `body`/`bytes` are `Array.from(uint8array)`
-// inside a JSON payload, so every byte becomes a decimal literal plus a comma — measured at
-// **3.57x** for random bytes (a 256 KiB body seals into a 914 KiB envelope). The relay caps an
-// envelope at 300 KiB (`MAX_RELAY_ENVELOPE_BYTES` in forge-anywhere-service/src/relay.rs) and
-// answers anything larger with `relay_frame_too_large`.
-//
-// Sending at the 256 KiB acceptance limit therefore guaranteed rejection, and offload did not
-// kick in until 256 KiB — so every body between ~84 KiB and 256 KiB failed outright, while both
-// smaller and LARGER ones worked. That dead band is what broke voice over Anywhere: 16 kHz mono
-// 16-bit WAV is 32 KB/s, so clips from roughly 2.7s to 8s could never be sent.
-//
-// 64 KiB worst-cases to ~229 KiB sealed, leaving room for headers, metadata and the envelope.
-const MAX_OUTBOUND_INLINE_BYTES = 64 * 1024;
+// What we SEND inline before offloading to a blob is `maxOutboundInline(wire)`, a much smaller
+// number than the above under wire v1, where `body`/`bytes` are number arrays and every byte costs
+// a decimal literal plus a comma (**3.57x** for random bytes). The relay caps an envelope at
+// 300 KiB (`MAX_RELAY_ENVELOPE_BYTES` in forge-anywhere-service/src/relay.rs) and answers anything
+// larger with `relay_frame_too_large`. Sending at the 256 KiB acceptance limit once guaranteed
+// rejection, which is what broke voice clips between ~2.7s and 8s. v1 keeps 64 KiB inline (~229 KiB
+// sealed); a host that advertised wire v2 gets base64url and 192 KiB inline (256 KiB encoded).
 const MAX_BLOB_CIPHERTEXT_BYTES = 32 * 1024 * 1024;
 
 // The relay service (forge-anywhere-service/src/relay_blob.rs `MIN_RELAY_BLOB_BYTES`) rejects a
 // `POST /v1/relay/blobs` reservation whose ciphertext is not strictly larger than this — a 400
 // `invalid_object_size`. `uploadBlob` pads the plaintext so every blob it uploads clears this
-// threshold, which is why a body between MAX_OUTBOUND_INLINE_BYTES and this size (the real-world
+// threshold, which is why a body between the outbound inline limit and this size (the real-world
 // `/api/models`/`/api/config` range, history pages, short voice clips) failed outright before: it
 // was too big to send inline and too small for the service to accept as a blob.
 const MIN_RELAY_BLOB_CIPHERTEXT_BYTES = 256 * 1024;
@@ -106,26 +110,37 @@ export interface AnywhereRelayCredentials {
 }
 
 interface PendingRequest {
+  hostId: string;
   resolve(response: AnywhereBridgeResponse): void;
   reject(error: Error): void;
   timeout: ReturnType<typeof setTimeout>;
 }
 
 interface BridgeResponsePayload {
-  request_id: number[];
+  request_id: WireBytes;
   status: number;
   headers?: [string, string][];
-  body?: number[];
+  body?: WireBytes;
   body_blob?: RelayBlobReference;
+  /** The highest wire version the host reads; absent from hosts that predate negotiation. */
+  wire?: number;
 }
 
 interface WebSocketPayload {
-  stream_id: number[];
+  stream_id: WireBytes;
   direction: "controller_to_host" | "host_to_controller";
   kind: "data" | "close";
   text?: boolean;
-  bytes?: number[];
+  bytes?: WireBytes;
   bytes_blob?: RelayBlobReference;
+}
+
+/** A controller-to-host frame before encoding; `sendStreamFrame` picks the host's wire version. */
+export interface OutboundStreamFrame {
+  streamId: Uint8Array;
+  kind: "data" | "close";
+  text?: boolean;
+  bytes: Uint8Array;
 }
 
 interface BlobReservation {
@@ -162,6 +177,9 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
   private incoming = Promise.resolve();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly streams = new Map<string, AnywhereRemoteSocket>();
+  // The wire version each host advertised on its last authenticated response. Unknown means v1,
+  // which every host parses; a host that never says otherwise is never sent anything else.
+  private readonly hostWire = new Map<string, number>();
 
   constructor(private readonly credentials: AnywhereRelayCredentials) {
     assertLength("account id", credentials.accountId, 16);
@@ -173,19 +191,20 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
   async request(request: AnywhereBridgeRequest): Promise<AnywhereBridgeResponse> {
     const requestId = this.credentials.randomBytes(16);
     assertLength("request id", requestId, 16);
+    const wire = this.wireFor(request.hostId);
     const payload: Record<string, unknown> = {
-      request_id: Array.from(requestId),
+      request_id: encodeWireBytes(requestId, wire),
       route: request.route,
       method: request.method,
       parameters: request.parameters,
       headers: request.headers,
     };
-    if (request.body.length > MAX_OUTBOUND_INLINE_BYTES) {
+    if (request.body.length > maxOutboundInline(wire)) {
       payload.body_blob = await this.uploadBlob(request.hostId, request.body);
     } else {
-      payload.body = Array.from(request.body);
+      payload.body = encodeWireBytes(request.body, wire);
     }
-    return this.sendBridgeRequest(request.hostId, payload, request.signal);
+    return this.sendBridgeRequest(request.hostId, requestId, payload, request.signal);
   }
 
   openSessionSocket(request: {
@@ -230,13 +249,14 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       this,
     );
     this.streams.set(bytesToHex(streamId), socket);
-    void this.sendBridgeRequest(hostId, {
-      request_id: Array.from(streamId),
+    const wire = this.wireFor(hostId);
+    void this.sendBridgeRequest(hostId, streamId, {
+      request_id: encodeWireBytes(streamId, wire),
       route,
       method: "GET",
       parameters,
       headers: [],
-      body: [],
+      body: encodeWireBytes(new Uint8Array(), wire),
     }).then(
       (response) => {
         if (response.status >= 200 && response.status < 300) socket.markOpen();
@@ -247,17 +267,18 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     return socket;
   }
 
-  async sendStreamFrame(hostId: string, payload: WebSocketPayload): Promise<void> {
-    let wirePayload = payload;
-    const frameBytes = new Uint8Array(payload.bytes ?? []);
-    if (payload.kind === "data" && frameBytes.length > MAX_OUTBOUND_INLINE_BYTES) {
-      wirePayload = {
-        stream_id: payload.stream_id,
-        direction: payload.direction,
-        kind: payload.kind,
-        text: payload.text,
-        bytes_blob: await this.uploadBlob(hostId, frameBytes),
-      };
+  async sendStreamFrame(hostId: string, frame: OutboundStreamFrame): Promise<void> {
+    const wire = this.wireFor(hostId);
+    const wirePayload: WebSocketPayload = {
+      stream_id: encodeWireBytes(frame.streamId, wire),
+      direction: "controller_to_host",
+      kind: frame.kind,
+    };
+    if (frame.text !== undefined) wirePayload.text = frame.text;
+    if (frame.kind === "data" && frame.bytes.length > maxOutboundInline(wire)) {
+      wirePayload.bytes_blob = await this.uploadBlob(hostId, frame.bytes);
+    } else {
+      wirePayload.bytes = encodeWireBytes(frame.bytes, wire);
     }
     const bytes = new TextEncoder().encode(JSON.stringify(wirePayload));
     const envelope = await this.seal(3, hostId, bytes);
@@ -268,14 +289,20 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     this.streams.delete(bytesToHex(streamId));
   }
 
+  /** The encoding to send to `hostId`: v2 only after that host advertised it. */
+  private wireFor(hostId: string): number {
+    return this.hostWire.get(hostId) ?? WIRE_V1;
+  }
+
   private async sendBridgeRequest(
     hostId: string,
+    requestId: Uint8Array,
     payload: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<AnywhereBridgeResponse> {
-    const requestId = new Uint8Array(payload.request_id as number[]);
     const key = bytesToHex(requestId);
-    const plaintext = new TextEncoder().encode(JSON.stringify(payload));
+    // Ask for the smallest answer this build reads. A host that predates negotiation ignores it.
+    const plaintext = new TextEncoder().encode(JSON.stringify({ ...payload, wire: WIRE_LATEST }));
     const envelope = await this.seal(1, hostId, plaintext);
     const connection = await this.ensureConnection();
     return new Promise<AnywhereBridgeResponse>((resolve, reject) => {
@@ -307,6 +334,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
       }
       const sentAt = nowMs();
       this.pending.set(key, {
+        hostId,
         resolve: (response) => {
           settle();
           recordRelayRoundTrip(nowMs() - sentAt);
@@ -642,23 +670,28 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
 
   private async prepareBridgeResponse(plaintext: Uint8Array, senderId: string): Promise<PreparedDelivery> {
     const payload = JSON.parse(new TextDecoder().decode(plaintext)) as BridgeResponsePayload;
-    const requestId = new Uint8Array(payload.request_id);
+    const requestId = decodeWireBytes("bridge response request id", payload.request_id);
     assertLength("bridge response request id", requestId, 16);
     const pending = this.pending.get(bytesToHex(requestId));
-    assertOptionalByteArray("bridge response body", payload.body);
+    if (wireByteLength(payload.body) > MAX_INLINE_BYTES * 2) {
+      throw new Error("Anywhere bridge response inline body exceeds 256 KiB");
+    }
+    const inlineBody = decodeOptionalWireBytes("bridge response body", payload.body);
     if (payload.body_blob !== undefined) assertBlobReference(payload.body_blob);
-    if (payload.body_blob !== undefined && (payload.body?.length ?? 0) !== 0) {
+    if (payload.body_blob !== undefined && inlineBody.length !== 0) {
       throw new Error("Anywhere bridge response contains both inline and blob bodies");
     }
-    if (payload.body_blob === undefined && (payload.body?.length ?? 0) > MAX_INLINE_BYTES) {
+    if (payload.body_blob === undefined && inlineBody.length > MAX_INLINE_BYTES) {
       throw new Error("Anywhere bridge response inline body exceeds 256 KiB");
     }
     if (!pending) return { deliver: () => {} };
+    // Authenticated and matched to a request we sent that host: its advertisement is trustworthy.
+    this.hostWire.set(pending.hostId, negotiateWire(payload.wire));
     if (payload.body_blob === undefined) {
       const response: AnywhereBridgeResponse = {
         status: payload.status,
         headers: payload.headers,
-        body: new Uint8Array(payload.body ?? []),
+        body: inlineBody,
       };
       return {
         deliver: () => {
@@ -714,15 +747,18 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     if (payload.text !== undefined && typeof payload.text !== "boolean") {
       throw new Error("invalid Anywhere stream frame type");
     }
-    const streamId = new Uint8Array(payload.stream_id);
+    const streamId = decodeWireBytes("stream id", payload.stream_id);
     assertLength("stream id", streamId, 16);
     const stream = this.streams.get(bytesToHex(streamId));
-    assertOptionalByteArray("Anywhere stream bytes", payload.bytes);
+    if (wireByteLength(payload.bytes) > MAX_INLINE_BYTES * 2) {
+      throw new Error("Anywhere stream frame inline bytes exceed 256 KiB");
+    }
+    const inlineBytes = decodeOptionalWireBytes("Anywhere stream bytes", payload.bytes);
     if (payload.bytes_blob !== undefined) assertBlobReference(payload.bytes_blob);
-    if (payload.bytes_blob !== undefined && (payload.bytes?.length ?? 0) !== 0) {
+    if (payload.bytes_blob !== undefined && inlineBytes.length !== 0) {
       throw new Error("Anywhere stream frame contains both inline and blob bytes");
     }
-    if (payload.bytes_blob === undefined && (payload.bytes?.length ?? 0) > MAX_INLINE_BYTES) {
+    if (payload.bytes_blob === undefined && inlineBytes.length > MAX_INLINE_BYTES) {
       throw new Error("Anywhere stream frame inline bytes exceed 256 KiB");
     }
     if (payload.kind === "close" && payload.bytes_blob !== undefined) {
@@ -730,7 +766,7 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
     }
     if (!stream) return { deliver: () => {} };
     if (payload.bytes_blob === undefined) {
-      const frameBytes = new Uint8Array(payload.bytes ?? []);
+      const frameBytes = inlineBytes;
       return {
         deliver: () => {
           if (payload.kind === "close") stream.remoteClose();
@@ -757,6 +793,8 @@ export class EncryptedAnywhereRelay implements AnywhereRelay {
 
   private connectionClosed(error = new Error("Forge Anywhere relay disconnected")): void {
     this.connection = null;
+    // A host may have been downgraded while we were away: learn its wire version again.
+    this.hostWire.clear();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
       pending.reject(error);
@@ -804,11 +842,10 @@ class AnywhereRemoteSocket implements RemoteSocket {
     if (this.state !== WebSocket.OPEN) throw new Error("Forge Anywhere session stream is not open");
     void dataBytes(data).then((bytes) =>
       this.relay.sendStreamFrame(this.hostId, {
-        stream_id: Array.from(this.streamId),
-        direction: "controller_to_host",
+        streamId: this.streamId,
         kind: "data",
         text: typeof data === "string",
-        bytes: Array.from(bytes),
+        bytes,
       }),
     ).catch((error) => this.fail(asError(error)));
   }
@@ -817,10 +854,9 @@ class AnywhereRemoteSocket implements RemoteSocket {
     if (this.state >= WebSocket.CLOSING) return;
     this.state = WebSocket.CLOSING;
     void this.relay.sendStreamFrame(this.hostId, {
-      stream_id: Array.from(this.streamId),
-      direction: "controller_to_host",
+      streamId: this.streamId,
       kind: "close",
-      bytes: [],
+      bytes: new Uint8Array(),
     }).finally(() => this.remoteClose());
   }
 
@@ -908,15 +944,6 @@ function padForRelayMinimum(plaintext: Uint8Array): Uint8Array {
   padded.set(plaintext);
   padded.fill(0x20, plaintext.length);
   return padded;
-}
-
-function assertOptionalByteArray(label: string, value: number[] | undefined): void {
-  if (
-    value !== undefined
-    && (!Array.isArray(value) || value.some((byte) => !Number.isInteger(byte) || byte < 0 || byte > 255))
-  ) {
-    throw new Error(`${label} must contain bytes`);
-  }
 }
 
 function requireBlobId(value: unknown): string {

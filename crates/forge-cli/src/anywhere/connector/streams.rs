@@ -27,6 +27,8 @@ const SESSION_FRAME_INTERVAL: std::time::Duration = std::time::Duration::from_mi
 pub(super) struct StreamHandle {
     pub(super) owner_device_id: [u8; 16],
     pub(super) commands: mpsc::Sender<LocalSocketCommand>,
+    /// Negotiated by the request that opened the stream; every frame to the controller uses it.
+    pub(super) wire: forge_anywhere_protocol::wire::Wire,
 }
 
 pub(super) enum LocalSocketCommand {
@@ -51,6 +53,7 @@ pub(super) async fn open_stream(
     local_base_url: &str,
     request: &BridgeRequest,
     owner_device_id: [u8; 16],
+    wire: forge_anywhere_protocol::wire::Wire,
     streams: &mut HashMap<[u8; 16], StreamHandle>,
     local_events: &mpsc::Sender<LocalSocketEvent>,
 ) -> BridgeResponse {
@@ -58,6 +61,7 @@ pub(super) async fn open_stream(
         local_base_url,
         request,
         owner_device_id,
+        wire,
         streams,
         local_events,
     )
@@ -78,6 +82,7 @@ async fn open_stream_inner(
     local_base_url: &str,
     request: &BridgeRequest,
     owner_device_id: [u8; 16],
+    wire: forge_anywhere_protocol::wire::Wire,
     streams: &mut HashMap<[u8; 16], StreamHandle>,
     local_events: &mpsc::Sender<LocalSocketEvent>,
 ) -> Result<()> {
@@ -228,6 +233,7 @@ async fn open_stream_inner(
         StreamHandle {
             owner_device_id,
             commands: commands_tx,
+            wire,
         },
     );
     Ok(())

@@ -49,6 +49,16 @@ defaults to an empty array, an absent reference defaults to `null`, and serializ
 references. A message must not set both an externalized byte field and its reference. Inline
 messages at or below 256 KiB retain the original representation.
 
+Byte fields (`request_id`, `stream_id`, `body`, `bytes`) have two encodings. Wire v1 is a JSON
+array of numbers 0-255. Wire v2 is an unpadded base64url string; non-zero trailing bits are
+invalid. Receivers accept both forms. Bridge requests and responses carry `"wire": N`, the highest
+version the sender reads; it is absent from peers that predate negotiation and means 1. A host
+answers a request, and every frame of a stream that request opens, in v2 only when the request
+advertised `wire >= 2`; a controller sends v2 to a host only after an authenticated response from
+that host advertised it. Sync records and durable commands are written in v1. The envelope is
+the same in both: v2 changes only the plaintext's encoding. See
+`docs/rfcs/anywhere-wire-v2-and-device-revoke.md`.
+
 `(sender_device_id, key_epoch, sequence)` is globally unique within an account. Clients persist the
 next sequence before transmission. The service atomically rejects a repeated tuple. Clients also
 generate a fresh uniformly random 24-byte nonce for every encryption; a sequence does not replace
@@ -272,6 +282,15 @@ checksum}`. `checksum` is SHA-256 over the domain-separated service/account/entr
 reject a wrong service, wrong account, malformed checksum, or non-12-word v2 value before deriving
 any key. Recovery material is never emitted to analytics, logs, URLs, crash reports, or clipboard
 without an explicit copy action.
+
+
+Device revocation (`POST /v1/devices/{id}/revoke`) creates the next epoch atomically: the caller
+wraps the new data key to every remaining device and the recovery secret, and the service revokes
+the target's tokens, host grants and push subscriptions in the same transaction. Any active,
+key-enrolled device of the account may revoke another device of that account, except the owner
+device (the oldest active enrolled device, flagged `owner: true` in `GET /v1/devices`), which only
+the owner may revoke (`403 owner_device_protected`). A revoked device cannot act or be restored.
+Every decision is recorded as a `device_revoked` security audit event.
 
 ### Account-bound device approval
 

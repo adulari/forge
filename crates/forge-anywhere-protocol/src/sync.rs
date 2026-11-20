@@ -49,13 +49,17 @@ pub struct SyncRecord {
     pub kind: SyncRecordKind,
     pub revision: u64,
     pub logical_clock: u64,
+    #[serde(deserialize_with = "crate::wire::fixed::deserialize")]
     pub device_id: DeviceId,
     pub operation: SyncOperation,
     /// Required for files; allows divergence to create a conflict copy instead of overwriting.
+    #[serde(default, deserialize_with = "crate::wire::optional_fixed::deserialize")]
     pub base_hash: Option<[u8; 32]>,
+    #[serde(deserialize_with = "crate::wire::fixed::deserialize")]
     pub content_hash: [u8; 32],
-    /// Record content. Empty for tombstones.
-    #[serde(default)]
+    /// Record content. Empty for tombstones. Written as wire v1 (see [`crate::wire`]); readers
+    /// accept both forms so the writer can switch once every reader is past wire negotiation.
+    #[serde(default, deserialize_with = "crate::wire::bytes::deserialize")]
     pub payload: Vec<u8>,
 }
 
