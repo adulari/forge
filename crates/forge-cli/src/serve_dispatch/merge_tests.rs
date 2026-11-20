@@ -300,19 +300,16 @@ async fn a_dirty_base_refuses_the_whole_run_and_touches_nothing() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_commit_stops_with_the_merge_staged_and_gits_reason() {
-    use std::os::unix::fs::PermissionsExt;
     let _env = FORGE_DB_LOCK.lock().await;
     let db = tempfile::tempdir().unwrap();
     use_temp_db(db.path());
     let repo = repo(&[("README.md", "hi\n")]);
     let hook = repo.path().join(".git/hooks/pre-commit");
-    std::fs::write(
+    forge_types::exec_fixture::install_executable(
         &hook,
         "#!/bin/sh\ncase \"$(git rev-parse --git-dir)\" in */worktrees/*) exit 0;; esac\n\
          echo 'refused by the test hook' >&2\nexit 1\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let state = state(repo.path());
     let (s1, _) = worker(&state, repo.path(), &[("a.txt", "one\n")]).await;
     let (s2, wt2) = worker(&state, repo.path(), &[("b.txt", "two\n")]).await;

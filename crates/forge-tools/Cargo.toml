@@ -37,6 +37,7 @@ portable-pty = "0.9"
 base64 = "0.23"
 
 [dev-dependencies]
+forge-types = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 

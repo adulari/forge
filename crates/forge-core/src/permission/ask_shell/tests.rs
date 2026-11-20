@@ -59,7 +59,6 @@ fn real_git_path() -> PathBuf {
 /// A `git` in `dir` that appends its arguments and its environment to a log, then runs the real
 /// one: how a test sees what the probe started and with what. Returns the program and the log.
 pub(super) fn logging_git(dir: &Path) -> (PathBuf, PathBuf) {
-    use std::os::unix::fs::PermissionsExt;
     let log = dir.join("git-calls.log");
     let program = dir.join("git");
     let body = format!(
@@ -67,8 +66,7 @@ pub(super) fn logging_git(dir: &Path) -> (PathBuf, PathBuf) {
         log.display(),
         real_git_path().display()
     );
-    std::fs::write(&program, body).unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&program, &body);
     (program, log)
 }
 

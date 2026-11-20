@@ -81,7 +81,6 @@ mod tests {
     use crate::job::{JobEvent, JobState, Jobs, PromptKind};
     use crate::test_support::{env_lock, ScopedEnv};
     use std::ffi::OsStr;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Instant;
 
     const TOKEN: &str = "sk-ant-oat01-FakeTokenForTestsOnly0123456789abcdefghijkl";
@@ -118,8 +117,7 @@ mod tests {
 
     fn fake_claude(f: &Fixture, body: &str) {
         let path = f.dir.path().join("bin/claude");
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        forge_types::exec_fixture::install_executable(&path, &format!("#!/bin/sh\n{body}\n"));
     }
 
     fn run_to_end(jobs: &Jobs, id: u64) -> crate::job::JobPoll {

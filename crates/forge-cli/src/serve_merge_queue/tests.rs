@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -149,8 +148,7 @@ esac
             tmp = self.dir.path().display(),
         );
         let path = self.dir.path().join("gh");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        forge_types::exec_fixture::install_executable(&path, &script);
     }
 
     pub(super) fn gh(&self) -> Gh {

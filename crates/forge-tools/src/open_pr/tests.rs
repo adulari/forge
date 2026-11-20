@@ -90,9 +90,7 @@ esac
         log = gh_log.display(),
         body = body_file.display(),
     );
-    std::fs::write(&gh, script).unwrap();
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&gh, &script);
     Fixture {
         _dir: dir,
         work,

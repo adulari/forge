@@ -187,7 +187,6 @@ fn head_tail_keeps_both_ends() {
 
 #[test]
 fn discovery_orders_venv_path_and_collapses_duplicates() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let ws = dir.path().join("ws");
     let bin = dir.path().join("bin");
@@ -196,8 +195,7 @@ fn discovery_orders_venv_path_and_collapses_duplicates() {
         std::fs::create_dir_all(d).unwrap();
     }
     let make = |p: &Path| {
-        std::fs::write(p, "#!/bin/sh\n").unwrap();
-        std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        forge_types::exec_fixture::install_executable(p, "#!/bin/sh\n");
     };
     make(&ws.join(".venv/bin/python"));
     make(&bin.join("python3"));
@@ -534,11 +532,7 @@ async fn moving_the_workspace_restarts_the_kernel() {
 async fn a_missing_interpreter_reports_failed_to_start() {
     let ws = tempfile::tempdir().unwrap();
     let python = ws.path().join("fake-python");
-    std::fs::write(&python, "#!/bin/sh\necho oops >&2\nexit 1\n").unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    forge_types::exec_fixture::install_executable(&python, "#!/bin/sh\necho oops >&2\nexit 1\n");
     let mut kernel = Kernel::spawn(&python, ws.path()).await.unwrap();
     let err = kernel.hello(Duration::from_secs(5)).await.unwrap_err();
     assert!(err.contains("oops") || err.contains("no output"), "{err}");

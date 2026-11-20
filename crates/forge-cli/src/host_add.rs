@@ -709,9 +709,7 @@ mod tests {
         let bin = dir.path().join("bin");
         std::fs::create_dir(&bin).unwrap();
         let curl = bin.join("curl");
-        std::fs::write(&curl, "#!/bin/sh\nexit 22\n").unwrap();
-        std::fs::set_permissions(&curl, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
+        forge_types::exec_fixture::install_executable(&curl, "#!/bin/sh\nexit 22\n");
         let run = |script: &str| {
             Command::new("sh")
                 .arg("-c")

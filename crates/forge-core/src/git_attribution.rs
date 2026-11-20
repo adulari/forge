@@ -285,16 +285,11 @@ mod tests {
         let dir = repo();
         let hooks = dir.path().join(".git/hooks");
         let custom = hooks.join(HOOK_NAME);
-        std::fs::write(
+        #[cfg(unix)]
+        forge_types::exec_fixture::install_executable(
             &custom,
             "#!/bin/sh\necho custom-ran >> \"$(dirname \"$0\")/ran\"\n",
-        )
-        .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&custom, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        );
         let outcome = install_commit_hook(dir.path()).unwrap();
         assert!(
             matches!(outcome, HookInstall::Chained { .. }),

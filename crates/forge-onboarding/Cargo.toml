@@ -22,5 +22,6 @@ toml = "1.1"
 portable-pty = "0.9"
 
 [dev-dependencies]
+forge-types = { workspace = true, features = ["test-support"] }
 forge-config = { workspace = true, features = ["test-secrets"] }
 tempfile = "3"

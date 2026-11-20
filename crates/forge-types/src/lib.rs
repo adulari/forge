@@ -15,6 +15,8 @@ pub use provider_items::ProviderItems;
 pub mod child_env;
 pub mod deferred_call;
 pub mod effort;
+#[cfg(all(unix, feature = "test-support"))]
+pub mod exec_fixture;
 pub mod goal_contract;
 pub mod goal_envelope;
 pub mod interaction;

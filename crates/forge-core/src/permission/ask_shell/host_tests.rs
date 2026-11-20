@@ -2,7 +2,7 @@
 //! which program a name in `PATH` becomes, what the git probe starts (and when it does not run at
 //! all), and how long it can take. The rules on the text are in `tests.rs`.
 
-use std::os::unix::fs::{symlink, PermissionsExt};
+use std::os::unix::fs::symlink;
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -53,8 +53,7 @@ fn outside() -> (TempDir, PathBuf) {
 
 fn plant(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, body).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(path, body);
 }
 
 fn calls(log: &Path) -> usize {

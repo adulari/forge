@@ -1,5 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
-
 use super::*;
 
 fn fake_gh(dir: &Path) -> Gh {
@@ -9,8 +7,7 @@ fn fake_gh(dir: &Path) -> Gh {
         log = dir.join("calls.log").display(),
         view = dir.join("view.json").display(),
     );
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&path, &script);
     Gh::with_program(path)
 }
 
@@ -467,8 +464,7 @@ async fn a_fix_turn_waits_while_auto_merge_cannot_be_turned_off() {
         view = dir.path().join("view.json").display(),
         deny = dir.path().join("deny").display(),
     );
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&path, &script);
     let gh = Gh::with_program(path);
     let mut watch = Watch::new("s1", Mode::Merge, "auto", 0);
     view_at(dir.path(), "h1", PENDING, "BLOCKED", "");

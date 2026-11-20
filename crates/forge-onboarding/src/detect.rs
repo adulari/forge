@@ -469,7 +469,6 @@ mod tests {
     use crate::host::NoHost;
     use crate::test_support::{env_lock, ScopedEnv};
     use std::ffi::OsStr;
-    use std::os::unix::fs::PermissionsExt;
 
     struct Fixture {
         _guard: std::sync::MutexGuard<'static, ()>,
@@ -510,8 +509,10 @@ mod tests {
 
     fn fake_cli(f: &Fixture, name: &str, version_line: &str) {
         let path = f.home.path().join("bin").join(name);
-        std::fs::write(&path, format!("#!/bin/sh\necho '{version_line}'\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        forge_types::exec_fixture::install_executable(
+            &path,
+            &format!("#!/bin/sh\necho '{version_line}'\n"),
+        );
     }
 
     fn detect_fast() -> Machine {
@@ -728,7 +729,6 @@ mod reconnect_tests {
     use crate::host::NoHost;
     use crate::test_support::{env_lock, ScopedEnv};
     use std::ffi::OsStr;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn an_installed_claude_with_its_own_login_but_no_token_needs_a_reconnect() {
@@ -737,8 +737,7 @@ mod reconnect_tests {
         let bin = home.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "#!/bin/sh\necho 2.1.4\n").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        forge_types::exec_fixture::install_executable(&claude, "#!/bin/sh\necho 2.1.4\n");
         std::fs::create_dir_all(home.path().join(".claude")).unwrap();
         std::fs::write(home.path().join(".claude/.credentials.json"), "{}").unwrap();
         let config = home.path().join("config");
