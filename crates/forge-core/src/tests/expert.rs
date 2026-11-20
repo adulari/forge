@@ -46,7 +46,7 @@ impl Provider for Scripted {
                     provider: "codex-cli".into(),
                     window: "weekly".into(),
                     status: forge_types::QuotaStatus::Ok,
-                    resets_at: Some(chrono::Utc::now().timestamp() + 100_000),
+                    resets_at: Some(jiff::Timestamp::now().as_second() + 100_000),
                     fraction_used: Some(pct / 100.0),
                 });
             }
@@ -364,7 +364,7 @@ async fn a_spent_budget_refuses_the_next_consult_with_a_note() {
         provider: "codex-cli".into(),
         window: "weekly".into(),
         status: forge_types::QuotaStatus::Ok,
-        resets_at: Some(chrono::Utc::now().timestamp() + 100_000),
+        resets_at: Some(jiff::Timestamp::now().as_second() + 100_000),
         fraction_used: Some(0.90),
     });
     r.session.run_turn("read everything").await.unwrap();
@@ -879,7 +879,7 @@ async fn a_fresh_bridge_process_meters_the_window_from_the_sessions_first_check(
         provider: "codex-cli".into(),
         window: "weekly".into(),
         status: forge_types::QuotaStatus::Ok,
-        resets_at: Some(chrono::Utc::now().timestamp() + 100_000),
+        resets_at: Some(jiff::Timestamp::now().as_second() + 100_000),
         fraction_used: Some(0.10),
     });
     let config = codex_bridge_config();

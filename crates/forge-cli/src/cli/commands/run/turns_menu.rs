@@ -11,13 +11,7 @@ const SHOWN_COUNTS: usize = 4;
 const UNFINISHED_ROWS: usize = 15;
 
 fn when(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
-        .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|| "?".into())
+    crate::timefmt::local(secs, "%m-%d %H:%M").unwrap_or_else(|| "?".into())
 }
 
 fn counts_line(counts: &[(String, i64)]) -> String {
@@ -78,7 +72,7 @@ pub(crate) fn rows(
 }
 
 pub(crate) fn open(app: &mut forge_tui::App, store: &Store, session_id: &str) {
-    let since = chrono::Utc::now().timestamp() - WINDOW_DAYS * 86_400;
+    let since = jiff::Timestamp::now().as_second() - WINDOW_DAYS * 86_400;
     let session_counts = store
         .turn_end_counts(0, Some(session_id))
         .unwrap_or_default();

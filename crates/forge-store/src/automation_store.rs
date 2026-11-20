@@ -271,7 +271,7 @@ impl Store {
         session_id: &str,
         cwd: &str,
     ) -> Result<()> {
-        let stale_before = chrono::Utc::now().timestamp() - WORKFLOW_RUN_STALE_SECS;
+        let stale_before = jiff::Timestamp::now().as_second() - WORKFLOW_RUN_STALE_SECS;
         let conn = self.lock()?;
         conn.execute(
             "UPDATE workflow_run SET status = 'interrupted' \
@@ -304,7 +304,7 @@ impl Store {
              WHERE id = ?7 AND status = 'running'",
             (
                 if ok { "ok" } else { "failed" },
-                chrono::Utc::now().timestamp(),
+                jiff::Timestamp::now().as_second(),
                 summary,
                 phases,
                 agents,
@@ -323,7 +323,7 @@ impl Store {
         self.lock()?.execute(
             "UPDATE workflow_run SET status = 'interrupted', finished_at = ?1 \
              WHERE id = ?2 AND status = 'running'",
-            (chrono::Utc::now().timestamp(), id),
+            (jiff::Timestamp::now().as_second(), id),
         )?;
         Ok(())
     }
@@ -340,7 +340,7 @@ impl Store {
         cwd: &str,
         limit: usize,
     ) -> Result<Vec<WorkflowRun>> {
-        let stale_before = chrono::Utc::now().timestamp() - WORKFLOW_RUN_STALE_SECS;
+        let stale_before = jiff::Timestamp::now().as_second() - WORKFLOW_RUN_STALE_SECS;
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, name, session_id, cwd, started_at, finished_at, status, summary, \

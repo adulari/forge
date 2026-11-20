@@ -201,7 +201,7 @@ fn model_health_report(excluded: &[(String, i64, String)], benched_rows: usize) 
 
 /// A compact "12m" / "3h 20m" remaining, from an absolute epoch-second expiry.
 fn human_remaining(until_epoch: i64) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let secs = (until_epoch - now).max(0);
     if secs >= 3600 {
         format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
@@ -460,7 +460,7 @@ mod tests {
     /// stays gone — the whole reason this defect cost a day was that nothing said so anywhere.
     #[test]
     fn excluded_but_reachable_provider_is_not_reported_healthy() {
-        let until = chrono::Utc::now().timestamp() + 20 * 60;
+        let until = jiff::Timestamp::now().as_second() + 20 * 60;
         let reachability = vec![check(
             Status::Ok,
             "opencode_go reachability",
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn doctor_reports_an_excluded_provider_with_its_reason_and_expiry() {
-        let until = chrono::Utc::now().timestamp() + 20 * 60;
+        let until = jiff::Timestamp::now().as_second() + 20 * 60;
         let checks = model_health_report(
             &[(
                 "claude-cli".to_string(),
@@ -582,7 +582,7 @@ mod tests {
 
     #[test]
     fn benched_model_rows_are_counted_separately_from_provider_rows() {
-        let until = chrono::Utc::now().timestamp() + 600;
+        let until = jiff::Timestamp::now().as_second() + 600;
         let checks =
             model_health_report(&[("groq".to_string(), until, "auth failed".to_string())], 3);
         let models = checks
@@ -594,7 +594,7 @@ mod tests {
 
     #[test]
     fn human_remaining_never_goes_negative() {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         assert_eq!(human_remaining(now - 100), "0s");
         assert_eq!(human_remaining(now + 125), "2m");
         assert_eq!(human_remaining(now + 7200 + 60), "2h 1m");

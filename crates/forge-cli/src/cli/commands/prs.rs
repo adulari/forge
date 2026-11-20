@@ -183,10 +183,8 @@ pub(crate) fn review_lines(answer: &Value) -> Vec<String> {
 fn who_when(owner: &Value) -> String {
     let at = owner["at"]
         .as_i64()
-        .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
-        .map_or_else(String::new, |d| {
-            format!(" at {}", d.format("%Y-%m-%d %H:%M UTC"))
-        });
+        .and_then(|t| crate::timefmt::utc(t, "%Y-%m-%d %H:%M UTC"))
+        .map_or_else(String::new, |d| format!(" at {d}"));
     format!("by {}{at}", text(owner, "by"))
 }
 
@@ -357,5 +355,18 @@ mod tests {
     #[test]
     fn an_empty_queue_says_how_to_fill_it() {
         assert!(queue_lines(&json!({"queues": []}))[0].contains("No pull requests"));
+    }
+}
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn the_owner_line_reads_by_name_and_utc_minute() {
+        let owner = serde_json::json!({"by": "floris (cli)", "at": 1_700_000_000});
+        assert_eq!(who_when(&owner), "by floris (cli) at 2023-11-14 22:13 UTC");
+        let no_time = serde_json::json!({"by": "floris"});
+        assert_eq!(who_when(&no_time), "by floris");
     }
 }

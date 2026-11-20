@@ -453,7 +453,7 @@ pub(crate) async fn deliver_pending_fleet_messages(
             remote::RemoteInput::FollowUp { text }
         };
         if handle.input_tx.send(input).await.is_ok() {
-            match store.mark_fleet_message_delivered(&msg.id, chrono::Utc::now().timestamp()) {
+            match store.mark_fleet_message_delivered(&msg.id, jiff::Timestamp::now().as_second()) {
                 Ok(true) => {}
                 Ok(false) => tracing::warn!(
                     message_id = %msg.id,

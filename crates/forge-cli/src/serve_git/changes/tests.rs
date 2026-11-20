@@ -132,7 +132,7 @@ async fn edits_that_predate_the_last_commit_do_not_claim_a_file() {
     // Back-date the commit's successor so the recorded edit is older than HEAD.
     std::fs::write(dir.path().join("a.txt"), "a\nhuman, later\n").unwrap();
     git_in(dir.path(), &["add", "a.txt"]);
-    let later = (chrono::Utc::now().timestamp() + 3_600).to_string();
+    let later = (jiff::Timestamp::now().as_second() + 3_600).to_string();
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir.path())
@@ -172,7 +172,7 @@ async fn committing_one_file_keeps_the_other_uncommitted_edits_attributed() {
     edited(&store, &sid, "edit_file", "b.txt");
     // The user commits only b.txt (dated later than the edits); a.txt is still the agent's.
     git_in(dir.path(), &["add", "b.txt"]);
-    let later = (chrono::Utc::now().timestamp() + 3_600).to_string();
+    let later = (jiff::Timestamp::now().as_second() + 3_600).to_string();
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(dir.path())

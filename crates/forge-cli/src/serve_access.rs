@@ -466,7 +466,7 @@ impl AuditLog {
             Ok(value) => value,
             Err(_) => return,
         };
-        value["ts"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
+        value["ts"] = serde_json::json!(crate::timefmt::now_rfc3339_auto());
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
