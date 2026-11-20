@@ -231,6 +231,35 @@ jobs:
         if: always()
         run: bash scripts/ci/trim-runner-cache.sh
 
+  # Linux-only CI let a dependency under `[target.'cfg(unix)'.dependencies]` that every platform
+  # uses (chrono in forge-tui) reach a release, where only release.yml's Windows leg caught it and
+  # cost days. `cargo check` of the shipped binary for the Windows target catches that class of
+  # break at PR time without linking anything. GitHub-hosted, so it never queues behind the single
+  # heavy self-hosted runner.
+  windows-check:
+    name: check (windows)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      # dtolnay/rust-toolchain ignores rust-toolchain.toml; resolve the pinned channel like
+      # release.yml so the installed target matches what cargo will actually use.
+      - name: Resolve the pinned toolchain
+        id: toolchain
+        shell: bash
+        run: sed -n 's/^ *channel *= *"\(.*\)"/channel=\1/p' rust-toolchain.toml >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+        with:
+          key: check-x86_64-pc-windows-msvc-${{ steps.toolchain.outputs.channel }}
+          add-job-id-key: false
+      - run: cargo check --locked --bin forge --target x86_64-pc-windows-msvc
+
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
   # `--release --locked`, and breakages there (LTO-only failures, a Cargo.lock that drifted from
   # Cargo.toml) surface only at tag time otherwise — exactly what failed v0.4.42's first release.
@@ -267,7 +296,7 @@ jobs:
         run: bash scripts/ci/trim-runner-cache.sh
 
   CI:
-    needs: [changes, anywhere-policy, fmt, clippy, test, release-build]
+    needs: [changes, anywhere-policy, fmt, clippy, test, windows-check, release-build]
     if: always()
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 5
@@ -290,6 +319,7 @@ jobs:
             "fmt=${{ needs.fmt.result }}" \
             "clippy=${{ needs.clippy.result }}" \
             "test=${{ needs.test.result }}" \
+            "windows-check=${{ needs.windows-check.result }}" \
             "release-build=${{ needs.release-build.result }}"; do
             name="${entry%%=*}"
             result="${entry#*=}"
