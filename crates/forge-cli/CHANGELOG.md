@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- One merge queue across daemons (docs/rfcs/shared-merge-queue.md). Daemons that watch PRs of the same GitHub repository take turns landing through a lease held in a ref of that repository (`refs/forge/merge-queue/<base>`, created and moved through the git refs API, which is atomic): only the lease holder updates, verifies and lands, the others hold their queue heads and say who is landing (`landing on ssu-dev: PR #123`). The holder renews every minute; a lease stale for ten minutes is taken over, so a dead daemon never blocks the queue. If GitHub refuses the lease the daemon lands on its own with a warning, as before. `[pr_watch] shared_queue = false` turns it off. The holder shows on `/queue`, `forge board`, `forge prs queue` and the Merge queue page on desktop and phone.
+
 ### Changed
 
 - Forge Anywhere relay traffic is about 2.6x smaller. Byte fields inside sealed payloads travel as base64url (wire v2) instead of JSON number arrays, negotiated per host: a host answers in v2 only when the app or daemon asks, and an app only sends v2 to a host that said it reads it, so the App Store app, released daemons and the current relay service keep working unchanged. The encryption envelope is identical. With v2, bodies up to 192 KiB stay inline instead of taking the relay-blob round trip above 64 KiB. See docs/rfcs/anywhere-wire-v2-and-device-revoke.md.

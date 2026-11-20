@@ -123,6 +123,7 @@ pub(crate) fn queue_rows(answer: &Value) -> Vec<forge_tui::queue_menu::QueueRow>
                 state: text(row, "state"),
                 reason: text(row, "reason"),
                 review: text(row, "review"),
+                lease: text(&queue["lease"], "text"),
                 pushes: row["pushes"]
                     .as_u64()
                     .and_then(|p| u32::try_from(p).ok())
@@ -204,7 +205,12 @@ pub(crate) fn queue_lines(answer: &Value) -> Vec<String> {
     }
     let mut lines = Vec::new();
     for queue in &queues {
-        lines.push(text(queue, "repo").to_string());
+        let lease = text(&queue["lease"], "text");
+        lines.push(if lease.is_empty() {
+            text(queue, "repo").to_string()
+        } else {
+            format!("{} [{lease}]", text(queue, "repo"))
+        });
         for row in queue["rows"].as_array().into_iter().flatten() {
             let place = row["position"]
                 .as_u64()
@@ -254,6 +260,19 @@ mod tests {
         );
         assert!(lines[2].contains("queued") && lines[2].contains("behind PR #7"));
         assert!(lines[3].starts_with("  -   PR #8") && lines[3].contains("conflicts in src/a.rs"));
+    }
+
+    #[test]
+    fn the_repository_line_and_rows_carry_the_lease_holder() {
+        let answer = json!({"queues": [{"repo": "/r/.git @ main",
+            "lease": {"status": "other", "holder": "ssu-dev", "pr": 123, "text": "landing on ssu-dev: PR #123"},
+            "rows": [{"session_id": "a", "position": 1, "pr_number": 9, "state": "queued",
+                "reason": "landing on ssu-dev: PR #123", "pushes": 0}]}]});
+        assert_eq!(
+            queue_lines(&answer)[0],
+            "/r/.git @ main [landing on ssu-dev: PR #123]"
+        );
+        assert_eq!(queue_rows(&answer)[0].lease, "landing on ssu-dev: PR #123");
     }
 
     #[test]

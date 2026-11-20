@@ -10,6 +10,7 @@
 //! so the queue behind it keeps going; a new push puts it back at its place.
 
 mod changelog;
+pub(crate) mod lease;
 mod update;
 pub(crate) use update::{recover_interrupted_update, Verify};
 #[cfg(test)]
@@ -20,11 +21,69 @@ mod custody_tests;
 mod tests;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use crate::serve_pr_watch::{Mode, Phase, Watch};
 use update::{run_step, Step};
+
+use crate::serve_pr::Gh;
+use lease::{Lease, LeaseView, Leases};
+
+/// How the daemon queues merge-mode PRs.
+#[derive(Clone)]
+pub(crate) enum Queue {
+    /// `[pr_watch] queue = false`: each PR is polled and merged on its own.
+    Off,
+    /// One queue per repository on this daemon.
+    Local,
+    /// The same, and daemons watching one GitHub repository take turns landing through its lease.
+    Shared(Arc<Leases>),
+}
+
+impl Queue {
+    pub(crate) fn load() -> Self {
+        match forge_config::load().ok().map(|c| c.pr_watch).as_ref() {
+            Some(c) if !c.queue => Self::Off,
+            Some(c) if !c.shared_queue => Self::Local,
+            _ => Self::Shared(daemon_leases()),
+        }
+    }
+
+    pub(crate) fn is_on(&self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub(crate) fn leases(&self) -> Option<&Leases> {
+        match self {
+            Self::Shared(leases) => Some(leases),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn daemon_leases() -> Arc<Leases> {
+    static LEASES: std::sync::OnceLock<Arc<Leases>> = std::sync::OnceLock::new();
+    LEASES
+        .get_or_init(|| Arc::new(Leases::new(lease::Identity::of_this_daemon())))
+        .clone()
+}
+
+/// After a sweep: give back the lease of every repository this daemon has nothing left to land
+/// in, or all of them when sharing was switched off.
+pub(crate) async fn settle_leases(queue: &Queue, gh: &Gh, all: &[Watch], now: i64) {
+    let busy = |repo: &str| {
+        queue.leases().is_some()
+            && all.iter().any(|w| {
+                queued(w) && waiting(w) && w.queue.as_ref().is_some_and(|q| q.repo == repo)
+            })
+    };
+    match queue.leases() {
+        Some(leases) => leases.release_idle(gh, busy, now).await,
+        None => daemon_leases().release_idle(gh, busy, now).await,
+    }
+}
 
 /// Seconds after a push before the head may merge, so a PR whose checks have not registered yet
 /// is not mistaken for a green one.
@@ -67,6 +126,9 @@ pub(crate) struct QueueInfo {
     retry_seq: u32,
     #[serde(default)]
     retried_seq: u32,
+    /// Who holds the repository's shared lease, as of the last look (`[pr_watch] shared_queue`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) lease: Option<LeaseView>,
     skipped_head: Option<String>,
     pushed_head: Option<String>,
     pushed_at: Option<i64>,
@@ -89,6 +151,7 @@ impl QueueInfo {
             rank: None,
             retry_seq: 0,
             retried_seq: 0,
+            lease: None,
             skipped_head: None,
             pushed_head: None,
             pushed_at: None,
@@ -264,7 +327,10 @@ async fn update_step(
 }
 
 /// Queue bookkeeping and, for the head, the update step. Sets `w.hold` for PR Watch.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn before_poll(
+    gh: &Gh,
+    queue: &Queue,
     root: &Path,
     w: &mut Watch,
     mut all: Vec<Watch>,
@@ -333,6 +399,29 @@ pub(crate) async fn before_poll(
         w.hold = Some(reason);
         return pre;
     }
+
+    if let Some(leases) = queue.leases() {
+        let pr = w.pr_number;
+        let info = w.queue.as_mut().expect("set above");
+        match leases.acquire(gh, root, &repo, &base, pr, now).await {
+            Lease::Held(view) | Lease::Degraded(view) => info.lease = Some(view),
+            Lease::Off => info.lease = None,
+            Lease::Busy(view) => {
+                let reason = format!(
+                    "{} (the shared queue lets one daemon land at a time)",
+                    view.landing()
+                );
+                info.state = QueueState::Queued;
+                info.reason = Some(reason.clone());
+                info.lease = Some(view);
+                w.hold = Some(reason);
+                return pre;
+            }
+        }
+    } else if let Some(info) = w.queue.as_mut() {
+        info.lease = None;
+    }
+    let info = w.queue.as_mut().expect("set above");
 
     if let (Some(at), Some(pushed)) = (info.pushed_at, info.pushed_head.clone()) {
         let caught_up = head_sha.as_deref() == Some(pushed.as_str());
@@ -444,6 +533,9 @@ pub(crate) struct QueueRow {
 #[derive(Serialize, Debug, PartialEq, Eq)]
 pub(crate) struct RepoQueue {
     pub(crate) repo: String,
+    /// Who is landing this repository's PRs when daemons share the queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) lease: Option<lease::LeaseRow>,
     pub(crate) rows: Vec<QueueRow>,
 }
 
@@ -542,7 +634,15 @@ pub(crate) fn snapshot(all: &[Watch]) -> Vec<RepoQueue> {
                 };
                 rows.push(row(w, None, state));
             }
-            RepoQueue { repo, rows }
+            let lease = all
+                .iter()
+                .filter(|w| w.mode == Mode::Merge)
+                .filter_map(|w| w.queue.as_ref())
+                .filter(|q| q.repo == repo)
+                .filter_map(|q| q.lease.clone())
+                .max_by_key(|l| l.seen_at)
+                .map(|l| lease::LeaseRow::from(&l));
+            RepoQueue { repo, lease, rows }
         })
         .collect()
 }

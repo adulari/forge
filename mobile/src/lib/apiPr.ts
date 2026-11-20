@@ -303,8 +303,21 @@ export interface PrQueueRow {
   review?: string | null;
 }
 
+/** Who is landing a repository's PRs when daemons share its queue. */
+export interface PrQueueLease {
+  /** `mine`: this daemon, `other`: another daemon, `unavailable`: GitHub refused the lease and this daemon lands alone. */
+  status: "mine" | "other" | "unavailable";
+  holder?: string;
+  pr?: number;
+  /** Unix seconds; the lease goes stale then unless its holder renews it. */
+  expires_at?: number;
+  /** `landing on ssu-dev: PR #123`. */
+  text: string;
+}
+
 export interface PrRepoQueue {
   repo: string;
+  lease?: PrQueueLease | null;
   rows: PrQueueRow[];
 }
 
