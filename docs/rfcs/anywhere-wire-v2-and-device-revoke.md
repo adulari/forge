@@ -1,9 +1,10 @@
 # RFC: Anywhere wire v2 and device revoke by any device
 
-Status: implemented (forge `feat/anywhere-protocol-v2`, forge-anywhere-service
-`feat/anywhere-protocol-v2`). Service deploy pending owner approval.
+Status: sections 1 and 2 implemented and deployed (service 3b20168). Section 3 ("Make owner")
+implemented (forge `feat/anywhere-make-owner`, forge-anywhere-service `feat/make-owner`); its
+service deploy is pending owner approval.
 
-Two changes to Forge Anywhere that ship together because they touch the same three components
+Two changes (plus a follow-up, section 3) to Forge Anywhere that ship together because they touch the same three components
 (service, daemon/connector, app):
 
 1. **Wire v2**: byte fields inside sealed relay payloads travel as base64url instead of JSON number
@@ -104,7 +105,8 @@ other device and replace the recovery wrap with garbage.
 ### Rule
 
 - **Owner device**: the account's oldest active, key-enrolled device (`ORDER BY created_at, rowid`;
-  normally the device that ran `forge anywhere setup`). Computed, not stored, so no migration.
+  normally the device that ran `forge anywhere setup`), unless the owner chose another device
+  (section 3).
 - Any active, enrolled device of the account may revoke any other device of that account.
 - Only the owner device may revoke the owner device. A non-owner gets `403
   owner_device_protected`.
@@ -145,6 +147,52 @@ last refresh. New tests pin both the sliding window and the lapse.
   reason. Against a service without `owner`, every client behaves as before and the service
   decides.
 
+## 3. Choosing the owner ("Make owner")
+
+The implicit rule made the browser app owner on accounts where it was paired first. The owner
+device can now hand ownership to another active device.
+
+### Service
+
+- `account_owner (account_id PK, device_id, updated_at)` stores the explicit choice. The effective
+  owner is that device while it is active and key-enrolled; otherwise (no row, or a row whose
+  device was revoked) the oldest-active rule applies. Revoke protection uses the effective owner.
+- `POST /v1/devices/{id}/make-owner` (bearer auth, no body): only the current owner device may
+  call it (`403 owner_required` otherwise); the target must be an active, key-enrolled device of
+  the same account (`404 device_not_found`). Returns the updated device list (same shape as
+  `GET /v1/devices`). Making yourself the owner again is a no-op. Idempotent by nature, so no
+  idempotency key.
+- Every decision except not-found is audited in `security_audit_event` as
+  `device_owner_transferred`: `success` (`previous_owner_device_id`, `target_device_id`) or
+  `denied` (`reason: owner_required`).
+- An owner that revokes itself clears the row, so ownership still passes to the oldest remaining
+  device.
+- `GET /v1/capabilities` gains `features.owner_transfer: true`.
+
+### Migration and rollback
+
+The service refuses to start on a database whose `PRAGMA user_version` is newer than it knows, so
+a normal versioned migration would make the previous binary unable to roll back. The table is
+therefore created by an **additive step outside the `user_version` ladder**: on open, inside an
+immediate transaction, if `account_owner` does not exist it is created and backfilled with each
+account's current implicit owner (so nothing changes for anyone). `user_version` stays 12. The
+previous binary starts on the migrated database and ignores the table; while rolled back it
+applies the oldest-active rule, and a row it leaves stale (its device revoked) is ignored by the
+new binary. Verified by running the previous release binary against a migrated copy.
+
+### Clients
+
+All gated on `features.owner_transfer` and on this device being the owner; against an older
+service nothing is offered and nothing is called.
+
+- **CLI**: `forge anywhere devices --make-owner <id>` asks `[y/N]` (`--yes` skips it), checks the
+  capability and the rule, posts, and confirms the new owner from the response.
+- **TUI** (`/anywhere`): `m` on another device opens a confirmation (Cancel focused); the footer
+  shows `m make owner` only where it applies, and a non-owner or an older service gets a one-line
+  reason instead.
+- **Phone, desktop and web**: a crown action on qualifying rows of the Devices page opens an inline
+  confirmation; TypeScript only, so it ships OTA.
+
 ## Rollout
 
 Each step is safe on its own; nothing requires a later step to keep working.
@@ -160,6 +208,10 @@ Each step is safe on its own; nothing requires a later step to keep working.
    No native build is required.
 4. **Later**: once telemetry shows no pre-v2 readers, switch the sync-record and durable-command
    writers to v2 (their readers already accept it).
+
+Make owner follows the same order: deploy the service (check `owner_transfer: true` and exactly
+one `owner: true`), then clients offer the action as they update. Rolling the service back hides
+the action again (the capability disappears) and restores the oldest-active rule.
 
 Rollback: reverting the service restores the old revoke rule; clients keep working (the `owner`
 field is optional everywhere). Reverting a daemon or app falls back to v1 by negotiation.
