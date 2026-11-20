@@ -71,8 +71,10 @@ fn unix_secs(at: SystemTime) -> u64 {
 }
 
 fn clock(at: SystemTime) -> String {
-    chrono::DateTime::<chrono::Local>::from(at)
-        .format("%H:%M")
+    jiff::Timestamp::try_from(at)
+        .unwrap_or_default()
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%H:%M")
         .to_string()
 }
 
@@ -253,7 +255,7 @@ impl Session {
         }
         episode.attempts += 1;
         let until_bench = Duration::from_secs(
-            u64::try_from(soonest - chrono::Utc::now().timestamp()).unwrap_or(0) + 1,
+            u64::try_from(soonest - jiff::Timestamp::now().as_second()).unwrap_or(0) + 1,
         );
         let wait = until_bench.min(MAX_WAIT).min(remaining);
         tracing::warn!(%candidate, wait_secs = wait.as_secs(), "every candidate is benched: waiting for the soonest bench to end");
@@ -480,5 +482,27 @@ mod tests {
         assert_eq!(span(secs(45)), "45s");
         assert_eq!(span(secs(12 * 60 + 5)), "12m");
         assert_eq!(span(secs(4 * 3600 + 9 * 60 + 30)), "4h09m");
+    }
+}
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn the_clock_is_a_zero_padded_hour_and_minute() {
+        for secs in [0u64, 86_399, 1_786_314_600, 1_794_267_000] {
+            let text = clock(UNIX_EPOCH + Duration::from_secs(secs));
+            let b = text.as_bytes();
+            assert!(
+                b.len() == 5
+                    && b[2] == b':'
+                    && b[..2].iter().chain(&b[3..]).all(u8::is_ascii_digit),
+                "{text}"
+            );
+            assert!(
+                text[..2].parse::<u32>().unwrap() < 24 && text[3..].parse::<u32>().unwrap() < 60
+            );
+        }
     }
 }

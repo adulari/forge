@@ -82,8 +82,7 @@ fn parse_usages(body: &str) -> Vec<forge_types::QuotaHint> {
             let resets_at = detail
                 .get("resetTime")
                 .and_then(serde_json::Value::as_str)
-                .and_then(|iso| chrono::DateTime::parse_from_rfc3339(iso).ok())?
-                .timestamp();
+                .and_then(crate::timefmt::parse_rfc3339)?;
             Some(forge_types::QuotaHint {
                 provider: KIMI_PROVIDER.to_string(),
                 window: window.to_string(),
@@ -118,7 +117,7 @@ pub(crate) async fn refresh_kimi_quota(store: &Store) {
     let Some(body) = fetch_usages(USAGE_URL, &key).await else {
         return;
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for hint in parse_usages(&body) {
         let _ = store.record_quota_at(&hint, now);
     }
@@ -158,11 +157,7 @@ mod tests {
         assert!((hint.fraction_used.unwrap() - 0.37).abs() < 1e-9);
         assert_eq!(
             hint.resets_at,
-            Some(
-                chrono::DateTime::parse_from_rfc3339("2026-09-14T22:21:14.589596Z")
-                    .unwrap()
-                    .timestamp()
-            )
+            Some(crate::timefmt::parse_rfc3339("2026-09-14T22:21:14.589596Z").unwrap())
         );
     }
 

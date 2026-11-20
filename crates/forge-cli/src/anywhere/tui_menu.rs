@@ -46,8 +46,8 @@ fn epoch_ms(raw: &str) -> Option<i64> {
 
 fn date(raw: &str) -> String {
     epoch_ms(raw)
-        .and_then(|ms| chrono::DateTime::from_timestamp(ms / 1000, 0))
-        .map_or_else(|| raw.to_string(), |t| t.format("%Y-%m-%d").to_string())
+        .and_then(|ms| crate::timefmt::utc(ms / 1000, "%Y-%m-%d"))
+        .unwrap_or_else(|| raw.to_string())
 }
 
 pub(crate) fn view_of(
@@ -473,5 +473,17 @@ mod tests {
         );
         set_category(true, "instructions", false).await.unwrap();
         assert!(matches!(load_devices(true).await, Devices::Loaded { .. }));
+    }
+}
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn the_menu_date_is_the_utc_day_of_seconds_or_millis() {
+        assert_eq!(date("1700000000"), "2023-11-14");
+        assert_eq!(date("1700000000000"), "2023-11-14");
+        assert_eq!(date("junk"), "junk");
     }
 }

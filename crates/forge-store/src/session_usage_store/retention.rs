@@ -22,7 +22,7 @@ impl Store {
         if max_sessions == 0 {
             return Ok(0);
         }
-        let cutoff = chrono::Utc::now().timestamp() - horizon_secs;
+        let cutoff = jiff::Timestamp::now().as_second() - horizon_secs;
         with_busy_retry(|| {
             let conn = self.lock()?;
             let ids: Vec<String> = {
@@ -62,7 +62,7 @@ impl Store {
         if max_sessions == 0 {
             return Ok(0);
         }
-        let cutoff = chrono::Utc::now().timestamp() - horizon_secs;
+        let cutoff = jiff::Timestamp::now().as_second() - horizon_secs;
         with_busy_retry(|| {
             let conn = self.lock()?;
             let ids: Vec<String> = {
