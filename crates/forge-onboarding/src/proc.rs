@@ -127,6 +127,8 @@ mod tests {
 
     #[test]
     fn a_quick_command_returns_its_output() {
+        // Other tests point PATH at a fake bin directory while they hold this lock.
+        let _guard = crate::test_support::env_lock();
         let (ok, out) = run_capture("sh", &["-c", "echo hi"], Duration::from_secs(30)).unwrap();
         assert!(ok);
         assert_eq!(out.trim(), "hi");
@@ -134,6 +136,7 @@ mod tests {
 
     #[test]
     fn a_slow_command_is_killed_at_the_deadline() {
+        let _guard = crate::test_support::env_lock();
         let start = Instant::now();
         assert!(run_capture("sh", &["-c", "sleep 5"], Duration::from_millis(100)).is_none());
         assert!(start.elapsed() < Duration::from_secs(2));
