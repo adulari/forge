@@ -3,13 +3,13 @@
 // and revoke-with-key-rotation flow — same `anywhere.revokeDevice` used by
 // recovery-phrase.tsx's Recovery Center, just given its own dedicated list here.
 import { PAGE_MAX_WIDTH } from "../../components/ds/pageWidth";
-import { Laptop, Smartphone, Trash2 } from "lucide-react-native";
-import React, { useCallback, useMemo, useState } from "react";
+import { Crown, Laptop, Smartphone, Trash2 } from "lucide-react-native";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { Badge } from "../../components/ds/Badge";
 import { useClockSeconds } from "../../components/ds/relativeClock";
-import { describeDevices } from "../../lib/anywhere/deviceList";
+import { canMakeOwner, describeDevices } from "../../lib/anywhere/deviceList";
 import { PageHeader } from "../../components/ds/PageHeader";
 import { Banner } from "../../components/ds/Banner";
 import { Button } from "../../components/ds/Button";
@@ -17,6 +17,7 @@ import { Input } from "../../components/ds/Input";
 import { Screen } from "../../components/ds/Screen";
 import { useToast } from "../../components/ds/ToastHost";
 import { useAnywhere } from "../../lib/AnywhereProvider";
+import { DEFAULT_ANYWHERE_SERVICE_URL, fetchAnywhereCapabilities } from "../../lib/anywhereApi";
 import { useTokens } from "../../theme/ThemeProvider";
 import { radii, space } from "../../theme/tokens";
 import { type as typeScale } from "../../theme/typography";
@@ -29,7 +30,17 @@ export default function AnywhereDevicesScreen() {
   const [target, setTarget] = useState<string | null>(null);
   const [phrase, setPhrase] = useState("");
   const [busy, setBusy] = useState(false);
+  const [ownerTarget, setOwnerTarget] = useState<string | null>(null);
+  const [ownerTransferSupported, setOwnerTransferSupported] = useState(false);
   const nowSeconds = useClockSeconds();
+  const serviceUrl = anywhere.credentials?.serviceUrl;
+  useEffect(() => {
+    let cancelled = false;
+    fetchAnywhereCapabilities(serviceUrl ?? process.env.EXPO_PUBLIC_FORGE_ANYWHERE_URL ?? DEFAULT_ANYWHERE_SERVICE_URL)
+      .then((capabilities) => { if (!cancelled) setOwnerTransferSupported(capabilities.features.owner_transfer === true); })
+      .catch(() => { if (!cancelled) setOwnerTransferSupported(false); });
+    return () => { cancelled = true; };
+  }, [serviceUrl]);
   const deviceRows = useMemo(
     () => describeDevices(anywhere.devices, anywhere.credentials?.deviceIdHex, nowSeconds * 1000),
     [anywhere.devices, anywhere.credentials?.deviceIdHex, nowSeconds],
@@ -49,6 +60,22 @@ export default function AnywhereDevicesScreen() {
       setBusy(false);
     }
   }, [anywhere, phrase, target, toast]);
+
+  const thisDeviceIsOwner = deviceRows.some((row) => row.isThisDevice && row.isOwner);
+
+  const makeOwner = useCallback(async () => {
+    if (!ownerTarget) return;
+    setBusy(true);
+    try {
+      await anywhere.makeOwner(ownerTarget);
+      toast.show("Ownership handed over.", { tone: "neutral" });
+      setOwnerTarget(null);
+    } catch (reason) {
+      toast.show(reason instanceof Error ? reason.message : "Ownership could not be handed over.", { tone: "danger" });
+    } finally {
+      setBusy(false);
+    }
+  }, [anywhere, ownerTarget, toast]);
 
   if (anywhere.phase !== "ready") return null;
 
@@ -81,10 +108,24 @@ export default function AnywhereDevicesScreen() {
                   </Text>
                 ) : null}
               </View>
+              {canMakeOwner(device, { thisDeviceIsOwner, ownerTransferSupported }) ? (
+                <Pressable
+                  onPress={() => {
+                    setOwnerTarget(device.id);
+                    setTarget(null);
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Make ${device.name} the owner`}
+                  hitSlop={8}
+                >
+                  <Crown size={16} color={tokens.ink2} />
+                </Pressable>
+              ) : null}
               {device.canRevoke ? (
                 <Pressable
                   onPress={() => {
                     setTarget(device.id);
+                    setOwnerTarget(null);
                     setPhrase("");
                   }}
                   accessibilityRole="button"
@@ -100,6 +141,19 @@ export default function AnywhereDevicesScreen() {
             <Text style={[typeScale.sub, styles.empty, { color: tokens.ink3 }]}>No devices enrolled yet.</Text>
           ) : null}
         </View>
+
+        {ownerTarget ? (
+          <View style={[styles.revokePanel, { backgroundColor: tokens.bg2, borderColor: tokens.borderStrong }]}>
+            <Text style={[typeScale.headingBold, { color: tokens.ink }]}>{`Make ${deviceRows.find((row) => row.id === ownerTarget)?.name ?? "device"} the owner?`}</Text>
+            <Text style={[typeScale.sub, { color: tokens.ink2 }]}>
+              Only the owner can revoke the owner or hand ownership on. This device stops being the owner.
+            </Text>
+            <View style={styles.actions}>
+              <Button label="Cancel" variant="ghost" disabled={busy} onPress={() => setOwnerTarget(null)} style={styles.action} />
+              <Button label="Make owner" variant="primary" loading={busy} onPress={() => void makeOwner()} style={styles.action} />
+            </View>
+          </View>
+        ) : null}
 
         {target ? (
           <View style={[styles.revokePanel, { backgroundColor: tokens.bg2, borderColor: tokens.borderStrong }]}>
