@@ -6,6 +6,11 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Esc in the local terminal app now leaves the same "Interrupted by you" note the daemon does, so a stopped turn is not mistaken for a crash by `/turns`, `forge turns` and the resume path.
+- `pr-watch.json` and `drains.json` follow `FORGE_DB` (`<FORGE_DB>.daemon/`), so isolated runs no longer read or write the real data directory's PR Watch state.
+
 ## [2.29.0] - 2026-11-13
 
 ### Security

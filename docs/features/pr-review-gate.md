@@ -105,5 +105,5 @@ dismissed)`). Where to do it:
 ## Where it lives
 
 The verdict is stored on the watch record in `pr-watch.json` (`review`), not in the database: no
-migration. Re-arming a watch clears it. A `running` review lives in the daemon's memory only; after
+migration. The file sits in the data directory, or in `<FORGE_DB>.daemon/` when `FORGE_DB` selects another store. Re-arming a watch clears it. A `running` review lives in the daemon's memory only; after
 a restart the stored `running` state has no job behind it and the next tick starts it again.
