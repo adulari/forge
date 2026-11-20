@@ -87,8 +87,10 @@ mod tests {
     const TOKEN: &str = "sk-ant-oat01-FakeTokenForTestsOnly0123456789abcdefghijkl";
 
     struct Fixture {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        // Field order is drop order: the environment is restored before the lock is released,
+        // or the next test sets its HOME/PATH and this drop writes the old values over them.
         _env: ScopedEnv,
+        _guard: std::sync::MutexGuard<'static, ()>,
         dir: tempfile::TempDir,
     }
 

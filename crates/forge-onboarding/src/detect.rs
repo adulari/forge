@@ -472,8 +472,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     struct Fixture {
-        _guard: std::sync::MutexGuard<'static, ()>,
+        // Field order is drop order: the environment is restored before the lock is released,
+        // or the next test sets its HOME/PATH and this drop writes the old values over them.
         _env: ScopedEnv,
+        _guard: std::sync::MutexGuard<'static, ()>,
         home: tempfile::TempDir,
     }
 
@@ -514,10 +516,8 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    // Detection returns as soon as every probe has answered, so this budget only matters when a
-    // probe is starved. A swapping CI host has missed 5 s for a probe that just reads ~/.claude.
     fn detect_fast() -> Machine {
-        detect_with(Arc::new(NoHost), Duration::from_secs(60))
+        detect_with(Arc::new(NoHost), Duration::from_secs(5))
     }
 
     #[test]
