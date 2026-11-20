@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Forge Anywhere "Make owner": the owner device can hand ownership of the account to another of your devices (phone, desktop or CLI host) instead of it always being the oldest device. `forge anywhere devices --make-owner <id>`, `m` on a device in the `/anywhere` TUI menu, and a crown action on the app's Devices page, each behind a confirmation and offered only on the owner device and only when the service advertises `owner_transfer`, so nothing changes against the currently deployed service. See docs/rfcs/anywhere-wire-v2-and-device-revoke.md.
+
 ### Changed
 
 - Forge Anywhere relay traffic is about 2.6x smaller. Byte fields inside sealed payloads travel as base64url (wire v2) instead of JSON number arrays, negotiated per host: a host answers in v2 only when the app or daemon asks, and an app only sends v2 to a host that said it reads it, so the App Store app, released daemons and the current relay service keep working unchanged. The encryption envelope is identical. With v2, bodies up to 192 KiB stay inline instead of taking the relay-blob round trip above 64 KiB. See docs/rfcs/anywhere-wire-v2-and-device-revoke.md.

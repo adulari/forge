@@ -1,11 +1,17 @@
-//! `forge anywhere devices`: list the account's devices and revoke one with a key rotation.
+//! `forge anywhere devices`: list the account's devices, revoke one with a key rotation, or make
+//! another device the owner.
 //!
-//! Any active device may revoke another; only the owner device may revoke the owner device. The
-//! service enforces that rule; the check here only saves typing the Recovery Kit for nothing.
+//! Any active device may revoke another; only the owner device may revoke the owner device, and
+//! only the owner device may hand ownership to another device. The service enforces both rules;
+//! the checks here only explain them before a request is sent.
 
 use super::*;
 
-pub(super) async fn devices(revoke: Option<&str>) -> Result<()> {
+pub(super) async fn devices(
+    revoke: Option<&str>,
+    make_owner: Option<&str>,
+    yes: bool,
+) -> Result<()> {
     let store = StateStore::platform()?;
     let mut state = store.load()?;
     let token = ensure_access_token(&store, &mut state).await?;
@@ -14,6 +20,11 @@ pub(super) async fn devices(revoke: Option<&str>) -> Result<()> {
     if let Some(device_id) = revoke {
         revoke_device(&store, &mut state, &service_url, &token, device_id).await?;
         return Ok(());
+    }
+    if let Some(device_id) = make_owner {
+        let this_device = state.device_id.clone();
+        return make_owner_command(&service_url, &token, this_device.as_deref(), device_id, yes)
+            .await;
     }
 
     let rows: DeviceList = send_json(
@@ -51,6 +62,118 @@ pub(super) async fn devices(revoke: Option<&str>) -> Result<()> {
     println!(
         "\nRevoke one with `forge anywhere devices --revoke <id>` (asks for your Recovery Kit)."
     );
+    if owner_transfer_supported(&service_url)
+        .await
+        .unwrap_or(false)
+    {
+        println!("Make another device the owner with `forge anywhere devices --make-owner <id>`.");
+    }
+    Ok(())
+}
+
+/// Whether the service advertises `features.owner_transfer`.
+pub(super) async fn owner_transfer_supported(service_url: &str) -> Result<bool> {
+    let capabilities: ServiceCapabilities =
+        send_json(client()?.get(format!("{service_url}/v1/capabilities")))
+            .await
+            .context("check Forge Anywhere service capabilities")?;
+    Ok(capabilities.features.owner_transfer)
+}
+
+/// Why this device cannot make `target` the owner, or `None` when it may. The service enforces
+/// the same rule; this only explains it before a request is sent.
+pub(super) fn make_owner_refusal(
+    devices: &[DeviceRow],
+    this_device: Option<&str>,
+    target: &str,
+) -> Option<String> {
+    let Some(row) = devices.iter().find(|device| device.id == target) else {
+        return Some(format!("device {target} is not an active enrolled device"));
+    };
+    if row.owner {
+        return Some(format!("{} is already the owner device", row.name));
+    }
+    let this_is_owner = devices
+        .iter()
+        .any(|device| device.owner && this_device == Some(device.id.as_str()));
+    if !this_is_owner {
+        return Some(
+            "only the owner device can hand ownership to another device; run this on the owner"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// `POST /v1/devices/{id}/make-owner`; the service answers with the updated device list.
+pub(super) async fn request_make_owner(
+    service_url: &str,
+    access_token: &str,
+    target: &str,
+) -> Result<DeviceList> {
+    send_json(
+        client()?
+            .post(format!("{service_url}/v1/devices/{target}/make-owner"))
+            .bearer_auth(access_token),
+    )
+    .await
+    .context("make the device the Anywhere owner")
+}
+
+/// Checks the capability and the owner rule, then transfers. Returns the new owner's name.
+pub(super) async fn make_owner_checked(
+    service_url: &str,
+    access_token: &str,
+    this_device: Option<&str>,
+    target: &str,
+) -> Result<String> {
+    if !owner_transfer_supported(service_url).await? {
+        bail!("this Forge Anywhere service cannot change the owner device yet");
+    }
+    let rows: DeviceList = send_json(
+        client()?
+            .get(format!("{service_url}/v1/devices"))
+            .bearer_auth(access_token),
+    )
+    .await
+    .context("list Anywhere devices")?;
+    if let Some(reason) = make_owner_refusal(&rows.devices, this_device, target) {
+        bail!(reason);
+    }
+    let updated = request_make_owner(service_url, access_token, target).await?;
+    let Some(owner) = updated.devices.iter().find(|device| device.owner) else {
+        bail!("the service did not report an owner device after the transfer");
+    };
+    if owner.id != target {
+        bail!("the service kept {} as the owner device", owner.name);
+    }
+    Ok(owner.name.clone())
+}
+
+async fn make_owner_command(
+    service_url: &str,
+    access_token: &str,
+    this_device: Option<&str>,
+    target: &str,
+    yes: bool,
+) -> Result<()> {
+    if !yes {
+        if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+            bail!("pass --yes to make a device the owner without a terminal to confirm at");
+        }
+        eprint!(
+            "Make {target} the owner? Only the owner can revoke the owner or hand ownership on, \
+             and this device stops being the owner. [y/N] "
+        );
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            println!("Nothing changed.");
+            return Ok(());
+        }
+    }
+    let name = make_owner_checked(service_url, access_token, this_device, target).await?;
+    println!("{name} is now the owner device of this Forge Anywhere account.");
     Ok(())
 }
 
@@ -256,4 +379,154 @@ async fn revoke_device(
     println!("Revoked device {target_device_id} and rotated encrypted data to epoch {new_epoch}.");
     account_sync::rotate::after_revoke(state, target_is_local);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::{Path, State};
+    use axum::http::HeaderMap;
+    use axum::routing::{get, post};
+    use axum::{Json, Router};
+    use serde_json::{json, Value};
+
+    use super::*;
+
+    fn row(id: &str, owner: bool) -> DeviceRow {
+        DeviceRow {
+            id: id.into(),
+            name: format!("device {id}"),
+            created_at: "1".into(),
+            last_seen_at: None,
+            signing_public_key: None,
+            exchange_public_key: None,
+            owner,
+        }
+    }
+
+    #[test]
+    fn only_the_owner_may_hand_ownership_to_another_active_device() {
+        let rows = [row("aa", true), row("bb", false)];
+        assert_eq!(make_owner_refusal(&rows, Some("aa"), "bb"), None);
+        assert!(make_owner_refusal(&rows, Some("bb"), "bb")
+            .unwrap()
+            .contains("only the owner device"));
+        assert!(make_owner_refusal(&rows, Some("aa"), "aa")
+            .unwrap()
+            .contains("already the owner"));
+        assert!(make_owner_refusal(&rows, Some("aa"), "cc")
+            .unwrap()
+            .contains("not an active enrolled device"));
+        assert!(make_owner_refusal(&rows, None, "bb").is_some());
+    }
+
+    #[derive(Default)]
+    struct Seen {
+        owner: String,
+        calls: Vec<(String, Option<String>)>,
+    }
+
+    async fn service(owner_transfer: Option<bool>) -> (String, Arc<Mutex<Seen>>) {
+        let seen = Arc::new(Mutex::new(Seen {
+            owner: "aa".into(),
+            ..Seen::default()
+        }));
+        fn list(owner: &str) -> Value {
+            json!({"version": 1, "devices": [
+                {"id": "aa", "name": "desk", "created_at": "1", "owner": owner == "aa"},
+                {"id": "bb", "name": "phone", "created_at": "2", "owner": owner == "bb"},
+            ]})
+        }
+        let mut features = json!({"account_bound_enrollment": true, "recovery_kit_v2": true});
+        if let Some(flag) = owner_transfer {
+            features["owner_transfer"] = json!(flag);
+        }
+        let capabilities = json!({
+            "version": 1, "protocol_version": 2, "maximum_client_major": 2, "ready": true,
+            "features": features,
+        });
+        let app = Router::new()
+            .route(
+                "/v1/capabilities",
+                get(move || {
+                    let capabilities = capabilities.clone();
+                    async move { Json(capabilities) }
+                }),
+            )
+            .route(
+                "/v1/devices",
+                get(|State(seen): State<Arc<Mutex<Seen>>>| async move {
+                    Json(list(&seen.lock().unwrap().owner))
+                }),
+            )
+            .route(
+                "/v1/devices/{id}/make-owner",
+                post(
+                    |State(seen): State<Arc<Mutex<Seen>>>,
+                     Path(id): Path<String>,
+                     headers: HeaderMap| async move {
+                        let mut seen = seen.lock().unwrap();
+                        let bearer = headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        seen.calls.push((id.clone(), bearer));
+                        seen.owner = id;
+                        Json(list(&seen.owner))
+                    },
+                ),
+            )
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), seen)
+    }
+
+    #[tokio::test]
+    async fn make_owner_posts_with_the_access_token_and_reads_back_the_new_owner() {
+        let (url, seen) = service(Some(true)).await;
+        let name = make_owner_checked(&url, "access-1", Some("aa"), "bb")
+            .await
+            .unwrap();
+        assert_eq!(name, "phone");
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.calls,
+            vec![("bb".to_string(), Some("Bearer access-1".to_string()))]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_older_service_without_the_capability_is_never_asked() {
+        for flag in [None, Some(false)] {
+            let (url, seen) = service(flag).await;
+            assert!(!owner_transfer_supported(&url).await.unwrap());
+            let error = make_owner_checked(&url, "access-1", Some("aa"), "bb")
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("cannot change the owner"));
+            assert!(seen.lock().unwrap().calls.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_owner_is_refused_before_any_request() {
+        let (url, seen) = service(Some(true)).await;
+        let error = make_owner_checked(&url, "access-1", Some("bb"), "aa")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already the owner"), "{error}");
+        let error = make_owner_checked(&url, "access-1", Some("zz"), "bb")
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("only the owner device"),
+            "{error}"
+        );
+        assert!(seen.lock().unwrap().calls.is_empty());
+    }
 }

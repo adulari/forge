@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { AnywhereDevice } from "../anywhereApi";
-import { describeDevices, deviceKind, formatAgo } from "./deviceList";
+import { canMakeOwner, describeDevices, deviceKind, formatAgo } from "./deviceList";
 
 const NOW = Date.parse("2026-10-30T12:00:00Z");
 const day = 24 * 60 * 60 * 1000;
@@ -69,5 +69,24 @@ describe("who may revoke whom", () => {
   it("leaves the decision to an older service that reports no owner", () => {
     const rows = describeDevices([device("a", "A", 10, 1), device("b", "B", 10, 1)], "b", NOW);
     expect(rows.find((row) => row.id === "a")).toMatchObject({ isOwner: false, canRevoke: true });
+  });
+});
+
+describe("canMakeOwner", () => {
+  const other = { isOwner: false, isThisDevice: false };
+  const on = { thisDeviceIsOwner: true, ownerTransferSupported: true };
+  it("never without the capability", () => {
+    expect(canMakeOwner(other, { ...on, ownerTransferSupported: undefined })).toBe(false);
+    expect(canMakeOwner(other, { ...on, ownerTransferSupported: false })).toBe(false);
+  });
+  it("never when this device is not the owner", () => {
+    expect(canMakeOwner(other, { ...on, thisDeviceIsOwner: false })).toBe(false);
+  });
+  it("never for the owner row or this device", () => {
+    expect(canMakeOwner({ isOwner: true, isThisDevice: false }, on)).toBe(false);
+    expect(canMakeOwner({ isOwner: false, isThisDevice: true }, on)).toBe(false);
+  });
+  it("yes for another device when owner and supported", () => {
+    expect(canMakeOwner(other, on)).toBe(true);
   });
 });

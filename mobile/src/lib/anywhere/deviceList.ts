@@ -115,3 +115,11 @@ export function describeDevices(
   return sortDevices(devices, currentDeviceId).map((device) =>
     describeDevice(device, { currentDeviceId, nowMs, nameCounts, currentIsOwner }));
 }
+
+/** Only the owner device may hand ownership on, and only when the service supports it. The service enforces the same rule. */
+export function canMakeOwner(
+  row: Pick<DeviceRowModel, "isOwner" | "isThisDevice">,
+  ctx: { thisDeviceIsOwner: boolean; ownerTransferSupported: boolean | undefined },
+): boolean {
+  return ctx.ownerTransferSupported === true && ctx.thisDeviceIsOwner && !row.isOwner && !row.isThisDevice;
+}

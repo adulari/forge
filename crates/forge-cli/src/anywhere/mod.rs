@@ -142,6 +142,9 @@ struct ServiceCapabilities {
 struct ServiceFeatures {
     account_bound_enrollment: bool,
     recovery_kit_v2: bool,
+    /// `POST /v1/devices/{id}/make-owner` exists. Absent (false) on older services.
+    #[serde(default)]
+    owner_transfer: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -385,7 +388,11 @@ pub(crate) async fn anywhere_cmd(command: AnywhereCmd) -> Result<()> {
             .await
         }
         AnywhereCmd::Jobs => jobs::resume_pending().await,
-        AnywhereCmd::Devices { revoke } => devices::devices(revoke.as_deref()).await,
+        AnywhereCmd::Devices {
+            revoke,
+            make_owner,
+            yes,
+        } => devices::devices(revoke.as_deref(), make_owner.as_deref(), yes).await,
         AnywhereCmd::Sync { cmd } => account_sync::cli::sync_cmd(cmd).await,
         AnywhereCmd::Disable => disable().await,
         AnywhereCmd::Logout => logout().await,

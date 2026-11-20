@@ -23,6 +23,7 @@ import {
   idempotencyKey,
   isAnywhereNetworkError,
   isAnywhereSessionInvalid,
+  makeOwner as makeOwnerRequest,
   observeAnywhereUnauthorized,
   preflightAnywhere,
 } from "./anywhereApi";
@@ -257,6 +258,7 @@ export interface AnywhereContextValue {
   checkout(period?: AnywhereBillingPeriod): Promise<void>;
   openBillingPortal(): Promise<void>;
   revokeDevice(deviceId: string, recoveryWords: string): Promise<void>;
+  makeOwner(deviceId: string): Promise<void>;
   revokeHost(hostId: string): Promise<void>;
   renameHost(hostId: string, name: string): Promise<void>;
   /** Suspend or resume managed access without revoking enrollment. Only call for a host
@@ -1690,6 +1692,19 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     }
   }, [accessToken, devices, persistCredentials, refresh]);
 
+  const makeOwner = useCallback(async (deviceId: string) => {
+    try {
+      setError(null);
+      const token = await accessToken();
+      const serviceUrl = credentialsRef.current?.serviceUrl ?? SERVICE_URL;
+      const updated = await makeOwnerRequest(serviceUrl, deviceId, token);
+      setDevices(updated.devices);
+    } catch (reason) {
+      setError(message(reason));
+      throw reason;
+    }
+  }, [accessToken]);
+
   const enablePush = useCallback(async () => {
     try {
       setError(null);
@@ -1770,7 +1785,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     hostTransportPreferences,
     approvalError, error, errorIsOffline, pushStatus, remoteJobs,
     accessToken, startLogin, openLoginPage, confirmNewRecovery, recoverExisting, scheduleCleanReset, cancelCleanReset, registerPasskey: registerRecoveryPasskey, recoverWithPasskey, renamePasskey: renameRecoveryPasskey, revokePasskey: revokeRecoveryPasskey, useRecoveryInstead, restartSetup, refresh, checkout, openBillingPortal,
-    revokeDevice, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, inspectPairing, approvePairing, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
+    revokeDevice, makeOwner, revokeHost, renameHost, setHostDisabled, setHostTransportPreference, exportAccountData, selectHost, inspectPairing, approvePairing, refreshPendingApprovals, prepareLocalHost, confirmLocalHost, cancelLocalHost, queueRemoteJob, refreshRemoteJobs,
     enablePush, disablePush, logout,
   }), [
     accessToken,
@@ -1816,6 +1831,7 @@ export function AnywhereProvider({ children }: { children: React.ReactNode }) {
     renameRecoveryPasskey,
     restartSetup,
     revokeDevice,
+    makeOwner,
     revokeHost,
     revokeRecoveryPasskey,
     scheduleCleanReset,

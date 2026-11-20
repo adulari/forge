@@ -541,7 +541,11 @@ fn devices_section(doc: &mut Doc, m: &AnywhereMenu) {
                 ),
             ]);
         }
-        Devices::Loaded { devices, .. } => {
+        Devices::Loaded {
+            devices,
+            owner_transfer,
+            ..
+        } => {
             doc.heading(
                 "Devices",
                 Some((format!("{} enrolled", devices.len()), styles::faint())),
@@ -580,6 +584,19 @@ fn devices_section(doc: &mut Doc, m: &AnywhereMenu) {
                     Span::styled(
                         trunc(
                             "x revokes a device and rotates the account key (asks for your Recovery Kit)",
+                            doc.width.saturating_sub(4),
+                        ),
+                        styles::faint(),
+                    ),
+                ]);
+            }
+            let this_is_owner = devices.iter().any(|d| d.this_device && d.owner);
+            if *owner_transfer && this_is_owner && devices.len() > 1 {
+                doc.push(vec![
+                    Span::raw("    "),
+                    Span::styled(
+                        trunc(
+                            "m makes a device the owner (only the owner can revoke the owner)",
                             doc.width.saturating_sub(4),
                         ),
                         styles::faint(),
@@ -643,8 +660,13 @@ fn footer(m: &AnywhereMenu, max: usize) -> String {
         Some(Row::Device(_)) => Some(("x", "revoke")),
         _ => None,
     };
+    let owner_act = match focus {
+        Some(Row::Device(i)) if m.can_make_owner(i) => Some(("m", "make owner")),
+        _ => None,
+    };
     let mut pairs: Vec<(&str, &str)> = vec![(g().up_down, "move")];
     pairs.extend(act);
+    pairs.extend(owner_act);
     pairs.extend([
         ("Tab", "section"),
         ("s", "sync"),
@@ -768,7 +790,7 @@ pub(crate) fn render_anywhere_menu(f: &mut Frame, app: &App, region: Rect) {
     if let Some(confirm) = m.confirm {
         super::confirm::render_keys_confirm(f, card, confirm.on_confirm);
     }
-    if let Some(revoke) = &m.revoke {
-        super::confirm::render_revoke_confirm(f, card, &revoke.name, revoke.on_confirm);
+    if let Some(pending) = &m.device_confirm {
+        super::confirm::render_device_confirm(f, card, pending);
     }
 }

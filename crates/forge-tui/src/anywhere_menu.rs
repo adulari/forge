@@ -122,6 +122,9 @@ pub enum Devices {
         devices: Vec<DeviceView>,
         hosts_online: usize,
         hosts_total: usize,
+        /// The service accepts `POST /v1/devices/{id}/make-owner` (capability `owner_transfer`).
+        /// False on an older service: the menu then never offers "make owner".
+        owner_transfer: bool,
     },
 }
 
@@ -182,11 +185,21 @@ pub struct KeysConfirm {
     pub on_confirm: bool,
 }
 
-/// The confirmation that stands between a keystroke and revoking another device.
+/// What a device confirmation leads to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DeviceConfirmKind {
+    #[default]
+    Revoke,
+    MakeOwner,
+}
+
+/// The confirmation that stands between a keystroke and revoking another device, or handing it
+/// ownership of the account.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RevokeConfirm {
+pub struct DeviceConfirm {
     pub id: String,
     pub name: String,
+    pub kind: DeviceConfirmKind,
     /// True when the primary button has focus. Opens on Cancel.
     pub on_confirm: bool,
 }
@@ -213,6 +226,11 @@ pub enum MenuAction {
         id: String,
         name: String,
     },
+    /// Make the device the account's owner (`POST /v1/devices/{id}/make-owner`).
+    MakeOwner {
+        id: String,
+        name: String,
+    },
 }
 
 const NOTICE_TICKS: u32 = 420;
@@ -225,7 +243,7 @@ pub struct AnywhereMenu {
     pub devices: Devices,
     pub cursor: usize,
     pub confirm: Option<KeysConfirm>,
-    pub revoke: Option<RevokeConfirm>,
+    pub device_confirm: Option<DeviceConfirm>,
     pub notice: Option<Notice>,
     pub tick: u32,
     pub now_ms: i64,
@@ -248,7 +266,7 @@ impl AnywhereMenu {
     pub fn close(&mut self) {
         self.open = false;
         self.confirm = None;
-        self.revoke = None;
+        self.device_confirm = None;
     }
 
     /// Whether the binary should start a refresh now; clears the request.
@@ -387,8 +405,8 @@ impl AnywhereMenu {
         if let Some(confirm) = self.confirm {
             return self.confirm_key(confirm, key);
         }
-        if let Some(revoke) = self.revoke.clone() {
-            return self.revoke_key(revoke, key);
+        if let Some(pending) = self.device_confirm.clone() {
+            return self.device_confirm_key(pending, key);
         }
         match key {
             KeyKind::Esc | KeyKind::Char('q') | KeyKind::Interrupt => {
@@ -438,6 +456,7 @@ impl AnywhereMenu {
             KeyKind::Char('s') => self.sync_now(),
             KeyKind::Char('o') => MenuAction::OpenWeb,
             KeyKind::Char('x') => self.ask_revoke(),
+            KeyKind::Char('m') => self.ask_make_owner(),
             KeyKind::Char(' ') | KeyKind::Enter => self.activate(),
             KeyKind::Left | KeyKind::Char('h') => self.switch(Some(false)),
             KeyKind::Right | KeyKind::Char('l') => self.switch(Some(true)),
@@ -467,30 +486,31 @@ impl AnywhereMenu {
         }
     }
 
-    fn revoke_key(&mut self, revoke: RevokeConfirm, key: KeyKind) -> MenuAction {
+    fn device_confirm_key(&mut self, pending: DeviceConfirm, key: KeyKind) -> MenuAction {
         let go = |menu: &mut Self| {
-            menu.revoke = None;
-            MenuAction::RevokeDevice {
-                id: revoke.id.clone(),
-                name: revoke.name.clone(),
+            menu.device_confirm = None;
+            let (id, name) = (pending.id.clone(), pending.name.clone());
+            match pending.kind {
+                DeviceConfirmKind::Revoke => MenuAction::RevokeDevice { id, name },
+                DeviceConfirmKind::MakeOwner => MenuAction::MakeOwner { id, name },
             }
         };
         match key {
             KeyKind::Esc | KeyKind::Char('n') | KeyKind::Char('q') | KeyKind::Interrupt => {
-                self.revoke = None;
+                self.device_confirm = None;
                 MenuAction::None
             }
             KeyKind::Char('y') => go(self),
             KeyKind::Left | KeyKind::Right | KeyKind::Tab | KeyKind::CycleTemper => {
-                self.revoke = Some(RevokeConfirm {
-                    on_confirm: !revoke.on_confirm,
-                    ..revoke
+                self.device_confirm = Some(DeviceConfirm {
+                    on_confirm: !pending.on_confirm,
+                    ..pending
                 });
                 MenuAction::None
             }
-            KeyKind::Enter | KeyKind::Char(' ') if revoke.on_confirm => go(self),
+            KeyKind::Enter | KeyKind::Char(' ') if pending.on_confirm => go(self),
             KeyKind::Enter | KeyKind::Char(' ') => {
-                self.revoke = None;
+                self.device_confirm = None;
                 MenuAction::None
             }
             _ => MenuAction::None,
@@ -522,9 +542,71 @@ impl AnywhereMenu {
                 ),
             );
         } else {
-            self.revoke = Some(RevokeConfirm {
+            self.device_confirm = Some(DeviceConfirm {
                 id: device.id,
                 name: device.name,
+                kind: DeviceConfirmKind::Revoke,
+                on_confirm: false,
+            });
+        }
+        MenuAction::None
+    }
+
+    /// Whether `m` (make owner) applies to this row: the service supports it, this device is the
+    /// owner, and the row is another device.
+    pub fn can_make_owner(&self, index: usize) -> bool {
+        let Devices::Loaded {
+            devices,
+            owner_transfer: true,
+            ..
+        } = &self.devices
+        else {
+            return false;
+        };
+        let this_is_owner = devices.iter().any(|d| d.this_device && d.owner);
+        devices
+            .get(index)
+            .is_some_and(|d| this_is_owner && !d.owner && !d.this_device)
+    }
+
+    /// Open the make-owner confirmation for the focused device, or say why it does not apply.
+    fn ask_make_owner(&mut self) -> MenuAction {
+        let (
+            Some(Row::Device(i)),
+            Devices::Loaded {
+                devices,
+                owner_transfer,
+                ..
+            },
+        ) = (self.focused(), &self.devices)
+        else {
+            return MenuAction::None;
+        };
+        let Some(device) = devices.get(i).cloned() else {
+            return MenuAction::None;
+        };
+        let owner_transfer = *owner_transfer;
+        let this_is_owner = devices.iter().any(|d| d.this_device && d.owner);
+        if !owner_transfer {
+            self.notify(
+                Tone::Warn,
+                "This Forge Anywhere service cannot change the owner device yet.",
+            );
+        } else if device.owner {
+            self.notify(
+                Tone::Ok,
+                format!("{} is already the owner device.", device.name),
+            );
+        } else if !this_is_owner {
+            self.notify(
+                Tone::Warn,
+                "Only the owner device can hand ownership to another device.",
+            );
+        } else {
+            self.device_confirm = Some(DeviceConfirm {
+                id: device.id,
+                name: device.name,
+                kind: DeviceConfirmKind::MakeOwner,
                 on_confirm: false,
             });
         }

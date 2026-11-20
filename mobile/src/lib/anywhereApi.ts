@@ -37,7 +37,29 @@ export interface AnywhereCapabilities {
     seven_day_clean_reset: boolean;
     recovery_kit_v2: boolean;
     legacy_recovery_kit_v1: boolean;
+    /** Absent from services that predate owner hand-off. */
+    owner_transfer?: boolean;
   };
+}
+
+export function fetchAnywhereCapabilities(serviceUrl: string): Promise<AnywhereCapabilities> {
+  return anywhereRequest<AnywhereCapabilities>(serviceUrl, "/v1/capabilities", { cache: "no-store" });
+}
+
+export async function makeOwner(serviceUrl: string, deviceId: string, token: string): Promise<{ devices: AnywhereDevice[] }> {
+  try {
+    return await anywhereRequest<{ devices: AnywhereDevice[] }>(
+      serviceUrl,
+      `/v1/devices/${encodeURIComponent(deviceId)}/make-owner`,
+      { method: "POST" },
+      token,
+    );
+  } catch (reason) {
+    if (reason instanceof AnywhereApiError && reason.code === "owner_required") {
+      throw new AnywhereApiError(reason.status, reason.code, "Only the owner device can hand ownership on. Open Forge on the owner device and try again.");
+    }
+    throw reason;
+  }
 }
 
 export async function preflightAnywhere(serviceUrl: string): Promise<AnywhereCapabilities> {
