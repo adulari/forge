@@ -49,3 +49,25 @@ describe("helpers", () => {
     expect(deviceKind("Forge Desktop")).toBe("computer");
   });
 });
+
+describe("who may revoke whom", () => {
+  const owned = (id: string, owner: boolean) => ({ ...device(id, `Device ${id}`, 10, 1), owner });
+
+  it("lets any other device revoke a peer but only the owner revoke the owner", () => {
+    const fromPeer = describeDevices([owned("o", true), owned("p", false), owned("q", false)], "p", NOW);
+    const byId = Object.fromEntries(fromPeer.map((row) => [row.id, row]));
+    expect(byId.o.isOwner).toBe(true);
+    expect(byId.o.canRevoke).toBe(false);
+    expect(byId.q.canRevoke).toBe(true);
+    expect(byId.p.canRevoke).toBe(false);
+
+    const fromOwner = describeDevices([owned("o", true), owned("p", false)], "o", NOW);
+    expect(fromOwner.find((row) => row.id === "p")?.canRevoke).toBe(true);
+    expect(fromOwner.find((row) => row.id === "o")?.canRevoke).toBe(false);
+  });
+
+  it("leaves the decision to an older service that reports no owner", () => {
+    const rows = describeDevices([device("a", "A", 10, 1), device("b", "B", 10, 1)], "b", NOW);
+    expect(rows.find((row) => row.id === "a")).toMatchObject({ isOwner: false, canRevoke: true });
+  });
+});

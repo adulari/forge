@@ -1,4 +1,4 @@
-//! Public Forge Anywhere v1 protocol.
+//! Public Forge Anywhere v1 protocol, with the negotiated payload encoding in [`wire`].
 //!
 //! This crate is deliberately service-independent: it defines the encrypted binary envelope,
 //! key derivation, recovery material, sync records, and the explicit daemon bridge allowlist.
@@ -13,6 +13,7 @@ pub mod envelope;
 pub mod keys;
 pub mod share;
 pub mod sync;
+pub mod wire;
 
 pub use capsule::{
     CapsuleAcknowledgeRequest, CapsuleAcknowledgement, CapsuleClaim, CapsuleCompletion, CapsuleId,

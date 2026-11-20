@@ -57,7 +57,7 @@ export default function AnywhereDevicesScreen() {
       <View style={styles.shell}>
         <PageHeader
           title="Devices"
-          subtitle={`${deviceRows.length} paired. Revoke enrollments you no longer use; the account key is rotated so they cannot read new data.`}
+          subtitle={`${deviceRows.length} paired. Any of your devices can revoke another; only the owner device can revoke the owner. The account key is rotated so a revoked device cannot read new data.`}
           backLabel="Anywhere"
           onBack={() => goBackOr("/anywhere")}
         />
@@ -71,11 +71,17 @@ export default function AnywhereDevicesScreen() {
                 <View style={styles.nameLine}>
                   <Text style={[typeScale.bodyBold, styles.deviceName, { color: tokens.ink }]} numberOfLines={1}>{device.name}</Text>
                   {device.isThisDevice ? <Badge label="THIS DEVICE" tone="accent" /> : null}
+                  {device.isOwner ? <Badge label="OWNER" tone="neutral" /> : null}
                   {device.stale ? <Badge label="INACTIVE" tone="warn" /> : null}
                 </View>
                 <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>{`${device.lastSeen} · ${device.enrolled}`}</Text>
+                {device.isOwner && !device.isThisDevice && !device.canRevoke ? (
+                  <Text style={[typeScale.meta, { color: tokens.ink3 }]} numberOfLines={2}>
+                    Only the owner device can revoke itself. That keeps a way back in if another device is lost.
+                  </Text>
+                ) : null}
               </View>
-              {!device.isThisDevice ? (
+              {device.canRevoke ? (
                 <Pressable
                   onPress={() => {
                     setTarget(device.id);

@@ -555,7 +555,15 @@ fn devices_section(doc: &mut Doc, m: &AnywhereMenu) {
                     Span::raw(" "),
                     Span::styled(pad(&trunc(&d.name, 20), 21), styles::fg()),
                     Span::styled(
-                        pad(if d.this_device { "this device" } else { "" }, 13),
+                        pad(
+                            match (d.this_device, d.owner) {
+                                (true, true) => "this · owner",
+                                (true, false) => "this device",
+                                (false, true) => "owner",
+                                (false, false) => "",
+                            },
+                            13,
+                        ),
                         styles::ok(),
                     ),
                     Span::styled(pad(&format!("seen {seen}"), 18), styles::muted()),
@@ -571,7 +579,7 @@ fn devices_section(doc: &mut Doc, m: &AnywhereMenu) {
                     Span::raw("    "),
                     Span::styled(
                         trunc(
-                            "Revoking needs your recovery phrase: forge anywhere devices --revoke <id>",
+                            "x revokes a device and rotates the account key (asks for your Recovery Kit)",
                             doc.width.saturating_sub(4),
                         ),
                         styles::faint(),
@@ -632,6 +640,7 @@ fn footer(m: &AnywhereMenu, max: usize) -> String {
         Some(Row::SyncNow) => Some(("Enter", "sync")),
         Some(Row::SignIn(_)) | Some(Row::SignInToAnywhere) => Some(("Enter", "sign in")),
         Some(Row::OpenWeb) => Some(("Enter", "open")),
+        Some(Row::Device(_)) => Some(("x", "revoke")),
         _ => None,
     };
     let mut pairs: Vec<(&str, &str)> = vec![(g().up_down, "move")];
@@ -758,5 +767,8 @@ pub(crate) fn render_anywhere_menu(f: &mut Frame, app: &App, region: Rect) {
     }
     if let Some(confirm) = m.confirm {
         super::confirm::render_keys_confirm(f, card, confirm.on_confirm);
+    }
+    if let Some(revoke) = &m.revoke {
+        super::confirm::render_revoke_confirm(f, card, &revoke.name, revoke.on_confirm);
     }
 }

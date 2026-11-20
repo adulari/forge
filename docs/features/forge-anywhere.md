@@ -135,9 +135,14 @@ unless the owner set `[anywhere] allow_ship_over_relay = true` on that host (def
 
 ## Recovery, device loss, and revocation
 
-- **One device lost, another remains:** list devices from an authorized endpoint and revoke the
-  missing device immediately. Revocation atomically invalidates its tokens and creates a new data
-  key epoch wrapped only to remaining devices and the recovery secret.
+- **One device lost, another remains:** revoke it from any other device: `forge anywhere devices
+  --revoke <id>`, the TUI `/anywhere` menu (`x` on a device), or Devices in the app. Revocation
+  atomically invalidates its tokens and creates a new data key epoch wrapped only to remaining
+  devices and the recovery secret. It asks for the Recovery Kit and cannot be undone.
+- **Who may revoke whom:** any active device may revoke any other device of the account, except
+  the owner device (the account's oldest active device, tagged `owner` everywhere), which only the
+  owner may revoke. That keeps a compromised secondary device from locking the owner out. A lost
+  owner's sign-in still lapses 30 days after its last use; refresh tokens rotate on every use.
 - **All devices lost, recovery phrase available:** install Forge on a trusted device, choose account
   recovery during `forge anywhere login`, enter the phrase locally, and re-enroll the device. Do not
   send the phrase to Forge support or enter it on the service website.
