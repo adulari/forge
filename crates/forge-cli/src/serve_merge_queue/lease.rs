@@ -225,7 +225,7 @@ struct Held {
 #[derive(Default)]
 struct State {
     held: HashMap<String, Held>,
-    degraded_until: HashMap<String, i64>,
+    degraded_until: HashMap<String, (i64, String)>,
     bodies: HashMap<String, Body>,
 }
 
@@ -277,11 +277,8 @@ impl Leases {
         };
         {
             let state = self.state();
-            if state.degraded_until.get(repo).is_some_and(|t| now < *t) {
-                return Lease::Degraded(unavailable(
-                    "shared queue unavailable, landing on its own",
-                    now,
-                ));
+            if let Some((_, note)) = state.degraded_until.get(repo).filter(|(t, _)| now < *t) {
+                return Lease::Degraded(unavailable(note, now));
             }
             if let Some(held) = state.held.get(repo) {
                 if now - held.renewed_local < RENEW_SECS && held.body.pr == pr {
@@ -310,18 +307,16 @@ impl Leases {
             last
         };
         tracing::warn!(repo, %why, "shared merge queue unavailable; landing on this daemon's own");
+        let note = format!(
+            "shared queue unavailable ({}), landing on its own",
+            short(&why)
+        );
         let mut state = self.state();
         state.held.remove(repo);
         state
             .degraded_until
-            .insert(repo.to_string(), now + DEGRADED_SECS);
-        Lease::Degraded(unavailable(
-            &format!(
-                "shared queue unavailable ({}), landing on its own",
-                short(&why)
-            ),
-            now,
-        ))
+            .insert(repo.to_string(), (now + DEGRADED_SECS, note.clone()));
+        Lease::Degraded(unavailable(&note, now))
     }
 
     #[allow(clippy::too_many_arguments)]
