@@ -262,6 +262,7 @@ mod base64_hash {
 /// An encrypted bridge request sent from a controller to one host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeRequest {
+    #[serde(deserialize_with = "crate::wire::fixed::deserialize")]
     pub request_id: [u8; 16],
     pub route: RouteId,
     /// Redundant with `route` by design: the host validates both before dispatch.
@@ -273,7 +274,7 @@ pub struct BridgeRequest {
     #[serde(default)]
     pub headers: Vec<(String, String)>,
     /// Opaque local-daemon request bytes.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::wire::bytes::deserialize")]
     pub body: Vec<u8>,
     /// Temporary encrypted object containing `body` when it exceeds the inline limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,11 +284,12 @@ pub struct BridgeRequest {
 /// An encrypted bridge response returned by the host connector.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BridgeResponse {
+    #[serde(deserialize_with = "crate::wire::fixed::deserialize")]
     pub request_id: [u8; 16],
     pub status: u16,
     #[serde(default)]
     pub headers: Vec<(String, String)>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::wire::bytes::deserialize")]
     pub body: Vec<u8>,
     /// Temporary encrypted object containing `body` when it exceeds the inline limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,13 +299,14 @@ pub struct BridgeResponse {
 /// One encrypted remote-v8 frame, forwarded without interpreting session semantics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WebSocketFrame {
+    #[serde(deserialize_with = "crate::wire::fixed::deserialize")]
     pub stream_id: [u8; 16],
     pub direction: FrameDirection,
     pub kind: WebSocketFrameKind,
     /// Preserve the original WebSocket frame type. Older peers omit this and default to binary.
     #[serde(default)]
     pub text: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::wire::bytes::deserialize")]
     pub bytes: Vec<u8>,
     /// Temporary encrypted object containing `bytes` when it exceeds the inline limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]

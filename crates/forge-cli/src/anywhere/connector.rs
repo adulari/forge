@@ -13,6 +13,7 @@ use forge_anywhere_protocol::bridge::{
     WebSocketFrameKind,
 };
 use forge_anywhere_protocol::envelope::{HEADER_LEN, SIGNATURE_LEN, TAG_LEN};
+use forge_anywhere_protocol::wire::{self, Wire};
 use forge_anywhere_protocol::{
     CommandAcknowledgement, CommandErrorCode, CommandId, CommandResult, Envelope, EnvelopeKind,
     EnvelopeMetadata, QueuedCommandList, QueuedCommandMetadata, RecipientKind,
@@ -37,14 +38,13 @@ use super::{
 /// build offloads at its own threshold, and rejecting its frames here would break it for no gain.
 const MAX_INLINE_BODY: usize = 256 * 1024;
 
-/// What this host SENDS inline before offloading to a blob, which must be far smaller than the
-/// acceptance limit above because bodies do not travel as bytes: `body`/`bytes` are `Vec<u8>`
-/// inside a `serde_json` payload, so every byte becomes a decimal literal plus a comma —
-/// measured at 3.57x for random bytes. The relay caps an envelope at 300 KiB
-/// (`MAX_RELAY_ENVELOPE_BYTES` in forge-anywhere-service) and answers anything larger with
-/// `relay_frame_too_large`, so sending at the 256 KiB acceptance limit guaranteed rejection while
-/// offload did not engage until that same 256 KiB. Everything in between simply failed.
-const MAX_OUTBOUND_INLINE_BODY: usize = 64 * 1024;
+/// What this host SENDS inline before offloading to a blob is [`Wire::max_outbound_inline`]: far
+/// smaller than the acceptance limit above under wire v1, because there every byte becomes a
+/// decimal literal plus a comma (3.57x for random bytes) and the relay caps an envelope at 300 KiB
+/// (`MAX_RELAY_ENVELOPE_BYTES` in forge-anywhere-service). Wire v2's base64url (1.33x) lets a peer
+/// that negotiated it keep three times as much inline.
+#[cfg(test)]
+const MAX_OUTBOUND_INLINE_BODY: usize = forge_anywhere_protocol::wire::MAX_OUTBOUND_INLINE_V1;
 const MAX_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 
 /// The relay service (`forge-anywhere-service/src/relay_blob.rs` `MIN_RELAY_BLOB_BYTES`) rejects
@@ -518,6 +518,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                     pending.sender_device_id,
                     pending.request.request_id,
                     response,
+                    pending.wire,
                     &mut relay_write,
                 ).await?;
             }
@@ -540,18 +541,20 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                 let Some(event) = event else {
                     bail!("local WebSocket event channel closed");
                 };
-                    let (stream_id, owner_device_id, kind, bytes, text) = match event {
+                    let (stream_id, owner_device_id, kind, bytes, text, wire) = match event {
                         LocalSocketEvent::Data { stream_id, owner_device_id, bytes, text } => {
-                            (stream_id, owner_device_id, WebSocketFrameKind::Data, bytes, text)
+                            let wire = streams.get(&stream_id).map_or(Wire::V1, |handle| handle.wire);
+                            (stream_id, owner_device_id, WebSocketFrameKind::Data, bytes, text, wire)
                         }
                         LocalSocketEvent::Closed { stream_id, owner_device_id } => {
-                            streams.remove(&stream_id);
+                            let wire = streams.remove(&stream_id).map_or(Wire::V1, |handle| handle.wire);
                             (
                                 stream_id,
                                 owner_device_id,
                                 WebSocketFrameKind::Close,
                                 Vec::new(),
                                 false,
+                                wire,
                             )
                         }
                     };
@@ -563,7 +566,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                         bytes,
                     bytes_blob: None,
                 };
-                if frame.bytes.len() > MAX_OUTBOUND_INLINE_BODY {
+                if frame.bytes.len() > wire.max_outbound_inline() {
                     let reference = upload_blob(
                         &store,
                         &blobs,
@@ -573,7 +576,7 @@ async fn connect_once(local_base_url: &str) -> Result<()> {
                     frame.bytes.clear();
                     frame.bytes_blob = Some(reference);
                 }
-                let plaintext = serde_json::to_vec(&frame).context("encode local WebSocket frame")?;
+                let plaintext = wire::encode_frame(&frame, wire).context("encode local WebSocket frame")?;
                 let encoded = seal_outbound(
                     &store,
                     EnvelopeKind::WebSocketFrame,
@@ -846,6 +849,8 @@ where
 
     match envelope.metadata.kind {
         EnvelopeKind::BridgeRequest => {
+            // Answer in the newest encoding the controller said it reads; an old app says nothing.
+            let wire = Wire::negotiate(wire::advertised(&plaintext));
             let mut request: BridgeRequest = match serde_json::from_slice(&plaintext) {
                 Ok(request) => request,
                 Err(error) => {
@@ -872,6 +877,7 @@ where
                             501,
                             "this Forge host does not support that request yet — update Forge on the host",
                         ),
+                        wire,
                         relay_write,
                     )
                     .await?;
@@ -909,12 +915,14 @@ where
                     request,
                     sender_device_id,
                     consumed_blob_id,
+                    wire,
                 }));
             }
             let response = open_stream(
                 local_base_url,
                 &request,
                 sender_device_id,
+                wire,
                 streams,
                 local_events,
             )
@@ -928,6 +936,7 @@ where
                 sender_device_id,
                 request.request_id,
                 response,
+                wire,
                 relay_write,
             )
             .await?;
@@ -1018,6 +1027,7 @@ where
 fn unsupported_request_id(plaintext: &[u8]) -> Option<[u8; 16]> {
     #[derive(Deserialize)]
     struct RequestIdOnly {
+        #[serde(deserialize_with = "wire::fixed::deserialize")]
         request_id: [u8; 16],
     }
     serde_json::from_slice::<RequestIdOnly>(plaintext)
@@ -1030,6 +1040,8 @@ struct PendingDispatch {
     request: BridgeRequest,
     sender_device_id: [u8; 16],
     consumed_blob_id: Option<[u8; 16]>,
+    /// The encoding the controller advertised it reads, for this request's response.
+    wire: Wire,
 }
 
 async fn send_bridge_response<S>(
@@ -1038,12 +1050,13 @@ async fn send_bridge_response<S>(
     sender_device_id: [u8; 16],
     request_id: [u8; 16],
     mut response: BridgeResponse,
+    wire: Wire,
     relay_write: &mut S,
 ) -> Result<()>
 where
     S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
-    if response.body.len() > MAX_OUTBOUND_INLINE_BODY {
+    if response.body.len() > wire.max_outbound_inline() {
         match upload_blob(store, blobs, sender_device_id, &response.body).await {
             Ok(reference) => {
                 response.body.clear();
@@ -1062,7 +1075,7 @@ where
             }
         }
     }
-    let plaintext = serde_json::to_vec(&response).context("encode bridge response")?;
+    let plaintext = wire::encode_response(&response, wire).context("encode bridge response")?;
     let encoded = seal_outbound(
         store,
         EnvelopeKind::BridgeResponse,
@@ -1621,6 +1634,8 @@ use routing::*;
 
 #[cfg(test)]
 mod ship_relay_tests;
+#[cfg(test)]
+mod wire_tests;
 
 fn bridge_error(request_id: [u8; 16], status: u16, message: &str) -> BridgeResponse {
     BridgeResponse {
