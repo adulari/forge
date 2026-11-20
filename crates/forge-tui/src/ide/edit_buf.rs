@@ -686,14 +686,29 @@ mod tests {
 
     #[test]
     fn large_buffer_typing_is_fast() {
-        let text: String = (0..5000).map(|i| format!("line number {i}\n")).collect();
-        let mut b = EditBuf::new(&text);
-        b.set_cursor(2500, 5);
-        let t = Instant::now();
-        for _ in 0..1000 {
-            b.insert_char('x');
+        // Compares a 5,000-line buffer with a 50-line one instead of a wall-clock limit, so a loaded
+        // CI host cannot fail it: typing must not get slower as the buffer grows.
+        fn best_of_five(lines: usize) -> std::time::Duration {
+            let text: String = (0..lines).map(|i| format!("line number {i}\n")).collect();
+            (0..5)
+                .map(|_| {
+                    let mut b = EditBuf::new(&text);
+                    b.set_cursor(lines / 2, 5);
+                    let t = Instant::now();
+                    for _ in 0..1000 {
+                        b.insert_char('x');
+                    }
+                    assert_eq!(b.line_count(), lines);
+                    t.elapsed()
+                })
+                .min()
+                .unwrap()
         }
-        assert!(t.elapsed().as_millis() < 50, "{:?}", t.elapsed());
-        assert_eq!(b.line_count(), 5000);
+        let small = best_of_five(50);
+        let large = best_of_five(5000);
+        assert!(
+            large <= small * 10 + std::time::Duration::from_millis(5),
+            "typing in a large buffer is {large:?}, against {small:?} in a small one"
+        );
     }
 }

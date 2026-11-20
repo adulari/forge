@@ -504,7 +504,7 @@ impl BridgeExpert {
             ));
         }
         if let Some(spec) = &spec {
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             if let Some(why) =
                 bridge_budget_refusal(store, session_id, &model, spec, &cfg.budget, now)
             {

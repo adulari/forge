@@ -246,7 +246,7 @@ async fn list_send_wake_reply_and_the_guards() {
     // notice and then refused. Pre-age the rows so the per-minute limit stays out of the way.
     let c = spawn(&registry, &store, "gamma").await;
     let fleet_c = fleet_of(&registry, &store, &c);
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for i in 0..forge_core::fleet::AUTO_REPLY_LIMIT - 1 {
         let id = format!("seed-{i}");
         store
@@ -458,7 +458,11 @@ async fn other_machines_are_listed_addressed_and_degrade_when_offline() {
     // The receiving host's guards key the sender as <host>/<id>.
     assert_eq!(
         away_store
-            .fleet_pair_activity(&format!("laptop/{a}"), &r, chrono::Utc::now().timestamp())
+            .fleet_pair_activity(
+                &format!("laptop/{a}"),
+                &r,
+                jiff::Timestamp::now().as_second()
+            )
             .unwrap()
             .last_minute,
         1

@@ -830,7 +830,8 @@ fn prompt_requires_fault_seam_audit(prompt: &str) -> bool {
 /// real repository.
 fn working_tree_status(root: Option<&std::path::Path>) -> Option<Vec<u8>> {
     let mut cmd = std::process::Command::new("git");
-    cmd.args(["status", "--porcelain"]);
+    cmd.args(["status", "--porcelain"])
+        .env("GIT_OPTIONAL_LOCKS", "0");
     if let Some(r) = root {
         cmd.current_dir(r);
     }

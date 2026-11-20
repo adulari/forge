@@ -23,7 +23,7 @@ pub(crate) fn blame_cmd(file: &str, line: Option<usize>, json: bool) -> Result<(
 
     let attributions = blame::blame_file(&store, &target, &current)
         .with_context(|| format!("loading recorded edits for {file}"))?;
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
 
     if let Some(line_no) = line {
         let Some(attr) = attributions.get(line_no.saturating_sub(1)) else {

@@ -46,6 +46,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
         .arg("-C")
         .arg(root)
         .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
@@ -96,7 +97,7 @@ fn tree_fingerprint(root: &Path) -> String {
         // Without git there is no way to tell that the tree is unchanged, so nothing is reused.
         return format!(
             "untracked-{}",
-            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            i64::try_from(jiff::Timestamp::now().as_nanosecond()).unwrap_or(0)
         );
     }
     let mut text = String::new();
@@ -133,7 +134,7 @@ fn shell_args(shell: Option<&str>) -> (&'static str, &'static [&'static str]) {
 }
 
 fn now_unix() -> i64 {
-    chrono::Utc::now().timestamp()
+    jiff::Timestamp::now().as_second()
 }
 
 /// Run one step to completion or timeout; the combined output tail comes back with the status.
@@ -576,8 +577,8 @@ pub(crate) fn rows_for(plan: &CiPlan, report: Option<&CiReport>) -> Vec<ViewRow>
 pub(crate) fn summary_for(report: Option<&CiReport>) -> Option<String> {
     let report = report?;
     let (pass, fail, rest) = report.counts();
-    let ago = chrono::Utc::now()
-        .timestamp()
+    let ago = jiff::Timestamp::now()
+        .as_second()
         .saturating_sub(report.finished_unix)
         .max(0);
     let when = match ago {

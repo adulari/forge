@@ -128,7 +128,7 @@ impl Session {
         let spec = r.spec.as_ref()?;
         // Metered in the store like the bridged path, so a resumed or restarted session keeps
         // its baseline, spend and unverified allowance instead of starting a new slice.
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let refusal = bridge_budget_refusal(
             &self.store,
             &self.id,
@@ -204,7 +204,7 @@ impl Session {
         }
         if let Some(spec) = &r.spec {
             let windows = self.store.subscription_windows().unwrap_or_default();
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             meter(
                 &mut self.expert.envelope,
                 spec,
@@ -374,7 +374,7 @@ impl Session {
             .extend(std::iter::repeat_n("tool", bridged as usize));
         if let Some(spec) = &spec {
             let windows = self.store.subscription_windows().unwrap_or_default();
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             meter(
                 &mut self.expert.envelope,
                 spec,

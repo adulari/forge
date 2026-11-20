@@ -35,11 +35,7 @@ pub(crate) async fn assay_cmd(sub: AssayCmd) -> Result<()> {
             println!("{:<10}  {:<28}  {:>8}  scope", "id", "date", "cost");
             println!("{}", "─".repeat(64));
             for (id, scope, cost, ts) in &runs {
-                use chrono::{Local, TimeZone};
-                let date = Local
-                    .timestamp_opt(*ts, 0)
-                    .single()
-                    .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                let date = crate::timefmt::local(*ts, "%Y-%m-%d %H:%M:%S")
                     .unwrap_or_else(|| ts.to_string());
                 println!(
                     "{:<10}  {:<28}  ${:>7.4}  {}",

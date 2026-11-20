@@ -33,7 +33,7 @@ pub(crate) fn stats_cmd(cmd: StatsCmd) -> Result<()> {
     let since = if session.is_some() {
         0
     } else {
-        chrono::Utc::now().timestamp() - i64::from(days) * 86_400
+        jiff::Timestamp::now().as_second() - i64::from(days) * 86_400
     };
     if codemode {
         let stats = store

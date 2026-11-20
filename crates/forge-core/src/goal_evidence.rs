@@ -28,6 +28,7 @@ async fn git(root: &Path, args: &[&str]) -> Option<String> {
             .arg("-C")
             .arg(root)
             .args(args)
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)
             .output(),
@@ -71,8 +72,11 @@ pub(crate) async fn collect(root: &Path, session_id: &str, started_unix: i64) ->
             checks,
         };
     }
-    let since = format!("--since=@{started_unix}");
-    let before = format!("--before=@{started_unix}");
+    // Bare `@N` is only a timestamp to git when N is large; a small N (such as 0) is parsed as
+    // "now", which hides every commit not made in the current second. The `+0000` suffix selects
+    // git's exact timestamp form.
+    let since = format!("--since=@{started_unix} +0000");
+    let before = format!("--before=@{started_unix} +0000");
     let commits = git(
         root,
         &["log", "--oneline", "--no-decorate", "-n", "30", &since],
@@ -215,6 +219,35 @@ mod tests {
         );
         assert!(evidence.uncommitted.contains("c.txt"));
         assert!(evidence.render().contains("feat: add b"));
+    }
+
+    #[tokio::test]
+    async fn a_goal_started_at_a_small_timestamp_still_sees_older_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("a.txt"), "one").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "feat: first slice"]);
+        let evidence = collect(dir.path(), "s1", 0).await;
+        assert!(
+            evidence.commits.contains("feat: first slice"),
+            "{}",
+            evidence.commits
+        );
     }
 
     #[tokio::test]

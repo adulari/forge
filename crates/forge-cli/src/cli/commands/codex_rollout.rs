@@ -139,9 +139,7 @@ fn is_injected(text: &str) -> bool {
 }
 
 fn when(v: &Value) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(v["timestamp"].as_str()?)
-        .ok()
-        .map(|t| t.timestamp())
+    crate::timefmt::parse_rfc3339(v["timestamp"].as_str()?)
 }
 
 fn note_meta(meta: &mut RolloutMeta, v: &Value) {
@@ -442,3 +440,17 @@ pub(crate) fn read(path: &Path) -> Result<Rollout> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn a_rollout_line_time_is_its_rfc3339_timestamp_in_epoch_seconds() {
+        let at = |ts: &str| when(&serde_json::json!({ "timestamp": ts }));
+        assert_eq!(at("2023-11-14T22:13:20.123Z"), Some(1_700_000_000));
+        assert_eq!(at("2023-11-14T23:13:20+01:00"), Some(1_700_000_000));
+        assert_eq!(at("nope"), None);
+        assert_eq!(when(&serde_json::json!({})), None);
+    }
+}

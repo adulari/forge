@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use chrono::{Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -98,12 +97,12 @@ pub(crate) fn start(command: &Command) -> TelemetryRun {
         return disabled;
     };
 
-    let now = Utc::now();
-    let iso_week = now.iso_week();
-    let day = now.format("%Y-%m-%d").to_string();
-    let week = format!("{}-W{:02}", iso_week.year(), iso_week.week());
-    let month = now.format("%Y-%m").to_string();
-    let window = (now.timestamp() / (30 * 60)).to_string();
+    let Periods {
+        day,
+        week,
+        month,
+        window,
+    } = Periods::at(jiff::Timestamp::now().as_second());
 
     let mut state = read_state(&path);
     let show_notice = !state.notice_shown && surface == Surface::Tui;
@@ -168,7 +167,7 @@ pub(crate) fn finish(run: TelemetryRun, succeeded: bool) {
         } else {
             "forge_run_failed"
         },
-        &Utc::now().format("%Y-%m-%d").to_string(),
+        &Periods::at(jiff::Timestamp::now().as_second()).day,
     ));
     if write_state(&path, &state).is_err() {
         return;
@@ -313,9 +312,30 @@ fn queue_period(state: &mut TelemetryState, event: &str, period: &str, should_qu
     }
 }
 
+struct Periods {
+    day: String,
+    week: String,
+    month: String,
+    window: String,
+}
+
+impl Periods {
+    fn at(unix_secs: i64) -> Self {
+        let now = jiff::Timestamp::from_second(unix_secs)
+            .unwrap_or_default()
+            .to_zoned(jiff::tz::TimeZone::UTC);
+        let iso_week = now.date().iso_week_date();
+        Self {
+            day: now.strftime("%Y-%m-%d").to_string(),
+            week: format!("{}-W{:02}", iso_week.year(), iso_week.week()),
+            month: now.strftime("%Y-%m").to_string(),
+            window: (unix_secs / (30 * 60)).to_string(),
+        }
+    }
+}
+
 fn pending_event(event: &str, period: &str) -> PendingEvent {
-    let nanos = Utc::now()
-        .timestamp_nanos_opt()
+    let nanos = i64::try_from(jiff::Timestamp::now().as_nanosecond())
         .unwrap_or_default()
         .unsigned_abs();
     let sequence = LOCAL_EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -386,7 +406,7 @@ async fn tui_heartbeat(host: String, api_key: String, path: PathBuf) {
         if !is_enabled() {
             return;
         }
-        let window = (Utc::now().timestamp() / (30 * 60)).to_string();
+        let window = Periods::at(jiff::Timestamp::now().as_second()).window;
         let mut state = read_state(&path);
         queue_changed(&mut state, "forge_active_window", &window, Marker::Window);
         if state.pending.is_empty() || write_state(&path, &state).is_err() {
@@ -449,6 +469,45 @@ mod tests {
         assert_eq!(object["distinct_id"], DISTINCT_ID);
         assert_eq!(object["$process_person_profile"], false);
         assert_eq!(object["$geoip_disable"], true);
+    }
+
+    #[test]
+    fn periods_are_the_utc_day_iso_week_month_and_half_hour_window() {
+        let p = Periods::at(1_783_000_000);
+        assert_eq!(
+            (
+                p.day.as_str(),
+                p.week.as_str(),
+                p.month.as_str(),
+                p.window.as_str()
+            ),
+            ("2026-07-02", "2026-W27", "2026-07", "990555")
+        );
+        let new_year = Periods::at(1_767_225_600);
+        assert_eq!(
+            (new_year.day.as_str(), new_year.week.as_str()),
+            ("2026-01-01", "2026-W01")
+        );
+        let monday_in_next_iso_year = Periods::at(1_735_516_800);
+        assert_eq!(
+            (
+                monday_in_next_iso_year.day.as_str(),
+                monday_in_next_iso_year.week.as_str()
+            ),
+            ("2024-12-30", "2025-W01")
+        );
+        let week_53 = Periods::at(1_609_632_000);
+        assert_eq!(
+            (week_53.day.as_str(), week_53.week.as_str()),
+            ("2021-01-03", "2020-W53")
+        );
+        let late = Periods::at(1_785_283_199);
+        assert_eq!(
+            (late.day.as_str(), late.month.as_str()),
+            ("2026-07-28", "2026-07")
+        );
+        assert_eq!(Periods::at(1_799).window, "0");
+        assert_eq!(Periods::at(1_800).window, "1");
     }
 
     #[test]
