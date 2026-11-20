@@ -79,6 +79,7 @@ pub(crate) fn probe(root: &Path) -> Option<RepoStatus> {
             "--untracked-files=all",
         ])
         .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .ok()
         .filter(|out| out.status.success())?;

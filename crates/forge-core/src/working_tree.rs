@@ -5,7 +5,7 @@ use std::path::Path;
 
 pub(crate) fn git_output(root: Option<&Path>, args: &[&str]) -> Option<Vec<u8>> {
     let mut cmd = std::process::Command::new("git");
-    cmd.args(args);
+    cmd.args(args).env("GIT_OPTIONAL_LOCKS", "0");
     if let Some(root) = root {
         cmd.current_dir(root);
     }
@@ -70,6 +70,7 @@ pub(crate) fn worktree_fingerprint(root: &std::path::Path) -> Option<u64> {
             .arg("-C")
             .arg(root)
             .args(args)
+            .env("GIT_OPTIONAL_LOCKS", "0")
             .output()
             .ok()
             .filter(|o| o.status.success())
@@ -92,7 +93,11 @@ pub(crate) fn worktree_fingerprint(root: &std::path::Path) -> Option<u64> {
             None => line.hash(&mut hasher),
         }
     }
-    git(&["diff", "HEAD"]).unwrap_or_default().hash(&mut hasher);
+    // Plumbing on purpose: `git diff` rewrites a stat-dirty index under `index.lock` even with
+    // `GIT_OPTIONAL_LOCKS=0`, and this runs every turn beside the session's own commits.
+    git(&["diff-index", "-p", "HEAD"])
+        .unwrap_or_default()
+        .hash(&mut hasher);
     Some(hasher.finish())
 }
 
@@ -397,5 +402,37 @@ mod tests {
             std::fs::write(dir.path().join(format!("n{i}.txt")), "").unwrap();
         }
         assert_eq!(progress_fingerprint(dir.path()), None);
+    }
+
+    #[test]
+    fn a_fingerprint_never_rewrites_the_index_so_it_cannot_race_a_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        std::fs::write(dir.path().join("f.txt"), "a").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+        // Same bytes, new mtime: a plain `git status` refreshes the index and so takes
+        // `index.lock`, which fails a concurrent `git commit` outright.
+        let file = std::fs::File::options()
+            .write(true)
+            .open(dir.path().join("f.txt"))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        let index = dir.path().join(".git/index");
+        let before = std::fs::read(&index).unwrap();
+        assert!(worktree_fingerprint(dir.path()).is_some());
+        assert_eq!(before, std::fs::read(&index).unwrap());
     }
 }

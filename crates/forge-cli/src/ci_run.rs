@@ -46,6 +46,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
         .arg("-C")
         .arg(root)
         .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
