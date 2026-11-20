@@ -19,7 +19,12 @@ pub fn install_executable(path: &Path, contents: &str) {
     std::fs::write(&source, contents).unwrap();
     // A fresh inode: `cp` onto an existing file would reopen it for writing.
     let _ = std::fs::remove_file(path);
-    let copied = std::process::Command::new("cp")
+    // By absolute path: tests often point PATH at a fake bin directory before installing into it.
+    let cp = ["/bin/cp", "/usr/bin/cp"]
+        .into_iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .unwrap_or("cp");
+    let copied = std::process::Command::new(cp)
         .arg(&source)
         .arg(path)
         .status()
