@@ -225,9 +225,14 @@ async fn fetch_devices() -> anyhow::Result<Devices> {
         })
         .count();
     let this = state.device_id.clone();
+    // An older service, or one that does not answer, simply never offers "make owner".
+    let owner_transfer = super::devices::owner_transfer_supported(&service_url)
+        .await
+        .unwrap_or(false);
     Ok(Devices::Loaded {
         hosts_online: online,
         hosts_total: live.len(),
+        owner_transfer,
         devices: devices
             .devices
             .into_iter()
@@ -251,6 +256,26 @@ pub(crate) async fn load_devices(mock: bool) -> Devices {
         Ok(Ok(devices)) => devices,
         Ok(Err(error)) => Devices::Unavailable(format!("{error:#}")),
         Err(_) => Devices::Unavailable("the service did not answer in time".into()),
+    }
+}
+
+/// Make `id` the account's owner device. Ok carries the new owner's name.
+pub(crate) async fn make_owner(mock: bool, id: &str) -> Result<String, String> {
+    if mock {
+        return Ok(id.to_string());
+    }
+    let work = async {
+        let store = StateStore::platform()?;
+        let mut state = store.load()?;
+        let token = ensure_access_token(&store, &mut state).await?;
+        let service_url = forge_config::load()?.anywhere.service_url().to_owned();
+        super::devices::make_owner_checked(&service_url, &token, state.device_id.as_deref(), id)
+            .await
+    };
+    match tokio::time::timeout(SERVICE_TIMEOUT, work).await {
+        Ok(Ok(name)) => Ok(name),
+        Ok(Err(error)) => Err(format!("{error:#}")),
+        Err(_) => Err("the service did not answer in time".into()),
     }
 }
 
@@ -388,6 +413,7 @@ fn mock_devices() -> Devices {
     Devices::Loaded {
         hosts_online: 2,
         hosts_total: 3,
+        owner_transfer: true,
         devices: vec![
             DeviceView {
                 id: "a1b2c3d4e5f60718".into(),

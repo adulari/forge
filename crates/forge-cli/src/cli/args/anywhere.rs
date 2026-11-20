@@ -87,11 +87,18 @@ pub(crate) enum AnywhereCmd {
     },
     /// Retry exact queued job ciphertext and poll categorical host acknowledgements.
     Jobs,
-    /// List enrolled devices, or atomically revoke one and rotate the data-key epoch.
+    /// List enrolled devices, atomically revoke one and rotate the data-key epoch, or make
+    /// another device the account's owner.
     Devices {
         /// Device id to revoke. Omit to list devices.
-        #[arg(long, value_name = "DEVICE")]
+        #[arg(long, value_name = "DEVICE", conflicts_with = "make_owner")]
         revoke: Option<String>,
+        /// Device id to make the account's owner. Only the current owner device can do this.
+        #[arg(long, value_name = "DEVICE")]
+        make_owner: Option<String>,
+        /// Skip the confirmation question for `--make-owner`.
+        #[arg(long, short = 'y', requires = "make_owner")]
+        yes: bool,
     },
     /// Sync keys, skills, settings, MCP servers and instructions across your devices.
     Sync {

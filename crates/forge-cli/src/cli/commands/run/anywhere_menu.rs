@@ -24,6 +24,7 @@ enum Msg {
         result: Result<(), String>,
     },
     Synced(Result<(), String>),
+    OwnerChanged(Result<String, String>),
 }
 
 pub(crate) struct AnywhereMenuDriver {
@@ -142,6 +143,15 @@ impl AnywhereMenuDriver {
                     }
                     self.status_at = None;
                 }
+                Msg::OwnerChanged(result) => {
+                    match result {
+                        Ok(name) => app
+                            .anywhere_menu
+                            .notify(Tone::Ok, format!("{name} is now the owner device.")),
+                        Err(error) => app.anywhere_menu.notify(Tone::Err, error),
+                    }
+                    self.devices_at = None;
+                }
                 Msg::Synced(result) => {
                     app.anywhere_menu.syncing = false;
                     match result {
@@ -197,6 +207,15 @@ impl AnywhereMenuDriver {
                     &label,
                     &format!("forge anywhere devices --revoke {id}"),
                 );
+            }
+            MenuAction::MakeOwner { id, name } => {
+                app.anywhere_menu
+                    .notify(Tone::Ok, format!("Making {name} the owner device..."));
+                let (tx, mock) = (self.tx.clone(), self.mock);
+                tokio::spawn(async move {
+                    let result = tui_menu::make_owner(mock, &id).await.map(|_| name);
+                    let _ = tx.send(Msg::OwnerChanged(result));
+                });
             }
             MenuAction::OpenWeb => match crate::cli::commands::mcp::open_browser(WEB_URL) {
                 Ok(()) => app

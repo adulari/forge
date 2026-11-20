@@ -1,4 +1,5 @@
-//! The confirmations shown before key sync is switched on and before a device is revoked.
+//! The confirmations shown before key sync is switched on, before a device is revoked and before
+//! ownership moves to another device.
 
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -27,7 +28,18 @@ pub(super) fn render_keys_confirm(f: &mut Frame, card: Rect, on_confirm: bool) {
     );
 }
 
-pub(super) fn render_revoke_confirm(f: &mut Frame, card: Rect, name: &str, on_confirm: bool) {
+pub(super) fn render_device_confirm(f: &mut Frame, card: Rect, pending: &super::DeviceConfirm) {
+    match pending.kind {
+        super::DeviceConfirmKind::Revoke => {
+            render_revoke_confirm(f, card, &pending.name, pending.on_confirm)
+        }
+        super::DeviceConfirmKind::MakeOwner => {
+            render_make_owner_confirm(f, card, &pending.name, pending.on_confirm)
+        }
+    }
+}
+
+fn render_revoke_confirm(f: &mut Frame, card: Rect, name: &str, on_confirm: bool) {
     let paragraphs: [(&str, &str); 4] = [
         ("", "The device loses access at once: its sign-in, its host grants and its push subscription are revoked."),
         ("- ", "Forge rotates the account key and re-wraps it to your remaining devices and your Recovery Kit, so the device cannot read anything new."),
@@ -40,6 +52,21 @@ pub(super) fn render_revoke_confirm(f: &mut Frame, card: Rect, name: &str, on_co
         &paragraphs,
         ("Revoke device", on_confirm),
         format!("Revoke {name}?"),
+    );
+}
+
+fn render_make_owner_confirm(f: &mut Frame, card: Rect, name: &str, on_confirm: bool) {
+    let paragraphs: [(&str, &str); 3] = [
+        ("", "Only the owner device can revoke the owner, or hand ownership to another device."),
+        ("- ", "This device stops being the owner. It can still revoke other devices, but no longer the new owner."),
+        ("- ", "Only the new owner can make this device the owner again."),
+    ];
+    render_confirm(
+        f,
+        card,
+        &paragraphs,
+        ("Make owner", on_confirm),
+        format!("Make {name} the owner?"),
     );
 }
 

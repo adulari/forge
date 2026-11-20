@@ -72,6 +72,7 @@ fn devices() -> Devices {
     Devices::Loaded {
         hosts_online: 2,
         hosts_total: 3,
+        owner_transfer: true,
         devices: vec![
             DeviceView {
                 id: "a1b2c3d4".into(),
@@ -395,7 +396,7 @@ fn revoke_asks_first_and_cancel_is_the_default() {
     m.key(KeyKind::End);
     assert_eq!(m.focused(), Some(Row::Device(1)));
     assert_eq!(m.key(KeyKind::Enter), MenuAction::None);
-    let revoke = m.revoke.clone().expect("confirmation is open");
+    let revoke = m.device_confirm.clone().expect("confirmation is open");
     assert_eq!((revoke.id.as_str(), revoke.on_confirm), ("99aa88bb", false));
     let [narrow, wide] = both("revoke-confirm", &m);
     for screen in [narrow, wide] {
@@ -404,7 +405,7 @@ fn revoke_asks_first_and_cancel_is_the_default() {
     }
     // Enter on the default button cancels.
     assert_eq!(m.key(KeyKind::Enter), MenuAction::None);
-    assert!(m.revoke.is_none());
+    assert!(m.device_confirm.is_none());
 
     m.key(KeyKind::Char('x'));
     m.key(KeyKind::Left);
@@ -426,7 +427,7 @@ fn revoke_asks_first_and_cancel_is_the_default() {
     m.key(KeyKind::Char('x'));
     assert_eq!(m.key(KeyKind::Esc), MenuAction::None);
     assert!(
-        m.revoke.is_none() && m.open,
+        m.device_confirm.is_none() && m.open,
         "Esc closes the confirmation, not the menu"
     );
 }
@@ -438,7 +439,7 @@ fn this_device_and_a_foreign_owner_are_explained_not_offered() {
     m.key(KeyKind::Up);
     assert_eq!(m.focused(), Some(Row::Device(0)));
     m.key(KeyKind::Char('x'));
-    assert!(m.revoke.is_none());
+    assert!(m.device_confirm.is_none());
     assert!(m
         .notice
         .as_ref()
@@ -458,12 +459,13 @@ fn this_device_and_a_foreign_owner_are_explained_not_offered() {
             devices,
             hosts_online: 1,
             hosts_total: 1,
+            owner_transfer: true,
         },
     );
     m.key(KeyKind::End);
     m.key(KeyKind::Up);
     assert_eq!(m.key(KeyKind::Enter), MenuAction::None);
-    assert!(m.revoke.is_none());
+    assert!(m.device_confirm.is_none());
     assert!(m.notice.as_ref().unwrap().text.contains("owner device"));
     let [narrow, _] = both("owner-row", &m);
     assert!(narrow.contains("owner"));
@@ -530,4 +532,102 @@ fn a_moving_outbox_only_reports_its_backlog() {
         assert!(t.contains("3 waiting to upload"), "{t}");
         assert!(!t.contains("Upload blocked"));
     }
+}
+
+#[test]
+fn make_owner_asks_first_and_only_the_owner_is_offered_it() {
+    let mut m = menu(Some(signed_in(all_off())), devices());
+    m.key(KeyKind::End);
+    assert_eq!(m.focused(), Some(Row::Device(1)));
+    assert!(m.can_make_owner(1));
+    assert!(!m.can_make_owner(0), "this device is already the owner");
+    let [narrow, wide] = both("make-owner-row", &m);
+    assert!(wide.contains("m make owner"), "{wide}");
+    assert!(
+        narrow.contains("makes a device the owner") || wide.contains("makes a device the owner")
+    );
+
+    assert_eq!(m.key(KeyKind::Char('m')), MenuAction::None);
+    let pending = m.device_confirm.clone().expect("confirmation is open");
+    assert_eq!(pending.kind, DeviceConfirmKind::MakeOwner);
+    assert!(!pending.on_confirm, "Cancel is the default");
+    let [narrow, wide] = both("make-owner-confirm", &m);
+    for screen in [narrow, wide] {
+        assert!(screen.contains("Make laptop the owner?"), "{screen}");
+    }
+    assert_eq!(m.key(KeyKind::Enter), MenuAction::None);
+    assert!(m.device_confirm.is_none());
+
+    m.key(KeyKind::Char('m'));
+    assert_eq!(
+        m.key(KeyKind::Char('y')),
+        MenuAction::MakeOwner {
+            id: "99aa88bb".into(),
+            name: "laptop".into()
+        }
+    );
+
+    // The owner row itself is explained, not offered.
+    m.key(KeyKind::Up);
+    m.key(KeyKind::Char('m'));
+    assert!(m.device_confirm.is_none());
+    assert!(m
+        .notice
+        .as_ref()
+        .unwrap()
+        .text
+        .contains("already the owner"));
+}
+
+#[test]
+fn make_owner_is_never_offered_by_a_non_owner_or_against_an_older_service() {
+    let Devices::Loaded { mut devices, .. } = devices() else {
+        unreachable!()
+    };
+    devices[0].this_device = false;
+    devices[1].this_device = true;
+    let mut m = menu(
+        Some(signed_in(all_off())),
+        Devices::Loaded {
+            devices,
+            hosts_online: 1,
+            hosts_total: 1,
+            owner_transfer: true,
+        },
+    );
+    m.key(KeyKind::End);
+    assert!(!m.can_make_owner(0) && !m.can_make_owner(1));
+    m.key(KeyKind::Char('m'));
+    assert!(m.device_confirm.is_none());
+    assert!(m
+        .notice
+        .as_ref()
+        .unwrap()
+        .text
+        .contains("Only the owner device"));
+
+    let Devices::Loaded { devices, .. } = super::tests::devices() else {
+        unreachable!()
+    };
+    let mut m = menu(
+        Some(signed_in(all_off())),
+        Devices::Loaded {
+            devices,
+            hosts_online: 1,
+            hosts_total: 1,
+            owner_transfer: false,
+        },
+    );
+    m.key(KeyKind::End);
+    assert!(!m.can_make_owner(1));
+    let [_, wide] = both("make-owner-unsupported", &m);
+    assert!(!wide.contains("make owner"), "{wide}");
+    m.key(KeyKind::Char('m'));
+    assert!(m.device_confirm.is_none());
+    assert!(m
+        .notice
+        .as_ref()
+        .unwrap()
+        .text
+        .contains("cannot change the owner"));
 }
