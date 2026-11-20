@@ -82,6 +82,14 @@ writable. If a workflow needs `sudo` or system writes, loosen it with a drop-in
 (`systemctl --user edit forge-serve.service`). `forge service logs [-n 100] [-f]` shows the
 daemon's output (journald on Linux, `serve.log` in the data directory on macOS).
 
+The unit uses `Restart=always` with `RestartSec=10` and `StartLimitIntervalSec=0`, so the daemon
+comes back after an OOM kill, a crash or a stray `SIGTERM`, and a burst of quick failures cannot park
+it in `failed` for good. An explicit `systemctl --user stop forge-serve` or `forge service stop`
+still stops it. A permanent failure (exit 78) is exempt from restarts, lands in `failed`, and fires
+`OnFailure=`. Older installs have `Restart=on-failure` and stay down after a clean exit; the unit is
+rewritten only on install, so run `forge service install` once after upgrading (`forge doctor`
+flags the old unit).
+
 ## Rolling an update back
 
 `forge update` keeps the build it replaced beside the binary as `forge.prev` (one extra binary of
