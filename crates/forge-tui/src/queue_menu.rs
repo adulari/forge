@@ -24,6 +24,9 @@ pub struct QueueRow {
     pub pushes: u32,
     /// The independent review's verdict (`review clean`, `review: 2 confirmed, fixing`), or empty.
     pub review: String,
+    /// Who is landing the repository's PRs when daemons share the queue (`landing on ssu-dev:
+    /// PR #123`), or empty.
+    pub lease: String,
 }
 
 impl QueueRow {

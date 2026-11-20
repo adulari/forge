@@ -104,6 +104,13 @@ export function repoName(repo: string): string {
   return last && last.length > 0 ? last : repo;
 }
 
+/** The repository's shared-queue line: who is landing, in the tone that says whether the owner should look. */
+export function leaseStatus(queue: PrRepoQueue): { text: string; tone: WatchTone } | null {
+  const lease = queue.lease;
+  if (!lease || !lease.text) return null;
+  return { text: lease.text, tone: lease.status === "unavailable" ? "warn" : lease.status === "mine" ? "accent" : "neutral" };
+}
+
 export function pushesLabel(row: PrQueueRow): string | null {
   const parts: string[] = [];
   if (row.pushes > 0) parts.push(`${row.pushes} ${row.pushes === 1 ? "push" : "pushes"} by the queue`);

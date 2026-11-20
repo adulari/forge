@@ -15,7 +15,17 @@ async fn advance(
     now: i64,
     verify: Option<Vec<super::Verify>>,
 ) -> crate::serve_pr_watch::Outcome {
-    advance_queued(true, gh, root, watch, all, free, now, verify).await
+    advance_queued(
+        &super::Queue::Local,
+        gh,
+        root,
+        watch,
+        all,
+        free,
+        now,
+        verify,
+    )
+    .await
 }
 
 pub(super) fn git(dir: &Path, args: &[&str]) -> String {
@@ -121,6 +131,48 @@ impl World {
             r#"#!/bin/sh
 echo "$@" >> "{log}"
 BARE="{bare}"
+if [ "$1" = api ]; then
+  if [ -e "{tmp}/api-down" ]; then echo "gh: Bad credentials (HTTP 401)" >&2; exit 1; fi
+  path="$2"; shift 2
+  method=GET; sha=""; msg=""; tree=""; parent=""; ref=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -X) method="$2"; shift 2 ;;
+      -f|-F) kv="$2"; shift 2
+        case "$kv" in
+          sha=*) sha="${{kv#*=}}" ;;
+          message=*) msg="${{kv#*=}}" ;;
+          tree=*) tree="${{kv#*=}}" ;;
+          parents*) parent="${{kv#*=}}" ;;
+          ref=*) ref="${{kv#*=}}" ;;
+        esac ;;
+      *) shift ;;
+    esac
+  done
+  G="git --git-dir=$BARE"
+  export GIT_AUTHOR_NAME=l GIT_AUTHOR_EMAIL=l@example.invalid GIT_COMMITTER_NAME=l GIT_COMMITTER_EMAIL=l@example.invalid
+  case "$method $path" in
+    "GET repos/"*"/git/ref/"*)
+      s=$($G rev-parse -q --verify "refs/${{path#*/git/ref/}}") || {{ echo "gh: Not Found (HTTP 404)" >&2; exit 1; }}
+      printf '{{"object":{{"sha":"%s"}}}}' "$s" ;;
+    "GET repos/"*"/git/commits/"*)
+      m=$($G cat-file commit "${{path##*/}}" | sed '1,/^$/d')
+      printf '{{"message":"%s"}}' "$m" ;;
+    "POST repos/"*"/git/commits")
+      if [ -n "$parent" ]; then c=$($G commit-tree "$tree" -p "$parent" -m "$msg"); else c=$($G commit-tree "$tree" -m "$msg"); fi
+      printf '{{"sha":"%s"}}' "$c" ;;
+    "POST repos/"*"/git/refs")
+      if $G rev-parse -q --verify "$ref" >/dev/null; then echo "gh: Reference already exists (HTTP 422)" >&2; exit 1; fi
+      $G update-ref "$ref" "$sha" && printf '{{"ref":"%s"}}' "$ref" ;;
+    "PATCH repos/"*"/git/refs/"*)
+      name="refs/${{path#*/git/refs/}}"
+      cur=$($G rev-parse -q --verify "$name") || {{ echo "gh: Not Found (HTTP 404)" >&2; exit 1; }}
+      if ! $G merge-base --is-ancestor "$cur" "$sha"; then echo "gh: Update is not a fast forward (HTTP 422)" >&2; exit 1; fi
+      $G update-ref "$name" "$sha" "$cur" && printf '{{"ref":"%s"}}' "$name" ;;
+    *) echo "unexpected gh api call: $method $path" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
 case "$1 $2" in
 "pr view")
   br=$(git rev-parse --abbrev-ref HEAD)
@@ -1053,7 +1105,17 @@ async fn a_slow_update_step_does_not_hold_the_sweep() {
         cwd: None,
     }];
     let started = std::time::Instant::now();
-    let pre = before_poll(wt, &mut watch, vec![], true, 100, Some(slow.clone())).await;
+    let pre = before_poll(
+        &Gh::system(),
+        &super::Queue::Local,
+        wt,
+        &mut watch,
+        vec![],
+        true,
+        100,
+        Some(slow.clone()),
+    )
+    .await;
     assert!(
         started.elapsed() < std::time::Duration::from_secs(4),
         "the sweep waited {:?} for the update step",
@@ -1062,16 +1124,46 @@ async fn a_slow_update_step_does_not_hold_the_sweep() {
     assert!(!pre.acted);
     assert_eq!(watch.hold.as_deref(), Some(UPDATING));
     assert_eq!(watch.queue.as_ref().unwrap().state, QueueState::Head);
-    let again = before_poll(wt, &mut watch, vec![], true, 101, Some(slow.clone())).await;
+    let again = before_poll(
+        &Gh::system(),
+        &super::Queue::Local,
+        wt,
+        &mut watch,
+        vec![],
+        true,
+        101,
+        Some(slow.clone()),
+    )
+    .await;
     assert!(!again.acted, "a second sweep does not start a second step");
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    let mut pre = before_poll(wt, &mut watch, vec![], true, 160, Some(slow.clone())).await;
+    let mut pre = before_poll(
+        &Gh::system(),
+        &super::Queue::Local,
+        wt,
+        &mut watch,
+        vec![],
+        true,
+        160,
+        Some(slow.clone()),
+    )
+    .await;
     for _ in 0..20 {
         if pre.acted {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        pre = before_poll(wt, &mut watch, vec![], true, 160, Some(slow.clone())).await;
+        pre = before_poll(
+            &Gh::system(),
+            &super::Queue::Local,
+            wt,
+            &mut watch,
+            vec![],
+            true,
+            160,
+            Some(slow.clone()),
+        )
+        .await;
     }
     assert!(pre.acted, "the finished step was applied: {:?}", watch.hold);
     let info = watch.queue.as_ref().unwrap();

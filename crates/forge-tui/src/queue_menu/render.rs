@@ -53,7 +53,15 @@ fn lines(m: &QueueMenu, w: usize) -> (Vec<Line<'static>>, usize) {
     for (i, r) in m.rows.iter().enumerate() {
         if repo != Some(r.repo.as_str()) {
             repo = Some(r.repo.as_str());
-            out.push(Line::from(Span::styled(trunc(&r.repo, w), styles::muted())));
+            let mut head = vec![Span::styled(trunc(&r.repo, w), styles::muted())];
+            if !r.lease.is_empty() {
+                let room = w.saturating_sub(width(&r.repo) + 3);
+                head.push(Span::styled(
+                    format!(" {} {}", g().sep, trunc(&r.lease, room.max(12))),
+                    styles::brand(),
+                ));
+            }
+            out.push(Line::from(head));
         }
         if i == m.cursor {
             focus = out.len();

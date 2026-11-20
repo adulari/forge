@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PrQueueRow } from "../../lib/apiPr";
-import { availableActions, pushesLabel, queueSummary, repoName, rowOpenTarget, rowStatus, summaryLabel } from "./mergeQueueModel";
+import { availableActions, leaseStatus, pushesLabel, queueSummary, repoName, rowOpenTarget, rowStatus, summaryLabel } from "./mergeQueueModel";
 
 const row = (over: Partial<PrQueueRow> = {}): PrQueueRow => ({
   session_id: "s1",
@@ -95,5 +95,18 @@ describe("rowOpenTarget", () => {
     expect(rowOpenTarget(row(), false)).toBe("external");
     expect(rowOpenTarget(row({ pr_number: null }), true)).toBe("external");
     expect(rowOpenTarget(row({ pr_number: null, pr_url: null }), true)).toBeNull();
+  });
+});
+
+describe("leaseStatus", () => {
+  it("says who is landing, and stays quiet without a shared queue", () => {
+    expect(leaseStatus({ repo: "r", rows: [] })).toBeNull();
+    expect(leaseStatus({ repo: "r", lease: null, rows: [] })).toBeNull();
+    expect(leaseStatus({ repo: "r", lease: { status: "other", holder: "ssu-dev", pr: 123, text: "landing on ssu-dev: PR #123" }, rows: [] })).toEqual({
+      text: "landing on ssu-dev: PR #123",
+      tone: "neutral",
+    });
+    expect(leaseStatus({ repo: "r", lease: { status: "mine", text: "landing here: PR #4" }, rows: [] })?.tone).toBe("accent");
+    expect(leaseStatus({ repo: "r", lease: { status: "unavailable", text: "shared queue unavailable (x), landing on its own" }, rows: [] })?.tone).toBe("warn");
   });
 });

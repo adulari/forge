@@ -16,6 +16,7 @@ fn row(n: u64, state: &str, position: Option<usize>) -> QueueRow {
         },
         pushes: 0,
         review: String::new(),
+        lease: String::new(),
     }
 }
 
@@ -157,6 +158,18 @@ fn the_card_lists_position_pr_state_and_reason_per_repository() {
         "{text}"
     );
     assert!(text.contains("merged"), "{text}");
+}
+
+#[test]
+fn the_repository_line_says_which_daemon_is_landing() {
+    let mut menu = QueueMenu::default();
+    menu.open();
+    let _ = menu.take_refresh();
+    let mut waiting = row(8, "queued", Some(1));
+    waiting.lease = "landing on ssu-dev: PR #123".into();
+    menu.apply_list(Ok(vec![waiting]));
+    let s = drawn(menu, 120, 24);
+    assert!(s.contains("landing on ssu-dev: PR #123"), "{s}");
 }
 
 #[test]

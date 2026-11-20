@@ -29,6 +29,7 @@ use serde_json::Value;
 
 use crate::serve::{err_response, json_response, DaemonState};
 use crate::serve_git::session_repo_root;
+use crate::serve_merge_queue as merge_queue;
 use crate::serve_pr::{
     merge_in, parse_summary, Gh, GhError, MergeRequest, PrSummary, SUMMARY_FIELDS,
 };
@@ -453,6 +454,7 @@ pub(crate) fn start(state: &Arc<DaemonState>) {
 
 pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
     crate::serve_custody::settle(state);
+    let queue = crate::serve_merge_queue::Queue::load();
     for watch in registry().all().into_iter().filter(Watch::active) {
         let hosted = state.registry.get(&watch.session_id).await;
         let Some(handle) = (match hosted {
@@ -496,8 +498,7 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
         }
         let mut next = watch.clone();
         let all = registry().all();
-        let queue = forge_config::load().map_or(true, |c| c.pr_watch.queue);
-        let outcome = advance(queue, gh, &root, &mut next, all, free, now, None).await;
+        let outcome = advance(&queue, gh, &root, &mut next, all, free, now, None).await;
         let announcement = settle_push(&mut next, outcome.green);
         registry().store(&watch.session_id, next.clone());
         announce(state, &watch.session_id, announcement).await;
@@ -520,6 +521,7 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
             state.registry.notify_fleet();
         }
     }
+    crate::serve_merge_queue::settle_leases(&queue, gh, &registry().all(), now).await;
 }
 
 /// One watch's turn: the merge queue's update step for a merge-mode watch, then PR Watch's poll.
@@ -528,7 +530,7 @@ pub(crate) async fn sweep(state: &Arc<DaemonState>, gh: &Gh, now: i64) {
 /// its own, with no queue standing, update step or hold.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn advance(
-    queue: bool,
+    queue: &merge_queue::Queue,
     gh: &Gh,
     root: &Path,
     watch: &mut Watch,
@@ -537,14 +539,14 @@ pub(crate) async fn advance(
     now: i64,
     verify: Option<Vec<crate::serve_merge_queue::Verify>>,
 ) -> Outcome {
-    if watch.mode != Mode::Merge || !queue {
+    if watch.mode != Mode::Merge || !queue.is_on() {
         watch.hold = None;
         watch.queue = None;
         return poll_once(gh, root, watch, free, now).await;
     }
     let before = watch.clone();
     let tracked = registry().live_arm(watch).is_some();
-    let pre = crate::serve_merge_queue::before_poll(root, watch, all, free, now, verify).await;
+    let pre = merge_queue::before_poll(gh, queue, root, watch, all, free, now, verify).await;
     if registry().superseded(watch, tracked) {
         return Outcome::default();
     }

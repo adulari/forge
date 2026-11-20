@@ -375,6 +375,13 @@ fn draw_queue_section(app: &BoardApp, frame: &mut Frame, area: Rect) {
     if back > 0 {
         title.push_str(&format!(" · {back} handed back"));
     }
+    if let Some(lease) = rows
+        .iter()
+        .map(|r| r.lease.as_str())
+        .find(|l| !l.is_empty())
+    {
+        title.push_str(&format!(" · {lease}"));
+    }
     if rows.len() > QUEUE_ROWS {
         title.push_str(&format!(" · +{} more", rows.len() - QUEUE_ROWS));
     }
@@ -962,6 +969,7 @@ mod tests {
             reason: reason.into(),
             pushes: 0,
             review: String::new(),
+            lease: String::new(),
         }
     }
 
@@ -1000,6 +1008,14 @@ mod tests {
         assert!(
             !short.contains("Merge queue"),
             "a short terminal keeps its height for cards: {short}"
+        );
+        let mut waiting = queued(8, "queued", Some(1), "landing on ssu-dev: PR #123");
+        waiting.lease = "landing on ssu-dev: PR #123".into();
+        app.apply(BoardEvent::Queue(vec![waiting]));
+        let s = screen(&mut app, 130, 30);
+        assert!(
+            s.contains("Merge queue · 1 waiting · landing on ssu-dev: PR #123"),
+            "{s}"
         );
         app.apply(BoardEvent::Queue(Vec::new()));
         assert!(!screen(&mut app, 130, 30).contains("Merge queue"));

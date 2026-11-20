@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- One merge queue across daemons (docs/rfcs/shared-merge-queue.md). Daemons that watch PRs of the same GitHub repository take turns landing through a lease held in a ref of that repository (`refs/forge/merge-queue/<base>`, created and moved through the git refs API, which is atomic): only the lease holder updates, verifies and lands, the others hold their queue heads and say who is landing (`landing on ssu-dev: PR #123`). The holder renews every minute; a lease stale for ten minutes is taken over, so a dead daemon never blocks the queue. If GitHub refuses the lease the daemon lands on its own with a warning, as before. `[pr_watch] shared_queue = false` turns it off. The holder shows on `/queue`, `forge board`, `forge prs queue` and the Merge queue page on desktop and phone.
+
 ## [2.29.0] - 2026-11-13
 
 ### Security

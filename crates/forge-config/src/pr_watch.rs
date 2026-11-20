@@ -23,6 +23,10 @@ fn default_queue() -> bool {
     true
 }
 
+fn default_shared_queue() -> bool {
+    true
+}
+
 fn default_review_timeout_secs() -> u64 {
     600
 }
@@ -37,6 +41,11 @@ pub struct PrWatchConfig {
     /// (docs/features/merge-queue.md). `false` polls and merges each PR on its own.
     #[serde(default = "default_queue")]
     pub queue: bool,
+    /// Daemons that watch PRs of the same GitHub repository take turns landing through a lease
+    /// on a ref in that repository (docs/features/merge-queue.md). `false` keeps each daemon's
+    /// queue to itself. Only matters with `queue` on.
+    #[serde(default = "default_shared_queue")]
+    pub shared_queue: bool,
     /// `auto` reviews every PR PR Watch is about to merge; `off` merges as before.
     #[serde(default = "default_review")]
     pub review: String,
@@ -68,6 +77,7 @@ impl Default for PrWatchConfig {
     fn default() -> Self {
         Self {
             queue: default_queue(),
+            shared_queue: default_shared_queue(),
             review: default_review(),
             review_model: String::new(),
             review_budget: String::new(),
@@ -106,7 +116,7 @@ mod tests {
     #[test]
     fn review_is_on_by_default_and_allows_the_merge_on_error() {
         let c = PrWatchConfig::default();
-        assert!(c.review_enabled() && c.merge_on_review_error() && c.queue);
+        assert!(c.review_enabled() && c.merge_on_review_error() && c.queue && c.shared_queue);
         let strict = PrWatchConfig {
             review_on_error: "block".into(),
             ..PrWatchConfig::default()
@@ -121,11 +131,11 @@ mod tests {
     #[test]
     fn the_table_parses() {
         let cfg = parse(
-            "[pr_watch]\nreview = \"off\"\nreview_model = \"bedrock::sonnet\"\nreview_on_error = \"merge\"\nqueue = false\nreview_max_findings = 3\n",
+            "[pr_watch]\nreview = \"off\"\nreview_model = \"bedrock::sonnet\"\nreview_on_error = \"merge\"\nqueue = false\nshared_queue = false\nreview_max_findings = 3\n",
         );
         assert!(!cfg.pr_watch.review_enabled());
         assert!(cfg.pr_watch.merge_on_review_error());
-        assert!(!cfg.pr_watch.queue);
+        assert!(!cfg.pr_watch.queue && !cfg.pr_watch.shared_queue);
         assert_eq!(cfg.pr_watch.review_max_findings, 3);
         assert_eq!(cfg.pr_watch.review_model, "bedrock::sonnet");
     }

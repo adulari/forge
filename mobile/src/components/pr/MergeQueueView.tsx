@@ -15,7 +15,7 @@ import { Button } from "../ds/Button";
 import { EmptyState } from "../ds/EmptyState";
 import { Sheet } from "../ds/Sheet";
 import { PrDetailView } from "./PrDetailView";
-import { ACTION_LABELS, availableActions, pushesLabel, repoName, rowOpenTarget, rowStatus } from "./mergeQueueModel";
+import { ACTION_LABELS, availableActions, leaseStatus, pushesLabel, repoName, rowOpenTarget, rowStatus } from "./mergeQueueModel";
 
 interface Pending {
   session: string;
@@ -69,6 +69,15 @@ export function MergeQueueView() {
       {queues.map((queue) => (
         <View key={queue.repo} style={styles.group}>
           <Text style={[typeScale.meta, { color: tokens.ink2 }]}>{repoName(queue.repo)}</Text>
+          {(() => {
+            const lease = leaseStatus(queue);
+            return lease ? (
+              <View style={styles.lease}>
+                <Badge label="Shared queue" tone={lease.tone} />
+                <Text style={[typeScale.monoMeta, styles.flex, { color: tokens.ink3 }]}>{lease.text}</Text>
+              </View>
+            ) : null;
+          })()}
           {queue.rows.map((row) => {
             const status = rowStatus(row);
             const actions = availableActions(row);
@@ -134,6 +143,7 @@ const styles = StyleSheet.create({
   group: { gap: space.space8 },
   row: { borderWidth: StyleSheet.hairlineWidth, borderRadius: radii.radius4, padding: space.space12, gap: space.space8 },
   head: { flexDirection: "row", alignItems: "center", gap: space.space8 },
+  lease: { flexDirection: "row", alignItems: "center", gap: space.space8 },
   position: { width: 20 },
   flex: { flex: 1 },
   actions: { flexDirection: "row", flexWrap: "wrap", gap: space.space8 },

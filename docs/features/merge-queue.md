@@ -8,7 +8,8 @@ pile of PRs that all conflict the moment the first one merges.
 
 ```toml
 [pr_watch]
-queue = true   # false: each merge-mode PR is polled and merged on its own, no queue or update step
+queue = true         # false: each merge-mode PR is polled and merged on its own, no queue or update step
+shared_queue = true  # false: this daemon's queue is its own (see "One queue across daemons")
 ```
 
 ## What it does
@@ -92,6 +93,36 @@ is stored, so a hold pressed mid-update is not lost.
 - Away brief (`forge brief`, `B` on the board): a `Merge queue: 3 waiting, next PR #12 (checks),
   1 held, 1 handed back` line.
 
+## One queue across daemons
+
+Two daemons (a laptop and a build host) can watch PRs of one GitHub repository. Without
+coordination both would update, verify and land at once and race each other into BEHIND and conflict
+churn. With `shared_queue` on (the default) they take turns: a lease on a ref in the repository,
+`refs/forge/merge-queue/<base>`, says which daemon is landing. Design and reasoning:
+[docs/rfcs/shared-merge-queue.md](../rfcs/shared-merge-queue.md).
+
+- Only a daemon's queue head asks for the lease, just before its update step. The holder renews it
+  about every minute and keeps it while it has a PR of that repository waiting; when it has none left
+  (landed, held by you, handed back) it gives the lease back.
+- A daemon that does not get it holds its head at the merge step and says why:
+  `landing on ssu-dev: PR #123 (the shared queue lets one daemon land at a time)`. Its PRs keep PR
+  Watch's fix turns for failing checks and comments, and your hold, release, front and retry work as
+  before. Merging by hand never needs the lease.
+- A lease nobody renewed for ten minutes is stale and the next daemon takes it over, so a daemon that
+  is off, asleep or crashed never blocks the other for long.
+- If GitHub refuses the lease (`gh` missing or signed out, no push access to the repository, a
+  rate limit) the daemon lands on its own for five minutes with the warning `shared queue unavailable
+  (...), landing on its own` on its queue, then asks again: the worst case is the behaviour without
+  the feature. A remote that is not on github.com is not coordinated.
+- It writes one hidden ref (not a branch, no workflow runs on it) to the repository. Turn
+  `shared_queue` off to stop; the ref can be deleted at any time.
+
+Everywhere the queue is listed, the repository shows who is landing: the `/queue` overlay and the
+board's queue section, `forge prs queue` (`repo [landing on ssu-dev: PR #123]`), and the Merge queue
+page on desktop and phone. The JSON has a `lease` object per repository:
+`{status: mine|other|unavailable, holder, pr, expires_at, text}`, and each queued watch carries it
+too.
+
 ## Not done
 
 - The board's queue section is read-only; the actions are in `/queue` and `forge prs queue`.
@@ -119,6 +150,13 @@ again. A merge without the marker is the session's own and is left alone. The dr
 `~/.cache/forge-burn-demo/run4/custody/run.sh before|after`.
 
 ## Tests
+
+`crates/forge-cli/src/serve_merge_queue/lease_tests.rs` runs the lease against a fake `gh api` that
+implements the git refs semantics (create fails when the ref exists, a ref moves only
+fast-forward) on the same bare remote: acquire, renew without a GitHub call inside the window, stale
+take-over, a restarted daemon renewing its own lease, a lost race, release, the degrade path and its
+back-off, and two simulated daemons landing four PRs without ever both being head, with hold, front
+and a dead holder. Nothing in the tests talks to GitHub.
 
 `crates/forge-cli/src/serve_merge_queue/tests.rs` runs the whole flow against a local bare
 remote and a fake `gh` that answers from it (no network, no GitHub): three PRs that each add a
