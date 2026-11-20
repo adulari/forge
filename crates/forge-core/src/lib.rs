@@ -4538,6 +4538,10 @@ fn ask_user_spec() -> ToolSpec {
                             "allow_note": {
                                 "type": "boolean",
                                 "description": "let the user attach an optional note (default true)"
+                            },
+                            "requires_human": {
+                                "type": "boolean",
+                                "description": "only the user may answer this (a secret, money, a destructive or irreversible choice, a matter of taste): it is never delegated to an expert when the user is away (default false)"
                             }
                         },
                         "required": ["question"]
@@ -5168,6 +5172,8 @@ mod tests {
 
     #[path = "ask_user_no_nudge.rs"]
     mod ask_user_no_nudge_tests;
+    #[path = "expert_question.rs"]
+    mod expert_question_tests;
     #[path = "mid_intent.rs"]
     mod mid_intent_tests;
 

@@ -573,6 +573,9 @@ pub(crate) async fn run_chat_tui(
                             UiMsg::Question { reply, .. } => {
                                 let _ = reply.send(Vec::new());
                             }
+                            UiMsg::ExpertAnswer { applied, .. } => {
+                                let _ = applied.send(false);
+                            }
                         }
                     }
                     tui.draw(&app);
@@ -3376,6 +3379,9 @@ pub(crate) async fn run_chat_tui(
                                         }
                                         UiMsg::Question { reply, .. } => {
                                             let _ = reply.send(Vec::new());
+                                        }
+                                        UiMsg::ExpertAnswer { applied, .. } => {
+                                            let _ = applied.send(false);
                                         }
                                     }
                                 }

@@ -438,6 +438,7 @@ mod tests {
     fn single() -> Question {
         Question {
             allow_note: true,
+            requires_human: false,
             ..Question::single("Which DB?", &[opt("Postgres"), opt("SQLite")], true)
         }
     }

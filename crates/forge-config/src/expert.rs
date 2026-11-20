@@ -38,6 +38,21 @@ impl Default for ExpertTriggers {
     }
 }
 
+fn default_answer_after_secs() -> u64 {
+    300
+}
+
+/// Whether the expert answers an `ask_user` question when nobody is there to.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerQuestions {
+    /// The run waits for a human, however long it takes.
+    #[default]
+    Off,
+    /// An unattended session's unanswered question is answered by the expert after a grace period.
+    Unattended,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpertConfig {
     /// The expert. Empty means no expert (the DONE review keeps using `[harness.advisor]`).
@@ -56,6 +71,15 @@ pub struct ExpertConfig {
     pub budget: String,
     #[serde(default = "default_expert_timeout_secs")]
     pub timeout_secs: u64,
+    /// Let the expert answer `ask_user` questions in an unattended session. Never for permission
+    /// prompts, and never for a question marked `requires_human` or touching secrets, money or
+    /// destructive actions.
+    #[serde(default)]
+    pub answer_questions: AnswerQuestions,
+    /// Seconds a question must wait, still unattended, before the expert answers it. A human
+    /// answer that arrives first always wins.
+    #[serde(default = "default_answer_after_secs")]
+    pub answer_after_secs: u64,
 }
 
 impl Default for ExpertConfig {
@@ -66,6 +90,8 @@ impl Default for ExpertConfig {
             max_consults_per_turn: default_max_consults(),
             budget: String::new(),
             timeout_secs: default_expert_timeout_secs(),
+            answer_questions: AnswerQuestions::Off,
+            answer_after_secs: default_answer_after_secs(),
         }
     }
 }
@@ -107,6 +133,21 @@ mod tests {
         assert_eq!(e.budget, "codex:5%w");
         assert_eq!(e.max_consults_per_turn, 3);
         assert!(e.triggers.stall && e.triggers.done && !e.triggers.tool);
+    }
+
+    #[test]
+    fn answering_questions_is_off_until_asked_for() {
+        let e = ExpertConfig::default();
+        assert_eq!(e.answer_questions, AnswerQuestions::Off);
+        assert_eq!(e.answer_after_secs, 300);
+        let cfg = parse(
+            "[harness.expert]\nmodel = \"m::x\"\nanswer_questions = \"unattended\"\nanswer_after_secs = 5\n",
+        );
+        assert_eq!(
+            cfg.harness.expert.answer_questions,
+            AnswerQuestions::Unattended
+        );
+        assert_eq!(cfg.harness.expert.answer_after_secs, 5);
     }
 
     #[test]

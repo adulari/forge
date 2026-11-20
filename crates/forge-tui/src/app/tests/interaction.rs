@@ -536,6 +536,7 @@ fn question_form_renders_tabs_checkboxes_other_and_note_rows() {
             header: "Scope".into(),
             multi: true,
             allow_note: true,
+            requires_human: false,
             ..forge_types::Question::single(
                 "Which features go in the MVP?",
                 &[opt("Auth", ""), opt("Billing", "stripe"), opt("Search", "")],
@@ -591,6 +592,7 @@ fn a_secret_question_masks_the_field_and_the_scrollback_record() {
         header: "Token".into(),
         secret: true,
         allow_note: false,
+        requires_human: false,
         ..forge_types::Question::single("API token for the deploy server", &[], true)
     }]);
     for c in "hunter2".chars() {

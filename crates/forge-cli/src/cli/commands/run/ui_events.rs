@@ -74,6 +74,10 @@ pub(super) fn apply_ui_msgs(
                 *prompts.pending_question = Some(reply);
                 *prompts.prompt_seq += 1;
             }
+            // Only a daemon session, whose presenter can be unattended, parks a form for the expert.
+            UiMsg::ExpertAnswer { applied, .. } => {
+                let _ = applied.send(false);
+            }
         }
     }
     applied

@@ -442,6 +442,8 @@ struct DriverState {
     goal_state: Option<GoalState>,
     pending: Option<(String, std::sync::mpsc::Sender<forge_tui::ConfirmReply>)>,
     pending_question: Option<std::sync::mpsc::Sender<Vec<forge_types::Answer>>>,
+    /// What the expert answered to a question while nobody was attached, waiting to be pushed.
+    expert_answered: Option<String>,
     pending_duel: Arc<std::sync::Mutex<PendingDuel>>,
     duel_state: PendingDuel,
     pending_pr: PrSlot,
@@ -497,6 +499,17 @@ impl Drop for DriverState {
             turn.abort();
         }
     }
+}
+
+/// The push that tells the owner the expert answered a question they were not there for.
+fn expert_answered_push(snap: &remote::Snapshot, answer: &str) -> crate::push::PushMessage {
+    let mut msg = crate::push::unrun_message(snap, "");
+    msg.kind = "done";
+    msg.body = format!("Expert answered: {answer}")
+        .chars()
+        .take(160)
+        .collect();
+    msg
 }
 
 /// Fire-and-forget delivery of one actionable notification across every configured channel
@@ -654,6 +667,7 @@ async fn drive_session(
         goal_state: None,
         pending: None,
         pending_question: None,
+        expert_answered: None,
         pending_duel: Arc::new(std::sync::Mutex::new(None)),
         duel_state: None,
         pending_pr: Arc::new(std::sync::Mutex::new(None)),
@@ -868,6 +882,24 @@ async fn drive_session(
                     st.pending_question = Some(reply);
                     st.prompt_seq += 1;
                 }
+                UiMsg::ExpertAnswer {
+                    answers,
+                    model,
+                    reason,
+                    applied,
+                } => {
+                    let open = st.pending_question.take();
+                    let _ = applied.send(open.is_some());
+                    if let Some(reply) = open {
+                        let answer: Vec<String> =
+                            answers.iter().map(forge_types::Answer::summary).collect();
+                        let _ = reply.send(answers);
+                        st.app.clear_question();
+                        st.prompt_seq += 1;
+                        st.expert_answered =
+                            Some(format!("{} ({model}) — {reason}", answer.join("; ")));
+                    }
+                }
             }
         }
         // 2. Remote inputs (prompts / answers / keys / overlay verbs).
@@ -1071,6 +1103,15 @@ async fn drive_session(
                 let _ = snapshot_tx.send(frame);
             }
             dirty = false;
+        }
+        if let (Some(text), Some(snap)) = (st.expert_answered.take(), &last_snap) {
+            dispatch_push(
+                &apns,
+                &push,
+                &session_id,
+                snap,
+                expert_answered_push(snap, &text),
+            );
         }
         if let (Some(text), Some(snap)) = (st.pending_unrun.take(), &last_snap) {
             let msg = crate::push::unrun_message(snap, &text);
@@ -1608,6 +1649,7 @@ pub(super) mod tests {
             goal_state: None,
             pending: None,
             pending_question: None,
+            expert_answered: None,
             pending_duel: std::sync::Arc::new(std::sync::Mutex::new(None)),
             duel_state: None,
             pending_pr: std::sync::Arc::new(std::sync::Mutex::new(None)),

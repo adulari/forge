@@ -30,8 +30,8 @@ pub use job_notice::{parse_job_notices, JobExitNotice, JobNotice};
 pub use permission_mode::PermissionMode;
 
 pub use interaction::{
-    Answer, ConfirmOutcome, ConfirmReply, Presenter, PresenterEvent, QChoice, Question, ReplayItem,
-    RuleSuggestion, ToolOutputRef, FULL_OUTPUT_HINT, NO_ANSWER,
+    Answer, ConfirmOutcome, ConfirmReply, ExpertOffer, FormWait, Presenter, PresenterEvent,
+    QChoice, Question, ReplayItem, RuleSuggestion, ToolOutputRef, FULL_OUTPUT_HINT, NO_ANSWER,
 };
 pub use subscription_pacing::{
     nominal_window_secs, SubscriptionPacing, SubscriptionWindow, SUBSCRIPTION_PACE_SPEND_FRACTION,

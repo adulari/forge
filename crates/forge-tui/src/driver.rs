@@ -109,6 +109,15 @@ pub enum UiMsg {
         questions: Vec<forge_types::Question>,
         reply: Sender<Vec<forge_types::Answer>>,
     },
+    /// The expert's answer to the question the loop is still showing. The loop closes the form
+    /// with `answers` and replies `true` when the question was still open, `false` when a human
+    /// had answered first and the expert's answer is dropped.
+    ExpertAnswer {
+        answers: Vec<forge_types::Answer>,
+        model: String,
+        reason: String,
+        applied: Sender<bool>,
+    },
 }
 
 /// A presenter that forwards everything over a channel; safe to move onto a task.
@@ -118,6 +127,8 @@ pub struct ChannelPresenter {
     /// How many clients are attached to the session this presenter serves, when that is tracked
     /// (the daemon). `None` means a person is always there (the terminal UI owns this presenter).
     attached: Option<std::sync::Arc<std::sync::atomic::AtomicUsize>>,
+    /// The answer channel of a form [`Presenter::ask_form_parking`] left open.
+    parked: Option<std::sync::mpsc::Receiver<Vec<forge_types::Answer>>>,
 }
 
 impl ChannelPresenter {
@@ -126,6 +137,7 @@ impl ChannelPresenter {
             tx,
             suggestion: None,
             attached: None,
+            parked: None,
         }
     }
 
@@ -168,6 +180,7 @@ impl Presenter for ChannelPresenter {
             tx: self.tx.clone(),
             suggestion: None,
             attached: self.attached.clone(),
+            parked: None,
         }))
     }
 
@@ -232,6 +245,69 @@ impl Presenter for ChannelPresenter {
             return Vec::new();
         }
         recv_blocking(&answer).unwrap_or_default()
+    }
+
+    fn ask_form_parking(
+        &mut self,
+        questions: &[forge_types::Question],
+        grace: std::time::Duration,
+    ) -> forge_types::FormWait {
+        let (reply, answer) = std::sync::mpsc::channel();
+        if self
+            .tx
+            .send(UiMsg::Question {
+                questions: questions.to_vec(),
+                reply,
+            })
+            .is_err()
+        {
+            return forge_types::FormWait::Answered(Vec::new());
+        }
+        loop {
+            let waited = if tokio::runtime::Handle::try_current().is_ok() {
+                tokio::task::block_in_place(|| answer.recv_timeout(grace))
+            } else {
+                answer.recv_timeout(grace)
+            };
+            match waited {
+                Ok(answers) => return forge_types::FormWait::Answered(answers),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return forge_types::FormWait::Answered(Vec::new())
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !self.is_attended() => {
+                    self.parked = Some(answer);
+                    return forge_types::FormWait::Parked;
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    fn offer_expert_answer(
+        &mut self,
+        answers: &[forge_types::Answer],
+        model: &str,
+        reason: &str,
+    ) -> forge_types::ExpertOffer {
+        let (applied, applied_rx) = std::sync::mpsc::channel();
+        let sent = self.tx.send(UiMsg::ExpertAnswer {
+            answers: answers.to_vec(),
+            model: model.to_string(),
+            reason: reason.to_string(),
+            applied,
+        });
+        if sent.is_ok() && recv_blocking(&applied_rx).unwrap_or(false) {
+            self.parked = None;
+            return forge_types::ExpertOffer::Applied;
+        }
+        forge_types::ExpertOffer::Human(self.await_parked_form())
+    }
+
+    fn await_parked_form(&mut self) -> Vec<forge_types::Answer> {
+        match self.parked.take() {
+            Some(answer) => recv_blocking(&answer).unwrap_or_default(),
+            None => Vec::new(),
+        }
     }
 
     fn read_line(&mut self) -> Option<String> {
@@ -688,6 +764,90 @@ mod tests {
             ChannelPresenter::new(tx).is_attended(),
             "the terminal UI owns its presenter: a person is always there"
         );
+    }
+
+    fn form() -> Vec<forge_types::Question> {
+        vec![forge_types::Question::single(
+            "Which database?",
+            &[QChoice {
+                label: "SQLite".into(),
+                description: String::new(),
+            }],
+            false,
+        )]
+    }
+
+    fn pick(label: &str) -> Vec<forge_types::Answer> {
+        vec![forge_types::Answer {
+            selected: vec![label.into()],
+            ..Default::default()
+        }]
+    }
+
+    #[test]
+    fn an_attended_form_keeps_waiting_past_the_grace_period() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let mut p = ChannelPresenter::with_attached(tx, clients);
+        let human = std::thread::spawn(move || {
+            let Ok(UiMsg::Question { reply, .. }) = rx.recv() else {
+                panic!("a question was expected");
+            };
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            reply.send(pick("SQLite")).unwrap();
+        });
+        let wait = p.ask_form_parking(&form(), std::time::Duration::from_millis(40));
+        assert_eq!(wait, forge_types::FormWait::Answered(pick("SQLite")));
+        human.join().unwrap();
+    }
+
+    #[test]
+    fn an_unattended_form_parks_and_the_expert_answer_closes_it() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut p = ChannelPresenter::with_attached(tx, clients);
+        let lp = std::thread::spawn(move || {
+            let Ok(UiMsg::Question { reply, .. }) = rx.recv() else {
+                panic!("a question was expected");
+            };
+            let Ok(UiMsg::ExpertAnswer {
+                answers, applied, ..
+            }) = rx.recv()
+            else {
+                panic!("the expert answer was expected");
+            };
+            reply.send(answers).unwrap();
+            applied.send(true).unwrap();
+        });
+        let wait = p.ask_form_parking(&form(), std::time::Duration::from_millis(40));
+        assert_eq!(wait, forge_types::FormWait::Parked);
+        let offer = p.offer_expert_answer(&pick("SQLite"), "m::x", "why");
+        assert_eq!(offer, forge_types::ExpertOffer::Applied);
+        lp.join().unwrap();
+    }
+
+    #[test]
+    fn a_human_answer_that_got_in_first_beats_the_expert_answer() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let clients = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut p = ChannelPresenter::with_attached(tx, clients);
+        let lp = std::thread::spawn(move || {
+            let Ok(UiMsg::Question { reply, .. }) = rx.recv() else {
+                panic!("a question was expected");
+            };
+            let Ok(UiMsg::ExpertAnswer { applied, .. }) = rx.recv() else {
+                panic!("the expert answer was expected");
+            };
+            reply.send(pick("Postgres")).unwrap();
+            applied.send(false).unwrap();
+        });
+        assert_eq!(
+            p.ask_form_parking(&form(), std::time::Duration::from_millis(40)),
+            forge_types::FormWait::Parked
+        );
+        let offer = p.offer_expert_answer(&pick("SQLite"), "m::x", "why");
+        assert_eq!(offer, forge_types::ExpertOffer::Human(pick("Postgres")));
+        lp.join().unwrap();
     }
 
     /// Regression: `ask`/`confirm` block on a sync channel from inside the async turn task. On a
