@@ -63,7 +63,7 @@ fn notes_response(notes: ProjectNotes) -> NotesResponse {
 }
 
 fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 fn store_error(error: StoreError) -> Response {

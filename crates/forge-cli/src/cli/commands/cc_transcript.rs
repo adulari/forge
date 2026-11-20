@@ -574,9 +574,7 @@ fn recover_parallel_results(nodes: &[Node], chain: &mut Vec<usize>) {
 }
 
 fn timestamp(v: &Value) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(v["timestamp"].as_str()?)
-        .ok()
-        .map(|t| t.timestamp())
+    crate::timefmt::parse_rfc3339(v["timestamp"].as_str()?)
 }
 
 fn merge_assistant(into: &mut Imported, content: &Value) {
@@ -722,3 +720,16 @@ impl Normalizer {
 mod slim;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn a_transcript_line_time_is_its_rfc3339_timestamp_in_epoch_seconds() {
+        let at = |ts: &str| timestamp(&serde_json::json!({ "timestamp": ts }));
+        assert_eq!(at("2023-11-14T22:13:20.123Z"), Some(1_700_000_000));
+        assert_eq!(at("nope"), None);
+        assert_eq!(timestamp(&serde_json::json!({})), None);
+    }
+}

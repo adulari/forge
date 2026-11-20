@@ -236,10 +236,11 @@ pub(crate) fn run(args: ReportArgs) -> Result<()> {
             println!("Nothing has been sent.");
         }
         for entry in log {
-            let when =
-                chrono::DateTime::from_timestamp(i64::try_from(entry.sent_at).unwrap_or(0), 0)
-                    .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
-                    .unwrap_or_default();
+            let when = crate::timefmt::utc(
+                i64::try_from(entry.sent_at).unwrap_or(0),
+                "%Y-%m-%d %H:%M UTC",
+            )
+            .unwrap_or_default();
             println!("{when}  {}", entry.report.headline());
         }
         return Ok(());

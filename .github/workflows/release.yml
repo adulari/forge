@@ -112,7 +112,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266
         with:
           key: assets-dev-${{ steps.toolchain.outputs.channel }}
           add-job-id-key: false
@@ -205,7 +205,7 @@ jobs:
       # environment half of the hash no longer churns with the runner image's preinstalled rustc,
       # which was the original reason for turning it off. release-cache-keepalive.yml restores the
       # same prefix so GitHub's 7-day eviction never fires.
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16
+      - uses: Swatinem/rust-cache@eedcf2fb1c22f010a0eb66b92f378c110977f266
         with:
           key: ${{ matrix.target }}-${{ steps.toolchain.outputs.channel }}
           add-job-id-key: false
@@ -413,7 +413,7 @@ jobs:
 
       - name: Publish
         if: ${{ !inputs.dry_run }}
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3
         with:
           tag_name: ${{ inputs.release_tag }}
           files: |

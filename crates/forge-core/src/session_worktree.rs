@@ -241,6 +241,7 @@ pub(crate) fn discard_orphan(created: &worktree_ops::Outcome, current: &std::pat
         .arg("-C")
         .arg(path)
         .args(["status", "--porcelain"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .map(|o| !o.status.success() || !o.stdout.is_empty())
         .unwrap_or(true);

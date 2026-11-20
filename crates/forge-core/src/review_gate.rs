@@ -237,6 +237,7 @@ fn git_text(root: &std::path::Path, args: &[&str]) -> Option<String> {
         .arg("-C")
         .arg(root)
         .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .ok()
         .filter(|o| o.status.success())

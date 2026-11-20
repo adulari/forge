@@ -1200,7 +1200,7 @@ pub(crate) async fn run_chat_tui(
 
         // A goal paused on a spent subscription window continues once the window has reset.
         if turn_handle.is_none() && !busy {
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             if let Some(DispatchOutcome::StartGoal {
                 prompt,
                 goal,

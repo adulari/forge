@@ -7,7 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, TimeZone};
 use forge_store::{FileEditRow, TurnContext};
 
 /// Marker `cap_result_json` (forge-store) appends to a truncated `args_json`. A contribution
@@ -201,11 +200,7 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 fn fmt_time(epoch: i64) -> String {
-    Local
-        .timestamp_opt(epoch, 0)
-        .single()
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|| epoch.to_string())
+    crate::timefmt::local(epoch, "%Y-%m-%d %H:%M:%S").unwrap_or_else(|| epoch.to_string())
 }
 
 /// Coarse "3d ago"-style relative age. `now` is passed in (rather than read internally) so this

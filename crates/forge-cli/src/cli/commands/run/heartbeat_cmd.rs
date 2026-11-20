@@ -13,7 +13,7 @@ pub(crate) async fn dispatch_heartbeat(
     action: forge_tui::HeartbeatAction,
 ) -> anyhow::Result<()> {
     let sid = session.lock().await.id().to_string();
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     match action {
         forge_tui::HeartbeatAction::Every { interval, prompt } => {
             let prompt = prompt.trim().to_string();

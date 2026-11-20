@@ -56,6 +56,7 @@ fn git_output(cwd: &Path, args: &[&str]) -> Option<String> {
         .arg("-C")
         .arg(cwd)
         .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .ok()?;
     if !out.status.success() {

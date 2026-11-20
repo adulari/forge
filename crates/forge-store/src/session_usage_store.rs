@@ -656,7 +656,7 @@ impl Store {
                 latest.insert(key, (window, updated_at));
             }
         }
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let mut windows = latest
             .into_values()
             .filter_map(|(window, updated_at)| {

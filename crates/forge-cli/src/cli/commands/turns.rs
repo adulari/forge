@@ -40,7 +40,7 @@ pub(crate) fn turns_cmd(args: TurnsArgs) -> Result<()> {
         None => None,
         Some(prefix) => Some(resolve_session(&store, prefix)?),
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let since = now - parse_window(&args.since)?;
     if args.backfill {
         let turns = store
@@ -82,13 +82,7 @@ pub(crate) fn turns_cmd(args: TurnsArgs) -> Result<()> {
 }
 
 fn when(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
-        .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|| "?".into())
+    crate::timefmt::local(secs, "%m-%d %H:%M").unwrap_or_else(|| "?".into())
 }
 
 pub(crate) fn render(counts: &[(String, i64)], unfinished: &[TurnRow], since: &str) -> String {

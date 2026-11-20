@@ -367,9 +367,7 @@ pub(crate) async fn models(
                     .resets_at
                     .map(|resets_at| format!(
                         " · resets {}",
-                        chrono::DateTime::from_timestamp(resets_at, 0)
-                            .map(|instant| instant.format("%Y-%m-%d %H:%M UTC").to_string())
-                            .unwrap_or_default()
+                        crate::timefmt::utc(resets_at, "%Y-%m-%d %H:%M UTC").unwrap_or_default()
                     ))
                     .unwrap_or_default(),
             );

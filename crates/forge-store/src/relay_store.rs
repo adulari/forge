@@ -52,7 +52,7 @@ impl Store {
                 reason,
                 detail,
                 brief,
-                chrono::Utc::now().timestamp()
+                jiff::Timestamp::now().as_second()
             ],
         )?;
         Ok(())
@@ -102,7 +102,7 @@ impl Store {
         detail: &str,
         brief: &str,
     ) -> Result<()> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let conn = self.lock()?;
         let tx = conn.unchecked_transaction()?;
         tx.execute(

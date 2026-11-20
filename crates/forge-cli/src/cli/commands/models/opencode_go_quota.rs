@@ -81,8 +81,7 @@ fn parse_usage(body: &str) -> Vec<forge_types::QuotaHint> {
             let resets_at = entry
                 .get("resetsAt")
                 .and_then(serde_json::Value::as_str)
-                .and_then(|iso| chrono::DateTime::parse_from_rfc3339(iso).ok())?
-                .timestamp();
+                .and_then(crate::timefmt::parse_rfc3339)?;
             Some(forge_types::QuotaHint {
                 provider: OPENCODE_GO_PROVIDER.to_string(),
                 window: (*window).to_string(),
@@ -135,7 +134,7 @@ async fn refresh_with_key_and_url(store: &Store, key: &str, url: &str) {
     let Some(body) = fetch_usage(url, key).await else {
         return;
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     for hint in parse_usage(&body) {
         // A live poll genuinely was observed now, so `record_quota_at`'s stale guard only ever
         // rejects a write when something newer already landed.
@@ -185,11 +184,7 @@ mod tests {
         assert!((five.fraction_used.unwrap() - 0.42).abs() < 1e-9);
         assert_eq!(
             five.resets_at,
-            Some(
-                chrono::DateTime::parse_from_rfc3339("2026-09-02T00:30:48.917Z")
-                    .unwrap()
-                    .timestamp()
-            )
+            Some(crate::timefmt::parse_rfc3339("2026-09-02T00:30:48.917Z").unwrap())
         );
         assert!((hint(&hints, "weekly").unwrap().fraction_used.unwrap() - 0.105).abs() < 1e-9);
         assert!((hint(&hints, "monthly").unwrap().fraction_used.unwrap() - 0.03).abs() < 1e-9);
@@ -392,7 +387,7 @@ mod tests {
     #[test]
     fn a_fresh_reading_suppresses_the_next_poll() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         for hint in parse_usage(REAL_SHAPE) {
             store
                 .record_quota_at(

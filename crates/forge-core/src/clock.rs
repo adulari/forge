@@ -17,14 +17,14 @@
 
 /// The turn-start time line handed to the model.
 pub(crate) fn now_line() -> String {
-    line_for(chrono::Local::now())
+    line_for(jiff::Zoned::now())
 }
 
 /// The clock line for a session that has already been told the full instruction: just the time.
 /// The ~280 chars of "treat this as the present moment" are the same every turn, and the first
 /// copy is still in the transcript.
 pub(crate) fn short_line() -> String {
-    short_line_for(chrono::Local::now())
+    short_line_for(jiff::Zoned::now())
 }
 
 /// Whether `content` is the full clock instruction (as opposed to the short per-turn line).
@@ -39,33 +39,37 @@ const FULL_LINE_PREFIX: &str = "[time] Current date and time: ";
 /// instead of reading it back as Claude Code's own date-only prompt is.
 const TIMESTAMP_FORMAT: &str = "%A %Y-%m-%d %H:%M %:z";
 
-fn short_line_for(now: chrono::DateTime<chrono::Local>) -> String {
-    format!("[time] {}", now.format(TIMESTAMP_FORMAT))
+fn short_line_for(now: jiff::Zoned) -> String {
+    format!("[time] {}", now.strftime(TIMESTAMP_FORMAT))
 }
 
 /// Pure formatter, so the wording and shape are testable without depending on the wall clock.
-fn line_for(now: chrono::DateTime<chrono::Local>) -> String {
+fn line_for(now: jiff::Zoned) -> String {
     format!(
         "{FULL_LINE_PREFIX}{}. Treat this as the present moment — your training \
          cutoff is NOT today. Use it for anything dated: changelog and release entries, how old a \
          commit, file or dependency version is, and what \"today\", \"now\", \"recent\" or \
          \"latest\" mean. Do not guess the date, and do not assume a year from your training data.",
-        now.format(TIMESTAMP_FORMAT)
+        now.strftime(TIMESTAMP_FORMAT)
     )
+}
+
+#[cfg(test)]
+fn local_time(year: i16, month: i8, day: i8, hour: i8, minute: i8, second: i8) -> jiff::Zoned {
+    jiff::civil::date(year, month, day)
+        .at(hour, minute, second, 0)
+        .to_zoned(jiff::tz::TimeZone::system())
+        .expect("unambiguous local time")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     #[test]
     fn the_line_carries_a_full_local_timestamp() {
-        let at = chrono::Local
-            .with_ymd_and_hms(2026, 9, 14, 1, 20, 33)
-            .single()
-            .expect("unambiguous local time");
-        let line = line_for(at);
+        let at = local_time(2026, 9, 14, 1, 20, 33);
+        let line = line_for(at.clone());
         assert!(line.contains("2026-09-14"), "{line}");
         assert!(line.contains("01:20 "), "{line}");
         assert!(
@@ -79,29 +83,23 @@ mod tests {
 
     #[test]
     fn the_line_tells_the_model_to_prefer_it_over_its_training_cutoff() {
-        let at = chrono::Local
-            .with_ymd_and_hms(2026, 9, 14, 1, 20, 33)
-            .single()
-            .expect("unambiguous local time");
-        let line = line_for(at);
+        let at = local_time(2026, 9, 14, 1, 20, 33);
+        let line = line_for(at.clone());
         assert!(line.contains("present moment"), "{line}");
         assert!(line.contains("training"), "{line}");
     }
 
     #[test]
     fn the_short_line_carries_the_same_timestamp_without_the_instruction() {
-        let at = chrono::Local
-            .with_ymd_and_hms(2026, 9, 14, 1, 20, 33)
-            .single()
-            .expect("unambiguous local time");
-        let short = short_line_for(at);
+        let at = local_time(2026, 9, 14, 1, 20, 33);
+        let short = short_line_for(at.clone());
         assert!(
             short.starts_with("[time] Monday 2026-09-14 01:20 "),
             "{short}"
         );
         assert!(!is_full_line(&short));
-        assert!(is_full_line(&line_for(at)));
-        assert!(short.len() * 3 < line_for(at).len());
+        assert!(is_full_line(&line_for(at.clone())));
+        assert!(short.len() * 3 < line_for(at.clone()).len());
     }
 
     #[test]
@@ -112,6 +110,50 @@ mod tests {
         assert!(
             line.contains('+') || line.contains('-'),
             "expected a UTC offset: {line}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    fn offset_suffix_is_well_formed(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 6
+            && (b[0] == b'+' || b[0] == b'-')
+            && b[1].is_ascii_digit()
+            && b[2].is_ascii_digit()
+            && b[3] == b':'
+            && b[4].is_ascii_digit()
+            && b[5].is_ascii_digit()
+    }
+
+    #[test]
+    fn the_short_line_is_weekday_date_minute_and_a_colon_offset() {
+        let at = local_time(2026, 9, 14, 1, 20, 33);
+        let line = short_line_for(at.clone());
+        let rest = line
+            .strip_prefix("[time] Monday 2026-09-14 01:20 ")
+            .expect(&line);
+        assert!(offset_suffix_is_well_formed(rest), "{line}");
+    }
+
+    #[test]
+    fn the_full_line_wraps_the_same_timestamp_in_fixed_wording() {
+        let at = local_time(2026, 1, 2, 23, 5, 0);
+        let line = line_for(at.clone());
+        let rest = line
+            .strip_prefix("[time] Current date and time: Friday 2026-01-02 23:05 ")
+            .expect(&line);
+        let (offset, tail) = rest.split_at(6);
+        assert!(offset_suffix_is_well_formed(offset), "{line}");
+        assert_eq!(
+            tail,
+            ". Treat this as the present moment — your training cutoff is NOT today. Use it for \
+             anything dated: changelog and release entries, how old a commit, file or dependency \
+             version is, and what \"today\", \"now\", \"recent\" or \"latest\" mean. Do not guess \
+             the date, and do not assume a year from your training data."
         );
     }
 }

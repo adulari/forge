@@ -66,7 +66,7 @@ pub(crate) async fn page(
     let store = state.store.clone();
     let offset = params.tz_offset.unwrap_or(0).clamp(-14 * 3600, 14 * 3600);
     let window = params.days.unwrap_or(365).clamp(1, MAX_DAYS);
-    let since = chrono::Utc::now().timestamp() - window * 86_400;
+    let since = jiff::Timestamp::now().as_second() - window * 86_400;
     let changes = params
         .tz_changes
         .as_deref()
