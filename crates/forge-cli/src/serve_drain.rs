@@ -145,7 +145,7 @@ pub(crate) fn registry() -> &'static Arc<DrainRegistry> {
 
 /// Load `drains.json`; called before the daemon listens so no request sees an unpersisted registry.
 pub(crate) fn init() {
-    if let Some(path) = forge_config::data_dir().map(|d| d.join("drains.json")) {
+    if let Some(path) = forge_config::daemon_state_file("drains.json") {
         let _ = REGISTRY.set(Arc::new(DrainRegistry::new(Some(path))));
     }
 }

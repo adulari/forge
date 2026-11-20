@@ -434,7 +434,7 @@ pub(crate) fn arm_watch_keeping_mode(
 }
 
 pub(crate) fn start(state: &Arc<DaemonState>) {
-    if let Some(path) = forge_config::data_dir().map(|d| d.join("pr-watch.json")) {
+    if let Some(path) = forge_config::daemon_state_file("pr-watch.json") {
         let _ = REGISTRY.set(Arc::new(Registry::new(Some(path))));
     }
     crate::serve_pr_review::install(state);

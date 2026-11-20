@@ -110,9 +110,9 @@ pub use oauth::{
     OAuthAccountStore, OAuthConfig, OAuthTokens, Pkce, ProtectedResourceMetadata,
 };
 pub use paths::{
-    claude_dir, codex_dir, config_dir, cursor_dir, data_dir, home_dir, is_global_worktree_path,
-    mark_project_auto_setup_attempted, project_auto_setup_attempted, project_initialization,
-    ProjectInitCache, ProjectInitialization,
+    claude_dir, codex_dir, config_dir, cursor_dir, daemon_state_file, data_dir, home_dir,
+    is_global_worktree_path, mark_project_auto_setup_attempted, project_auto_setup_attempted,
+    project_initialization, ProjectInitCache, ProjectInitialization,
 };
 pub use progress_guard::ProgressGuardMode;
 pub use project_dirs::{project_resource_dirs, repo_top};
