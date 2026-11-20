@@ -16,6 +16,7 @@ use forge_types::goal_envelope::{
 
 mod bridge_meter;
 mod consult;
+mod question;
 
 use bridge_meter::{bridge_budget_refusal, stored_envelope};
 
@@ -41,6 +42,7 @@ pub(crate) enum Trigger {
     Stall,
     Done,
     Tool,
+    Question,
 }
 
 impl Trigger {
@@ -49,6 +51,7 @@ impl Trigger {
             Trigger::Stall => "stall",
             Trigger::Done => "done",
             Trigger::Tool => "tool",
+            Trigger::Question => "question",
         }
     }
 }

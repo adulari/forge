@@ -157,7 +157,7 @@ impl Session {
         }
         // The interactive question tool is core-owned too (it needs the presenter).
         if call.name == ASK_USER_TOOL {
-            return self.ask_user(msg_id, call);
+            return self.ask_user(msg_id, call).await;
         }
         // Task tracking is core-owned (it mutates session state + persists + emits to the TUI).
         if call.name == UPDATE_TASKS_TOOL {

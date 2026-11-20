@@ -21,6 +21,9 @@ impl Session {
             Trigger::Stall => cfg.triggers.stall,
             Trigger::Done => cfg.triggers.done,
             Trigger::Tool => cfg.triggers.tool,
+            Trigger::Question => {
+                cfg.answer_questions == forge_config::expert::AnswerQuestions::Unattended
+            }
         };
         if !allowed {
             return Ok(None);

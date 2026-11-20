@@ -291,6 +291,7 @@ impl ElicitForm {
                     multi,
                     allow_other,
                     allow_note: false,
+                    requires_human: false,
                     secret,
                 }
             })

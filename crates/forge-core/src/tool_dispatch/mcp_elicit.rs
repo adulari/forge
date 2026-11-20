@@ -109,6 +109,7 @@ impl Session {
             multi: false,
             allow_other: false,
             allow_note: false,
+            requires_human: false,
             secret: false,
         };
         let answers = self.presenter.ask_form(&[question]);

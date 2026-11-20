@@ -28,6 +28,8 @@ pub(crate) fn group_and_label(path: &str) -> Option<(&'static str, &'static str)
         "harness.expert.triggers.stall" => Some(("Behaviour", "Expert on stalls")),
         "harness.expert.triggers.done" => Some(("Behaviour", "Expert at DONE")),
         "harness.expert.triggers.tool" => Some(("Behaviour", "Expert on request")),
+        "harness.expert.answer_questions" => Some(("Behaviour", "Expert answers questions")),
+        "harness.expert.answer_after_secs" => Some(("Behaviour", "Expert answers after")),
         "tui.session_strip" => Some(("Interface", "Session strip")),
         "tui.sidebar" => Some(("Interface", "Sidebar")),
         "anywhere.allow_ship_over_relay" => Some(("Anywhere", "Ship over Anywhere")),
@@ -41,6 +43,7 @@ pub(crate) fn group_and_label(path: &str) -> Option<(&'static str, &'static str)
 pub(crate) fn options(path: &str) -> Option<Vec<&'static str>> {
     Some(match path {
         "harness.scouts" => vec!["off", "tool", "auto"],
+        "harness.expert.answer_questions" => vec!["off", "unattended"],
         "pr_watch.review_on_error" => vec!["allow", "block"],
         _ => return None,
     })
@@ -77,6 +80,8 @@ pub(crate) fn help(path: &str) -> Option<&'static str> {
         "harness.expert.triggers.stall" => "Consult the expert before Forge nudges or stops a turn that is going in circles.",
         "harness.expert.triggers.done" => "Send the DONE review to the expert instead of the advisor model.",
         "harness.expert.triggers.tool" => "Let the model call consult_expert with a question of its own.",
+        "harness.expert.answer_questions" => "off: an ask_user question waits for you. unattended: when nobody is attached and the question has waited the grace period, the expert answers it and says so in the transcript and a push. Never for permission prompts or questions about secrets, money or destructive actions. Needs an expert model. Default off.",
+        "harness.expert.answer_after_secs" => "Seconds a question waits, still unattended, before the expert answers it (default 300). An answer from you first always wins.",
         "harness.advisor.timeout_secs" => "Seconds before an advisor call is abandoned and the turn finishes as it would have (default 120).",
         "pr_watch.queue" => "Land merge-mode PRs one at a time per repository through the merge queue, each tested against the main the previous one produced. Off merges each PR on its own. Default on.",
         "pr_watch.review_on_error" => "What a reviewer failure does to a PR about to merge. allow: merge anyway and note it. block: do not merge, retry the review, and block the PR after 3 failures on one head. Default allow.",

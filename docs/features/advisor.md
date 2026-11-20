@@ -88,6 +88,37 @@ pass rates; that needs the A/B below.
   `forge mcp-serve`, which answers from the parent session's stored transcript with the same cap
   and budget; the parent counts those consults into the turn when it ends.
 
+## Answering `ask_user` questions while you are away
+
+`[harness.expert] answer_questions = "unattended"` (default `"off"`) lets the expert answer an
+`ask_user` question that nobody is there to answer, instead of the run blocking until you return.
+It needs an expert model; with none set the setting does nothing. `answer_after_secs` (default 300)
+is the grace period.
+
+- Fires only for a daemon session with no client attached (the same definition as the push
+  escalation) whose question has waited `answer_after_secs`. The form stays open on every surface
+  meanwhile, and the push to your phone has already gone out. If a client is attached when the grace
+  period ends, the question keeps waiting for you.
+- You always win. Your answer inside the grace period means the expert is never asked. An answer
+  that arrives while the expert is thinking is used and the expert's is dropped (the consult row is
+  labelled `expert/question:dropped`).
+- Never for permission or approval prompts: side effects stay with you and the broker. Never for a
+  question marked `requires_human` (a field of `ask_user`'s question schema, which the model is
+  told to set for secrets, money and destructive or irreversible choices), a `secret` question, or
+  one whose text, header or option labels contain a word from a short list (password, token,
+  credential, key, payment, purchase, billing, delete, destroy, wipe, force push, production and the
+  like). The expert can also decline with `needs_human`.
+- The expert gets the questions, their options, the task and the turn's recent activity (the same
+  context as any consult), and replies with `{"needs_human", "reason", "answers": [{"selected",
+  "text"}]}`. An answer must name an option (or give text where the question allows it). Any
+  failure, a spent budget or the per-turn cap means the question goes back to waiting for you.
+- It counts against `max_consults_per_turn` and the expert budget like any other consult.
+- Where it shows: the tool result the model reads and the transcript end with `Answered by expert
+  (<model>): <answer> — <reason>`; every surface gets the usual expert line with trigger
+  `question`; the turn record lists `question` in `expert_triggers`; and a push says `Expert
+  answered: <answer> (<model>) — <reason>`. Settings: `Expert answers questions` and `Expert answers
+  after` in the TUI and app editors.
+
 ## Where it shows
 
 - Usage: one side-call row per consult, labelled `expert/stall:advice`, `expert/tool:advice`,

@@ -53,6 +53,10 @@ pub struct Question {
     /// as it is typed and the answer is never echoed into the transcript or tool cards.
     #[serde(default)]
     pub secret: bool,
+    /// Only the human may answer: an unattended session keeps waiting for them even when an
+    /// expert is configured to answer questions.
+    #[serde(default)]
+    pub requires_human: bool,
 }
 
 fn default_true() -> bool {
@@ -69,6 +73,7 @@ impl Question {
             allow_other: allow_other || options.is_empty(),
             allow_note: false,
             secret: false,
+            requires_human: false,
         }
     }
 }
@@ -446,6 +451,23 @@ impl From<ConfirmOutcome> for ConfirmReply {
     }
 }
 
+/// What waiting on a form for a bounded time came to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormWait {
+    Answered(Vec<Answer>),
+    /// Nobody answered and nobody is attached; the form is still open.
+    Parked,
+}
+
+/// What became of an expert's answer to a parked form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExpertOffer {
+    /// The form is closed with the expert's answers.
+    Applied,
+    /// A human had already answered; these are their answers.
+    Human(Vec<Answer>),
+}
+
 /// Rendering and interaction interface implemented by every Forge surface adapter.
 pub trait Presenter: Send {
     fn emit(&mut self, event: PresenterEvent);
@@ -475,6 +497,31 @@ pub trait Presenter: Send {
                 }
             })
             .collect()
+    }
+    /// [`Presenter::ask_form`] that may give up waiting: the form stays open and `Parked` comes
+    /// back once `grace` has passed with nobody attached and no answer. The default never parks.
+    /// A surface that parks must also implement [`Presenter::offer_expert_answer`] and
+    /// [`Presenter::await_parked_form`].
+    fn ask_form_parking(
+        &mut self,
+        questions: &[Question],
+        _grace: std::time::Duration,
+    ) -> FormWait {
+        FormWait::Answered(self.ask_form(questions))
+    }
+    /// Close a parked form with an expert's `answers` unless a human answered first, in which
+    /// case their answers come back and the expert's are dropped.
+    fn offer_expert_answer(
+        &mut self,
+        _answers: &[Answer],
+        _model: &str,
+        _reason: &str,
+    ) -> ExpertOffer {
+        ExpertOffer::Human(Vec::new())
+    }
+    /// Keep waiting for a human on a parked form.
+    fn await_parked_form(&mut self) -> Vec<Answer> {
+        Vec::new()
     }
     fn read_line(&mut self) -> Option<String>;
     /// Whether a human is present to answer a prompt on this surface. `false` for headless

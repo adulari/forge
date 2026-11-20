@@ -8,7 +8,7 @@ impl Session {
     /// Handle an `ask_user` call: parse one question (legacy shape) or a `questions` form, ask
     /// the user through the presenter, and return their answers as the tool result
     /// (docs/features/ask-user-question.md).
-    pub(crate) fn ask_user(
+    pub(crate) async fn ask_user(
         &mut self,
         msg_id: &str,
         call: &forge_types::ToolCall,
@@ -25,8 +25,14 @@ impl Session {
             }
         };
         self.asked_user_this_turn = true;
-        let answers = self.presenter.ask_form(&questions);
-        let result = render_answers(&questions, &answers);
+        let (answers, expert_line) = self.ask_form_or_expert(&questions).await;
+        let mut result = render_answers(&questions, &answers);
+        if let Some(line) = expert_line {
+            result.push_str(&format!(
+                "\n[{}. The human did not answer; they can see this and correct it.]",
+                line.trim_end_matches('.')
+            ));
+        }
         self.store
             .record_tool_call(msg_id, &call.name, &args_json, &result, "allowed", "ok")?;
         Ok(result)
@@ -439,6 +445,7 @@ fn parse_one(q: &serde_json::Value, index: usize) -> Result<forge_types::Questio
         allow_other: flag("allow_other", true) || options.is_empty(),
         allow_note: flag("allow_note", true),
         secret: false,
+        requires_human: flag("requires_human", false),
         options,
     })
 }

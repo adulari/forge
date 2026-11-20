@@ -6,6 +6,10 @@ All notable changes to Forge are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The expert on call can answer `ask_user` questions while you are away. `[harness.expert] answer_questions = "unattended"` (default `"off"`; needs an expert model) lets it answer a question that nobody has answered for `answer_after_secs` (default 300) in a session with no client attached, instead of the run blocking until you return. Your answer always wins, and one that arrives first means the expert is never asked. Never for permission prompts, for a question the model marks `requires_human` (a new `ask_user` field), a secret, or one about credentials, money or destructive actions. The transcript says `Answered by expert (<model>): <answer> - <reason>`, a push tells you, and the turn record lists the `question` trigger. See docs/features/advisor.md.
+
 ## [2.29.0] - 2026-11-13
 
 ### Security
