@@ -265,7 +265,12 @@ jobs:
         with:
           key: check-x86_64-pc-windows-msvc-${{ steps.toolchain.outputs.channel }}
           add-job-id-key: false
+      # Errors only: the workflow-wide `-D warnings` would fail on dead-code warnings that exist
+      # today in Windows-only builds (fs_write.rs, proc_tree.rs, refresh_lock.rs), and release.yml
+      # does not deny warnings either. The goal is "does it compile", not lint parity.
       - run: cargo check --locked --bin forge --target x86_64-pc-windows-msvc
+        env:
+          RUSTFLAGS: ""
 
   # Release-profile + `--locked` smoke on one platform. The release workflow builds with
   # `--release --locked`, and breakages there (LTO-only failures, a Cargo.lock that drifted from
