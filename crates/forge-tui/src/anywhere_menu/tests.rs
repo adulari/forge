@@ -79,6 +79,7 @@ fn devices() -> Devices {
                 enrolled: "2026-09-12".into(),
                 last_seen_at: Some(NOW),
                 this_device: true,
+                owner: true,
             },
             DeviceView {
                 id: "99aa88bb".into(),
@@ -86,6 +87,7 @@ fn devices() -> Devices {
                 enrolled: "2026-10-02".into(),
                 last_seen_at: Some(NOW - 180_000),
                 this_device: false,
+                owner: false,
             },
         ],
     }
@@ -226,7 +228,7 @@ fn enabled_categories_show_pending_conflicts_and_skips_with_reasons() {
         assert!(t.contains("needs `npx`, not installed here"));
         assert!(t.contains("1 waiting to apply") || t.contains("skipped"));
     }
-    assert!(wide.contains("workstation") && wide.contains("this device"));
+    assert!(wide.contains("workstation") && wide.contains("this · owner"));
     assert!(wide.contains("laptop"));
 }
 
@@ -388,17 +390,83 @@ fn notices_expire() {
 }
 
 #[test]
-fn revoke_is_explained_not_performed() {
+fn revoke_asks_first_and_cancel_is_the_default() {
     let mut m = menu(Some(signed_in(all_off())), devices());
     m.key(KeyKind::End);
     assert_eq!(m.focused(), Some(Row::Device(1)));
     assert_eq!(m.key(KeyKind::Enter), MenuAction::None);
+    let revoke = m.revoke.clone().expect("confirmation is open");
+    assert_eq!((revoke.id.as_str(), revoke.on_confirm), ("99aa88bb", false));
+    let [narrow, wide] = both("revoke-confirm", &m);
+    for screen in [narrow, wide] {
+        assert!(screen.contains("Revoke laptop?"), "{screen}");
+        assert!(screen.contains("Recovery Kit"));
+    }
+    // Enter on the default button cancels.
+    assert_eq!(m.key(KeyKind::Enter), MenuAction::None);
+    assert!(m.revoke.is_none());
+
+    m.key(KeyKind::Char('x'));
+    m.key(KeyKind::Left);
+    assert_eq!(
+        m.key(KeyKind::Enter),
+        MenuAction::RevokeDevice {
+            id: "99aa88bb".into(),
+            name: "laptop".into()
+        }
+    );
+    m.key(KeyKind::Char('x'));
+    assert_eq!(
+        m.key(KeyKind::Char('y')),
+        MenuAction::RevokeDevice {
+            id: "99aa88bb".into(),
+            name: "laptop".into()
+        }
+    );
+    m.key(KeyKind::Char('x'));
+    assert_eq!(m.key(KeyKind::Esc), MenuAction::None);
+    assert!(
+        m.revoke.is_none() && m.open,
+        "Esc closes the confirmation, not the menu"
+    );
+}
+
+#[test]
+fn this_device_and_a_foreign_owner_are_explained_not_offered() {
+    let mut m = menu(Some(signed_in(all_off())), devices());
+    m.key(KeyKind::End);
+    m.key(KeyKind::Up);
+    assert_eq!(m.focused(), Some(Row::Device(0)));
+    m.key(KeyKind::Char('x'));
+    assert!(m.revoke.is_none());
     assert!(m
         .notice
         .as_ref()
         .unwrap()
         .text
-        .contains("--revoke 99aa88bb"));
+        .contains("forge anywhere logout"));
+
+    // From a non-owner device, the owner row is protected.
+    let Devices::Loaded { mut devices, .. } = devices() else {
+        unreachable!()
+    };
+    devices[0].this_device = false;
+    devices[1].this_device = true;
+    let mut m = menu(
+        Some(signed_in(all_off())),
+        Devices::Loaded {
+            devices,
+            hosts_online: 1,
+            hosts_total: 1,
+        },
+    );
+    m.key(KeyKind::End);
+    m.key(KeyKind::Up);
+    assert_eq!(m.key(KeyKind::Enter), MenuAction::None);
+    assert!(m.revoke.is_none());
+    assert!(m.notice.as_ref().unwrap().text.contains("owner device"));
+    let [narrow, _] = both("owner-row", &m);
+    assert!(narrow.contains("owner"));
 }
 
 #[test]

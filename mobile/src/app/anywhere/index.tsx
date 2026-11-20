@@ -572,7 +572,7 @@ function DevicesSection({ anywhere }: { anywhere: ReturnType<typeof useAnywhere>
           key={row.id}
           icon={row.kind === "phone" ? <Smartphone size={18} color={tokens.ink3} /> : <Laptop size={18} color={tokens.ink3} />}
           title={row.name}
-          titleTag={row.isThisDevice ? "THIS DEVICE" : undefined}
+          titleTag={row.isThisDevice ? (row.isOwner ? "THIS DEVICE · OWNER" : "THIS DEVICE") : row.isOwner ? "OWNER" : undefined}
           sub={`${row.lastSeen} · ${row.enrolled}`}
           last={index === shown.length - 1 && hidden === 0}
         />

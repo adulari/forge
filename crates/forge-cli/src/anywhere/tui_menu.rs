@@ -233,6 +233,7 @@ async fn fetch_devices() -> anyhow::Result<Devices> {
             .into_iter()
             .map(|d| DeviceView {
                 this_device: this.as_deref() == Some(d.id.as_str()),
+                owner: d.owner,
                 last_seen_at: d.last_seen_at.as_deref().and_then(epoch_ms),
                 enrolled: date(&d.created_at),
                 id: d.id,
@@ -394,6 +395,7 @@ fn mock_devices() -> Devices {
                 enrolled: "2026-09-12".into(),
                 last_seen_at: Some(now),
                 this_device: true,
+                owner: true,
             },
             DeviceView {
                 id: "99aa88bb77cc6655".into(),
@@ -401,6 +403,7 @@ fn mock_devices() -> Devices {
                 enrolled: "2026-10-02".into(),
                 last_seen_at: Some(now - 3 * 60_000),
                 this_device: false,
+                owner: false,
             },
             DeviceView {
                 id: "0f1e2d3c4b5a6978".into(),
@@ -408,6 +411,7 @@ fn mock_devices() -> Devices {
                 enrolled: "2026-10-21".into(),
                 last_seen_at: Some(now - 5 * 3_600_000),
                 this_device: false,
+                owner: false,
             },
         ],
     }

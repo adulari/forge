@@ -107,6 +107,9 @@ pub struct DeviceView {
     /// Epoch milliseconds.
     pub last_seen_at: Option<i64>,
     pub this_device: bool,
+    /// The account's owner device: only the owner may revoke it. False on a service that predates
+    /// the owner rule, which then decides on its own.
+    pub owner: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -179,17 +182,37 @@ pub struct KeysConfirm {
     pub on_confirm: bool,
 }
 
+/// The confirmation that stands between a keystroke and revoking another device.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RevokeConfirm {
+    pub id: String,
+    pub name: String,
+    /// True when the primary button has focus. Opens on Cancel.
+    pub on_confirm: bool,
+}
+
 /// What the binary should do after a keystroke.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuAction {
     None,
     Close,
     Refresh,
-    Toggle { category: String, enabled: bool },
+    Toggle {
+        category: String,
+        enabled: bool,
+    },
     SyncNow,
-    SignInProvider { label: String, command: String },
+    SignInProvider {
+        label: String,
+        command: String,
+    },
     SetupAnywhere,
     OpenWeb,
+    /// Hand the terminal to `forge anywhere devices --revoke <id>`, which asks for the Recovery Kit.
+    RevokeDevice {
+        id: String,
+        name: String,
+    },
 }
 
 const NOTICE_TICKS: u32 = 420;
@@ -202,6 +225,7 @@ pub struct AnywhereMenu {
     pub devices: Devices,
     pub cursor: usize,
     pub confirm: Option<KeysConfirm>,
+    pub revoke: Option<RevokeConfirm>,
     pub notice: Option<Notice>,
     pub tick: u32,
     pub now_ms: i64,
@@ -224,6 +248,7 @@ impl AnywhereMenu {
     pub fn close(&mut self) {
         self.open = false;
         self.confirm = None;
+        self.revoke = None;
     }
 
     /// Whether the binary should start a refresh now; clears the request.
@@ -362,6 +387,9 @@ impl AnywhereMenu {
         if let Some(confirm) = self.confirm {
             return self.confirm_key(confirm, key);
         }
+        if let Some(revoke) = self.revoke.clone() {
+            return self.revoke_key(revoke, key);
+        }
         match key {
             KeyKind::Esc | KeyKind::Char('q') | KeyKind::Interrupt => {
                 self.close();
@@ -409,6 +437,7 @@ impl AnywhereMenu {
             }
             KeyKind::Char('s') => self.sync_now(),
             KeyKind::Char('o') => MenuAction::OpenWeb,
+            KeyKind::Char('x') => self.ask_revoke(),
             KeyKind::Char(' ') | KeyKind::Enter => self.activate(),
             KeyKind::Left | KeyKind::Char('h') => self.switch(Some(false)),
             KeyKind::Right | KeyKind::Char('l') => self.switch(Some(true)),
@@ -436,6 +465,70 @@ impl AnywhereMenu {
             }
             _ => MenuAction::None,
         }
+    }
+
+    fn revoke_key(&mut self, revoke: RevokeConfirm, key: KeyKind) -> MenuAction {
+        let go = |menu: &mut Self| {
+            menu.revoke = None;
+            MenuAction::RevokeDevice {
+                id: revoke.id.clone(),
+                name: revoke.name.clone(),
+            }
+        };
+        match key {
+            KeyKind::Esc | KeyKind::Char('n') | KeyKind::Char('q') | KeyKind::Interrupt => {
+                self.revoke = None;
+                MenuAction::None
+            }
+            KeyKind::Char('y') => go(self),
+            KeyKind::Left | KeyKind::Right | KeyKind::Tab | KeyKind::CycleTemper => {
+                self.revoke = Some(RevokeConfirm {
+                    on_confirm: !revoke.on_confirm,
+                    ..revoke
+                });
+                MenuAction::None
+            }
+            KeyKind::Enter | KeyKind::Char(' ') if revoke.on_confirm => go(self),
+            KeyKind::Enter | KeyKind::Char(' ') => {
+                self.revoke = None;
+                MenuAction::None
+            }
+            _ => MenuAction::None,
+        }
+    }
+
+    /// Open the revoke confirmation for the focused device, or say why it cannot be revoked here.
+    fn ask_revoke(&mut self) -> MenuAction {
+        let (Some(Row::Device(i)), Devices::Loaded { devices, .. }) =
+            (self.focused(), &self.devices)
+        else {
+            return MenuAction::None;
+        };
+        let Some(device) = devices.get(i).cloned() else {
+            return MenuAction::None;
+        };
+        let this_is_owner = devices.iter().any(|d| d.this_device && d.owner);
+        if device.this_device {
+            self.notify(
+                Tone::Warn,
+                "This is this device. Sign it out with `forge anywhere logout`, or revoke it from another device.",
+            );
+        } else if device.owner && !this_is_owner {
+            self.notify(
+                Tone::Warn,
+                format!(
+                    "{} is the owner device. Only it can revoke itself; that keeps a recovery path.",
+                    device.name
+                ),
+            );
+        } else {
+            self.revoke = Some(RevokeConfirm {
+                id: device.id,
+                name: device.name,
+                on_confirm: false,
+            });
+        }
+        MenuAction::None
     }
 
     fn confirm_keys(&mut self) -> MenuAction {
@@ -506,18 +599,7 @@ impl AnywhereMenu {
                     command: s.command.clone(),
                 }
             }
-            Some(Row::Device(i)) => {
-                if let Devices::Loaded { devices, .. } = &self.devices {
-                    if let Some(d) = devices.get(i).filter(|d| !d.this_device) {
-                        let text = format!(
-                            "Revoking needs your recovery phrase: forge anywhere devices --revoke {}",
-                            d.id
-                        );
-                        self.notify(Tone::Ok, text);
-                    }
-                }
-                MenuAction::None
-            }
+            Some(Row::Device(_)) => self.ask_revoke(),
             None => MenuAction::None,
         }
     }
