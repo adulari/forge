@@ -433,7 +433,14 @@ fn render_systemd_service(forge_exe: &str, exposure: Exposure, port: u16) -> Str
          # ignores it under [Service], which is where it was first written — the alarm looked\n\
          # installed and never fired.\n\
          OnFailure={}\n\n\
-         [Service]\nExecStart={} serve {} --port {port}\nRestart=on-failure\n\
+         [Service]\nExecStart={} serve {} --port {port}\nRestart=always\nRestartSec=10\n\
+         # `Restart=on-failure` left the daemon down for 10 hours after an OOM kill: a clean exit\n\
+         # on SIGTERM is not a failure, so nothing brought it back. `always` restarts after any\n\
+         # exit EXCEPT an explicit `systemctl stop`/`forge service stop`, which systemd never\n\
+         # overrides. The start-rate limit is off so a burst of quick failures can never park the\n\
+         # unit in `failed` for good; RestartSec bounds the loop to one start per ten seconds, and\n\
+         # the exit-78 guard below still turns a permanent failure into a visible `failed` state\n\
+         # (which is what fires OnFailure=).\nStartLimitIntervalSec=0\n\
          # A permanent failure (exit 78 = EX_CONFIG, e.g. a store this build cannot open) cannot be\n\
          # fixed by retrying. Without this the daemon restarts forever — 632 times in one observed\n\
          # case, with Anywhere down throughout and the unit still reporting `activating`. Stopping\n\
@@ -744,7 +751,17 @@ mod tests {
         assert!(unit.contains("ExecStart=\"/usr/local/bin/forge\" serve --lan --port 7420"));
         let spaced = render_systemd_service("/home/me/My Tools/forge", Exposure::Lan, 7420);
         assert!(spaced.contains("ExecStart=\"/home/me/My Tools/forge\" serve --lan --port 7420"));
-        assert!(unit.contains("Restart=on-failure"));
+        assert!(unit.contains("Restart=always"));
+        assert!(!unit.contains("Restart=on-failure"));
+        assert!(unit.contains("RestartSec=10"));
+        assert!(unit.contains("StartLimitIntervalSec=0"));
+        assert!(unit.contains("RestartPreventExitStatus=78"));
+        let service = unit.split("[Service]").nth(1).unwrap();
+        assert!(
+            service.contains("Restart=always")
+                && !unit.split("[Service]").next().unwrap().contains("Restart="),
+            "restart directives belong under [Service]"
+        );
         assert!(unit.contains("OOMPolicy=continue"));
         assert!(
             !unit.contains("OOMPolicy=stop"),

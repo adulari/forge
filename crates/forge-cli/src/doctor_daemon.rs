@@ -193,6 +193,15 @@ pub(crate) fn unit_drift_checks_at(
         ));
     }
 
+    if unit.contains("Restart=on-failure") {
+        out.push(check(
+            Status::Warn,
+            "daemon unit",
+            "restarts only on failure — a SIGTERM or OOM-adjacent clean exit leaves the daemon down",
+            Some("`forge service install` to re-render the unit with Restart=always"),
+        ));
+    }
+
     // ExecStart pins an absolute path. Install Forge somewhere else afterwards (brew, cargo) and
     // systemd keeps launching the OLD binary, so `forge --version` in a terminal can disagree with
     // what the daemon is actually running, with nothing anywhere saying so.
