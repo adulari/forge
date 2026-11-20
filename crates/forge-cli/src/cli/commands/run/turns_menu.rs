@@ -11,13 +11,7 @@ const SHOWN_COUNTS: usize = 4;
 const UNFINISHED_ROWS: usize = 15;
 
 fn when(secs: i64) -> String {
-    chrono::DateTime::from_timestamp(secs, 0)
-        .map(|t| {
-            t.with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|| "?".into())
+    crate::timefmt::local(secs, "%m-%d %H:%M").unwrap_or_else(|| "?".into())
 }
 
 fn counts_line(counts: &[(String, i64)]) -> String {

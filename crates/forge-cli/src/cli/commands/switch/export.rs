@@ -222,10 +222,8 @@ fn drafts_from_rows(rows: &[ExportRow]) -> Vec<Draft> {
 }
 
 fn rfc3339(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
-        .unwrap_or_default()
-        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-        .to_string()
+    crate::timefmt::utc_millis(ms, "%Y-%m-%dT%H:%M:%S%.3fZ")
+        .unwrap_or_else(|| "1970-01-01T00:00:00.000Z".to_string())
 }
 
 struct Writer<'a> {
@@ -392,4 +390,17 @@ pub(crate) fn build_entries(
         w.meta(json!({"type": "last-prompt", "lastPrompt": prompt, "leafUuid": leaf, "sessionId": ctx.cc_session_id}));
     }
     w.out
+}
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn exported_timestamps_carry_millisecond_precision_and_a_z() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00.000Z");
+        assert_eq!(rfc3339(1_700_000_000_123), "2023-11-14T22:13:20.123Z");
+        assert_eq!(rfc3339(1_700_000_000_007), "2023-11-14T22:13:20.007Z");
+        assert_eq!(rfc3339(i64::MAX), "1970-01-01T00:00:00.000Z");
+    }
 }

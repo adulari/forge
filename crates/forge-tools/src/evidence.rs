@@ -154,7 +154,7 @@ impl Ledger {
         let (path, mut file) = self.create_next(source, extension)?;
         file.write_all(bytes)?;
         let item = EvidenceItem {
-            ts: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ts: now_rfc3339_secs(),
             kind,
             file: path
                 .file_name()
@@ -360,8 +360,30 @@ pub fn pr_evidence_block(workspace: &Path, session: &str) -> Option<String> {
     pr_block::render(workspace, session, &PrBlockOptions::default())
 }
 
+fn now_rfc3339_secs() -> String {
+    rfc3339_secs(chrono::Utc::now().timestamp())
+}
+
+fn rfc3339_secs(unix_secs: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Utc
+        .timestamp_opt(unix_secs, 0)
+        .single()
+        .unwrap_or_default()
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn evidence_timestamps_are_whole_second_utc_with_a_z() {
+        assert_eq!(super::rfc3339_secs(0), "1970-01-01T00:00:00Z");
+        assert_eq!(super::rfc3339_secs(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(super::rfc3339_secs(951_782_400), "2000-02-29T00:00:00Z");
+        let live = super::now_rfc3339_secs();
+        assert!(live.len() == 20 && live.ends_with('Z'), "{live}");
+    }
+
     use super::*;
 
     fn ledger() -> (tempfile::TempDir, Ledger) {

@@ -6,7 +6,6 @@
 //! This module is pure over [`ReplayEntry`] slices so the summary/diff logic is unit-tested
 //! without a database; the CLI command resolves ids and prints what these functions return.
 
-use chrono::{Local, TimeZone};
 use forge_store::ReplayEntry;
 use forge_types::Role;
 
@@ -104,11 +103,7 @@ pub fn diff(a: &[ReplayEntry], b: &[ReplayEntry]) -> SessionDiff {
 }
 
 fn fmt_time(epoch: i64) -> String {
-    Local
-        .timestamp_opt(epoch, 0)
-        .single()
-        .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_else(|| epoch.to_string())
+    crate::timefmt::local(epoch, "%Y-%m-%d %H:%M:%S").unwrap_or_else(|| epoch.to_string())
 }
 
 fn role_label(role: &Role) -> &'static str {

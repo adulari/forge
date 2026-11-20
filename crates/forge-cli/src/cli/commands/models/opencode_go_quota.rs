@@ -81,8 +81,7 @@ fn parse_usage(body: &str) -> Vec<forge_types::QuotaHint> {
             let resets_at = entry
                 .get("resetsAt")
                 .and_then(serde_json::Value::as_str)
-                .and_then(|iso| chrono::DateTime::parse_from_rfc3339(iso).ok())?
-                .timestamp();
+                .and_then(crate::timefmt::parse_rfc3339)?;
             Some(forge_types::QuotaHint {
                 provider: OPENCODE_GO_PROVIDER.to_string(),
                 window: (*window).to_string(),

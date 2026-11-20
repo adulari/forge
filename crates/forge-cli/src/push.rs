@@ -413,11 +413,7 @@ impl PushMessage {
 
 /// `HH:MM` local time of a unix timestamp, for a push body.
 pub(crate) fn clock_label(unix_secs: u64) -> String {
-    chrono::DateTime::<chrono::Local>::from(
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix_secs),
-    )
-    .format("%H:%M")
-    .to_string()
+    crate::timefmt::local(i64::try_from(unix_secs).unwrap_or(0), "%H:%M").unwrap_or_default()
 }
 
 mod outage;
@@ -1440,5 +1436,24 @@ mod tests {
         assert!(t.chars().count() <= BODY_MAX_CHARS);
         assert!(t.ends_with('…'));
         assert_eq!(truncate_chars("short", BODY_MAX_CHARS), "short");
+    }
+}
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn the_push_clock_is_a_zero_padded_hour_and_minute() {
+        for secs in [0u64, 86_399, 1_786_314_600] {
+            let text = clock_label(secs);
+            let b = text.as_bytes();
+            assert!(
+                b.len() == 5
+                    && b[2] == b':'
+                    && b[..2].iter().chain(&b[3..]).all(u8::is_ascii_digit),
+                "{text}"
+            );
+        }
     }
 }

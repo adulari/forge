@@ -193,26 +193,18 @@ fn baseline_from(sources: &EnvelopeSources, spec: EnvelopeSpec) -> Result<Envelo
 
 /// `Thu 09:00` in local time.
 pub(crate) fn reset_label(resets_at: i64) -> String {
-    use chrono::TimeZone;
-    chrono::Local
-        .timestamp_opt(resets_at, 0)
-        .single()
-        .map_or_else(String::new, |t| t.format("%a %H:%M").to_string())
+    crate::timefmt::local(resets_at, "%a %H:%M").unwrap_or_default()
 }
 
 /// When a goal waiting on a window resumes, as the pause message and the surfaces say it: the
 /// clock time alone within the next day, with the weekday beyond that.
 pub(crate) fn resume_clock(resets_at: i64, now: i64) -> String {
-    use chrono::TimeZone;
-    let Some(t) = chrono::Local.timestamp_opt(resets_at, 0).single() else {
-        return String::new();
-    };
     let fmt = if (resets_at - now).abs() < 20 * 3600 {
         "%H:%M"
     } else {
         "%a %H:%M"
     };
-    t.format(fmt).to_string()
+    crate::timefmt::local(resets_at, fmt).unwrap_or_default()
 }
 
 /// What the goal says when it pauses at the cap, or cannot verify the envelope.

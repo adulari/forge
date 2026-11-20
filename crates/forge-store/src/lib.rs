@@ -8173,3 +8173,58 @@ mod tests {
             .unwrap());
     }
 }
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Local> {
+        Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    }
+
+    #[test]
+    fn week_bounds_start_on_the_local_monday_and_span_seven_days() {
+        let (s, e) = week_bounds_local(at(2026, 6, 17, 12, 0));
+        assert_eq!(s, at(2026, 6, 15, 0, 0).timestamp());
+        assert_eq!(e - s, 7 * 86_400);
+        let (s, _) = week_bounds_local(at(2026, 6, 21, 23, 59));
+        assert_eq!(
+            s,
+            at(2026, 6, 15, 0, 0).timestamp(),
+            "Sunday belongs to the week before"
+        );
+        let (s, _) = week_bounds_local(at(2026, 6, 15, 0, 0));
+        assert_eq!(
+            s,
+            at(2026, 6, 15, 0, 0).timestamp(),
+            "Monday midnight starts its own week"
+        );
+    }
+
+    #[test]
+    fn month_bounds_end_at_the_next_local_first_including_the_year_rollover() {
+        let (s, e) = month_bounds_local(at(2026, 6, 15, 12, 0));
+        assert_eq!(s, at(2026, 6, 1, 0, 0).timestamp());
+        assert_eq!(e, at(2026, 7, 1, 0, 0).timestamp());
+        let (s, e) = month_bounds_local(at(2026, 12, 31, 23, 59));
+        assert_eq!(s, at(2026, 12, 1, 0, 0).timestamp());
+        assert_eq!(e, at(2027, 1, 1, 0, 0).timestamp());
+        let (_, e) = month_bounds_local(at(2028, 2, 29, 12, 0));
+        assert_eq!(e, at(2028, 3, 1, 0, 0).timestamp());
+    }
+
+    #[test]
+    fn day_bounds_start_at_local_midnight() {
+        let (s, e) = day_bounds_local(at(2026, 6, 15, 23, 59));
+        assert_eq!(s, at(2026, 6, 15, 0, 0).timestamp());
+        assert_eq!(e - s, 86_400);
+    }
+
+    #[test]
+    fn rolling_bounds_include_the_current_second() {
+        let now = at(2026, 6, 15, 12, 0);
+        let (s, e) = rolling_hours_bounds(now, 5);
+        assert_eq!(e, now.timestamp() + 1);
+        assert_eq!(e - s, 5 * 3600);
+    }
+}

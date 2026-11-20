@@ -482,3 +482,25 @@ mod tests {
         assert_eq!(span(secs(4 * 3600 + 9 * 60 + 30)), "4h09m");
     }
 }
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn the_clock_is_a_zero_padded_hour_and_minute() {
+        for secs in [0u64, 86_399, 1_786_314_600, 1_794_267_000] {
+            let text = clock(UNIX_EPOCH + Duration::from_secs(secs));
+            let b = text.as_bytes();
+            assert!(
+                b.len() == 5
+                    && b[2] == b':'
+                    && b[..2].iter().chain(&b[3..]).all(u8::is_ascii_digit),
+                "{text}"
+            );
+            assert!(
+                text[..2].parse::<u32>().unwrap() < 24 && text[3..].parse::<u32>().unwrap() < 60
+            );
+        }
+    }
+}

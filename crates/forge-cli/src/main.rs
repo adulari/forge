@@ -180,6 +180,7 @@ mod session_delete;
 mod startup_trace;
 mod telemetry;
 mod terminal_owner;
+mod timefmt;
 mod update;
 mod update_auto;
 mod update_check;

@@ -256,3 +256,22 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn day_ordinals_are_days_since_the_common_era_and_reject_non_dates() {
+        assert_eq!(day_ordinal("0001-01-01"), Some(1));
+        assert_eq!(day_ordinal("1970-01-01"), Some(719_163));
+        assert_eq!(day_ordinal("2026-03-18"), Some(739_693));
+        assert_eq!(
+            day_ordinal("2028-03-01"),
+            day_ordinal("2028-02-29").map(|d| d + 1)
+        );
+        assert_eq!(day_ordinal("2026-02-30"), None);
+        assert_eq!(day_ordinal("nope"), None);
+        assert_eq!(day_ordinal(""), None);
+    }
+}

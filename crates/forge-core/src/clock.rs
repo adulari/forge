@@ -115,3 +115,54 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn offset_suffix_is_well_formed(s: &str) -> bool {
+        let b = s.as_bytes();
+        b.len() == 6
+            && (b[0] == b'+' || b[0] == b'-')
+            && b[1].is_ascii_digit()
+            && b[2].is_ascii_digit()
+            && b[3] == b':'
+            && b[4].is_ascii_digit()
+            && b[5].is_ascii_digit()
+    }
+
+    #[test]
+    fn the_short_line_is_weekday_date_minute_and_a_colon_offset() {
+        let at = chrono::Local
+            .with_ymd_and_hms(2026, 9, 14, 1, 20, 33)
+            .single()
+            .unwrap();
+        let line = short_line_for(at);
+        let rest = line
+            .strip_prefix("[time] Monday 2026-09-14 01:20 ")
+            .expect(&line);
+        assert!(offset_suffix_is_well_formed(rest), "{line}");
+    }
+
+    #[test]
+    fn the_full_line_wraps_the_same_timestamp_in_fixed_wording() {
+        let at = chrono::Local
+            .with_ymd_and_hms(2026, 1, 2, 23, 5, 0)
+            .single()
+            .unwrap();
+        let line = line_for(at);
+        let rest = line
+            .strip_prefix("[time] Current date and time: Friday 2026-01-02 23:05 ")
+            .expect(&line);
+        let (offset, tail) = rest.split_at(6);
+        assert!(offset_suffix_is_well_formed(offset), "{line}");
+        assert_eq!(
+            tail,
+            ". Treat this as the present moment — your training cutoff is NOT today. Use it for \
+             anything dated: changelog and release entries, how old a commit, file or dependency \
+             version is, and what \"today\", \"now\", \"recent\" or \"latest\" mean. Do not guess \
+             the date, and do not assume a year from your training data."
+        );
+    }
+}

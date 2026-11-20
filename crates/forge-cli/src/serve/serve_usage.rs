@@ -371,3 +371,28 @@ mod tests {
         assert_eq!(providers[1].kind, "bridge");
     }
 }
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn local_midnight_is_at_most_a_day_back_and_reads_midnight_on_the_clock() {
+        for now in [
+            1_700_000_000i64,
+            1_786_314_600,
+            1_794_267_000,
+            1_711_846_800,
+        ] {
+            let midnight = local_midnight(now);
+            assert!(
+                midnight <= now && now - midnight < 25 * 3600,
+                "{now} {midnight}"
+            );
+            assert_eq!(
+                crate::timefmt::local(midnight, "%H:%M:%S").as_deref(),
+                Some("00:00:00")
+            );
+        }
+    }
+}

@@ -967,3 +967,21 @@ mod tests {
         assert_eq!((stats.claude_weekly_in, stats.claude_weekly_out), (7, 3));
     }
 }
+
+#[cfg(test)]
+mod time_pins {
+    use super::*;
+
+    #[test]
+    fn rollout_timestamps_parse_to_epoch_seconds_and_garbage_is_zero() {
+        assert_eq!(parse_ts("2023-11-14T22:13:20Z"), 1_700_000_000);
+        assert_eq!(parse_ts("2023-11-14T22:13:20.999Z"), 1_700_000_000);
+        assert_eq!(parse_ts("2023-11-14T23:13:20+01:00"), 1_700_000_000);
+        assert_eq!(
+            parse_ts("2023-11-14T22:13:20.123456789+00:00"),
+            1_700_000_000
+        );
+        assert_eq!(parse_ts("not a time"), 0);
+        assert_eq!(parse_ts(""), 0);
+    }
+}
