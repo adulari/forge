@@ -646,9 +646,7 @@ mod tests {
         let hooks = repo.join(".git/hooks");
         std::fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-commit");
-        std::fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        forge_types::exec_fixture::install_executable(&hook, "#!/bin/sh\nexit 1\n");
         std::fs::create_dir_all(wt_path.join(".forge/uploads/u1")).unwrap();
         std::fs::write(wt_path.join(".forge/uploads/u1/photo.png"), "png").unwrap();
         std::fs::write(wt_path.join("child.txt"), "work\n").unwrap();

@@ -114,6 +114,7 @@ ignore = "0.4"
 forge-voice = { workspace = true, features = ["microphone"] }
 
 [dev-dependencies]
+forge-types = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 # Simulates a store migrated by a newer build, for the doctor schema-drift check.
 rusqlite = { workspace = true }

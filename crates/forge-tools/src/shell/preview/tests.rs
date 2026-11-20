@@ -218,10 +218,8 @@ async fn expose_refuses_when_the_kill_switch_is_off_or_the_job_is_not_running() 
 }
 
 fn fake_binary(dir: &Path, name: &str, script: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&path, script);
     path
 }
 

@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -96,18 +95,7 @@ fn fake_gh(dir: &Path) -> Gh {
         log = dir.join("calls.log").display(),
         view = dir.join("view.json").display(),
     );
-    // Copied into place by `cp`, so this multi-threaded test process never holds a write fd on
-    // the file it execs: a sibling test's fork would inherit that fd and the exec would fail
-    // ETXTBSY (see install_fake_cli in forge-provider).
-    let source = dir.join("gh.src");
-    std::fs::write(&source, script).unwrap();
-    let copied = std::process::Command::new("cp")
-        .arg(&source)
-        .arg(&path)
-        .status()
-        .unwrap();
-    assert!(copied.success());
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&path, &script);
     Gh::with_program(path)
 }
 

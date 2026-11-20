@@ -95,8 +95,10 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     fn fake_forge(path: &Path, version: &str) {
-        std::fs::write(path, format!("#!/bin/sh\necho \"forge {version}\"\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        forge_types::exec_fixture::install_executable(
+            path,
+            &format!("#!/bin/sh\necho \"forge {version}\"\n"),
+        );
     }
 
     fn version_of(path: &Path) -> String {

@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
 
 use super::super::test_support::*;
@@ -120,8 +119,7 @@ esac
         log = gh_log.display(),
         body = body_file.display(),
     );
-    std::fs::write(&gh, script).unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&gh, &script);
 
     let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
     let session = store
@@ -280,8 +278,10 @@ async fn a_failing_commit_hook_stops_before_any_push() {
         fx.work.join(hook)
     };
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(
+        &hook,
+        "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n",
+    );
 
     let response = ship(&fx, ShipRequest::default()).await;
     let refused = response.refused.unwrap();
@@ -381,8 +381,10 @@ fn install_failing_hook(fx: &Fixture) {
         fx.work.join(hook)
     };
     std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
-    std::fs::write(&hook, "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n").unwrap();
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(
+        &hook,
+        "#!/bin/sh\necho 'lint failed' >&2\nexit 1\n",
+    );
 }
 
 fn edited(store: &forge_store::Store, session: &str, path: &str) {

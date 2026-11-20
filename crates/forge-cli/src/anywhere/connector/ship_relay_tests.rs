@@ -3,7 +3,6 @@
 //! real `ship_session` against a bare git remote and a fake `gh`. Nothing here talks to the real
 //! Anywhere service, a real remote or a model.
 
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -105,9 +104,9 @@ fn ship_fixture() -> Ship {
 
     let gh_log = root.join("gh.log");
     let gh = root.join("gh");
-    std::fs::write(
+    forge_types::exec_fixture::install_executable(
         &gh,
-        format!(
+        &format!(
             r#"#!/bin/sh
 echo "$*" >> '{log}'
 case "$1 $2" in
@@ -119,9 +118,7 @@ esac
 "#,
             log = gh_log.display()
         ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let store = Arc::new(forge_store::Store::open_in_memory().unwrap());
     let session = store

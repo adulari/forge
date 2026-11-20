@@ -10,6 +10,10 @@ repository.workspace = true
 [lib]
 name = "forge_types"
 
+[features]
+# Test-only helpers; enabled by dependents' [dev-dependencies] so production builds never carry them.
+test-support = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

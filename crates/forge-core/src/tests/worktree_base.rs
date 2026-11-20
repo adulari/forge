@@ -160,11 +160,9 @@ fn a_failed_fetch_falls_back_to_head_with_the_reason_and_age() {
 fn a_hung_fetch_is_cut_off_at_the_timeout() {
     let f = fixture();
     let hang = f._dir.path().join("hang.sh");
-    std::fs::write(&hang, "#!/bin/sh\nsleep 30\n").unwrap();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
+        forge_types::exec_fixture::install_executable(&hang, "#!/bin/sh\nsleep 30\n");
         git(
             &f.mine,
             &["remote", "set-url", "origin", "ssh://nowhere.invalid/x.git"],

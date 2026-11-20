@@ -1,5 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
-
 use super::*;
 
 const YAML: &str = r#"name: Release
@@ -29,8 +27,7 @@ jobs:
 
 fn fake_gh(dir: &Path, script: &str) -> Gh {
     let path = dir.join("gh");
-    std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&path, &format!("#!/bin/sh\n{script}\n"));
     Gh::with_program(path)
 }
 

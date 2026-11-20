@@ -172,7 +172,6 @@ impl Reviewer for Real {
 }
 
 fn fake_gh(dir: &Path) -> Gh {
-    use std::os::unix::fs::PermissionsExt;
     let path = dir.join("gh");
     let script = format!(
         "#!/bin/sh\necho \"$@\" >> {log}\ncase \"$2\" in\n  view) cat {view} ;;\n  diff) cat {diff} ;;\n  merge) exit 0 ;;\nesac\n",
@@ -180,8 +179,7 @@ fn fake_gh(dir: &Path) -> Gh {
         view = dir.join("view.json").display(),
         diff = dir.join("diff.txt").display(),
     );
-    std::fs::write(&path, script).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    forge_types::exec_fixture::install_executable(&path, &script);
     std::fs::write(dir.join("diff.txt"), DIFF).unwrap();
     std::fs::write(
         dir.join("view.json"),
