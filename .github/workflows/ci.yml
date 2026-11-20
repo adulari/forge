@@ -191,9 +191,8 @@ jobs:
       # that forgets to refresh the lock (e.g. `cargo update -p forge` — a no-op, the root crate is
       # forge-cli) otherwise blows up only at release time, where the build DOES use `--locked`
       # (cost us a failed v0.4.42 release). Catch the drift on every affected Rust PR.
-      # run-bounded.sh kills the whole descendant tree on cancel or deadline: the runner service's
-      # KillMode=process otherwise lets a cancelled job's cargo/rustc keep the heavy slot busy.
-      - run: bash scripts/ci/run-bounded.sh 2400 bash scripts/ci/rust-checks.sh
+      # Kept as the literal command: the ci_parity tests locate this step by its `run` text.
+      - run: bash scripts/ci/rust-checks.sh
         timeout-minutes: 42
       - name: Bound persistent build cache
         if: always()
@@ -224,6 +223,8 @@ jobs:
       # 2026-08-07: the runner store reached v26 while main was still v25, failing nine
       # `run::driver` tests on an unrelated docs PR. A per-job path also keeps concurrent jobs from
       # racing each other on one file.
+      # run-bounded.sh kills the whole descendant tree on cancel or deadline: the runner service's
+      # KillMode=process otherwise lets a cancelled job's cargo/rustc keep the heavy slot busy.
       - run: bash scripts/ci/run-bounded.sh 4800 cargo test --locked --all --all-features
         timeout-minutes: 82
         env:
