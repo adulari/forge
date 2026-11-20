@@ -48,7 +48,7 @@ impl ImportSink<'_> {
         };
         let ts = row.created_at.unwrap_or_else(|| {
             self.last_ts
-                .unwrap_or_else(|| chrono::Utc::now().timestamp())
+                .unwrap_or_else(|| jiff::Timestamp::now().as_second())
         });
         self.tx
             .prepare_cached(

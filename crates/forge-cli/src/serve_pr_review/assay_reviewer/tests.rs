@@ -86,7 +86,7 @@ impl forge_provider::Provider for Scripted {
                     provider: "codex-cli".into(),
                     window: "weekly".into(),
                     status: forge_types::QuotaStatus::Ok,
-                    resets_at: Some(chrono::Utc::now().timestamp() + 100_000),
+                    resets_at: Some(jiff::Timestamp::now().as_second() + 100_000),
                     fraction_used: Some(fraction),
                 }]
             })

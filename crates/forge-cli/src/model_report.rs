@@ -321,7 +321,7 @@ mod tests {
             let id = store.open_turn(&sid, seq).unwrap();
             store.close_turn(id, reason, None).unwrap();
         }
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let report = build(&store, &|_| None, 30, None, now).unwrap();
         assert_eq!(report.turn_endings[0].reason, "final_answer");
         assert_eq!(report.turn_endings[0].count, 2);

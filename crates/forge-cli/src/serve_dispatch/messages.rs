@@ -74,7 +74,7 @@ pub(crate) async fn send_to_coordinator(
     let mut body = text.to_string();
     if pending.len() >= FLEET_PENDING_CAP {
         if let Some(newest) = pending.last() {
-            let now = chrono::Utc::now().timestamp();
+            let now = jiff::Timestamp::now().as_second();
             if matches!(
                 store.mark_fleet_message_delivered(&newest.id, now),
                 Ok(true)

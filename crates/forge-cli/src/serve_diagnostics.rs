@@ -191,7 +191,7 @@ fn store_recovery_check() -> Option<DiagnosticCheck> {
     const NOTICE_SHOWN_SECS: i64 = 7 * 24 * 60 * 60;
     let db = crate::store_path();
     let notice = forge_store::db_safety::read_notice(&db)
-        .filter(|n| chrono::Utc::now().timestamp() - n.at < NOTICE_SHOWN_SECS);
+        .filter(|n| jiff::Timestamp::now().as_second() - n.at < NOTICE_SHOWN_SECS);
     let Some(notice) = notice else {
         let copies = forge_store::db_safety::list_backups(&db).len();
         return (copies > 0).then(|| {
@@ -315,7 +315,7 @@ pub(crate) async fn diagnostics(
     });
 
     axum::Json(DiagnosticsResponse {
-        checked_at: chrono::Utc::now().timestamp(),
+        checked_at: jiff::Timestamp::now().as_second(),
         host: HostDiagnostics {
             hostname: crate::anywhere::default_host_name(),
             version: env!("CARGO_PKG_VERSION"),

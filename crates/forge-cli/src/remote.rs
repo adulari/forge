@@ -1649,7 +1649,7 @@ pub(crate) fn history_include_tools(raw: Option<&str>) -> bool {
 async fn usage_page() -> Response {
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
-        serde_json::json!({"week":{"sinceEpoch": chrono::Utc::now().timestamp() - 604800,"combined":{"inputTokens":0,"outputTokens":0,"costUsd":0.0},"providers":[]},"session":null,"quota":[]}).to_string(),
+        serde_json::json!({"week":{"sinceEpoch": jiff::Timestamp::now().as_second() - 604800,"combined":{"inputTokens":0,"outputTokens":0,"costUsd":0.0},"providers":[]},"session":null,"quota":[]}).to_string(),
     ).into_response()
 }
 

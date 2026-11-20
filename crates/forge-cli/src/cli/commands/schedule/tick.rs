@@ -24,7 +24,7 @@ const CAPTURE_BYTES: usize = 4 << 20;
 const DRAIN_GRACE: Duration = Duration::from_secs(2);
 
 pub(crate) fn unix_now() -> i64 {
-    chrono::Utc::now().timestamp()
+    jiff::Timestamp::now().as_second()
 }
 
 /// Mark `running` rows whose tick process is gone as `interrupted`. Cheap enough to call on every

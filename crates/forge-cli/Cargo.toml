@@ -54,7 +54,7 @@ tokio = { workspace = true }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 rmcp = { workspace = true, features = [
     "base64",
     "server",

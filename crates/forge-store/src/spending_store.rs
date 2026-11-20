@@ -5,13 +5,13 @@ use super::*;
 impl Store {
     /// Spend across all sessions in the current local calendar day.
     pub fn spend_today_usd(&self) -> Result<f64> {
-        let (s, e) = day_bounds_local(chrono::Local::now());
+        let (s, e) = day_bounds_local(&jiff::Zoned::now());
         self.spend_between(s, e)
     }
 
     /// Spend across all sessions in the current local calendar month.
     pub fn spend_this_month_usd(&self) -> Result<f64> {
-        let (s, e) = month_bounds_local(chrono::Local::now());
+        let (s, e) = month_bounds_local(&jiff::Zoned::now());
         self.spend_between(s, e)
     }
 
@@ -20,7 +20,7 @@ impl Store {
     /// Rows where `message.model` is NULL (side calls like compact/diagnose) are grouped under
     /// the empty string.
     pub fn spend_by_model_today(&self) -> Result<Vec<(String, f64, u64, u64)>> {
-        let (s, e) = day_bounds_local(chrono::Local::now());
+        let (s, e) = day_bounds_local(&jiff::Zoned::now());
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
             "SELECT COALESCE(m.model, '') as mdl,
@@ -45,13 +45,13 @@ impl Store {
 
     /// Spend in the last 5 hours (rolling, not calendar-day-aligned).
     pub fn spend_last_5h_usd(&self) -> Result<f64> {
-        let (s, e) = rolling_hours_bounds(chrono::Local::now(), 5);
+        let (s, e) = rolling_hours_bounds(&jiff::Zoned::now(), 5);
         self.spend_between(s, e)
     }
 
     /// Spend in the current local ISO calendar week (Monday 00:00 → now).
     pub fn spend_this_week_usd(&self) -> Result<f64> {
-        let (s, e) = week_bounds_local(chrono::Local::now());
+        let (s, e) = week_bounds_local(&jiff::Zoned::now());
         self.spend_between(s, e)
     }
 
@@ -60,10 +60,10 @@ impl Store {
     /// only one table scan runs; the `created_at` index makes it sub-millisecond.
     /// Uses prepare_cached so the statement is compiled once per connection, not once per call.
     pub fn spend_summary_usd(&self) -> Result<(f64, f64, f64)> {
-        let now = chrono::Local::now();
-        let (day_s, day_e) = day_bounds_local(now);
-        let (week_s, _) = week_bounds_local(now);
-        let (month_s, month_e) = month_bounds_local(now);
+        let now = jiff::Zoned::now();
+        let (day_s, day_e) = day_bounds_local(&now);
+        let (week_s, _) = week_bounds_local(&now);
+        let (month_s, month_e) = month_bounds_local(&now);
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
             "SELECT
@@ -86,7 +86,7 @@ impl Store {
 
     /// Per-model spend + token counts for the last 5 hours.
     pub fn spend_by_model_5h(&self) -> Result<Vec<(String, f64, u64, u64)>> {
-        let (s, e) = rolling_hours_bounds(chrono::Local::now(), 5);
+        let (s, e) = rolling_hours_bounds(&jiff::Zoned::now(), 5);
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
             "SELECT COALESCE(m.model, '') as mdl,
@@ -111,7 +111,7 @@ impl Store {
 
     /// Per-model spend + token counts for the current ISO week.
     pub fn spend_by_model_week(&self) -> Result<Vec<(String, f64, u64, u64)>> {
-        let (s, e) = week_bounds_local(chrono::Local::now());
+        let (s, e) = week_bounds_local(&jiff::Zoned::now());
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
             "SELECT COALESCE(m.model, '') as mdl,
@@ -136,7 +136,7 @@ impl Store {
 
     /// Per-model spend + token counts for the current calendar month.
     pub fn spend_by_model_month(&self) -> Result<Vec<(String, f64, u64, u64)>> {
-        let (s, e) = month_bounds_local(chrono::Local::now());
+        let (s, e) = month_bounds_local(&jiff::Zoned::now());
         let conn = self.lock()?;
         let mut stmt = conn.prepare_cached(
             "SELECT COALESCE(m.model, '') as mdl,

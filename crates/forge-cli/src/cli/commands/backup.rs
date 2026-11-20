@@ -26,7 +26,7 @@ fn default_destination(db: &Path) -> PathBuf {
     );
     dir.join(format!(
         "{name}-{}.db",
-        chrono::Local::now().format("%Y%m%d-%H%M%S")
+        crate::timefmt::local_now("%Y%m%d-%H%M%S")
     ))
 }
 

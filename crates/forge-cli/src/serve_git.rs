@@ -463,6 +463,7 @@ fn git_raw(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     full.extend_from_slice(args);
     let out = std::process::Command::new("git")
         .args(&full)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
