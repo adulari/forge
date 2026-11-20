@@ -487,7 +487,7 @@ jobs:
       # already on it — no CLI-only window (#837). `draft: false` is the flip; the action resolves
       # the existing draft by tag before updating it, so this never forks a second release.
       - name: Publish complete desktop release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: |
