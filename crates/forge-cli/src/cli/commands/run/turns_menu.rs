@@ -72,7 +72,7 @@ pub(crate) fn rows(
 }
 
 pub(crate) fn open(app: &mut forge_tui::App, store: &Store, session_id: &str) {
-    let since = chrono::Utc::now().timestamp() - WINDOW_DAYS * 86_400;
+    let since = jiff::Timestamp::now().as_second() - WINDOW_DAYS * 86_400;
     let session_counts = store
         .turn_end_counts(0, Some(session_id))
         .unwrap_or_default();

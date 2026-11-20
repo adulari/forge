@@ -33,7 +33,7 @@ impl EnvelopeSources {
 
     /// The same reading without a session, for work that spans several (an issue drain).
     pub(crate) fn from_store(store: &forge_store::Store, session_usd: f64) -> Self {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let mut windows = store.subscription_windows().unwrap_or_default();
         windows.extend(test_override(now));
         Self {
@@ -209,7 +209,7 @@ pub(crate) fn resume_clock(resets_at: i64, now: i64) -> String {
 
 /// What the goal says when it pauses at the cap, or cannot verify the envelope.
 pub(crate) fn pause_message(envelope: &EnvelopeState, check: EnvelopeCheck) -> String {
-    pause_message_at(envelope, check, chrono::Utc::now().timestamp())
+    pause_message_at(envelope, check, jiff::Timestamp::now().as_second())
 }
 
 pub(crate) fn pause_message_at(envelope: &EnvelopeState, check: EnvelopeCheck, now: i64) -> String {

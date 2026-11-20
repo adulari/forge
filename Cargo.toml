@@ -72,7 +72,7 @@ crossterm = "0.29"
 globset = "0.4"
 shell-words = "1"
 libc = "0.2"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 # Bundled syntaxes/themes with the pure-Rust fancy-regex backend (default-fancy minus the plist/yaml/html loaders, which Forge never calls)
 # (no oniguruma C dep: clean cross-compile, smaller footprint).

@@ -4,7 +4,6 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, TimeZone};
 use forge_types::{Role, TaskTier, ToolCall, Usage, Visibility};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use sha2::{Digest, Sha256};
@@ -277,63 +276,48 @@ fn escape_like_pattern(s: &str) -> String {
 /// a provider adding support is picked up the next day (was 7 days — too sticky).
 const CAPABILITY_EXCLUSION_SECS: i64 = 24 * 60 * 60;
 
+/// Epoch second of local midnight on `date`, or `now` when the zone has no such instant.
+fn local_midnight_secs(date: jiff::civil::Date, now: &jiff::Zoned) -> i64 {
+    date.to_zoned(now.time_zone().clone()).map_or_else(
+        |_| now.timestamp().as_second(),
+        |z| z.timestamp().as_second(),
+    )
+}
+
 /// Half-open `[start, end)` epoch-second bounds of `now`'s **local** calendar day. Computed
 /// in Rust (not SQLite `strftime`) so the day rolls at the user's midnight and survives DST.
-pub fn day_bounds_local(now: DateTime<Local>) -> (i64, i64) {
-    let midnight = now
-        .date_naive()
-        .and_hms_opt(0, 0, 0)
-        .expect("valid midnight");
-    let start = Local
-        .from_local_datetime(&midnight)
-        .earliest()
-        .unwrap_or(now);
-    let end = start + ChronoDuration::days(1);
-    (start.timestamp(), end.timestamp())
+pub fn day_bounds_local(now: &jiff::Zoned) -> (i64, i64) {
+    let start = local_midnight_secs(now.date(), now);
+    // Fixed 24 hours of elapsed time, not a calendar day: the bounds have always been this wide.
+    (start, start + 86_400)
 }
 
 /// Half-open `[start, end)` covering the last `hours` hours ending at `now`.
-pub fn rolling_hours_bounds(now: DateTime<Local>, hours: i64) -> (i64, i64) {
-    let end = now.timestamp() + 1;
+pub fn rolling_hours_bounds(now: &jiff::Zoned, hours: i64) -> (i64, i64) {
+    let end = now.timestamp().as_second() + 1;
     let start = end - hours * 3600;
     (start, end)
 }
 
 /// Half-open `[start, end)` epoch-second bounds of `now`'s **local** ISO calendar week
 /// (Monday 00:00 local → 7 days later).
-pub fn week_bounds_local(now: DateTime<Local>) -> (i64, i64) {
-    use chrono::Datelike;
-    let days_since_monday = now.weekday().num_days_from_monday() as i64;
-    let monday = now.date_naive() - ChronoDuration::days(days_since_monday);
-    let start = Local
-        .from_local_datetime(&monday.and_hms_opt(0, 0, 0).expect("valid midnight"))
-        .earliest()
-        .unwrap_or(now);
-    let end = start + ChronoDuration::weeks(1);
-    (start.timestamp(), end.timestamp())
+pub fn week_bounds_local(now: &jiff::Zoned) -> (i64, i64) {
+    let days_since_monday = i64::from(now.weekday().to_monday_zero_offset());
+    let monday = now
+        .date()
+        .saturating_sub(jiff::Span::new().days(days_since_monday));
+    let start = local_midnight_secs(monday, now);
+    (start, start + 7 * 86_400)
 }
 
 /// Half-open `[start, end)` epoch-second bounds of `now`'s **local** calendar month.
-pub fn month_bounds_local(now: DateTime<Local>) -> (i64, i64) {
-    let first = now
-        .date_naive()
-        .with_day(1)
-        .and_then(|d| d.and_hms_opt(0, 0, 0))
-        .expect("valid first-of-month");
-    let start = Local.from_local_datetime(&first).earliest().unwrap_or(now);
-    let next_first = if first.month() == 12 {
-        first
-            .with_year(first.year() + 1)
-            .and_then(|d| d.with_month(1))
-    } else {
-        first.with_month(first.month() + 1)
-    }
-    .expect("valid next month");
-    let end = Local
-        .from_local_datetime(&next_first)
-        .earliest()
-        .unwrap_or(now);
-    (start.timestamp(), end.timestamp())
+pub fn month_bounds_local(now: &jiff::Zoned) -> (i64, i64) {
+    let first = now.date().first_of_month();
+    let next_first = first.saturating_add(jiff::Span::new().months(1));
+    (
+        local_midnight_secs(first, now),
+        local_midnight_secs(next_first, now),
+    )
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2704,7 +2688,7 @@ mod tests {
             0.0,
             "a 1970 window excludes today's row"
         );
-        let (s, e) = day_bounds_local(Local::now());
+        let (s, e) = day_bounds_local(&jiff::Zoned::now());
         assert!(
             store.spend_between(s, e).unwrap() > 0.0,
             "today's window includes it"
@@ -2713,27 +2697,33 @@ mod tests {
 
     #[test]
     fn day_bounds_are_24h_and_exclude_prior_day() {
-        let now = Local.with_ymd_and_hms(2026, 6, 15, 13, 30, 0).unwrap();
-        let (s, e) = day_bounds_local(now);
+        let now = zoned(2026, 6, 15, 13, 30, 0);
+        let (s, e) = day_bounds_local(&now);
         assert_eq!(e - s, 86_400, "a day is 24h (no DST on this date)");
-        assert!(now.timestamp() >= s && now.timestamp() < e);
-        let prev = Local.with_ymd_and_hms(2026, 6, 14, 23, 0, 0).unwrap();
-        assert!(prev.timestamp() < s, "yesterday is excluded (AC-4)");
+        assert!(now.timestamp().as_second() >= s && now.timestamp().as_second() < e);
+        let prev = zoned(2026, 6, 14, 23, 0, 0);
+        assert!(
+            prev.timestamp().as_second() < s,
+            "yesterday is excluded (AC-4)"
+        );
     }
 
     #[test]
     fn month_bounds_exclude_prior_month() {
-        let now = Local.with_ymd_and_hms(2026, 6, 15, 12, 0, 0).unwrap();
-        let (s, e) = month_bounds_local(now);
-        assert!(now.timestamp() >= s && now.timestamp() < e);
-        let jun1 = Local.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
+        let now = zoned(2026, 6, 15, 12, 0, 0);
+        let (s, e) = month_bounds_local(&now);
+        assert!(now.timestamp().as_second() >= s && now.timestamp().as_second() < e);
+        let jun1 = zoned(2026, 6, 1, 0, 0, 0);
         assert_eq!(
             s,
-            jun1.timestamp(),
+            jun1.timestamp().as_second(),
             "window starts at the first of the month"
         );
-        let may = Local.with_ymd_and_hms(2026, 5, 31, 23, 0, 0).unwrap();
-        assert!(may.timestamp() < s, "May is excluded from June (AC-3)");
+        let may = zoned(2026, 5, 31, 23, 0, 0);
+        assert!(
+            may.timestamp().as_second() < s,
+            "May is excluded from June (AC-3)"
+        );
     }
 
     #[test]
@@ -3696,7 +3686,7 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE workflow_run SET started_at = ?1 WHERE id = 'run-crash'",
-                [chrono::Utc::now().timestamp() - WORKFLOW_RUN_STALE_SECS - 1],
+                [jiff::Timestamp::now().as_second() - WORKFLOW_RUN_STALE_SECS - 1],
             )
             .unwrap();
         let crashed = store.list_workflow_runs("build", "/repo", 10).unwrap();
@@ -4548,7 +4538,7 @@ mod tests {
         // `record_quota_history_at`, which would need a fully synthetic `now` that the real
         // wall-clock row would then fall outside of.
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let resets_at = now + 3600; // 1 hour left in the window
         store
             .record_quota_history_at("claude-cli", "five_hour", 0.10, Some(resets_at), now - 1200)
@@ -4629,7 +4619,7 @@ mod tests {
     #[test]
     fn bridge_fractions_share_the_latest_codex_window_with_both_surfaces() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         store
             .record_quota_at(
                 &forge_types::QuotaHint {
@@ -4988,7 +4978,7 @@ mod tests {
         // Wall clock, because `subscription_age_secs`/`bridge_fractions` are `now()`-based while
         // `quota_at` takes an explicit clock; a synthetic epoch would compare the two against
         // different clocks.
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let hint = |fraction| forge_types::QuotaHint {
             provider: "opencode_go".into(),
             window: "five_hour".into(),
@@ -5087,7 +5077,7 @@ mod tests {
     #[test]
     fn subscription_pacing_covers_every_window_kind_including_monthly() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let month = forge_types::nominal_window_secs("monthly").unwrap();
         let five = forge_types::nominal_window_secs("five_hour").unwrap();
         // An OpenCode Go reading: the 5-hour window is fresh, the monthly one is well ahead of
@@ -5123,7 +5113,7 @@ mod tests {
     #[test]
     fn subscription_windows_keep_open_weekly_observations_with_their_age() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let hint = |provider: &str, window: &str, fraction| forge_types::QuotaHint {
             provider: provider.into(),
             window: window.into(),
@@ -5162,7 +5152,7 @@ mod tests {
     #[test]
     fn display_windows_keep_a_stale_codex_reading_but_drop_a_passed_reset() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let hint = |provider: &str, window: &str, resets_at, fraction| forge_types::QuotaHint {
             provider: provider.into(),
             window: window.into(),
@@ -5193,7 +5183,7 @@ mod tests {
     #[test]
     fn a_full_fable_meter_is_shown_but_never_gates_the_provider() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let hint = |window: &str, status, fraction| forge_types::QuotaHint {
             provider: "claude-cli".into(),
             window: window.into(),
@@ -5232,7 +5222,7 @@ mod tests {
     #[test]
     fn quota_reset_survives_fraction_only_refresh() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let reset = now + 5 * 60 * 60;
         let hint = |resets_at, fraction| forge_types::QuotaHint {
             provider: "claude-cli".into(),
@@ -5367,7 +5357,7 @@ mod tests {
     #[test]
     fn exclude_model_benches_long_and_soonest_skips_exclusions() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
 
         // A permanent exclusion: benched far into the future, reason prefixed "excluded:".
         store
@@ -5561,7 +5551,7 @@ mod tests {
 
         // Backdate `old_empty` and `old_used` past the horizon; `recent_empty` stays fresh (as if
         // just created this instant) so it must survive the sweep.
-        let past = chrono::Utc::now().timestamp() - 3600;
+        let past = jiff::Timestamp::now().as_second() - 3600;
         store
             .lock()
             .unwrap()
@@ -5609,7 +5599,7 @@ mod tests {
                 .unwrap()
                 .execute(
                     "UPDATE session SET created_at = ?1 WHERE id = ?2",
-                    rusqlite::params![chrono::Utc::now().timestamp() - 3600, id],
+                    rusqlite::params![jiff::Timestamp::now().as_second() - 3600, id],
                 )
                 .unwrap();
         };
@@ -5627,7 +5617,10 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE session SET local_last_seen = ?1 WHERE id = ?2",
-                rusqlite::params![chrono::Utc::now().timestamp() - 3600, abandoned_terminal],
+                rusqlite::params![
+                    jiff::Timestamp::now().as_second() - 3600,
+                    abandoned_terminal
+                ],
             )
             .unwrap();
         for id in [&in_terminal, &in_daemon, &abandoned_terminal] {
@@ -5662,7 +5655,7 @@ mod tests {
             .unwrap()
             .execute(
                 "UPDATE session SET local_last_seen = ?1 WHERE id = ?2",
-                rusqlite::params![chrono::Utc::now().timestamp() - 600, sid],
+                rusqlite::params![jiff::Timestamp::now().as_second() - 600, sid],
             )
             .unwrap();
         let quiet = store.local_claim(&sid).unwrap().expect("still claimed");
@@ -5701,7 +5694,7 @@ mod tests {
         store.deactivate_messages_from(&sid, 0).unwrap();
 
         // Backdate past the empty-session horizon, as if the sweep ran much later.
-        let past = chrono::Utc::now().timestamp() - 3600;
+        let past = jiff::Timestamp::now().as_second() - 3600;
         store
             .lock()
             .unwrap()
@@ -6273,7 +6266,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         let sid = store.create_session("/tmp", "default").unwrap();
         store.set_session_agent_active(&sid, true).unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let set_age = |days: i64| {
             store
                 .lock()
@@ -8175,56 +8168,64 @@ mod tests {
 }
 
 #[cfg(test)]
+fn zoned(year: i16, month: i8, day: i8, hour: i8, minute: i8, second: i8) -> jiff::Zoned {
+    jiff::civil::date(year, month, day)
+        .at(hour, minute, second, 0)
+        .to_zoned(jiff::tz::TimeZone::system())
+        .unwrap()
+}
+
+#[cfg(test)]
 mod time_pins {
     use super::*;
 
-    fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Local> {
-        Local.with_ymd_and_hms(y, m, d, h, min, 0).unwrap()
+    fn at(y: i16, m: i8, d: i8, h: i8, min: i8) -> jiff::Zoned {
+        zoned(y, m, d, h, min, 0)
     }
 
     #[test]
     fn week_bounds_start_on_the_local_monday_and_span_seven_days() {
-        let (s, e) = week_bounds_local(at(2026, 6, 17, 12, 0));
-        assert_eq!(s, at(2026, 6, 15, 0, 0).timestamp());
+        let (s, e) = week_bounds_local(&at(2026, 6, 17, 12, 0));
+        assert_eq!(s, at(2026, 6, 15, 0, 0).timestamp().as_second());
         assert_eq!(e - s, 7 * 86_400);
-        let (s, _) = week_bounds_local(at(2026, 6, 21, 23, 59));
+        let (s, _) = week_bounds_local(&at(2026, 6, 21, 23, 59));
         assert_eq!(
             s,
-            at(2026, 6, 15, 0, 0).timestamp(),
+            at(2026, 6, 15, 0, 0).timestamp().as_second(),
             "Sunday belongs to the week before"
         );
-        let (s, _) = week_bounds_local(at(2026, 6, 15, 0, 0));
+        let (s, _) = week_bounds_local(&at(2026, 6, 15, 0, 0));
         assert_eq!(
             s,
-            at(2026, 6, 15, 0, 0).timestamp(),
+            at(2026, 6, 15, 0, 0).timestamp().as_second(),
             "Monday midnight starts its own week"
         );
     }
 
     #[test]
     fn month_bounds_end_at_the_next_local_first_including_the_year_rollover() {
-        let (s, e) = month_bounds_local(at(2026, 6, 15, 12, 0));
-        assert_eq!(s, at(2026, 6, 1, 0, 0).timestamp());
-        assert_eq!(e, at(2026, 7, 1, 0, 0).timestamp());
-        let (s, e) = month_bounds_local(at(2026, 12, 31, 23, 59));
-        assert_eq!(s, at(2026, 12, 1, 0, 0).timestamp());
-        assert_eq!(e, at(2027, 1, 1, 0, 0).timestamp());
-        let (_, e) = month_bounds_local(at(2028, 2, 29, 12, 0));
-        assert_eq!(e, at(2028, 3, 1, 0, 0).timestamp());
+        let (s, e) = month_bounds_local(&at(2026, 6, 15, 12, 0));
+        assert_eq!(s, at(2026, 6, 1, 0, 0).timestamp().as_second());
+        assert_eq!(e, at(2026, 7, 1, 0, 0).timestamp().as_second());
+        let (s, e) = month_bounds_local(&at(2026, 12, 31, 23, 59));
+        assert_eq!(s, at(2026, 12, 1, 0, 0).timestamp().as_second());
+        assert_eq!(e, at(2027, 1, 1, 0, 0).timestamp().as_second());
+        let (_, e) = month_bounds_local(&at(2028, 2, 29, 12, 0));
+        assert_eq!(e, at(2028, 3, 1, 0, 0).timestamp().as_second());
     }
 
     #[test]
     fn day_bounds_start_at_local_midnight() {
-        let (s, e) = day_bounds_local(at(2026, 6, 15, 23, 59));
-        assert_eq!(s, at(2026, 6, 15, 0, 0).timestamp());
+        let (s, e) = day_bounds_local(&at(2026, 6, 15, 23, 59));
+        assert_eq!(s, at(2026, 6, 15, 0, 0).timestamp().as_second());
         assert_eq!(e - s, 86_400);
     }
 
     #[test]
     fn rolling_bounds_include_the_current_second() {
         let now = at(2026, 6, 15, 12, 0);
-        let (s, e) = rolling_hours_bounds(now, 5);
-        assert_eq!(e, now.timestamp() + 1);
+        let (s, e) = rolling_hours_bounds(&now, 5);
+        assert_eq!(e, now.timestamp().as_second() + 1);
         assert_eq!(e - s, 5 * 3600);
     }
 }

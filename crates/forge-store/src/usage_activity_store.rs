@@ -61,9 +61,16 @@ pub fn streaks(days: &[String], today: &str) -> ActivityStreaks {
     out
 }
 
+/// Days from 0001-01-01 (day 1) to 1970-01-01.
+const DAYS_FROM_CE_TO_EPOCH: i64 = 719_163;
+
 fn day_ordinal(day: &str) -> Option<i64> {
-    let date = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()?;
-    Some(i64::from(chrono::Datelike::num_days_from_ce(&date)))
+    let date = jiff::fmt::strtime::parse("%Y-%m-%d", day)
+        .ok()?
+        .to_date()
+        .ok()?;
+    let since_epoch = date.since(jiff::civil::date(1970, 1, 1)).ok()?;
+    Some(i64::from(since_epoch.get_days()) + DAYS_FROM_CE_TO_EPOCH)
 }
 
 /// Seconds per aggregation slot. Every real UTC offset is a multiple of 15 minutes, so a slot
@@ -108,10 +115,13 @@ impl Store {
         for row in rows {
             let (slot, provider, input_tokens, output_tokens, cost_usd, calls) = row?;
             let at = slot * SLOT_SECS;
-            let Some(local) = chrono::DateTime::from_timestamp(at + offset_at(at), 0) else {
+            let Ok(local) = jiff::Timestamp::from_second(at + offset_at(at)) else {
                 continue;
             };
-            let day = local.format("%Y-%m-%d").to_string();
+            let day = local
+                .to_zoned(jiff::tz::TimeZone::UTC)
+                .strftime("%Y-%m-%d")
+                .to_string();
             let entry = merged
                 .entry((day.clone(), provider.clone()))
                 .or_insert_with(|| DayUsage {

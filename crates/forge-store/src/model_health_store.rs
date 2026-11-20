@@ -72,7 +72,7 @@ impl Store {
             model,
             cooldown_until,
             reason,
-            chrono::Utc::now().timestamp(),
+            jiff::Timestamp::now().as_second(),
         )
     }
 
@@ -116,7 +116,7 @@ impl Store {
         cooldown: std::time::Duration,
         reason: &str,
     ) -> Result<()> {
-        let until = chrono::Utc::now().timestamp() + cooldown.as_secs() as i64;
+        let until = jiff::Timestamp::now().as_second() + cooldown.as_secs() as i64;
         self.bench_model(model, until, reason)
     }
 
@@ -126,7 +126,7 @@ impl Store {
     /// *re-probes* after the window elapses (a provider may add tool support later). The reason is
     /// prefixed `excluded:` so the UI / report can distinguish it from a transient bench.
     pub fn exclude_model(&self, model: &str, reason: &str) -> Result<()> {
-        let until = chrono::Utc::now().timestamp() + CAPABILITY_EXCLUSION_SECS;
+        let until = jiff::Timestamp::now().as_second() + CAPABILITY_EXCLUSION_SECS;
         self.bench_model(model, until, &format!("excluded: {reason}"))
     }
 
@@ -136,7 +136,7 @@ impl Store {
     /// subscription's credential is dead. Uses the short [`AUTH_EXCLUSION_SECS`] window rather than
     /// the 24 h capability window — see [`exclude_provider`](Self::exclude_provider).
     pub fn exclude_model_auth(&self, model: &str, reason: &str) -> Result<()> {
-        let until = chrono::Utc::now().timestamp() + AUTH_EXCLUSION_SECS;
+        let until = jiff::Timestamp::now().as_second() + AUTH_EXCLUSION_SECS;
         self.bench_model(model, until, &format!("excluded: {AUTH_REASON}: {reason}"))
     }
 
@@ -147,7 +147,7 @@ impl Store {
     /// [`AUTH_REASON`] marker so a repeat is corroborated by
     /// [`provider_auth_failed_before`](Self::provider_auth_failed_before) and escalates normally.
     pub fn bench_model_auth_unconfirmed(&self, model: &str, reason: &str) -> Result<()> {
-        let until = chrono::Utc::now().timestamp() + AUTH_UNCONFIRMED_BENCH_SECS;
+        let until = jiff::Timestamp::now().as_second() + AUTH_UNCONFIRMED_BENCH_SECS;
         self.bench_model(
             model,
             until,
@@ -189,7 +189,7 @@ impl Store {
     /// auth-shaped, and benching an entire healthy subscription on that costs far more than one
     /// extra failed-over turn.
     pub fn exclude_provider(&self, provider: &str, reason: &str) -> Result<()> {
-        let until = chrono::Utc::now().timestamp() + AUTH_EXCLUSION_SECS;
+        let until = jiff::Timestamp::now().as_second() + AUTH_EXCLUSION_SECS;
         self.bench_model(
             &forge_types::provider_bench_key(provider),
             until,
@@ -205,7 +205,7 @@ impl Store {
     /// "another auth failure exists" alone would let a single burst escalate anyway. Requiring the
     /// earlier failure to be measurably older distinguishes a repeat from a burst.
     pub fn provider_auth_failed_before(&self, provider: &str, cutoff: i64) -> Result<bool> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let conn = self.lock()?;
         let mut stmt = conn.prepare(&format!(
             "SELECT model FROM model_health
@@ -269,7 +269,7 @@ impl Store {
     /// Currently provider-wide-excluded providers as of *now* (convenience over
     /// [`excluded_providers`](Self::excluded_providers)).
     pub fn current_excluded_providers(&self) -> Result<Vec<(String, i64, String)>> {
-        self.excluded_providers(chrono::Utc::now().timestamp())
+        self.excluded_providers(jiff::Timestamp::now().as_second())
     }
 
     /// The non-excluded model whose bench expires soonest (the "least dead" model), as a
@@ -308,12 +308,12 @@ impl Store {
 
     /// Currently-benched snapshot as of *now* (convenience over [`benched_models`]).
     pub fn current_benched(&self) -> Result<forge_types::ModelHealth> {
-        self.benched_models(chrono::Utc::now().timestamp())
+        self.benched_models(jiff::Timestamp::now().as_second())
     }
 
     /// Currently-benched detailed report as of *now* (convenience over [`benched_report`]).
     pub fn current_benched_report(&self) -> Result<Vec<(String, i64, String)>> {
-        self.benched_report(chrono::Utc::now().timestamp())
+        self.benched_report(jiff::Timestamp::now().as_second())
     }
 
     /// Clear any bench on a model (e.g. a healthy probe). No-op if it wasn't benched.
@@ -483,7 +483,7 @@ mod tests {
     use super::*;
 
     fn now() -> i64 {
-        chrono::Utc::now().timestamp()
+        jiff::Timestamp::now().as_second()
     }
 
     #[test]

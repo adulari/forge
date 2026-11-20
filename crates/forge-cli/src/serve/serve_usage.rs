@@ -146,15 +146,14 @@ fn spawn_subscription_refresh(store: Arc<forge_store::Store>) {
 }
 
 fn local_midnight(now: i64) -> i64 {
-    use chrono::TimeZone;
-    let day = chrono::Local
-        .timestamp_opt(now, 0)
-        .single()
-        .map(|time| time.date_naive())
-        .unwrap_or_default();
-    day.and_hms_opt(0, 0, 0)
-        .and_then(|midnight| chrono::Local.from_local_datetime(&midnight).earliest())
-        .map_or(now - 86_400, |midnight| midnight.timestamp())
+    jiff::Timestamp::from_second(now)
+        .ok()
+        .and_then(|at| {
+            at.to_zoned(jiff::tz::TimeZone::system())
+                .start_of_day()
+                .ok()
+        })
+        .map_or(now - 86_400, |midnight| midnight.timestamp().as_second())
 }
 
 /// A subscription bills nothing per call. Rows recorded before Codex calls were priced at $0 still
@@ -212,7 +211,7 @@ pub(super) async fn usage_page(
     crate::cli::commands::models::refresh_polled_quotas(&store).await;
     spawn_subscription_refresh(store.clone());
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<UsageResponse> {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let week_rows = store.usage_by_provider_since(now - 604800)?;
         let (combined, providers) = usage_providers(week_rows);
         let midnight = local_midnight(now);
@@ -316,7 +315,7 @@ mod tests {
 
     #[test]
     fn today_starts_at_the_most_recent_local_midnight() {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let midnight = local_midnight(now);
         assert!(
             midnight <= now && now - midnight <= 25 * 3600,

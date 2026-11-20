@@ -71,8 +71,10 @@ fn unix_secs(at: SystemTime) -> u64 {
 }
 
 fn clock(at: SystemTime) -> String {
-    chrono::DateTime::<chrono::Local>::from(at)
-        .format("%H:%M")
+    jiff::Timestamp::try_from(at)
+        .unwrap_or_default()
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%H:%M")
         .to_string()
 }
 
@@ -253,7 +255,7 @@ impl Session {
         }
         episode.attempts += 1;
         let until_bench = Duration::from_secs(
-            u64::try_from(soonest - chrono::Utc::now().timestamp()).unwrap_or(0) + 1,
+            u64::try_from(soonest - jiff::Timestamp::now().as_second()).unwrap_or(0) + 1,
         );
         let wait = until_bench.min(MAX_WAIT).min(remaining);
         tracing::warn!(%candidate, wait_secs = wait.as_secs(), "every candidate is benched: waiting for the soonest bench to end");

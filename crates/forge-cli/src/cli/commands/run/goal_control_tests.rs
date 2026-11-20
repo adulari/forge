@@ -164,7 +164,7 @@ fn paused_at_cap(app: &mut forge_tui::App) {
     let mut envelope = EnvelopeState::new(
         EnvelopeSpec::parse("claude:20%w", None).unwrap(),
         40.0,
-        Some(chrono::Utc::now().timestamp() + 3600),
+        Some(jiff::Timestamp::now().as_second() + 3600),
     );
     envelope.used = 20.0;
     envelope.spent = true;

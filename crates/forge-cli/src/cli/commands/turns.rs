@@ -40,7 +40,7 @@ pub(crate) fn turns_cmd(args: TurnsArgs) -> Result<()> {
         None => None,
         Some(prefix) => Some(resolve_session(&store, prefix)?),
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let since = now - parse_window(&args.since)?;
     if args.backfill {
         let turns = store

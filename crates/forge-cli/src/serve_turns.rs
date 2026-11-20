@@ -137,7 +137,7 @@ async fn turns_summary(
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT);
     let session = params.session.filter(|s| !s.is_empty());
     let result = tokio::task::spawn_blocking(move || {
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         build_summary(&store, now, days, session.as_deref(), limit)
     })
     .await;
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn the_summary_lists_only_turns_that_did_not_finish_inside_the_window() {
         let (store, sid) = store_with_turns();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let all = build_summary(&store, now + 60, 7, None, 10).unwrap();
         assert_eq!(all.unfinished.len(), 2);
         assert!(all.unfinished.iter().all(|t| !t.finished));

@@ -355,7 +355,7 @@ pub(crate) async fn submit_local(
             Some(_) => {}
         }
     }
-    let now = chrono::Utc::now().timestamp();
+    let now = jiff::Timestamp::now().as_second();
     let mut no_reply = false;
     if let (true, Some(sender_id)) = (sender.kind == "session", sender.id.as_deref()) {
         let activity = store
@@ -452,7 +452,7 @@ async fn deliver_to_terminal(store: &Arc<Store>, target_id: &str) -> Result<(), 
                 Some(base) => push_to_terminal(base, &input).await,
             };
         }
-        let _ = store.mark_fleet_message_delivered(&msg.id, chrono::Utc::now().timestamp());
+        let _ = store.mark_fleet_message_delivered(&msg.id, jiff::Timestamp::now().as_second());
     }
     outcome
 }

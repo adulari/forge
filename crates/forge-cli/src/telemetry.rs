@@ -9,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -103,7 +102,7 @@ pub(crate) fn start(command: &Command) -> TelemetryRun {
         week,
         month,
         window,
-    } = Periods::at(Utc::now().timestamp());
+    } = Periods::at(jiff::Timestamp::now().as_second());
 
     let mut state = read_state(&path);
     let show_notice = !state.notice_shown && surface == Surface::Tui;
@@ -168,7 +167,7 @@ pub(crate) fn finish(run: TelemetryRun, succeeded: bool) {
         } else {
             "forge_run_failed"
         },
-        &Periods::at(Utc::now().timestamp()).day,
+        &Periods::at(jiff::Timestamp::now().as_second()).day,
     ));
     if write_state(&path, &state).is_err() {
         return;
@@ -322,20 +321,21 @@ struct Periods {
 
 impl Periods {
     fn at(unix_secs: i64) -> Self {
-        let now = Utc.timestamp_opt(unix_secs, 0).single().unwrap_or_default();
-        let iso_week = now.iso_week();
+        let now = jiff::Timestamp::from_second(unix_secs)
+            .unwrap_or_default()
+            .to_zoned(jiff::tz::TimeZone::UTC);
+        let iso_week = now.date().iso_week_date();
         Self {
-            day: now.format("%Y-%m-%d").to_string(),
+            day: now.strftime("%Y-%m-%d").to_string(),
             week: format!("{}-W{:02}", iso_week.year(), iso_week.week()),
-            month: now.format("%Y-%m").to_string(),
+            month: now.strftime("%Y-%m").to_string(),
             window: (unix_secs / (30 * 60)).to_string(),
         }
     }
 }
 
 fn pending_event(event: &str, period: &str) -> PendingEvent {
-    let nanos = Utc::now()
-        .timestamp_nanos_opt()
+    let nanos = i64::try_from(jiff::Timestamp::now().as_nanosecond())
         .unwrap_or_default()
         .unsigned_abs();
     let sequence = LOCAL_EVENT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -406,7 +406,7 @@ async fn tui_heartbeat(host: String, api_key: String, path: PathBuf) {
         if !is_enabled() {
             return;
         }
-        let window = Periods::at(Utc::now().timestamp()).window;
+        let window = Periods::at(jiff::Timestamp::now().as_second()).window;
         let mut state = read_state(&path);
         queue_changed(&mut state, "forge_active_window", &window, Marker::Window);
         if state.pending.is_empty() || write_state(&path, &state).is_err() {

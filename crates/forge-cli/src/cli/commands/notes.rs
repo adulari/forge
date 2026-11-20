@@ -45,7 +45,7 @@ fn project_of(project: Option<String>) -> Result<String> {
 }
 
 fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+    jiff::Timestamp::now().as_millisecond()
 }
 
 /// Append a line to the scratchpad without clobbering a concurrent edit: the write names the

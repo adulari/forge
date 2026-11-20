@@ -11,7 +11,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{Datelike, Local};
 use serde_json::Value;
 
 #[derive(Debug, Default, Clone)]
@@ -240,11 +239,7 @@ fn first_reset_after(text: &str, key: &str) -> Option<i64> {
                 .parse::<i64>()
                 .ok()
                 .filter(|value| *value > 1_000_000_000)
-                .or_else(|| {
-                    chrono::DateTime::parse_from_rfc3339(token)
-                        .ok()
-                        .map(|timestamp| timestamp.timestamp())
-                })
+                .or_else(|| crate::timefmt::parse_rfc3339(token))
         })
 }
 
@@ -339,10 +334,12 @@ fn codex_line_observed_at(v: &Value, path: &Path) -> Option<i64> {
 
 /// All Codex session `.jsonl` files from the last `look_back` days, sorted newest-first.
 fn jsonl_files_in_recent_days(root: &Path, look_back: u32) -> Vec<PathBuf> {
-    let now = Local::now();
+    let now = jiff::Zoned::now();
     let mut all: Vec<PathBuf> = Vec::new();
     for delta in 0..=look_back {
-        let day = now.date_naive() - chrono::Duration::days(delta as i64);
+        let day = now
+            .date()
+            .saturating_sub(jiff::Span::new().days(i64::from(delta)));
         let dir = root
             .join(day.year().to_string())
             .join(format!("{:02}", day.month()))
@@ -605,9 +602,7 @@ fn now_epoch() -> i64 {
 }
 
 fn parse_ts(s: &str) -> i64 {
-    s.parse::<chrono::DateTime<chrono::Utc>>()
-        .map(|d| d.timestamp())
-        .unwrap_or(0)
+    crate::timefmt::parse_rfc3339(s).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -616,7 +611,7 @@ mod tests {
 
     /// Write a rollout file under `<home>/.codex/sessions/<today>/` and return its path.
     fn write_named_rollout(home: &Path, name: &str, lines: &str) -> PathBuf {
-        let now = Local::now();
+        let now = jiff::Zoned::now();
         let dir = home
             .join(".codex/sessions")
             .join(now.year().to_string())
@@ -654,9 +649,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let now = now_epoch();
         // A line whose event timestamp is 2 hours old — observed_at must reflect THAT, not now.
-        let two_hours_ago = chrono::DateTime::from_timestamp(now - 7200, 0)
+        let two_hours_ago = jiff::Timestamp::from_second(now - 7200)
             .unwrap()
-            .to_rfc3339();
+            .to_string();
         write_rollout(
             home.path(),
             &token_count_line(Some(&two_hours_ago), now + 3600, now + 86400),
@@ -756,7 +751,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let now = now_epoch();
         let line = serde_json::json!({
-            "timestamp": chrono::DateTime::from_timestamp(now - 30, 0).unwrap().to_rfc3339(),
+            "timestamp": jiff::Timestamp::from_second(now - 30).unwrap().to_string(),
             "type": "event_msg",
             "payload": {
                 "type": "token_count",
@@ -893,9 +888,9 @@ mod tests {
     }
 
     fn claude_line(secs_ago: i64, inp: u64, out: u64) -> String {
-        let ts = chrono::DateTime::from_timestamp(now_epoch() - secs_ago, 0)
+        let ts = jiff::Timestamp::from_second(now_epoch() - secs_ago)
             .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            .to_string();
         format!(
             r#"{{"type":"assistant","timestamp":"{ts}","message":{{"usage":{{"input_tokens":{inp},"output_tokens":{out}}}}}}}"#
         ) + "\n"

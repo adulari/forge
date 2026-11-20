@@ -2,11 +2,11 @@
 //! mode) and the status bar. Times arrive as unix seconds and are shown in local time.
 
 pub(crate) fn clock(secs: u64) -> String {
-    chrono::DateTime::<chrono::Local>::from(
-        std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
-    )
-    .format("%H:%M")
-    .to_string()
+    jiff::Timestamp::from_second(i64::try_from(secs).unwrap_or(0))
+        .unwrap_or_default()
+        .to_zoned(jiff::tz::TimeZone::system())
+        .strftime("%H:%M")
+        .to_string()
 }
 
 pub fn outage_line(model: &str, since: u64, next_try: u64, until: u64, reason: &str) -> String {

@@ -482,7 +482,7 @@ async fn a_benched_active_model_never_reviews() {
     r.store
         .bench_model(
             MODEL,
-            chrono::Utc::now().timestamp() + 600,
+            jiff::Timestamp::now().as_second() + 600,
             "empty response",
         )
         .unwrap();

@@ -364,7 +364,7 @@ pub(crate) fn build_entries(
         .first()
         .map(|d| d.ts_ms)
         .or_else(|| rows.first().map(|r| r.created_at * 1000))
-        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+        .unwrap_or_else(|| jiff::Timestamp::now().as_millisecond());
     let mut w = Writer {
         ctx,
         out: Exported::default(),

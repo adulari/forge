@@ -1,8 +1,8 @@
 //! `forge stats poster` / TUI `/stats`: a lifetime view of work and spend — a 52-week heatmap,
 //! streaks and the busiest providers, drawn from the same per-day rows as the app's Activity tab.
 
-use chrono::{Datelike, Duration, NaiveDate};
 use forge_store::{streaks, DayUsage};
+use jiff::{civil::Date, Span};
 use std::collections::BTreeMap;
 
 const MAX_WINDOW_DAYS: u32 = 400;
@@ -28,13 +28,13 @@ fn level(tokens: u64, max: u64) -> usize {
 
 pub(crate) fn render(
     rows: &[DayUsage],
-    today: NaiveDate,
+    today: Date,
     window_days: u32,
     provider: Option<&str>,
 ) -> String {
     let window_days = window_days.clamp(1, MAX_WINDOW_DAYS);
-    let window_start = today - Duration::days(i64::from(window_days) - 1);
-    let window_start_key = window_start.format("%Y-%m-%d").to_string();
+    let window_start = today.saturating_sub(Span::new().days(i64::from(window_days) - 1));
+    let window_start_key = window_start.strftime("%Y-%m-%d").to_string();
     let rows: Vec<&DayUsage> = rows
         .iter()
         .filter(|r| r.day >= window_start_key && provider.is_none_or(|p| r.provider == p))
@@ -58,8 +58,8 @@ pub(crate) fn render(
 
     let weeks = 52i64;
     let monday_this_week =
-        today - Duration::days(i64::from(today.weekday().num_days_from_monday()));
-    let start = monday_this_week - Duration::weeks(weeks - 1);
+        today.saturating_sub(Span::new().days(i64::from(today.weekday().to_monday_zero_offset())));
+    let start = monday_this_week.saturating_sub(Span::new().weeks(weeks - 1));
     let max = per_day.values().copied().max().unwrap_or(0);
     for (row, label) in ["Mon", "   ", "Wed", "   ", "Fri", "   ", "Sun"]
         .iter()
@@ -68,8 +68,8 @@ pub(crate) fn render(
         out.push_str(label);
         out.push(' ');
         for week in 0..weeks {
-            let date = start + Duration::weeks(week) + Duration::days(row as i64);
-            let key = date.format("%Y-%m-%d").to_string();
+            let date = start.saturating_add(Span::new().weeks(week).days(row as i64));
+            let key = date.strftime("%Y-%m-%d").to_string();
             let active = date <= today && date >= window_start;
             let cell = if !active || date > today {
                 ' '
@@ -83,7 +83,7 @@ pub(crate) fn render(
     out.push('\n');
 
     let active: Vec<String> = per_day.keys().map(|d| (*d).to_string()).collect();
-    let s = streaks(&active, &today.format("%Y-%m-%d").to_string());
+    let s = streaks(&active, &today.strftime("%Y-%m-%d").to_string());
     out.push_str(&format!(
         "{} active days · current streak {} · longest {}\n",
         s.active_days, s.current_streak, s.longest_streak
@@ -109,24 +109,19 @@ pub(crate) fn run(
     days: u32,
     provider: Option<&str>,
 ) -> anyhow::Result<String> {
-    use chrono::{Offset, TimeZone};
     let days = days.clamp(1, MAX_WINDOW_DAYS);
-    let now = chrono::Local::now();
-    let today = now.date_naive();
-    let first_day = today - Duration::days(i64::from(days) - 1);
+    let now = jiff::Zoned::now();
+    let tz = jiff::tz::TimeZone::system();
+    let today = now.date();
+    let first_day = today.saturating_sub(Span::new().days(i64::from(days) - 1));
     // Start at local midnight of the first day the window shows, so the totals cover exactly the
     // days the label and the heatmap do.
-    let since = chrono::Local
-        .from_local_datetime(&first_day.and_hms_opt(0, 0, 0).unwrap_or_default())
-        .earliest()
-        .map_or(now.timestamp() - i64::from(days) * 86_400, |t| {
-            t.timestamp()
-        });
+    let since = first_day.to_zoned(tz.clone()).map_or(
+        now.timestamp().as_second() - i64::from(days) * 86_400,
+        |t| t.timestamp().as_second(),
+    );
     let offset_at = |ts: i64| {
-        chrono::Local
-            .timestamp_opt(ts, 0)
-            .single()
-            .map_or(0, |t| i64::from(t.offset().fix().local_minus_utc()))
+        jiff::Timestamp::from_second(ts).map_or(0, |at| i64::from(tz.to_offset(at).seconds()))
     };
     let rows = store.usage_by_day_with(since, offset_at)?;
     Ok(render(&rows, today, days, provider))
@@ -149,7 +144,7 @@ mod tests {
 
     #[test]
     fn the_poster_shows_the_heatmap_streaks_and_provider_split() {
-        let today = NaiveDate::from_ymd_opt(2026, 3, 18).unwrap();
+        let today = jiff::civil::date(2026, 3, 18);
         let rows = vec![
             row("2026-03-16", "claude-cli", 1000),
             row("2026-03-17", "claude-cli", 4000),
@@ -174,7 +169,7 @@ mod tests {
 
     #[test]
     fn filtering_to_one_provider_drops_the_others_and_an_empty_window_says_so() {
-        let today = NaiveDate::from_ymd_opt(2026, 3, 18).unwrap();
+        let today = jiff::civil::date(2026, 3, 18);
         let rows = vec![row("2026-03-17", "gemini", 10)];
         assert!(render(&rows, today, 30, Some("claude-cli")).contains("no usage recorded"));
         let only = render(&rows, today, 30, Some("gemini"));
@@ -186,7 +181,7 @@ mod tests {
 
     #[test]
     fn the_totals_cover_exactly_the_labelled_window() {
-        let today = NaiveDate::from_ymd_opt(2026, 3, 18).unwrap();
+        let today = jiff::civil::date(2026, 3, 18);
         let rows = vec![
             row("2026-02-16", "gemini", 9000),
             row("2026-02-17", "gemini", 100),
@@ -200,7 +195,7 @@ mod tests {
 
     #[test]
     fn out_of_range_windows_are_clamped_for_the_label_and_the_grid() {
-        let today = NaiveDate::from_ymd_opt(2026, 3, 18).unwrap();
+        let today = jiff::civil::date(2026, 3, 18);
         let rows = vec![row("2026-03-18", "gemini", 50)];
         assert!(render(&rows, today, 1000, None).contains("last 400 days"));
         let zero = render(&rows, today, 0, None);

@@ -361,16 +361,13 @@ pub fn pr_evidence_block(workspace: &Path, session: &str) -> Option<String> {
 }
 
 fn now_rfc3339_secs() -> String {
-    rfc3339_secs(chrono::Utc::now().timestamp())
+    rfc3339_secs(jiff::Timestamp::now().as_second())
 }
 
 fn rfc3339_secs(unix_secs: i64) -> String {
-    use chrono::TimeZone;
-    chrono::Utc
-        .timestamp_opt(unix_secs, 0)
-        .single()
+    jiff::Timestamp::from_second(unix_secs)
         .unwrap_or_default()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        .to_string()
 }
 
 #[cfg(test)]

@@ -56,7 +56,7 @@ impl Store {
             report.pruned += 1;
             std::thread::sleep(MAINTENANCE_YIELD);
         }
-        let _ = self.prune_expired_model_health(chrono::Utc::now().timestamp());
+        let _ = self.prune_expired_model_health(jiff::Timestamp::now().as_second());
         Ok(report)
     }
 
@@ -97,7 +97,7 @@ mod tests {
     use super::*;
 
     fn backdate(store: &Store, id: &str, days: i64) {
-        let past = chrono::Utc::now().timestamp() - days * 24 * 60 * 60;
+        let past = jiff::Timestamp::now().as_second() - days * 24 * 60 * 60;
         store
             .lock()
             .unwrap()

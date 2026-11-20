@@ -53,7 +53,11 @@ fn seed_codex_rollout_quota(store: &Store, stats: &crate::bridge_stats::BridgeSt
         let (Some(percent), Some(observed_at)) = (percent, observed_at) else {
             continue;
         };
-        if chrono::Utc::now().timestamp().saturating_sub(observed_at) > CODEX_QUOTA_MAX_AGE_SECS {
+        if jiff::Timestamp::now()
+            .as_second()
+            .saturating_sub(observed_at)
+            > CODEX_QUOTA_MAX_AGE_SECS
+        {
             continue;
         }
         let fraction = (percent / 100.0).clamp(0.0, 1.0);
@@ -73,8 +77,12 @@ fn seed_codex_rollout_quota(store: &Store, stats: &crate::bridge_stats::BridgeSt
     if let Some(plan) = stats.codex_plan.as_deref() {
         let observed_at = stats
             .codex_plan_observed_at
-            .unwrap_or_else(|| chrono::Utc::now().timestamp());
-        if chrono::Utc::now().timestamp().saturating_sub(observed_at) <= CODEX_QUOTA_MAX_AGE_SECS {
+            .unwrap_or_else(|| jiff::Timestamp::now().as_second());
+        if jiff::Timestamp::now()
+            .as_second()
+            .saturating_sub(observed_at)
+            <= CODEX_QUOTA_MAX_AGE_SECS
+        {
             let _ = store.record_subscription_plan_at("codex-cli", plan, observed_at);
             let _ = store.record_subscription_plan_at("codex-oauth", plan, observed_at);
             observed = true;
@@ -149,7 +157,7 @@ mod tests {
     #[test]
     fn rollout_seed_preserves_source_timestamps_for_quota_and_plan() {
         let store = Store::open_in_memory().unwrap();
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let stats = crate::bridge_stats::BridgeStats {
             codex_5h_pct: Some(35.0),
             codex_5h_observed_at: Some(now - 30),
